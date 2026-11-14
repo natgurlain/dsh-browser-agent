@@ -11,6 +11,7 @@
 
 import type { InputSetupRequest, InputSetupResult } from '../shared/input-setup.ts'
 import { ActionError, resolveActionTarget } from './actions.ts'
+import { deepActiveElement } from './dom.ts'
 import type { ElementIds } from './ids.ts'
 
 /** Attribute used to hand one file input to the debugger without ambiguity. */
@@ -22,7 +23,7 @@ function prepare(
   ids: ElementIds,
 ): { focused: boolean; selected: boolean } {
   const focusedOnly = args.index === undefined && args.selector === undefined
-  const element = focusedOnly ? document.activeElement : resolveActionTarget(args, ids)
+  const element = focusedOnly ? deepActiveElement() : resolveActionTarget(args, ids)
   if (!(element instanceof Element)) {
     throw new ActionError('action-failed', 'No element has focus; click the target first or pass index or selector.')
   }
@@ -55,7 +56,7 @@ function prepare(
       }
     }
   }
-  const active = document.activeElement
+  const active = deepActiveElement()
   return {
     focused: active === element || (active !== null && (element.contains(active) || active.contains(element))),
     selected,

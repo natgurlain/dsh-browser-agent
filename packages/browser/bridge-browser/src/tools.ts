@@ -147,6 +147,13 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     parameters: {
       delta: { type: 'boolean', description: 'Return changes since the previous snapshot.' },
       region: { type: 'string', description: 'CSS selector or "main" to read only that region.' },
+      mode: {
+        type: 'string',
+        enum: ['full', 'interactive', 'text'],
+        description: 'full (default): text, numbered elements and form fields; interactive: elements and fields only; text: page text only, with a larger text budget.',
+      },
+      viewportOnly: { type: 'boolean', description: 'Only include elements and text blocks inside the current viewport.' },
+      collapse: { type: 'boolean', description: 'Collapse long runs of similar elements into one summary line. Defaults to true; false lists every element.' },
       frame: FRAME_PARAMETER,
       query: {
         type: 'object',
@@ -164,10 +171,21 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => {
-      const a = args as { delta?: boolean; region?: string; frame?: number; query?: Record<string, unknown> }
+      const a = args as {
+        delta?: boolean
+        region?: string
+        mode?: string
+        viewportOnly?: boolean
+        collapse?: boolean
+        frame?: number
+        query?: Record<string, unknown>
+      }
       return call(exec, 'browser_snapshot', {
         ...a.delta !== undefined ? { delta: a.delta } : {},
         ...a.region !== undefined ? { region: a.region } : {},
+        ...a.mode !== undefined ? { mode: a.mode } : {},
+        ...a.viewportOnly !== undefined ? { viewportOnly: a.viewportOnly } : {},
+        ...a.collapse !== undefined ? { collapse: a.collapse } : {},
         ...a.frame !== undefined ? { frame: a.frame } : {},
         ...a.query !== undefined ? { query: a.query } : {},
       })
@@ -381,17 +399,19 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const getText = (): ToolDefinition => defineTool({
     name: 'browser_get_text',
-    description: `Read plain text from the page or a selector. ${UNTRUSTED_CONTENT_WARNING}`,
+    description: `Read plain text from the page or a selector, 8000 characters per call; use offset to page through longer text. ${UNTRUSTED_CONTENT_WARNING}`,
     parameters: {
-      selector: { type: 'string', description: 'CSS selector. Omit to read the whole page.' },
+      selector: { type: 'string', description: 'CSS selector; " >>> " steps into an open shadow root. Omit to read the whole page.' },
+      offset: { type: 'number', description: 'Character offset to start from; the result reports the total length and the next offset.' },
       frame: FRAME_PARAMETER,
     },
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => {
-      const a = args as { selector?: string; frame?: number }
+      const a = args as { selector?: string; offset?: number; frame?: number }
       return call(exec, 'browser_get_text', {
         ...a.selector !== undefined ? { selector: a.selector } : {},
+        ...a.offset !== undefined ? { offset: a.offset } : {},
         ...a.frame !== undefined ? { frame: a.frame } : {},
       })
     },

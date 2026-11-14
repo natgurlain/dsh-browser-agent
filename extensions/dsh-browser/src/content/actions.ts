@@ -10,7 +10,8 @@
  * @module
  */
 
-import { pageText, truncate } from './extract.ts'
+import { deepActiveElement, resolveSelector } from './dom.ts'
+import { pageText } from './extract.ts'
 import { findElements, LocatorError, parseLocatorQuery, renderFound } from './find.ts'
 import type { ElementIds } from './ids.ts'
 import { dispatchPaste } from './paste.ts'
@@ -165,7 +166,7 @@ export function resolveActionTarget(args: Record<string, unknown>, ids: ElementI
   if (hasIndex) return elementOrThrow(ids, numberArg(args, 'index'))
   let found: Element | null
   try {
-    found = document.querySelector(selector as string)
+    found = resolveSelector(selector as string)
   } catch {
     throw new ActionError('bad-args', `selector is not a valid CSS selector: ${String(selector)}`)
   }
@@ -188,7 +189,7 @@ export function typeTargetIsSensitive(args: Record<string, unknown>, ids: Elemen
   let el: Element | null
   try {
     el = args.index === undefined && args.selector === undefined
-      ? document.activeElement
+      ? deepActiveElement()
       : resolveActionTarget(args, ids)
   } catch {
     return true
@@ -271,13 +272,24 @@ function snapshotAction(args: Record<string, unknown>, ctx: ActionContext): Acti
   let regionMiss = false
   if (region !== undefined) {
     try {
-      regionMiss = document.querySelector(region) === null
+      regionMiss = resolveSelector(region) === null
     } catch {
       throw new ActionError('bad-args', `region is not a valid CSS selector: ${region}`)
     }
   }
+  const mode = args.mode === undefined ? 'full' : args.mode
+  if (mode !== 'full' && mode !== 'interactive' && mode !== 'text') {
+    throw new ActionError('bad-args', 'mode must be full, interactive, or text.')
+  }
   // 基线在每次快照后都更新：delta 调用才能相对上一次（无论是否 delta）比较。
-  const view = buildSnapshot(ctx.ids, { delta, region, budget: ctx.budget }, lastSnapshot)
+  const view = buildSnapshot(ctx.ids, {
+    delta,
+    region,
+    budget: ctx.budget,
+    mode,
+    viewportOnly: args.viewportOnly === true,
+    collapse: args.collapse !== false,
+  }, lastSnapshot)
   lastSnapshot = view
   const rendered = renderSnapshot(view, delta)
   return {
@@ -535,7 +547,7 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   }
   const replace = args.replace === true
   const focusedOnly = args.index === undefined && args.selector === undefined
-  const el = focusedOnly ? document.activeElement : resolveActionTarget(args, ctx.ids)
+  const el = focusedOnly ? deepActiveElement() : resolveActionTarget(args, ctx.ids)
   if (!(el instanceof Element)) {
     throw new ActionError('action-failed', 'No element has focus; click the target first or pass index or selector.')
   }
@@ -586,7 +598,8 @@ async function pressAction(args: Record<string, unknown>, ctx: ActionContext): P
     const el = resolveActionTarget(args, ctx.ids)
     if (el instanceof HTMLElement) el.focus()
   }
-  const target = document.activeElement instanceof HTMLElement ? document.activeElement : document.body
+  const active = deepActiveElement()
+  const target = active instanceof HTMLElement ? active : document.body
   const init: KeyboardEventInit = {
     key,
     bubbles: true,
@@ -620,7 +633,7 @@ async function clipboardPasteAction(args: Record<string, unknown>, ctx: ActionCo
   if (text === '') throw new ActionError('bad-args', 'text must not be empty when pasting.')
   const html = typeof args.html === 'string' && args.html !== '' ? args.html : undefined
   const focusedOnly = args.index === undefined && args.selector === undefined
-  const el = focusedOnly ? document.activeElement : resolveActionTarget(args, ctx.ids)
+  const el = focusedOnly ? deepActiveElement() : resolveActionTarget(args, ctx.ids)
   if (!(el instanceof Element)) {
     throw new ActionError('action-failed', 'No element has focus; click the paste target first or pass index or selector.')
   }
@@ -716,15 +729,26 @@ async function getTextAction(args: Record<string, unknown>): Promise<ActionResul
   let source: Element | null = null
   if (selector !== undefined) {
     try {
-      source = document.querySelector(selector)
+      source = resolveSelector(selector)
     } catch {
       throw new ActionError('bad-args', `selector is not a valid CSS selector: ${selector}`)
     }
   }
-  const text = source !== null ? pageText(source) : selector !== undefined ? `No element matched selector: ${selector}` : pageText()
-  const truncated = truncate(text, 8_000)
-  return { text: truncated.text + (truncated.truncated > 0 ? `\n(Truncated ${truncated.truncated} characters.)` : '') }
+  if (source === null && selector !== undefined) return { text: `No element matched selector: ${selector}` }
+  const offset = args.offset === undefined ? 0 : numberArg(args, 'offset')
+  const text = pageText(source)
+  if (offset > 0 && offset >= text.length) {
+    return { text: `(offset ${offset} is past the end; the text has ${text.length} characters.)` }
+  }
+  const end = Math.min(text.length, offset + GET_TEXT_CHUNK_CHARS)
+  const chunk = text.slice(offset, end)
+  if (offset === 0 && end === text.length) return { text: chunk }
+  const more = end < text.length ? ` Call again with offset=${end} for more.` : ''
+  return { text: `${chunk}\n(Characters ${offset}–${end} of ${text.length}.${more})` }
 }
+
+/** Characters one browser_get_text call returns. */
+const GET_TEXT_CHUNK_CHARS = 8_000
 
 async function waitAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const ms = typeof args.ms === 'number' && args.ms > 0 ? args.ms : 0

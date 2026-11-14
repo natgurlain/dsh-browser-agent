@@ -12,7 +12,8 @@
  * @module
  */
 
-import { accessibleName } from './extract.ts'
+import { querySelectorAllDeep, resolveSelectorAll, SHADOW_PIERCE } from './dom.ts'
+import { accessibleName, isVisible } from './extract.ts'
 
 /** One locator request as supplied by the model. */
 export interface LocatorQuery {
@@ -108,6 +109,8 @@ export function isEditableElement(el: Element): boolean {
  * `HTMLElement`-only checks would exclude every SVG node.
  */
 function isRendered(el: Element): boolean {
+  // Hidden-but-operable form controls (custom checkboxes) count as rendered.
+  if (el instanceof HTMLElement && isVisible(el)) return true
   const style = getComputedStyle(el)
   if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false
   const rect = el.getBoundingClientRect()
@@ -128,10 +131,22 @@ function cssEscape(value: string): string {
  * @returns a CSS selector, or an empty string when the element has no parent chain.
  */
 export function uniqueSelectorFor(el: Element): string {
+  // Inside an open shadow root the path is relative to that root and joined to
+  // the host's own selector with the piercing combinator.
+  const root = el.getRootNode()
+  if (root instanceof ShadowRoot) {
+    const host = uniqueSelectorFor(root.host)
+    return host === '' ? '' : `${host} ${SHADOW_PIERCE} ${selectorWithin(el, root)}`
+  }
+  return selectorWithin(el, document)
+}
+
+/** Structural selector for an element relative to its own tree root. */
+function selectorWithin(el: Element, scope: Document | ShadowRoot): string {
   if (el.id !== '') {
     const byId = `#${cssEscape(el.id)}`
     try {
-      if (document.querySelectorAll(byId).length === 1) return byId
+      if (scope.querySelectorAll(byId).length === 1) return byId
     } catch {
       // Fall through to the structural path.
     }
@@ -146,7 +161,7 @@ export function uniqueSelectorFor(el: Element): string {
     if (node.id !== '') {
       const byId = `#${cssEscape(node.id)}`
       try {
-        if (document.querySelectorAll(byId).length === 1) {
+        if (scope.querySelectorAll(byId).length === 1) {
           parts.unshift(byId)
           break
         }
@@ -232,7 +247,7 @@ const MAX_MATCHES = 200
 function candidates(query: LocatorQuery): Element[] {
   if (query.selector !== undefined) {
     try {
-      return [...document.querySelectorAll(query.selector)]
+      return resolveSelectorAll(query.selector)
     } catch {
       throw new LocatorError(`query.selector is not a valid CSS selector: ${query.selector}`)
     }
@@ -240,7 +255,7 @@ function candidates(query: LocatorQuery): Element[] {
   const matched: Element[] = []
   const needle = query.text?.toLowerCase()
   let scanned = 0
-  for (const el of document.querySelectorAll('*')) {
+  for (const el of querySelectorAllDeep(document, '*')) {
     if (matched.length >= MAX_MATCHES || scanned >= MAX_SCANNED_ELEMENTS) break
     scanned += 1
     if (SKIPPED_TAGS.has(el.tagName.toLowerCase())) continue

@@ -10,39 +10,88 @@
  * @module
  */
 
-/** Every element type the model may be asked to operate on. */
-const INTERACTIVE_SELECTOR = [
+import { querySelectorAllDeep } from './dom.ts'
+
+/**
+ * Elements that are interactive by their own semantics. A match here always
+ * enters the inventory (when visible).
+ */
+const CORE_INTERACTIVE_SELECTOR = [
   'a[href]',
   'button',
   'input:not([type="hidden"])',
   'select',
   'textarea',
-  '[role="button"]',
-  '[role="link"]',
-  '[role="checkbox"]',
-  '[role="radio"]',
-  '[role="tab"]',
-  '[role="menuitem"]',
   'summary',
-  '[contenteditable="true"]',
-  '[contenteditable=""]',
+  '[contenteditable]:not([contenteditable="false"])',
+  ...[
+    'button', 'link', 'checkbox', 'radio', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
+    'combobox', 'option', 'switch', 'slider', 'spinbutton', 'searchbox', 'textbox', 'treeitem',
+  ].map((role) => `[role="${role}"]`),
+  '[role="gridcell"][aria-selected]',
 ].join(', ')
+
+/**
+ * Elements that are only interactive by a script hook (focusability, an inline
+ * handler) or by delegating to a control. They enter the inventory only when
+ * they do not wrap a core control, so a clickable card around a button does
+ * not crowd the inventory with a duplicate.
+ */
+const GENERIC_INTERACTIVE_SELECTOR = [
+  '[tabindex]:not([tabindex="-1"])',
+  '[onclick]',
+  'label',
+].join(', ')
+
+/** Every element type the model may be asked to operate on. */
+const INTERACTIVE_SELECTOR = `${CORE_INTERACTIVE_SELECTOR}, ${GENERIC_INTERACTIVE_SELECTOR}`
 
 /** Default cap on one item's rendered name/state text. */
 const MAX_ITEM_NAME_CHARS = 80
 
+/** Form controls that custom widgets commonly hide behind a styled label. */
+function isCheckable(el: Element): el is HTMLInputElement {
+  return el instanceof HTMLInputElement && (el.type === 'checkbox' || el.type === 'radio')
+}
+
+/** Whether an element itself renders a box (no opacity exemption). */
+function rendersBox(el: Element): boolean {
+  const style = getComputedStyle(el)
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false
+  const rect = el.getBoundingClientRect()
+  return rect.width > 0 && rect.height > 0
+}
+
 /**
  * Whether an element is visible to the user: not display/visibility/opacity
- * hidden and occupying layout space.
+ * hidden and occupying layout space. Visually-hidden checkboxes, radios and
+ * selects behind a rendered label or parent count as visible.
  * @param el - candidate element.
  * @returns true when the element renders.
  */
 export function isVisible(el: Element): boolean {
   if (!(el instanceof HTMLElement)) return false
+  if (rendersBox(el)) return true
+  return isStyledControl(el)
+}
+
+/**
+ * Custom checkboxes, radios and toggles keep the real input in the tree but
+ * paint it invisible (opacity 0 or a collapsed box) and draw the control on a
+ * sibling or the label. The input is still the thing to click, so it counts
+ * as visible when its label or its parent renders.
+ * @param el - candidate element.
+ * @returns true for a hidden-but-operable form control.
+ */
+function isStyledControl(el: HTMLElement): boolean {
+  if (!isCheckable(el) && !(el instanceof HTMLSelectElement)) return false
   const style = getComputedStyle(el)
-  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false
-  const rect = el.getBoundingClientRect()
-  return rect.width > 0 && rect.height > 0
+  if (style.display === 'none' || style.visibility === 'hidden') return false
+  for (const label of el.labels ?? []) {
+    if (rendersBox(label)) return true
+  }
+  const parent = el.parentElement
+  return parent !== null && rendersBox(parent)
 }
 
 /**
@@ -94,17 +143,24 @@ export function accessibleName(el: Element): string {
   const ariaLabel = el.getAttribute('aria-label')
   if (ariaLabel !== null && ariaLabel.trim() !== '') return truncate(clean(ariaLabel), MAX_ITEM_NAME_CHARS).text
 
+  // aria-labelledby is an id list; the name is every referenced node's text in
+  // order. Ids resolve in the element's own tree (document or shadow root).
+  const root = el.getRootNode() as Document | ShadowRoot
   const labelledBy = el.getAttribute('aria-labelledby')
   if (labelledBy !== null) {
-    const ref = document.getElementById(labelledBy.split(/\s+/)[0] ?? '')
-    const refText = ref?.textContent
-    if (refText !== undefined && refText.trim() !== '') return truncate(clean(refText), MAX_ITEM_NAME_CHARS).text
+    const refText = labelledBy.split(/\s+/)
+      .filter((id) => id !== '')
+      .map((id) => byId(root, id)?.textContent ?? '')
+      .map(clean)
+      .filter((text) => text !== '')
+      .join(' ')
+    if (refText !== '') return truncate(refText, MAX_ITEM_NAME_CHARS).text
   }
 
   const labelable = el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement
   if (labelable) {
     if (el.id !== '') {
-      const label = el.ownerDocument.querySelector<HTMLLabelElement>(`label[for="${cssEscape(el.id)}"]`)
+      const label = root.querySelector<HTMLLabelElement>(`label[for="${cssEscape(el.id)}"]`)
       const labelText = label?.textContent
       if (labelText !== undefined && labelText.trim() !== '') return truncate(clean(labelText), MAX_ITEM_NAME_CHARS).text
     }
@@ -131,6 +187,11 @@ export function accessibleName(el: Element): string {
   return el.tagName.toLowerCase()
 }
 
+/** getElementById for a document or a shadow root. */
+function byId(root: Document | ShadowRoot, id: string): Element | null {
+  return 'getElementById' in root ? root.getElementById(id) : null
+}
+
 /** CSS.escape with a fallback for environments that lack it (jsdom). */
 function cssEscape(value: string): string {
   if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value)
@@ -138,20 +199,176 @@ function cssEscape(value: string): string {
 }
 
 /**
- * Collect the page's interactive elements in document order, deduplicated and
- * visibility-filtered.
+ * The control a label operates, when it has one.
+ * @param label - label element.
+ * @returns the associated form control, or null.
+ */
+export function labelControl(label: Element): HTMLElement | null {
+  return label instanceof HTMLLabelElement ? label.control : null
+}
+
+/**
+ * Collect the page's interactive elements in document order (open shadow
+ * roots included), deduplicated and visibility-filtered.
+ *
+ * Generic candidates (focusable or `onclick` containers, labels) are kept only
+ * when they add something: a wrapper around a core control, or a label whose
+ * control is itself listed, would only duplicate that control and spend the
+ * inventory cap.
+ *
  * @param root - document or element to scan.
  * @returns the interactive inventory.
  */
 export function collectInteractive(root: Document | Element): Element[] {
   const seen = new Set<Element>()
-  const result: Element[] = []
-  for (const el of root.querySelectorAll(INTERACTIVE_SELECTOR)) {
+  const candidates: Element[] = []
+  for (const el of querySelectorAllDeep(root, INTERACTIVE_SELECTOR)) {
     if (seen.has(el)) continue
     seen.add(el)
-    if (isVisible(el)) result.push(el)
+    if (isVisible(el)) candidates.push(el)
   }
-  return result
+  const listed = new Set(candidates)
+  const core = candidates.filter((el) => el.matches(CORE_INTERACTIVE_SELECTOR))
+  const coreSet = new Set(core)
+  return candidates.filter((el) => {
+    if (coreSet.has(el)) return true
+    if (el instanceof HTMLLabelElement) {
+      // A label is the click target only when its control is not listed itself
+      // (a fully hidden custom checkbox or toggle input).
+      const control = labelControl(el)
+      return control !== null && !listed.has(control)
+    }
+    // Focusable or clickable wrappers around a real control add nothing.
+    return !core.some((control) => control !== el && el.contains(control))
+  })
+}
+
+/** Tags whose content never belongs to the readable page text. */
+const NON_TEXT_TAGS = new Set(['script', 'style', 'noscript', 'template', 'head', 'svg', 'canvas', 'iframe', 'object'])
+
+/** Elements that start a new line in the structured text. */
+const BLOCK_TAGS = new Set([
+  'address', 'article', 'aside', 'blockquote', 'br', 'caption', 'dd', 'details', 'dialog', 'div', 'dl',
+  'dt', 'fieldset', 'figcaption', 'figure', 'footer', 'form', 'header', 'hr', 'legend', 'li', 'main',
+  'nav', 'ol', 'p', 'pre', 'section', 'summary', 'table', 'tbody', 'tfoot', 'thead', 'tr', 'ul',
+])
+
+/** Options for structured text rendering. */
+export interface TextOptions {
+  /** Skip blocks entirely above or below the viewport. */
+  viewportOnly?: boolean
+}
+
+/** Rendered-text cap while walking, so a giant page cannot stall a snapshot. */
+const STRUCTURED_WALK_CAP = 400_000
+
+/**
+ * Render an element's visible text as lightweight structure: `#` headings,
+ * `-` list items (indented when nested), `|`-separated table rows, and one
+ * line per block. Flattening a whole page into a single string hides which
+ * label belongs to which value; a few markers keep that without the cost of a
+ * full accessibility tree. Open shadow roots render in place of their host's
+ * light children.
+ *
+ * @param root - element to render.
+ * @returns newline-separated text (unbounded below the walk cap).
+ */
+export function structuredText(root: Element, options: TextOptions = {}): string {
+  const lines: string[] = []
+  let inline = ''
+  let prefix = ''
+  let total = 0
+  let listDepth = 0
+
+  const flush = (): void => {
+    const text = clean(inline)
+    inline = ''
+    if (text === '') return
+    const line = `${prefix}${text}`
+    prefix = ''
+    if (lines[lines.length - 1] === line) return
+    lines.push(line)
+    total += line.length + 1
+  }
+  const hidden = (el: Element): boolean => {
+    if (el.getAttribute('aria-hidden') === 'true' || (el instanceof HTMLElement && el.hidden)) return true
+    const style = getComputedStyle(el)
+    if (style.display === 'none' || style.visibility === 'hidden') return true
+    // Viewport filtering checks blocks only: a partly visible container is
+    // kept and its children are tested in turn.
+    if (options.viewportOnly === true && el !== root && style.display !== 'inline') {
+      const rect = el.getBoundingClientRect()
+      if (rect.bottom < 0 || rect.top > window.innerHeight) return true
+    }
+    return false
+  }
+
+  const walk = (node: Node): void => {
+    if (total > STRUCTURED_WALK_CAP) return
+    if (node.nodeType === Node.TEXT_NODE) {
+      inline += node.textContent ?? ''
+      return
+    }
+    if (!(node instanceof Element)) return
+    const tag = node.tagName.toLowerCase()
+    if (NON_TEXT_TAGS.has(tag) || hidden(node)) return
+    if (/^h[1-6]$/.test(tag)) {
+      flush()
+      walkChildren(node)
+      prefix = `${'#'.repeat(Number(tag[1]))} `
+      flush()
+      prefix = ''
+      return
+    }
+    if (tag === 'table') {
+      flush()
+      for (const row of node.querySelectorAll('tr')) {
+        if (row.closest('table') !== node || hidden(row)) continue
+        const cells = [...row.children].filter((cell) => cell.tagName === 'TD' || cell.tagName === 'TH')
+        const text = cells.map((cell) => clean(elementText(cell))).join(' | ')
+        if (text.replace(/[|\s]/g, '') === '') continue
+        inline = `| ${text} |`
+        flush()
+      }
+      return
+    }
+    if (tag === 'ul' || tag === 'ol') {
+      flush()
+      listDepth += 1
+      walkChildren(node)
+      listDepth -= 1
+      flush()
+      return
+    }
+    if (tag === 'li') {
+      flush()
+      const marker = `${'  '.repeat(Math.max(0, listDepth - 1))}- `
+      prefix = marker
+      walkChildren(node)
+      // A nested list flushes the item's own text first; keep the marker only
+      // on the item's first line.
+      if (prefix === marker) flush()
+      prefix = ''
+      return
+    }
+    const block = BLOCK_TAGS.has(tag)
+    if (block) flush()
+    walkChildren(node)
+    if (block) flush()
+  }
+  const walkChildren = (el: Element): void => {
+    if (typeof HTMLSlotElement !== 'undefined' && el instanceof HTMLSlotElement) {
+      const assigned = el.assignedNodes({ flatten: true })
+      for (const child of assigned.length > 0 ? assigned : [...el.childNodes]) walk(child)
+      return
+    }
+    const children = el.shadowRoot !== null ? el.shadowRoot.childNodes : el.childNodes
+    for (const child of children) walk(child)
+  }
+
+  walk(root)
+  flush()
+  return lines.join('\n')
 }
 
 /**
@@ -160,13 +377,13 @@ export function collectInteractive(root: Document | Element): Element[] {
  * containing at least two paragraphs. Multiple articles commonly represent
  * cards or feed entries, so selecting only the first would hide page content.
  * @param doc - the document.
- * @returns the cleaned main text (unbounded; callers apply budgets).
+ * @returns the main text as structured lines (unbounded; callers apply budgets).
  */
-export function mainText(doc: Document): string {
+export function mainText(doc: Document, options: TextOptions = {}): string {
   const main = doc.querySelector('main, [role="main"]')
-  if (main !== null) return clean(elementText(main))
+  if (main !== null) return structuredText(main, options)
   const articles = doc.querySelectorAll('article')
-  if (articles.length === 1) return clean(elementText(articles[0]!))
+  if (articles.length === 1) return structuredText(articles[0]!, options)
 
   let best: Element | null = null
   let bestScore = 0
@@ -180,8 +397,8 @@ export function mainText(doc: Document): string {
       best = candidate
     }
   }
-  if (best !== null) return clean(elementText(best))
-  return clean(elementText(doc.body))
+  if (best !== null) return structuredText(best, options)
+  return doc.body === null ? '' : structuredText(doc.body, options)
 }
 
 /**

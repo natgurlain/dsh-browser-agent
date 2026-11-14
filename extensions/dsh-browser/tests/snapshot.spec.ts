@@ -93,8 +93,10 @@ describe('buildSnapshot', () => {
 
     const second = buildSnapshot(ids, { delta: true, budget: BUDGET }, first)
     const text = renderSnapshot(second, true)
-    expect(text).toContain('Changed main content:')
-    expect(text).toContain('结算完成')
+    // Delta mode reports a line diff of the main text rather than the whole text.
+    expect(text).toContain('Main content changes (+ added, - removed):')
+    expect(text).toContain('+ 结算完成')
+    expect(text).toContain('- 处理中')
   })
 
   it('caps inventory by budget and reports drops', () => {
