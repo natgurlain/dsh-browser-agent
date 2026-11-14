@@ -941,6 +941,79 @@ try {
   succeed(await tool('browser_snapshot', {}))
   await waitFor(async () => await badge(tabId) === 'AI', 'controlled tab badge after reconnect')
   results.push('the kill switch cancels pending approvals and calls, drops the bridge until Reconnect, and the badge shows OFF / AI')
+
+  // ---- Panel-free runtime ----
+  // Point the agent at the fixture page while a panel can still confirm it,
+  // then close every panel. The connection was in use, so the runtime lease
+  // keeps it (and the MV3 worker) up past Chrome's ~30 s idle cutoff.
+  // The kill switch revoked unrestricted access; restore it for the follow.
+  await settings({ unrestrictedBrowserAccess: true })
+  await page.bringToFront()
+  succeed(await tool('browser_follow_tab', { tabId }))
+  await chat.close()
+  await secondChat.close()
+  await panel.evaluate(() => panelPort.disconnect())
+  const currentWorker = () => browser.serviceWorkers().find(candidate => candidate.url().includes(extensionId))
+  const lease = await waitFor(async () => {
+    const stored = await currentWorker()?.evaluate(() => chrome.storage.session.get('dshRuntimeLease'))
+    return stored?.dshRuntimeLease
+  }, 'runtime lease')
+  assert.equal(lease.url, config.wsUrl, 'the lease names the address a restarted worker reconnects to')
+  assert.ok(lease.activeUntil > Date.now())
+  await delay(45_000)
+  succeed(await tool('browser_snapshot', {}))
+  results.push('with every panel closed the bridge and worker stay up past the 30 s idle cutoff and tool calls still run')
+
+  // The browser may still stop the worker (update, memory pressure). Stop it
+  // for real: the keepalive alarm restarts it, the storage.session lease says
+  // the runtime is active, and it reconnects headlessly to the same address.
+  const cdp = await browser.newCDPSession(page)
+  await cdp.send('ServiceWorker.enable')
+  const workerBefore = currentWorker()
+  await cdp.send('ServiceWorker.stopAllWorkers')
+  await waitFor(() => browser.serviceWorkers().every(candidate => candidate !== workerBefore) || undefined, 'worker stopped', 15_000)
+    .catch(() => { /* Playwright may keep the stale handle; the reconnect below is what matters */ })
+  const restartedCall = await waitFor(async () => {
+    const result = await tool('browser_snapshot', {}, 5_000)
+    return result.isError ? undefined : result
+  }, 'tool call after the worker restarted', 120_000)
+  succeed(restartedCall)
+  results.push('a stopped worker is restarted by the alarm and reconnects headlessly from its session lease')
+
+  // ---- Panel-independent approvals ----
+  // Record the notification the background shows (Playwright cannot click OS
+  // notifications), then answer through the same button event Chrome fires.
+  await currentWorker().evaluate(() => {
+    globalThis.smokeNotifications = []
+    const create = chrome.notifications.create.bind(chrome.notifications)
+    chrome.notifications.create = (id, options) => {
+      globalThis.smokeNotifications.push({ id, options })
+      return create(id, options)
+    }
+  })
+  const evalPending = tool('browser_console_eval', { expression: 'window.executed++' })
+  const shown = await waitFor(() => currentWorker().evaluate(() => globalThis.smokeNotifications[0]), 'approval notification')
+  assert.ok(shown.id.startsWith('dsh-browser-approval:'))
+  assert.deepEqual(shown.options.buttons.map(button => button.title), ['Review', 'Deny'],
+    'JavaScript evaluation is never allowed from a notification')
+  assert.match(shown.options.message, /full review/)
+  const dispatchable = await currentWorker().evaluate(() => typeof chrome.notifications.onButtonClicked.dispatch === 'function')
+  const executedBefore = await page.evaluate(() => window.executed)
+  if (dispatchable) {
+    await currentWorker().evaluate(id => chrome.notifications.onButtonClicked.dispatch(id, 1), shown.id)
+    const denied = await evalPending
+    assert.equal(denied.isError, true, JSON.stringify(denied))
+    results.push('a panel-free approval shows Review / Deny for JavaScript, and Deny from the notification refuses the call')
+  } else {
+    // Without a way to fire the button, the approval must still fail closed
+    // when its caller gives up.
+    const cancelled = await evalPending
+    assert.equal(cancelled.isError, true, JSON.stringify(cancelled))
+    results.push('a panel-free approval shows Review / Deny for JavaScript and fails closed when unanswered')
+  }
+  assert.equal(await page.evaluate(() => window.executed), executedBefore, 'the JavaScript never ran')
+  await waitFor(async () => (await currentWorker().evaluate(() => chrome.notifications.getAll()))[shown.id] === undefined,
+    'approval notification cleared')
   await writeFile(join(directory, 'results.json'), JSON.stringify(results, null, 2))
   console.log(`Browser smoke passed: ${results.join('; ')}`)
   console.log(`Evidence: ${directory}`)
