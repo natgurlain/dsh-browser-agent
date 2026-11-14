@@ -1,4 +1,4 @@
-# dsh Browser Pro
+# dsh Browser Agent
 
 > 基于 Yuxiang Lin 及贡献者的 [dsh-browser](https://github.com/omdsh-dev/dsh-browser)（MIT 许可）。见 [NOTICE](NOTICE)。
 
