@@ -3,7 +3,7 @@
  * Package release assets into an output directory:
  *   dsh-browser-chrome-<version>.zip   Chrome build (dist/), manifest `key` stripped
  *   dsh-browser-firefox-<version>.zip  Firefox build (dist-firefox/), manifest `key` stripped
- *   natgurlain-dsh-bridge-browser-<bridge version>.tgz  `pnpm pack` of the bridge plugin
+ *   dsh-bridge-browser-<version>.tgz    `pnpm pack` of the bridge plugin
  *   SHA256SUMS                         `sha256sum -c` compatible checksums of the above
  *
  * Usage: node scripts/package-release.mjs [--out release] [--tag v0.1.4] [--skip-build]
@@ -14,7 +14,7 @@
 
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { crc32, deflateRawSync } from 'node:zlib'
@@ -184,7 +184,11 @@ async function main() {
   run('pnpm', ['pack', '--pack-destination', options.out], bridgeDir)
   const tarballs = readdirSync(options.out).filter(name => name.endsWith('.tgz') && !before.has(name))
   if (tarballs.length !== 1) throw new Error(`expected one bridge tarball, found ${tarballs.join(', ') || 'none'}`)
-  assets.push(join(options.out, tarballs[0]))
+  // Name by release tag so installers can find every asset from the tag alone.
+  const tarball = join(options.out, `dsh-bridge-browser-${label}.tgz`)
+  renameSync(join(options.out, tarballs[0]), tarball)
+  console.log(`${tarballs[0]} -> ${basename(tarball)}`)
+  assets.push(tarball)
 
   for (const file of assets) if (!statSync(file).size) throw new Error(`${file} is empty`)
   const lines = writeChecksums(assets, join(options.out, 'SHA256SUMS'))

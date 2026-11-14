@@ -21,7 +21,7 @@ Zips are deterministic, so the same build output gives the same checksums.
 | --- | --- |
 | `dsh-browser-chrome-<tag>.zip` | Chrome build; manifest `key` stripped so Chrome Web Store uploads are accepted |
 | `dsh-browser-firefox-<tag>.zip` | Firefox build (`dist-firefox/`); manifest `key` stripped |
-| `natgurlain-dsh-bridge-browser-<version>.tgz` | `pnpm pack` of the bridge plugin |
+| `dsh-bridge-browser-<tag>.tgz` | `pnpm pack` of the bridge plugin (`@natgurlain/dsh-bridge-browser`) |
 | `SHA256SUMS` | `sha256sum -c` compatible checksums of the three files above |
 
 Each asset and `SHA256SUMS` carry a GitHub build-provenance attestation:
