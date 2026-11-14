@@ -130,6 +130,8 @@ export interface PanelCopy {
     devToolsDetach: string
     approvalNotifications: string
     approvalNotificationsHelp: string
+    approvalTimeout: string
+    approvalTimeoutHelp: string
     catchPageDialogs: string
     catchPageDialogsHelp: string
     autoResumeSession: string
@@ -484,7 +486,9 @@ const EN: PanelCopy = {
     catchPageDialogs: 'Catch page dialogs — shows Chrome\'s debugging bar',
     catchPageDialogsHelp: 'Attach the debugger before clicks, key presses, and navigation so alert/confirm/prompt/leave-site dialogs are reported and the agent can answer them. While attached, Chrome shows a "being debugged" bar that can shift the page.',
     approvalNotifications: 'Browser approval notifications',
-    approvalNotificationsHelp: 'Notify you when an approval arrives while the side panel is closed',
+    approvalNotificationsHelp: 'Notify you when an approval arrives while the side panel is closed. Simple actions can be allowed from the notification; code, typing, and uploads open the full card.',
+    approvalTimeout: 'Approval wait without the side panel (minutes)',
+    approvalTimeoutHelp: 'How long an approval waits for an answer while the side panel is closed — from a notification, the dsh web UI, or the CLI — before it is denied. 1–14 minutes.',
     autoResumeSession: "Resume this page's conversation",
     autoResumeSessionHelp: 'Reopen the conversation associated with this tab and page path; other pages start a new conversation',
     trustedOrigins: 'Always-allowed domains',
@@ -837,7 +841,9 @@ const ZH: PanelCopy = {
     catchPageDialogs: '捕获页面对话框——会显示 Chrome 调试提示栏',
     catchPageDialogsHelp: '在点击、按键和导航前连接调试器，以便报告 alert/confirm/prompt/离开页面对话框并由代理回应。连接期间 Chrome 会显示“正在调试”提示栏，可能使页面位移。',
     approvalNotifications: '浏览器审批通知',
-    approvalNotificationsHelp: '侧栏关闭时收到审批请求，通过系统通知提醒你',
+    approvalNotificationsHelp: '侧栏关闭时收到审批请求，通过系统通知提醒你。简单操作可在通知中直接允许；代码、输入和上传会打开完整审批卡片。',
+    approvalTimeout: '侧栏关闭时的审批等待（分钟）',
+    approvalTimeoutHelp: '侧栏关闭时，审批请求（通知、dsh 网页端或命令行均可回答）等待多久后自动拒绝。范围 1–14 分钟。',
     autoResumeSession: '续接当前页面会话',
     autoResumeSessionHelp: '重新打开当前标签页此页面的会话；其他页面会新建会话',
     trustedOrigins: '永久免确认域名',

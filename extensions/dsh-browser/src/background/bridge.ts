@@ -104,6 +104,9 @@ export interface BridgeSinks {
   onServerProofRejected?(url: string): void
 }
 
+/** Client-side hello caps beyond the snapshot contract. */
+export type BridgeClientCaps = Pick<BridgeCaps, 'devTools' | 'client'>
+
 /** Resolve whether opening a WebSocket is expected to succeed. */
 type BridgeProbe = (url: string) => Promise<boolean>
 
@@ -139,12 +142,13 @@ export class BridgeClient {
     /** Whether a disconnected client still has an active user-owned lease. */
     private readonly shouldReconnect: () => boolean = () => true,
     /**
-     * Capabilities this build can serve beyond the text snapshot contract.
-     * Advertised on every `hello`: the host registers the developer-tools group
-     * only for an extension that claims it, and the user's own setting still
-     * gates every call.
+     * Capabilities this build can serve beyond the text snapshot contract,
+     * plus this install's client identity. Read on every `hello`: the host
+     * registers the developer-tools group only for an extension that claims
+     * it (the user's own setting still gates every call), and keeps one
+     * connection per identity.
      */
-    private readonly capabilities: Pick<BridgeCaps, 'devTools'> = {},
+    private readonly capabilities: BridgeClientCaps | (() => BridgeClientCaps) = {},
     /** Token fallback when settings carry none (zero-config Chrome installs). */
     private readonly tokenSource: BridgeTokenSource = loadInstalledToken,
   ) {}
@@ -188,6 +192,15 @@ export class BridgeClient {
   suspendReconnect(): void {
     if (this.state === 'connected') return
     this.stop()
+  }
+
+  /**
+   * Send one sealed liveness frame. The bridge ignores unsolicited `pong`s,
+   * but the traffic keeps an MV3 service worker from being stopped as idle.
+   * @returns false when no authenticated socket exists.
+   */
+  heartbeat(): boolean {
+    return this.send({ t: 'pong' })
   }
 
   /** Whether a frame can be sent right now (an authenticated, open socket). */
@@ -374,7 +387,7 @@ export class BridgeClient {
             textOnly: true,
             snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS,
             maxInteractiveItems: 60,
-            ...this.capabilities,
+            ...typeof this.capabilities === 'function' ? this.capabilities() : this.capabilities,
           }
           let mac: string
           try {

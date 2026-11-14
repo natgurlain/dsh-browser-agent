@@ -22,7 +22,7 @@ interface PendingRpc {
  * @param bridge - the bridge client (must be connected).
  * @returns `{ request }` where request dispatches one unary gateway RPC.
  */
-export function createRpc(bridge: BridgeClient): { request(method: string, payload: unknown): Promise<unknown> } {
+export function createRpc(bridge: BridgeClient): { request(method: string, payload: unknown, timeoutMs?: number): Promise<unknown> } {
   const pending = new Map<string, PendingRpc>()
 
   const previous = bridge.sinks.onFrame
@@ -38,7 +38,7 @@ export function createRpc(bridge: BridgeClient): { request(method: string, paylo
   }
 
   return {
-    request(method: string, payload: unknown): Promise<unknown> {
+    request(method: string, payload: unknown, timeoutMs = RPC_TIMEOUT_MS): Promise<unknown> {
       if (!bridge.connected) {
         return Promise.reject(new Error('bridge not connected'))
       }
@@ -46,8 +46,8 @@ export function createRpc(bridge: BridgeClient): { request(method: string, paylo
       return new Promise<unknown>((resolve, reject) => {
         const timer = setTimeout(() => {
           pending.delete(id)
-          reject(new Error(`gateway rpc ${method} timed out after ${RPC_TIMEOUT_MS}ms`))
-        }, RPC_TIMEOUT_MS)
+          reject(new Error(`gateway rpc ${method} timed out after ${timeoutMs}ms`))
+        }, timeoutMs)
         pending.set(id, { resolve, reject, timer })
         const sent = bridge.send({ t: 'rpc', id, method, payload })
         if (!sent) {

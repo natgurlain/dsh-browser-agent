@@ -87,6 +87,7 @@ function mockChrome(options: {
       create: vi.fn(async () => ''),
       clear: vi.fn(async () => true),
       onClicked: chromeEvent<[string]>(),
+      onButtonClicked: chromeEvent<[string, number]>(),
     },
     runtime: {
       id: 'test-extension',
@@ -105,7 +106,8 @@ function mockChrome(options: {
         get: vi.fn(async () => {
           const stored: Record<string, unknown> = await (options.localGet ?? (async () => ({})))()
           const settings = (stored.dshSettings ?? {}) as Record<string, unknown>
-          return { ...stored, dshSettings: { token: TEST_BRIDGE_TOKEN, ...settings } }
+          // A provisioned client id, so identity setup never writes to storage.
+          return { dshClientId: 'test-client-0001', ...stored, dshSettings: { token: TEST_BRIDGE_TOKEN, ...settings } }
         }),
         set: vi.fn(options.localSet ?? (async () => {})),
         remove: vi.fn(async () => {}),
@@ -1160,5 +1162,171 @@ describe('background bridge lifecycle', () => {
         expect(chromeMock.action.setBadgeText).toHaveBeenCalledWith({ text: 'AI', tabId: 1 })
       })
     })
+  })
+})
+
+describe('panel-free runtime and approvals', () => {
+  const HOST_CAPS = { textOnly: true as const, snapshotMaxChars: 32_000, maxInteractiveItems: 60, hostApprovals: 1 as const }
+  type ButtonEvent = { emit: (id: string, index: number) => void }
+
+  async function connectedThenClosed(caps: typeof HOST_CAPS | null = HOST_CAPS) {
+    const tab = { id: 1, windowId: 1, title: 'Tab', url: 'https://example.com/', active: true } as chrome.tabs.Tab
+    const chromeMock = mockChrome({
+      localGet: async () => ({
+        dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge', sharePageContent: 'auto' },
+      }),
+      tabQuery: async () => [tab],
+      tabSendMessage: async (_tabId, message) => (message as { type?: unknown }).type === 'DSH_ACTION'
+        ? { ok: true, result: { text: 'Pressed Enter.' } }
+        : undefined,
+    })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    await completeHandshake(socket, { ...(caps === null ? {} : { caps }), until: panelSawConnected(panel.postMessage) })
+    panel.onDisconnect.emit()
+    return { chromeMock, socket }
+  }
+
+  type SentRpc = { t: 'rpc'; id: string; method: string; payload: Record<string, unknown> }
+  const rpcs = (socket: FakeWebSocket, method: string): SentRpc[] =>
+    socket.sent.filter((frame): frame is SentRpc => (frame as SentRpc).t === 'rpc' && (frame as SentRpc).method === method)
+
+  function pressEnter(socket: FakeWebSocket, id: string): void {
+    socket.receive({ t: 'tool.call', id, name: 'browser_press', args: { key: 'Enter' }, expiresAt: Date.now() + 10_000 })
+  }
+
+  async function forwarded(socket: FakeWebSocket): Promise<SentRpc> {
+    return await vi.waitFor(() => {
+      const found = rpcs(socket, 'bridge.approval.ask')[0]
+      expect(found).toBeDefined()
+      return found!
+    })
+  }
+
+  it('advertises a per-install client identity in hello', async () => {
+    const { socket } = await connectedThenClosed()
+    const hello = socket.sent.find((frame) => (frame as { t?: unknown }).t === 'hello') as { caps: { client?: unknown } }
+    expect(hello.caps.client).toEqual({ id: 'test-client-0001', browser: 'chrome' })
+  })
+
+  it('keeps the connection after the last panel closes and gates tool calls without a panel', async () => {
+    const { chromeMock, socket } = await connectedThenClosed()
+    // Boot clears stale alarms once; closing the panel must not clear it again.
+    const clears = chromeMock.alarms.clear.mock.calls.length
+    await new Promise((resolve) => { setTimeout(resolve, 20) })
+    expect(socket.readyState).toBe(FakeWebSocket.OPEN)
+    expect(chromeMock.alarms.clear.mock.calls.length).toBe(clears)
+    // The worker records its lease so a restarted worker can reconnect headlessly.
+    await vi.waitFor(() => {
+      expect(chromeMock.sessionStore.dshRuntimeLease).toEqual({ activeUntil: expect.any(Number), url: 'wss://bridge.example/ext/bridge' })
+    })
+    pressEnter(socket, 'panel-free-call')
+    // The approval has no panel: it is held on the bridge and forwarded to dsh.
+    const ask = await forwarded(socket)
+    expect(ask.payload).toMatchObject({ toolCallId: 'panel-free-call', approvalId: expect.any(String), reason: expect.stringContaining('browser_press') })
+    const hold = rpcs(socket, 'bridge.tool.hold')[0]!
+    expect(hold.payload).toMatchObject({ toolCallId: 'panel-free-call' })
+    expect(hold.payload.holdMs as number).toBeGreaterThan(9 * 60_000)
+    expect(chrome.notifications.create).toHaveBeenCalledWith(
+      `dsh-browser-approval:${String(ask.payload.approvalId)}`,
+      expect.objectContaining({ buttons: expect.any(Array) }),
+    )
+
+    // A dsh answer for a different payload binding is ignored.
+    socket.receive({ t: 'rpc.result', id: ask.id, ok: true, result: { approvalId: ask.payload.approvalId, binding: '0'.repeat(64), decision: 'allow-once' } })
+    await new Promise((resolve) => { setTimeout(resolve, 20) })
+    expect(socket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'panel-free-call' }))
+    // Deny from the notification instead (button 1 is Deny in both layouts).
+    ;(chrome.notifications.onButtonClicked as unknown as ButtonEvent)
+      .emit(`dsh-browser-approval:${String(ask.payload.approvalId)}`, 1)
+    await vi.waitFor(() => {
+      expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'panel-free-call', ok: false }))
+    })
+  })
+
+  it('runs the call when dsh allows it with the exact binding', async () => {
+    const { socket } = await connectedThenClosed()
+    pressEnter(socket, 'dsh-allowed')
+    const ask = await forwarded(socket)
+    socket.receive({
+      t: 'rpc.result',
+      id: ask.id,
+      ok: true,
+      result: { approvalId: ask.payload.approvalId, ...(ask.payload.binding === undefined ? {} : { binding: ask.payload.binding }), decision: 'allow-once' },
+    })
+    await vi.waitFor(() => {
+      expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'dsh-allowed', ok: true }))
+    })
+    // dsh answered first, so there is no question left to withdraw.
+    expect(rpcs(socket, 'bridge.approval.withdraw')).toHaveLength(0)
+  })
+
+  it('withdraws the dsh question when the notification answers first', async () => {
+    const { socket } = await connectedThenClosed()
+    pressEnter(socket, 'notification-first')
+    const ask = await forwarded(socket)
+    ;(chrome.notifications.onButtonClicked as unknown as ButtonEvent)
+      .emit(`dsh-browser-approval:${String(ask.payload.approvalId)}`, 1)
+    await vi.waitFor(() => {
+      expect(rpcs(socket, 'bridge.approval.withdraw')[0]?.payload).toEqual({ toolCallId: 'notification-first', approvalId: ask.payload.approvalId })
+    })
+    await vi.waitFor(() => {
+      expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'notification-first', ok: false }))
+    })
+  })
+
+  it('does not forward or hold when the bridge does not support host approvals', async () => {
+    const { socket } = await connectedThenClosed(null)
+    pressEnter(socket, 'old-bridge')
+    await vi.waitFor(() => { expect(chrome.notifications.create).toHaveBeenCalled() })
+    await new Promise((resolve) => { setTimeout(resolve, 20) })
+    expect(rpcs(socket, 'bridge.approval.ask')).toHaveLength(0)
+    expect(rpcs(socket, 'bridge.tool.hold')).toHaveLength(0)
+  })
+})
+
+describe('headless reconnect after a worker restart', () => {
+  it('reconnects to the leased address without a panel and without discovery', async () => {
+    mockChrome({
+      sessionGet: async () => ({ dshRuntimeLease: { activeUntil: Date.now() + 60_000, url: 'ws://127.0.0.1:3999/ext/bridge' } }),
+    })
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      wsUrl: 'ws://127.0.0.1:3999/ext/bridge',
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    expect(FakeWebSocket.instances[0]!.url).toBe('ws://127.0.0.1:3999/ext/bridge')
+    // Only the pre-flight probe of that one address; no discovery sweep.
+    for (const [url] of fetchMock.mock.calls as unknown as Array<[string]>) expect(String(url)).toContain('127.0.0.1:3999')
+    expect(chrome.alarms.create).toHaveBeenCalledWith('bridge-keepalive', { periodInMinutes: 0.5 })
+  })
+
+  it('stays asleep when the persisted lease has expired', async () => {
+    mockChrome({
+      sessionGet: async () => ({ dshRuntimeLease: { activeUntil: Date.now() - 1, url: 'ws://127.0.0.1:3999/ext/bridge' } }),
+    })
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    await new Promise((resolve) => { setTimeout(resolve, 30) })
+    expect(FakeWebSocket.instances).toHaveLength(0)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(chrome.alarms.create).not.toHaveBeenCalled()
+  })
+
+  it('ignores a malformed lease', async () => {
+    mockChrome({ sessionGet: async () => ({ dshRuntimeLease: { activeUntil: 'soon' } }) })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    await new Promise((resolve) => { setTimeout(resolve, 30) })
+    expect(FakeWebSocket.instances).toHaveLength(0)
   })
 })

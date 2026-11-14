@@ -1112,6 +1112,7 @@ export function App(): React.JSX.Element {
         approvalNotifications: raw?.approvalNotifications ?? true,
         catchPageDialogs: raw?.catchPageDialogs ?? false,
         autoResumeSession: raw?.autoResumeSession ?? true,
+        approvalTimeoutMinutes: raw?.approvalTimeoutMinutes ?? 10,
       })
     })
   }, [])
@@ -2906,6 +2907,20 @@ export function App(): React.JSX.Element {
                 : { ...current, approvalNotifications: event.target.checked })}
             />
             <span className="setting-toggle-control" aria-hidden="true"><span /></span>
+          </label>
+          <label>
+            <span>{copy.settings.approvalTimeout}</span>
+            <small>{copy.settings.approvalTimeoutHelp}</small>
+            <input
+              type="number"
+              min={1}
+              max={14}
+              step={1}
+              value={settings?.approvalTimeoutMinutes ?? 10}
+              onChange={(event) => setSettings((current) => current === null
+                ? current
+                : { ...current, approvalTimeoutMinutes: Number(event.target.value) })}
+            />
           </label>
           <label className="setting-toggle">
             <span className="setting-toggle-copy">

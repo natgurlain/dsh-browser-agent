@@ -2,9 +2,14 @@
  * Background service worker entry: owns the bridge connection, the gateway
  * RPC client, controlled-tab tool dispatch, and the panel port service.
  *
- * MV3 survival: after the user opens the panel, its port plus a half-minute
- * `alarms` keepalive re-arm the reconnect loop. Merely loading the extension
- * never probes or claims the single-connection bridge.
+ * MV3 survival: opening the panel is what first claims a bridge connection
+ * (merely loading the extension never probes). After that the connection is
+ * kept up without a panel while the runtime lease is active (a tool call or
+ * approval in flight, or activity within the idle window; see
+ * runtime-lifecycle.ts): a heartbeat keeps the worker awake, a half-minute
+ * `alarms` keepalive restarts it, and a lease mirrored in storage.session lets
+ * a restarted worker reconnect to the address it last used, without
+ * discovery. Once idle, the bridge closes and the worker may sleep.
  *
  * Panel port protocol (chrome.runtime.connect, name "dsh-panel"):
  *   panel → bg: { type: 'rpc', id, method, payload }
@@ -45,7 +50,11 @@
  */
 
 import {
+  BRIDGE_APPROVAL_ASK_METHOD,
+  BRIDGE_APPROVAL_WITHDRAW_METHOD,
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
+  BRIDGE_TOOL_HOLD_METHOD,
+  HOST_APPROVALS_CAPS_VERSION,
   isRespondResult,
   type BridgeCaps,
   type RespondResult,
@@ -92,7 +101,21 @@ import { bindOpenedTabAffinity } from './open-tab-binding.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
 import { SelectionTracker, type SelectionSource } from './selection.ts'
 import { parsePageSelection, parseSelectionCapture } from '../selection.ts'
-import { ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
+import {
+  APPROVAL_TIMEOUT_MS,
+  ApprovalCoordinator,
+  type ApprovalRequestResult,
+  type BackgroundApproval,
+} from './approval-coordinator.ts'
+import {
+  APPROVAL_NOTIFICATION_COPY,
+  approvalNotificationButtons,
+  approvalNotificationOptions,
+  hostApprovalReason,
+} from './approval-notifications.ts'
+import { RUNTIME_LEASE_STORAGE_KEY, RuntimeKeeper, RuntimeLease } from './runtime-lifecycle.ts'
+import { loadClientIdentity } from './client-identity.ts'
+import type { BridgeClientIdentity } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { devToolsSupported } from './debugger-session.ts'
 import { createDevToolsController } from './devtools-controller.ts'
 import {
@@ -134,6 +157,12 @@ export interface Settings {
   catchPageDialogs: boolean
   /** Restore the current tab and page path's conversation when the panel reopens. */
   autoResumeSession: boolean
+  /**
+   * Minutes an approval may wait while no side panel is open (notification,
+   * dsh web UI or CLI). With a panel open the card waits one minute. Clamped
+   * to 1–14 so the bridge's 15-minute hold can always cover it.
+   */
+  approvalTimeoutMinutes: number
 }
 
 const SETTINGS_DEFAULTS: Settings = {
@@ -147,7 +176,11 @@ const SETTINGS_DEFAULTS: Settings = {
   approvalNotifications: true,
   catchPageDialogs: false,
   autoResumeSession: true,
+  approvalTimeoutMinutes: 10,
 }
+
+/** Longest no-panel approval window the bridge's hold can cover. */
+const MAX_APPROVAL_TIMEOUT_MINUTES = 14
 
 /**
  * 自动探测：DSH Desktop 启动 Host 时用 `--port 0`，本地 Web 端口每次启动都由系统
@@ -440,6 +473,8 @@ interface ActiveToolCall {
   revocationRequested: boolean
   settled: Promise<void>
   settle: () => void
+  /** Move the call's deadline later after the bridge granted an approval hold. */
+  extendExpiry?: (expiresAt: number) => void
 }
 
 const activeToolCalls = new Map<string, ActiveToolCall>()
@@ -591,6 +626,9 @@ function normalizeSettings(candidate: Settings): Settings {
     approvalNotifications: candidate.approvalNotifications !== false,
     catchPageDialogs: candidate.catchPageDialogs === true && devToolsCapability,
     autoResumeSession: candidate.autoResumeSession !== false,
+    approvalTimeoutMinutes: typeof candidate.approvalTimeoutMinutes === 'number' && Number.isFinite(candidate.approvalTimeoutMinutes)
+      ? Math.min(MAX_APPROVAL_TIMEOUT_MINUTES, Math.max(1, Math.round(candidate.approvalTimeoutMinutes)))
+      : SETTINGS_DEFAULTS.approvalTimeoutMinutes,
   }
 }
 
@@ -978,36 +1016,156 @@ function deliverApproval(request: ApprovalRequest): boolean {
   return delivered
 }
 
+const EXT_TARGET: 'chrome' | 'firefox' = import.meta.env.EXT_TARGET === 'firefox' ? 'firefox' : 'chrome'
+
+function backgroundApprovalTimeoutMs(): number {
+  return settings.approvalTimeoutMinutes * 60_000
+}
+
+/**
+ * Show one approval as an OS notification. Chrome gets Allow once / Deny for
+ * approvals the notification fully describes and Review / Deny otherwise;
+ * Firefox has no notification buttons, so its notification opens the sidebar.
+ */
 function notifyApproval(request: ApprovalRequest, _windowId: number): void {
   if (!settings.approvalNotifications) return
-  const copy = getUiLocale() === 'zh'
-    ? {
-        title: '浏览器操作等待确认',
-        message: '点击通知打开 dsh 浏览器助手，并在 60 秒内确认或拒绝。',
-      }
-    : {
-        title: 'Browser action awaiting approval',
-        message: 'Click to open dsh Browser Assistant, then allow or deny within 60 seconds.',
-      }
-  void Promise.resolve(chrome.notifications.create(approvalNotificationId(request.id), {
-    type: 'basic',
+  void Promise.resolve(chrome.notifications.create(approvalNotificationId(request.id), approvalNotificationOptions(request, {
+    target: EXT_TARGET,
     iconUrl: chrome.runtime.getURL('assets/icons/icon128.png'),
-    title: copy.title,
-    message: copy.message,
-    requireInteraction: true,
-  })).catch(() => {})
+    copy: APPROVAL_NOTIFICATION_COPY[getUiLocale() === 'zh' ? 'zh' : 'en'],
+    minutes: backgroundApprovalTimeoutMs() / 60_000,
+  }))).catch(() => {})
 }
 
 function clearApprovalNotification(id: string): void {
   void Promise.resolve(chrome.notifications.clear(approvalNotificationId(id))).catch(() => {})
 }
 
+/** Approvals forwarded to dsh, by approval id → the tool call they gate. */
+const forwardedApprovals = new Map<string, string>()
+/** Room after an approval's own deadline for the approved call to run. */
+const APPROVAL_HOLD_MARGIN_MS = 60_000
+
 const approvals = new ApprovalCoordinator({
   deliver: deliverApproval,
   notify: notifyApproval,
   clearNotification: clearApprovalNotification,
-  resolved: broadcastApprovalResolved,
+  resolved: (id) => {
+    broadcastApprovalResolved(id)
+    const toolCallId = forwardedApprovals.get(id)
+    if (toolCallId !== undefined) {
+      forwardedApprovals.delete(id)
+      // First answer wins: withdraw the question from dsh's other clients.
+      void rpc?.request(BRIDGE_APPROVAL_WITHDRAW_METHOD, { toolCallId, approvalId: id }).catch(() => {})
+    }
+    runtimeKeeper.update()
+  },
+  background: onBackgroundApproval,
+}, APPROVAL_TIMEOUT_MS, backgroundApprovalTimeoutMs)
+
+/**
+ * An approval with no side panel: hold its tool call on the bridge for the
+ * longer no-panel window, and put it to dsh's approval service so the web UI
+ * or CLI can answer. The answer must echo this request's id and payload
+ * binding (ApprovalCoordinator.respondRemote), and can only allow once or deny.
+ */
+function onBackgroundApproval(approval: BackgroundApproval): void {
+  runtimeLease.touch()
+  runtimeKeeper.update()
+  const { request, toolCallId } = approval
+  const client = rpc
+  if (toolCallId === undefined || client === null || bridge?.connected !== true
+    || caps?.hostApprovals !== HOST_APPROVALS_CAPS_VERSION) return
+  const holdMs = approval.deadline - Date.now() + APPROVAL_HOLD_MARGIN_MS
+  void client.request(BRIDGE_TOOL_HOLD_METHOD, { toolCallId, holdMs }).then((result) => {
+    const expiresAt = (result as { expiresAt?: unknown } | null)?.expiresAt
+    if (typeof expiresAt === 'number') activeToolCalls.get(toolCallId)?.extendExpiry?.(expiresAt)
+  }).catch(() => {})
+  if (forwardedApprovals.has(request.id)) return
+  const reason = hostApprovalReason(request)
+  if (reason === undefined) return
+  forwardedApprovals.set(request.id, toolCallId)
+  void client.request(BRIDGE_APPROVAL_ASK_METHOD, {
+    toolCallId,
+    approvalId: request.id,
+    ...(request.binding === undefined ? {} : { binding: request.binding }),
+    reason,
+  }, holdMs).then((result) => {
+    const answer = result as { approvalId?: unknown; binding?: unknown; decision?: unknown } | null
+    // dsh has answered: nothing is left there to withdraw.
+    if (forwardedApprovals.get(request.id) === toolCallId) forwardedApprovals.delete(request.id)
+    if (answer?.approvalId !== request.id) return
+    if (answer.decision !== 'allow-once' && answer.decision !== 'deny') return
+    approvals.respondRemote(request.id, typeof answer.binding === 'string' ? answer.binding : undefined, answer.decision)
+  }).catch(() => {}).finally(() => {
+    if (forwardedApprovals.get(request.id) === toolCallId) forwardedApprovals.delete(request.id)
+  })
+}
+
+// ---- Panel-free runtime ----
+
+const runtimeLease = new RuntimeLease({
+  panels: () => panelPorts.size,
+  toolCalls: () => activeToolCalls.size,
+  approvals: () => approvals.size,
 })
+
+/** The address a headless reconnect uses (the last connected one). */
+let headlessBridgeUrl: string | undefined
+
+const runtimeKeeper = new RuntimeKeeper(runtimeLease, {
+  heartbeat: () => {
+    bridge?.heartbeat()
+    // An extension API call also resets the worker's idle timer.
+    try {
+      void Promise.resolve(chrome.runtime.getPlatformInfo()).catch(() => {})
+    } catch { /* not available in this context */ }
+  },
+  onActive: armBridgeKeepalive,
+  onIdle: () => {
+    if (panelPorts.size > 0) return
+    bridgeStartRevision += 1
+    bridge?.stop()
+    disarmBridgeKeepalive()
+  },
+  persist: (activeUntil) => {
+    const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
+    if (area === undefined) return
+    const url = connectedAddress ?? headlessBridgeUrl
+    void Promise.resolve(activeUntil === undefined || url === undefined
+      ? area.remove(RUNTIME_LEASE_STORAGE_KEY)
+      : area.set({ [RUNTIME_LEASE_STORAGE_KEY]: { activeUntil, url } })).catch(() => {})
+  },
+})
+
+/** Whether anything wants the bridge connection: a panel or an active runtime lease. */
+function runtimeWantsBridge(): boolean {
+  return panelPorts.size > 0 || runtimeLease.active()
+}
+
+/** Restore a lease left by the previous worker instance, and reconnect headlessly. */
+const runtimeRestored = (async () => {
+  const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
+  if (area === undefined) return
+  try {
+    const stored = (await area.get(RUNTIME_LEASE_STORAGE_KEY))?.[RUNTIME_LEASE_STORAGE_KEY] as
+      { activeUntil?: unknown; url?: unknown } | undefined
+    if (typeof stored?.activeUntil !== 'number' || typeof stored.url !== 'string') return
+    runtimeLease.restore(stored.activeUntil)
+    headlessBridgeUrl = stored.url
+  } catch {
+    return
+  }
+  runtimeKeeper.update()
+  if (!runtimeLease.active() || panelPorts.size > 0) return
+  await settingsReady
+  await startBridge()
+})()
+
+let clientIdentity: BridgeClientIdentity | undefined
+const clientIdentityReady = loadClientIdentity(chrome.storage.local, EXT_TARGET)
+  .then((identity) => { clientIdentity = identity })
+  .catch(() => {})
 
 function responseMessages(): { unavailable: string; timeout: string; duplicate: string; disconnected: string } {
   return getUiLocale() === 'zh'
@@ -1364,6 +1522,7 @@ async function authorizeToolCall(
   sessionId?: string,
   unrestrictedAccess: boolean = unrestrictedAccessEnabled(),
   tabId?: number,
+  toolCallId?: string,
 ): Promise<ApprovalAuthorization> {
   if (signal.aborted) return 'cancelled'
   const grantKind = devToolsGrantKind(prompt)
@@ -1379,7 +1538,7 @@ async function authorizeToolCall(
     ),
   })
   if (gate !== 'prompt') return gate
-  const result: ApprovalRequestResult = await approvals.request(prompt, signal, windowId, sessionId)
+  const result: ApprovalRequestResult = await approvals.request(prompt, signal, windowId, sessionId, toolCallId)
   if (signal.aborted) return 'cancelled'
   if (result.status !== 'decision') return result.status
   const { decision } = result
@@ -1632,16 +1791,25 @@ function routeToolCall(call: ToolCall): void {
   }
   activeToolCalls.set(call.id, activeCall)
   unsettledToolCalls.add(activeCall)
+  runtimeLease.touch()
+  runtimeKeeper.update()
   const commitAction = (): void => { activeCall.committed = true }
   const rollbackActionCommit = (): void => {
     activeCall.committed = false
     if (activeCall.revocationRequested) controller.abort()
   }
-  const expiryTimer = call.expiresAt === undefined
+  const expire = (): void => {
+    if (!activeCall.committed) controller.abort()
+  }
+  let expiryTimer = call.expiresAt === undefined
     ? undefined
-    : setTimeout(() => {
-        if (!activeCall.committed) controller.abort()
-      }, Math.max(0, call.expiresAt - Date.now()))
+    : setTimeout(expire, Math.max(0, call.expiresAt - Date.now()))
+  activeCall.extendExpiry = (expiresAt) => {
+    if (call.expiresAt === undefined || expiresAt <= call.expiresAt || controller.signal.aborted) return
+    call.expiresAt = expiresAt
+    if (expiryTimer !== undefined) clearTimeout(expiryTimer)
+    expiryTimer = setTimeout(expire, Math.max(0, expiresAt - Date.now()))
+  }
   const budget = caps === null
     ? undefined
     : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
@@ -1662,7 +1830,7 @@ function routeToolCall(call: ToolCall): void {
       call,
       sharePageContent,
       budget,
-      (prompt) => authorizeToolCall(prompt, controller.signal, windowId ?? 0, call.sessionId, unrestrictedAccess),
+      (prompt) => authorizeToolCall(prompt, controller.signal, windowId ?? 0, call.sessionId, unrestrictedAccess, undefined, call.id),
       controller.signal,
       undefined,
       undefined,
@@ -1689,7 +1857,7 @@ function routeToolCall(call: ToolCall): void {
           target.windowId,
           sharePageContent,
           budget,
-          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess),
+          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess, undefined, call.id),
           controller.signal,
           (tab) => bindOpenedTab(tab, call.sessionId, { active: call.args.active !== false }),
           (tabId) => tabAffinity.allowsTarget(tabId, call.sessionId),
@@ -1701,7 +1869,7 @@ function routeToolCall(call: ToolCall): void {
           call,
           sharePageContent,
           budget,
-          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess),
+          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess, undefined, call.id),
           controller.signal,
           target,
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
@@ -1760,6 +1928,8 @@ function routeToolCall(call: ToolCall): void {
     unsettledToolCalls.delete(activeCall)
     activeCall.settle()
     if (activeToolCalls.get(call.id) === activeCall) activeToolCalls.delete(call.id)
+    runtimeLease.touch()
+    runtimeKeeper.update()
   })
 }
 
@@ -1782,7 +1952,7 @@ async function dispatchDevToolsTool(call: ToolCall, signal: AbortSignal): Promis
   if (signal.aborted) return devToolsCancelled()
   const frames = await listTabFrames(target.id!, target.url)
   const prompt = devToolsApprovalForCall(call, frames)
-  const authorization = await authorizeToolCall(prompt, signal, target.windowId ?? 0, call.sessionId, undefined, target.id)
+  const authorization = await authorizeToolCall(prompt, signal, target.windowId ?? 0, call.sessionId, undefined, target.id, call.id)
   if (signal.aborted) return devToolsCancelled()
   if (authorization !== 'approved') {
     return {
@@ -1892,7 +2062,7 @@ function cancelAllToolCalls(): void {
  * Nothing retries once that pass finds nothing.
  */
 async function startBridge(): Promise<void> {
-  if (panelPorts.size === 0) return
+  if (!runtimeWantsBridge()) return
   if (!killSwitchLoaded) await killSwitchReady
   // The kill switch holds the bridge down until the user reconnects.
   if (killSwitchEngaged) {
@@ -1904,10 +2074,16 @@ async function startBridge(): Promise<void> {
   // a duplicate trigger cannot invalidate the pass it is deferring to.
   if (discoveryLatch === 'running') return
   const revision = ++bridgeStartRevision
-  const lease = (): boolean => revision === bridgeStartRevision && panelPorts.size > 0
+  const lease = (): boolean => revision === bridgeStartRevision && runtimeWantsBridge()
   let url = settings.bridgeUrl
   let discovered: string | undefined
-  if (url !== '') {
+  if (panelPorts.size === 0) {
+    // Headless (panel-free) reconnect: only an address already in use, never
+    // a discovery pass the user did not ask for.
+    await discoveryMemory
+    if (!lease()) return
+    if (url === '') url = headlessBridgeUrl ?? lastBridgeUrl ?? ''
+  } else if (url !== '') {
     if (isLocalBridgeAddress(url) && !await probeBridge(url)) {
       if (!lease()) return
       discovered = await discoverBridgeUrl(lease, url)
@@ -1941,6 +2117,11 @@ async function startBridge(): Promise<void> {
   } catch {
     // 非法 URL 原样交给 WebSocket 构造函数报错。
   }
+  // The hello must carry this install's identity.
+  if (clientIdentity === undefined) {
+    await clientIdentityReady
+    if (!lease()) return
+  }
   connectedAddress = url
   if (bridge === null) {
     const client = new BridgeClient({
@@ -1952,10 +2133,12 @@ async function startBridge(): Promise<void> {
         }
         broadcastStatus()
         if (state === 'stopped') refreshPanelResumeHints()
-        if (state === 'stopped' && panelPorts.size === 0) disarmBridgeKeepalive()
+        if (state === 'stopped' && !runtimeWantsBridge()) disarmBridgeKeepalive()
       },
       onFrame: (frame) => {
         if (frame.t === 'event') {
+          // Session traffic keeps a panel-free runtime alive while an agent works.
+          runtimeLease.touch()
           transientEvents.ingest(frame)
           broadcastEvent(frame)
         }
@@ -1966,6 +2149,10 @@ async function startBridge(): Promise<void> {
       },
       onHelloOk: (negotiated) => {
         caps = negotiated
+        headlessBridgeUrl = connectedAddress
+        runtimeKeeper.update()
+        // The address just became known: record it for a headless reconnect.
+        runtimeKeeper.persistNow()
         // The peer proved the token: only now is a discovered address worth
         // trying first next time.
         if (discoveredBridgeUrl !== undefined) rememberBridgeUrl(discoveredBridgeUrl)
@@ -1973,12 +2160,14 @@ async function startBridge(): Promise<void> {
         void pushBudgetToControlledTab(negotiated)
       },
       onServerProofRejected: onBridgeProofRejected,
-    }, probeBridge, () => panelPorts.size > 0, {
+    }, probeBridge, runtimeWantsBridge, () => ({
       // Advertised as soon as the platform can serve it, so the host registers
       // the developer-tools group; the user's setting and per-call approval
       // still gate every one of those calls.
       ...devToolsCapability ? { devTools: { version: DEVTOOLS_CAPS_VERSION } } : {},
-    })
+      // One bridge connection per install: other browsers and profiles keep theirs.
+      ...clientIdentity === undefined ? {} : { client: clientIdentity },
+    }))
     bridge = client
     rpc = createRpc(client)
   }
@@ -2101,6 +2290,7 @@ chrome.runtime.onConnect.addListener((port) => {
   const tabAffinityReturns = new Set<string>()
   panelPorts.add(port)
   if (wasIdle) armBridgeKeepalive()
+  runtimeKeeper.update()
   void settingsReady.then(syncSelectionWatch)
   void settingsReady.then(() => {
     if (!panelPorts.has(port)) return
@@ -2471,8 +2661,13 @@ chrome.runtime.onConnect.addListener((port) => {
     if (panelPorts.size === 0) {
       devToolsGrants.clear()
       cancelDevToolsCalls()
-      bridgeStartRevision += 1
-      bridge?.suspendReconnect()
+      // A session the user just left running may still need the browser: the
+      // runtime lease keeps an established connection for the idle window.
+      if (bridge?.state === 'connected') runtimeLease.touch()
+      if (!runtimeWantsBridge()) {
+        bridgeStartRevision += 1
+        bridge?.suspendReconnect()
+      }
       sessionTrustedActionOrigins.clear()
       approvals.notifyPending()
       // A fresh panel lease re-runs the automatic pass, so a miss is not final
@@ -2482,8 +2677,9 @@ chrome.runtime.onConnect.addListener((port) => {
       discoveryLatch = 'idle'
       discoveryState = 'idle'
       persistDiscoveryLatch('idle')
-      if (bridge?.state !== 'connected') disarmBridgeKeepalive()
+      if (bridge?.state !== 'connected' && !runtimeWantsBridge()) disarmBridgeKeepalive()
     }
+    runtimeKeeper.update()
   })
 })
 
@@ -2496,6 +2692,30 @@ chrome.notifications.onClicked.addListener((notificationId) => {
   // Notification clicks are extension user gestures; both panel APIs require
   // the call to remain inside this handler.
   openAssistantPanel(windowId)
+})
+
+/**
+ * Notification buttons (Chrome only). The button's meaning is recomputed from
+ * the pending request, and the coordinator re-checks that a notification may
+ * allow it at all: detailed approvals (code, typing, uploads, flags) can only
+ * be denied here or reviewed in the panel.
+ */
+chrome.notifications.onButtonClicked?.addListener((notificationId, buttonIndex) => {
+  if (!notificationId.startsWith(APPROVAL_NOTIFICATION_PREFIX)) return
+  const id = notificationId.slice(APPROVAL_NOTIFICATION_PREFIX.length)
+  const request = approvals.get(id)
+  const windowId = approvals.windowId(id)
+  if (request === undefined || windowId === undefined) {
+    clearApprovalNotification(id)
+    return
+  }
+  const button = approvalNotificationButtons(request, EXT_TARGET)[buttonIndex]
+  if (button === 'review') {
+    clearApprovalNotification(id)
+    openAssistantPanel(windowId)
+    return
+  }
+  if (button === 'allow-once' || button === 'deny') approvals.respondFromNotification(id, button)
 })
 
 // ---- Tab affinity ----
@@ -2611,20 +2831,30 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== BRIDGE_KEEPALIVE_ALARM) return
+  void runtimeRestored.then(onKeepaliveAlarm)
+})
+
+function onKeepaliveAlarm(): void {
+  if (panelPorts.size === 0) {
+    runtimeKeeper.update()
+    if (!runtimeLease.active()) {
+      if (bridge === null || bridge.state !== 'connected') disarmBridgeKeepalive()
+      return
+    }
+    // Panel-free runtime: the worker was restarted, or the socket dropped.
+    if (bridge === null || bridge.state === 'reconnecting') void settingsReady.then(() => startBridge())
+    return
+  }
   // A confirmed miss is terminal for this lease: do not re-probe in the
   // background, and do not wake the worker for it either.
   if (discoveryLatch === 'not-found') return
-  if (panelPorts.size === 0) {
-    if (bridge === null || bridge.state !== 'connected') disarmBridgeKeepalive()
-    return
-  }
   // `stopped` is intentionally terminal until an explicit panel reopen or
   // settings save. In particular, code 4000 means another browser owns the
   // single bridge slot and the keepalive must not reclaim it.
   if (bridge === null || bridge.state === 'reconnecting') {
     void settingsReady.then(() => startBridge())
   }
-})
+}
 
 // ---- Kill switch shortcut ----
 
