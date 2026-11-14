@@ -70,6 +70,7 @@ import { registerBrowserDelegateTool, registerBrowserPreset, registerBrowserSkil
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { DEVLOOP_CAPTURE_TIMEOUT_MS, DevLoop, withDevLoopMethods } from './dev-loop.ts'
 import { DEVLOOP_CAPTURE_TOOL } from './protocol.ts'
+import { mountLearning, type LearningMount } from './learning/index.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'bridge-browser'
@@ -100,6 +101,9 @@ const SESSION_LEDGER_FILE_NAME = 'browser-bridge-sessions.json'
 
 /** File (under the dsh home) recording which session owns each page watcher. */
 const WATCH_RECORDS_FILE_NAME = 'browser-bridge-watchers.json'
+
+/** File (under the dsh home) recording the workflow schedules this bridge created. */
+const LEARNING_SCHEDULE_FILE_NAME = 'browser-workflow-schedules.json'
 
 /** Default: sessions materialize only on the first message (open-and-close leaves no trace). */
 const DEFAULT_DEFER_SESSION_CREATE = true
@@ -386,6 +390,8 @@ function mountBridge(
   })
   // Hash-chained per-session record of every browser action (0600 JSONL).
   const auditLog = resolved.auditLogPath === '' ? undefined : new AuditLog(resolved.auditLogPath)
+  // Phase 3 learning features (default off; the extension reports its switches).
+  let learning: LearningMount | undefined
   // Page watchers wake only sessions this bridge owns, at a bounded rate (watchers.ts).
   const wakeLimiter = new WakeLimiter()
   const fleetChildren = new FleetChildren()
@@ -446,7 +452,11 @@ function mountBridge(
       taint.mark(sessionId, 'snapshot-injection')
     },
     purgeSession,
-    extraRpc,
+    extraRpc: (method, payload, context) => extraRpc(method, payload, context)
+      ?? learning?.rpc(method, payload, {
+        connection: context.connection,
+        allowsSession: (sessionId, access) => fenced.allowsSession(sessionId, context.signal, access),
+      }),
     ...(auditLog === undefined ? {} : {
       audit: new ToolCallAuditor(auditLog, (error) => {
         ctx.logger.warn(`browser bridge: audit log write failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -461,7 +471,20 @@ function mountBridge(
       () => ctx.agents as unknown as AgentLookup,
     ),
     maxApprovalHoldMs: DEFAULT_MAX_APPROVAL_HOLD_MS,
+    onDisconnect: (connection) => { learning?.disconnected(connection) },
   })
+  ctx.effect(() => {
+    learning = mountLearning(ctx, server, {
+      toolTimeoutMs: resolved.toolTimeoutMs,
+      workspacePath: resolved.sessionWorkspacePath,
+      scheduleFile: dshHomePath(LEARNING_SCHEDULE_FILE_NAME),
+      ownsSession: (sessionId) => fenced.allowsSession(sessionId, new AbortController().signal, 'own'),
+    })
+    return () => {
+      learning?.dispose()
+      learning = undefined
+    }
+  }, 'bridge-browser: learning features')
 
   const route: WebUpgradeRoute = {
     path: BRIDGE_PATH,

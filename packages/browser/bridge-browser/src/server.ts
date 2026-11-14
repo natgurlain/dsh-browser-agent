@@ -302,6 +302,8 @@ export interface BridgeServerDeps {
     parentOf(sessionId: string): string | undefined
     isTainted(sessionId: string): boolean
   }
+  /** Told when an authenticated connection goes away (learning features drop its switches). */
+  onDisconnect?: (connection: string) => void
 }
 
 /** Longest parent chain followed when resolving inherited affinity. */
@@ -1168,7 +1170,10 @@ export class BridgeServer {
 
   /** Close one connection and settle only its own in-flight calls. */
   private dropConnection(conn: ReadyConnection, reason: string): void {
-    if (this.connections.get(conn.key) === conn) this.connections.delete(conn.key)
+    if (this.connections.get(conn.key) === conn) {
+      this.connections.delete(conn.key)
+      try { this.deps.onDisconnect?.(conn.key) } catch { /* observer only */ }
+    }
     clearInterval(conn.ping)
     conn.abort.abort()
     if (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING) {
