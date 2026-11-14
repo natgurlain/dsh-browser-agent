@@ -56,6 +56,8 @@ let bridgeOnline = true
 const bridgeSockets = new Set()
 const pendingSockets = new Set()
 let pendingRequests = 0
+/** Bodies the strict-mode fixture form delivered to the server. */
+const strictSubmissions = []
 
 async function waitFor(check, label, timeout = 60_000) {
   const deadline = Date.now() + timeout
@@ -225,6 +227,18 @@ const tablePage = page => `<!doctype html><title>Ledger ${page}</title><body><ta
 
 const server = createServer((request, response) => {
   response.setHeader('content-type', 'text/html')
+  if (request.url.startsWith('/strict-submit')) {
+    let body = ''
+    request.on('data', chunk => { body += chunk })
+    request.on('end', () => { strictSubmissions.push({ method: request.method, body }); response.end('<!doctype html><title>Submitted</title><p>Thanks</p>') })
+    return
+  }
+  if (request.url.startsWith('/strict')) {
+    response.end(`<!doctype html><title>Checkout</title><body><h1>Checkout</h1>
+      <form method="post" action="/strict-submit"><input id="name" name="name"><input id="password" name="password" type="password">
+      <button id="submit" type="submit">Place order</button></form></body>`)
+    return
+  }
   if (request.url.startsWith('/inner')) { response.end(inner); return }
   if (request.url.startsWith('/content-tools')) { response.end(contentToolsPage); return }
   if (request.url.startsWith('/ledger')) { response.end(tablePage(Number(new URL(request.url, 'http://x').searchParams.get('page') ?? 1))); return }
@@ -970,6 +984,41 @@ try {
   await waitFor(() => page.evaluate(() => location.pathname === '/reliability'), 'back from the bank-like page')
   await clearTaint()
   results.push('per-site policy: read-only refuses actions, blocked refuses reads and screenshots, ask prompts under unrestricted access, and the built-in *bank* default is read-only')
+
+  // ---- Strict mode: the commit-point gate (CDP Fetch) holds agent writes ----
+  await settings({ strictSites: ['127.0.0.1'] })
+  succeed(await tool('browser_navigate', { url: `${origin}/strict` }))
+  await waitFor(() => page.evaluate(() => document.title === 'Checkout'), 'strict fixture')
+  succeed(await tool('browser_type', { selector: '#name', text: 'Ada' }))
+  succeed(await tool('browser_type', { selector: '#password', text: 'hunter2' }))
+  await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request') });
+  [policyRequest] = await answerApproval(tool('browser_click', { selector: '#submit' }), 'deny')
+  assert.equal(policyRequest.action, 'network_commit')
+  assert.equal(policyRequest.forced, true)
+  assert.match(policyRequest.summary, /^This will send 2 field\(s\) to http:\/\/127\.0\.0\.1:\d+\/strict-submit \(POST, includes masked sensitive fields\)$/)
+  assert.match(policyRequest.details[0].value, /name = "Ada"/)
+  assert.doesNotMatch(JSON.stringify(policyRequest), /hunter2/)
+  await delay(500)
+  assert.equal(strictSubmissions.length, 0)
+  await page.goto(`${origin}/strict`)
+  succeed(await tool('browser_type', { selector: '#name', text: 'Ada' }))
+  succeed(await tool('browser_type', { selector: '#password', text: 'hunter2' }))
+  await answerApproval(tool('browser_click', { selector: '#submit' }), 'allow-once')
+  await waitFor(() => strictSubmissions.length === 1, 'approved submission')
+  assert.equal(strictSubmissions[0].body, 'name=Ada&password=hunter2')
+  // The user's own submission outside an agent turn passes without a card.
+  await page.goto(`${origin}/strict`)
+  await delay(3_500)
+  await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request') })
+  await page.fill('#name', 'Grace')
+  await page.click('#submit')
+  await waitFor(() => strictSubmissions.length === 2, 'user submission')
+  assert.equal(await panel.evaluate(() => messages.some(message => message.type === 'approval.request')), false)
+  await settings({ strictSites: [] })
+  await page.goto(`${origin}/reliability`)
+  succeed(await tool('browser_get_text', { selector: 'h1' }))
+  await clearTaint()
+  results.push('strict mode pauses agent-turn form posts behind a masked "This will send" card (deny blocks, allow sends) and lets the user\'s own submissions through')
 
   // 通过正式界面上传图片，并用真实连接失败验证继续生成。
   await worker.evaluate(async () => { await chrome.storage.local.set({ dshPanelUiLocale: 'en' }) })

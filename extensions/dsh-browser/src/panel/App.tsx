@@ -1117,6 +1117,7 @@ export function App(): React.JSX.Element {
         approvalTimeoutMinutes: raw?.approvalTimeoutMinutes ?? 10,
         siteRules: raw?.siteRules ?? [],
         siteDefaultsEnabled: raw?.siteDefaultsEnabled ?? true,
+        strictSites: raw?.strictSites ?? [],
         settingsVersion: raw?.settingsVersion ?? 1,
       })
     })
@@ -3068,7 +3069,7 @@ export function App(): React.JSX.Element {
         {settings !== null && (
           <SitePolicySettings
             locale={locale}
-            value={{ siteRules: settings.siteRules, siteDefaultsEnabled: settings.siteDefaultsEnabled }}
+            value={{ siteRules: settings.siteRules, siteDefaultsEnabled: settings.siteDefaultsEnabled, strictSites: settings.strictSites }}
             onChange={(next) => setSettings((current) => current === null ? current : { ...current, ...next })}
           />
         )}

@@ -128,7 +128,8 @@ import {
 import { DevToolsGrants } from './devtools-grants.ts'
 import { BRIDGE_TAINT_CLEAR_METHOD, PolicyRuntime } from './policy-runtime.ts'
 import { callPolicyTargets, forcedApprovalPrompt, originFromUrl } from './authorization.ts'
-import { normalizeSiteRules, type SiteRuleEntry } from '../security/site-policy.ts'
+import { normalizeSitePattern, normalizeSiteRules, type SiteRuleEntry } from '../security/site-policy.ts'
+import { CommitGate, STRICT_MODE_UNAVAILABLE } from './commit-gate.ts'
 import { applyManagedOverrides } from '../security/managed-policy.ts'
 import {
   LEGACY_RECENT_SESSION_STORAGE_KEY,
@@ -171,6 +172,8 @@ export interface Settings {
   siteRules: SiteRuleEntry[]
   /** The built-in read-only rules (banking, password vaults, identity, cloud consoles). */
   siteDefaultsEnabled: boolean
+  /** Site patterns under strict mode: agent-turn writes need approval (commit-gate.ts). */
+  strictSites: string[]
   /**
    * 1 (or absent): before site policy, `unrestrictedBrowserAccess` skipped every
    * prompt. 2: it means "trusted everywhere except policy-restricted sites".
@@ -195,6 +198,7 @@ const SETTINGS_DEFAULTS: Settings = {
   approvalTimeoutMinutes: 10,
   siteRules: [],
   siteDefaultsEnabled: true,
+  strictSites: [],
   settingsVersion: SETTINGS_VERSION,
 }
 
@@ -437,6 +441,64 @@ const debuggerBroker = createDebuggerBroker({
   debuggerBroker.acquire = async (...args: Parameters<typeof acquire>) => {
     await refuseWhileKilled()
     return await acquire(...args)
+  }
+}
+
+/** Agent session and window of the latest agent call per strict-mode tab (approval routing). */
+const commitGateCallers = new Map<number, { sessionId?: string; windowId: number }>()
+/** Strict mode's commit-point gate (commit-gate.ts). */
+const commitGate = new CommitGate({
+  broker: debuggerBroker,
+  ask: async (prompt, tabId) => {
+    const caller = commitGateCallers.get(tabId)
+    // A request held behind an unanswered card would hang the page: bound it.
+    const signal = AbortSignal.timeout(120_000)
+    return authorizeToolCall(prompt, signal, caller?.windowId ?? 0, caller?.sessionId, false, tabId)
+  },
+})
+
+/**
+ * Arm or disarm the commit gate for one agent call's tab. Returns a refusal
+ * when strict mode covers the tab but cannot intercept (fail closed).
+ */
+async function prepareCommitGate(
+  target: { id?: number; url?: string; windowId?: number },
+  sessionId: string | undefined,
+): Promise<ToolAnswer | undefined> {
+  if (target.id === undefined) return undefined
+  if (!policyRuntime.strictFor(sessionId, target.url)) {
+    if (commitGate.isArmed(target.id)) await commitGate.disarm(target.id)
+    return undefined
+  }
+  if (!devToolsSupported()) return { ok: false, error: { code: 'action-failed', message: STRICT_MODE_UNAVAILABLE } }
+  commitGateCallers.set(target.id, { ...sessionId === undefined ? {} : { sessionId }, windowId: target.windowId ?? 0 })
+  try {
+    await commitGate.arm(target.id)
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return {
+      ok: false,
+      error: { code: 'action-failed', message: `Strict mode could not intercept this tab's outgoing requests (${detail}); the call was refused rather than run unguarded.` },
+    }
+  }
+  return undefined
+}
+
+/** Run one agent call with the tab's commit gate armed and the agent turn marked. */
+async function withCommitGate(
+  target: { id?: number; url?: string; windowId?: number },
+  sessionId: string | undefined,
+  run: () => Promise<ToolAnswer>,
+): Promise<ToolAnswer> {
+  const refused = await prepareCommitGate(target, sessionId)
+  if (refused !== undefined) return refused
+  if (target.id === undefined) return run()
+  const tabId = target.id
+  commitGate.callStarted(tabId)
+  try {
+    return await run()
+  } finally {
+    commitGate.callEnded(tabId)
   }
 }
 
@@ -693,6 +755,9 @@ function normalizeUserSettings(candidate: Settings): Settings {
       : SETTINGS_DEFAULTS.approvalTimeoutMinutes,
     siteRules: normalizeSiteRules(candidate.siteRules),
     siteDefaultsEnabled: candidate.siteDefaultsEnabled !== false,
+    strictSites: Array.isArray(candidate.strictSites)
+      ? [...new Set(candidate.strictSites.map(normalizeSitePattern).filter((entry): entry is string => entry !== undefined))].sort()
+      : [],
     settingsVersion: SETTINGS_VERSION,
   }
 }
@@ -1975,7 +2040,7 @@ function routeToolCall(call: ToolCall): void {
         ))
     : resolveToolTab(call.sessionId).then((target) => 'ok' in target
       ? target
-      : (policyTabOrigin = originFromUrl(target.url ?? ''), dispatchToolCall(
+      : (policyTabOrigin = originFromUrl(target.url ?? ''), withCommitGate(target, call.sessionId, () => dispatchToolCall(
           call,
           sharePageContent,
           budget,
@@ -1984,7 +2049,7 @@ function routeToolCall(call: ToolCall): void {
           target,
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
           { unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit, policy },
-        )))
+        ))))
   ).then(
     async (answer) => {
       // Untrusted page content entered the session: taint it (security/taint.ts).
@@ -2098,7 +2163,11 @@ async function dispatchDevToolsTool(call: ToolCall, signal: AbortSignal): Promis
         throw new Error('The request changed while approval was pending. Request approval again.')
       }
     }
-    return { ok: true, result: await devTools.handle(call.name, call.args, call.sessionId, validate) }
+    // Page JavaScript can send requests too: strict mode guards devtools calls.
+    return await withCommitGate(target, call.sessionId, async () => ({
+      ok: true,
+      result: await devTools.handle(call.name, call.args, call.sessionId, validate),
+    }))
   } catch (error: unknown) {
     return {
       ok: false,

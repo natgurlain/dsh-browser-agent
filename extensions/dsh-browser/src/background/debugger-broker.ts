@@ -22,7 +22,8 @@ import {
 } from './debugger-session.ts'
 
 /** Feature that holds an attachment. */
-export type DebuggerOwner = 'devtools' | 'input'
+/** `commit-gate` is strict mode's Fetch interception (commit-gate.ts). */
+export type DebuggerOwner = 'devtools' | 'input' | 'commit-gate'
 
 /** One feature's hold on a tab's debugger. */
 export interface DebuggerLease {

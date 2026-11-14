@@ -12,7 +12,11 @@ import { parseManagedPolicy, type ManagedPolicy } from '../security/managed-poli
 export interface SitePolicyValue {
   siteRules: SiteRuleEntry[]
   siteDefaultsEnabled: boolean
+  strictSites: string[]
 }
+
+/** Firefox has no debugger API, so the commit gate cannot run there. */
+const STRICT_AVAILABLE = typeof (globalThis as { chrome?: { debugger?: unknown } }).chrome?.debugger === 'object'
 
 const RULE_LABELS: Record<SiteRule, { en: string; zh: string }> = {
   blocked: { en: 'Blocked (no reads)', zh: '禁止（不可读取）' },
@@ -33,6 +37,13 @@ export function SitePolicySettings({ value, onChange, locale }: {
   const [pattern, setPattern] = useState('')
   const [rule, setRule] = useState<SiteRule>('read-only')
   const [managed, setManaged] = useState<ManagedPolicy | null>(null)
+  const [strictPattern, setStrictPattern] = useState('')
+  const strictNormalized = normalizeSitePattern(strictPattern)
+  const addStrict = (): void => {
+    if (strictNormalized === undefined) return
+    onChange({ ...value, strictSites: [...new Set([...value.strictSites, strictNormalized])].sort() })
+    setStrictPattern('')
+  }
   useEffect(() => {
     const area = (chrome.storage as { managed?: chrome.storage.StorageArea }).managed
     if (area === undefined) return
@@ -90,6 +101,33 @@ export function SitePolicySettings({ value, onChange, locale }: {
           </button>
         </div>
       ))}
+      <div className="strict-mode">
+        <strong>{t(locale, 'Strict mode (commit gate)', '严格模式（提交闸门）')}</strong>
+        <small>{STRICT_AVAILABLE
+          ? t(locale,
+            'On these sites, every POST/PUT/PATCH/DELETE or form submission the page sends during an agent action waits for your approval, with the fields shown (sensitive ones masked). It attaches the debugger, so Chrome shows its debugging bar. WebSocket messages and sendBeacon cannot be intercepted.',
+            '在这些站点上，代理操作期间页面发出的每个 POST/PUT/PATCH/DELETE 或表单提交都需要您批准，并显示字段（敏感字段已遮盖）。它会附加调试器，Chrome 会显示调试提示条。WebSocket 消息和 sendBeacon 无法拦截。')
+          : t(locale, 'Unavailable in this browser: strict mode needs the Chrome debugger.', '此浏览器不可用：严格模式需要 Chrome 调试器。')}</small>
+        <div className="trusted-origin-add">
+          <input
+            aria-label={t(locale, 'Strict mode site', '严格模式站点')}
+            value={strictPattern}
+            disabled={!STRICT_AVAILABLE}
+            onChange={(event) => setStrictPattern(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') addStrict() }}
+            placeholder="shop.example.com"
+          />
+          <button disabled={!STRICT_AVAILABLE || strictNormalized === undefined} onClick={addStrict}>{t(locale, 'Add', '添加')}</button>
+        </div>
+        {value.strictSites.map((pattern) => (
+          <div className="trusted-origin" key={`strict-${pattern}`}>
+            <code>{pattern}</code>
+            <button onClick={() => onChange({ ...value, strictSites: value.strictSites.filter((candidate) => candidate !== pattern) })}>
+              {t(locale, 'Remove', '移除')}
+            </button>
+          </div>
+        ))}
+      </div>
       {managed?.active === true && (
         <div className="managed-policy">
           <small>{t(locale, 'Managed by your administrator (overrides the settings above):', '由管理员管理（优先于上方设置）：')}</small>

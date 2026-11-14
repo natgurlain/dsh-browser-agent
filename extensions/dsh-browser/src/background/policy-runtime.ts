@@ -16,7 +16,7 @@
 
 import { evaluateCallPolicy, type CallPolicyDecision, type CallPolicyTargets, type ManagedCallFlags } from '../security/call-policy.ts'
 import { EMPTY_MANAGED_POLICY, loadManagedPolicy, type ManagedPolicy } from '../security/managed-policy.ts'
-import type { SitePolicy, SiteRuleEntry } from '../security/site-policy.ts'
+import { matchSitePattern, type SitePolicy, type SiteRuleEntry } from '../security/site-policy.ts'
 import { resultTaintsSession, TaintTracker, taintKey, type TaintRecord } from '../security/taint.ts'
 import type { CallPolicyHook, ToolCall } from './tools.ts'
 import { isDevToolsTool } from './authorization.ts'
@@ -30,6 +30,8 @@ export { BRIDGE_TAINT_CLEAR_METHOD } from '@natgurlain/dsh-bridge-browser/src/pr
 export interface PolicySettings {
   siteRules: SiteRuleEntry[]
   siteDefaultsEnabled: boolean
+  /** Site patterns where strict mode (the commit gate) is on. */
+  strictSites?: string[]
 }
 
 export interface PolicyRuntimeOptions {
@@ -61,6 +63,8 @@ export class PolicyRuntime {
   readonly taint: TaintTracker
   readonly ready: Promise<void>
   private readonly calls = new Map<string, CallRecord>()
+  /** Agent sessions the user put in strict mode from the panel (this worker's lifetime). */
+  private readonly strictSessions = new Set<string>()
   private readonly ports = new Set<chrome.runtime.Port>()
 
   constructor(private readonly options: PolicyRuntimeOptions) {
@@ -149,6 +153,24 @@ export class PolicyRuntime {
     this.taint.mark(call.sessionId, call.name, origins.length === 0 && fallbackOrigin !== undefined ? [fallbackOrigin] : origins)
   }
 
+  /** Whether strict mode (commit gate) covers a call in this session on this page. */
+  strictFor(sessionId: string | undefined, pageUrl: string | undefined): boolean {
+    if (this.strictSessions.has(taintKey(sessionId))) return true
+    const patterns = this.options.settings().strictSites ?? []
+    if (patterns.length === 0 || pageUrl === undefined) return false
+    let url: URL
+    try { url = new URL(pageUrl) } catch { return false }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+    return patterns.some((pattern) => matchSitePattern(pattern, url))
+  }
+
+  setStrictSession(sessionId: string | undefined, enabled: boolean): void {
+    const key = taintKey(sessionId)
+    if (enabled) this.strictSessions.add(key)
+    else this.strictSessions.delete(key)
+    this.broadcast()
+  }
+
   /** A snapshot was injected into a session without a tool call (follow refresh). */
   recordInjection(sessionId: string, origin: string | undefined): void {
     this.taint.mark(sessionId, 'snapshot-injection', origin === undefined ? [] : [origin])
@@ -185,6 +207,9 @@ export class PolicyRuntime {
       const msg = message as { type?: unknown; sessionId?: unknown; id?: unknown }
       if (msg.type === 'taint.subscribe') {
         void this.ready.then(() => { this.post(port) })
+      } else if (msg.type === 'strict.session') {
+        const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : undefined
+        this.setStrictSession(sessionId, (message as { enabled?: unknown }).enabled === true)
       } else if (msg.type === 'taint.clear') {
         const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : undefined
         void this.ready.then(() => this.clear(sessionId)).then((result) => {
@@ -202,6 +227,7 @@ export class PolicyRuntime {
       port.postMessage({
         type: 'taint.state',
         records: this.taint.snapshot(),
+        strictSessions: [...this.strictSessions],
         managed: { active: this.managed.active, siteRules: this.managed.siteRules },
       })
     } catch { /* port closed */ }
