@@ -7,7 +7,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const root = new URL('../', import.meta.url)
 const require = createRequire(new URL('package.json', root))
 const manifest = JSON.parse(readFileSync(new URL('package.json', root), 'utf8'))
-const version = manifest.dependencies['@deepseek-ai/dsh']
+// DSH_EXPECTED_VERSION lets the compatibility matrix (scripts/dsh-matrix.mjs)
+// check a non-pinned DSH release; normal runs enforce the package.json pin.
+const pinned = manifest.dependencies['@deepseek-ai/dsh']
+const version = process.env.DSH_EXPECTED_VERSION || pinned
+if (version !== pinned) console.log(`DSH_EXPECTED_VERSION=${version} overrides the ${pinned} pin`)
 const anchor = require.resolve('@deepseek-ai/dsh/package.json')
 const hostRequire = createRequire(anchor)
 const { load } = hostRequire('js-yaml')
