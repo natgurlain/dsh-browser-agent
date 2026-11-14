@@ -307,10 +307,10 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
   const refuseFullAccessSwitch = (preset: string): HostRpcResult | undefined =>
     !options.allowDangerFullAccess && !isSafePreset(preset) ? forbidden(DANGER_FULL_ACCESS_REFUSAL(preset.trim())) : undefined
 
-  /** The stored baseURL of a relay route, or undefined when it has none. */
-  const storedBaseUrl = async (routeKey: string, signal: AbortSignal): Promise<string | undefined> => {
+  /** The stored baseURL of a relay route, undefined when it has none, null when the Host could not say. */
+  const storedBaseUrl = async (routeKey: string, signal: AbortSignal): Promise<string | undefined | null> => {
     const described = await inner('settings.describe', {}, signal)
-    if (!described.ok || !isRecord(described.value) || !Array.isArray(described.value.namespaces)) return undefined
+    if (!described.ok || !isRecord(described.value) || !Array.isArray(described.value.namespaces)) return null
     const ns = described.value.namespaces.find((entry) => isRecord(entry) && entry.ns === 'llm-pi-ai')
     const providers = isRecord(ns) && isRecord(ns.value) && isRecord(ns.value.providers) ? ns.value.providers : undefined
     const route = providers?.[routeKey]
@@ -325,7 +325,7 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
     if (typeof payload.apiKey === 'string' && payload.apiKey.trim() !== '') return undefined
     // Without a draft key the Host spends the stored one: only on its own route.
     const stored = await storedBaseUrl(payload.provider, signal)
-    if (stored === undefined || reroutedWithoutKey.has(payload.provider)
+    if (stored === undefined || stored === null || reroutedWithoutKey.has(payload.provider)
       || (payload.baseURL !== undefined && normalizeBaseUrl(payload.baseURL) !== stored)) {
       return forbidden('Enter the relay API key to test a new or changed relay address; the stored key is only used with the address it was saved for.')
     }
@@ -339,7 +339,7 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
    * the panel, so a key left behind by an earlier route (unset-then-set)
    * never follows the route to a new address.
    */
-  const credentialsToClear = async (payload: Record<string, unknown>, signal: AbortSignal): Promise<{ rerouted: string[]; orphaned: string[] }> => {
+  const credentialsToClear = async (payload: Record<string, unknown>, signal: AbortSignal): Promise<{ rerouted: string[]; orphaned: string[] } | HostRpcResult> => {
     const rerouted: string[] = []
     const orphaned: string[] = []
     if (payload.ns !== 'llm-pi-ai' || !Array.isArray(payload.ops)) return { rerouted, orphaned }
@@ -349,17 +349,20 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
       const key = op.path[1]!
       if (freshCredentials.has(relayTokenRef(key))) continue
       const stored = await storedBaseUrl(key, signal)
+      // Without the stored route the bridge cannot tell a re-save from a new route: refuse rather than guess.
+      if (stored === null) return forbidden('The relay settings could not be read, so the route was not saved; try again.')
       if (stored === undefined) orphaned.push(key)
       else if (stored !== normalizeBaseUrl(op.value.baseURL)) rerouted.push(key)
     }
     return { rerouted, orphaned }
   }
 
-  const clearCredential = async (key: string, signal: AbortSignal): Promise<HostRpcResult | undefined> => {
+  const clearCredential = async (key: string, signal: AbortSignal, after: 'before' | 'after'): Promise<HostRpcResult | undefined> => {
     const cleared = await inner('credentials.unset', { ref: relayTokenRef(key) }, signal)
-    return cleared.ok
-      ? undefined
-      : forbidden(`The stored key of relay route ${key} could not be cleared (${cleared.error.message}); nothing was changed. Re-enter the key.`)
+    if (cleared.ok) return undefined
+    return forbidden(after === 'before'
+      ? `The stored key of relay route ${key} could not be cleared (${cleared.error.message}); the route was not saved.`
+      : `Relay route ${key} was removed but its stored key could not be cleared (${cleared.error.message}); remove the key in DSH settings.`)
   }
 
   const call = async (call: HostRpcCall): Promise<HostRpcResult> => {
@@ -419,11 +422,12 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
         return forbidden('Re-enter the API key of a relay whose address changed before making it the default model.')
       }
       const clear = await credentialsToClear(payload, call.signal)
+      if ('ok' in clear) return clear
       rerouted = clear.rerouted
       // Cleared before the route is written: a Host call between the two
       // (model selection, a prompt) must never spend the old key at the new address.
       for (const key of [...clear.rerouted, ...clear.orphaned]) {
-        const failed = await clearCredential(key, call.signal)
+        const failed = await clearCredential(key, call.signal, 'before')
         if (failed !== undefined) return failed
       }
     }
@@ -446,7 +450,7 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
         const op = opShape(raw)
         if (op?.op !== 'unset') continue
         reroutedWithoutKey.delete(op.path[1]!)
-        const failed = await clearCredential(op.path[1]!, call.signal)
+        const failed = await clearCredential(op.path[1]!, call.signal, 'after')
         if (failed !== undefined) return failed
       }
     }

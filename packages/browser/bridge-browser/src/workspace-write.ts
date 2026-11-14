@@ -26,7 +26,9 @@
  *   descriptor (`/proc/self/fd/<fd>/<name>`, the `openat` equivalent), so
  *   flipping a directory to a symlink mid-write cannot redirect it. Other
  *   platforms re-verify each component with `lstat` + `realpath` and publish
- *   the file with `link()`, which never replaces an existing entry.
+ *   the file with `link()`, which never replaces an existing entry; there a
+ *   narrow race remains (an ancestor swapped between the check and the
+ *   write), so only the Linux strategy fully closes the symlink-flip escape.
  *
  * The Host's sandboxed file service (`ctx.fs` from dsh-fs-sandbox) is not
  * used: it writes text only (PDFs are bytes), always replaces existing files,

@@ -66,7 +66,11 @@ export const BRIDGE_PROTOCOL_VERSION = 4
 export const BRIDGE_CLOSE_CODES = {
   /** Another authenticated connection took the single active slot. */
   replaced: 4000,
-  /** No valid `hello` within {@link HELLO_TIMEOUT_MS}. */
+  /**
+   * No valid `hello` within {@link HELLO_TIMEOUT_MS}. The bridge now
+   * terminates such sockets (the client sees 1006); the extension still uses
+   * this code for its own handshake timeout.
+   */
   helloTimeout: 4001,
   /**
    * The peer's proof did not verify: a wrong or missing token, an endpoint
@@ -78,7 +82,10 @@ export const BRIDGE_CLOSE_CODES = {
   versionMismatch: 4003,
   /** The WebSocket Origin is not an allowed extension. */
   originRejected: 4004,
-  /** Too many sockets are waiting to authenticate; retry later. */
+  /**
+   * Too many sockets are waiting to authenticate; retry later. Kept for older
+   * bridges: this bridge terminates the evicted socket (the client sees 1006).
+   */
   busy: 4005,
 } as const
 

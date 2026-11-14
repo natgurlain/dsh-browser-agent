@@ -111,6 +111,8 @@ describe('analyzeUrl', () => {
       'https://www.amazon.com/s?k=noise+cancelling+headphones&page=2',
       'https://www.booking.com/searchresults.html?ss=Krakow&checkin=2024-06-01&checkout=2024-06-05&group_adults=2',
       'https://stackoverflow.com/questions/12345678/how-do-i-undo-the-most-recent-local-commits-in-git',
+      'https://medium.com/@someone/understanding-javascript-closures-with-practical-examples-3f2a1b',
+      'https://dev.to/author/building-a-rest-api-with-express-and-postgresql-step-by-step-4k2m',
     ]) {
       expect(analyzeUrl(url)?.risky, url).toBe(false)
     }

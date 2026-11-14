@@ -405,8 +405,19 @@ describe('relay settings and credentials', () => {
     expect(forwarded(inner, 'credentials.unset').map(([c]) => c.payload)).toEqual([{ ref: 'DSH_RELAY_A_TOKEN' }, { ref: 'DSH_RELAY_A_TOKEN' }])
   })
 
+  it('refuses a relay route write when the stored settings cannot be read, instead of clearing a key it cannot place', async () => {
+    const { call, inner } = harness({ 'settings.describe': () => ({ ok: false, error: { code: 'internal', message: 'busy', details: {} } }) })
+    const result = await call('settings.mutate', { ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'relay-a'], value: relayRoute('relay-a') }] })
+    expect(result).toMatchObject({ ok: false, error: { code: 'forbidden', message: expect.stringContaining('could not be read') } })
+    expect(forwarded(inner, 'credentials.unset')).toHaveLength(0)
+    expect(forwarded(inner, 'settings.mutate')).toHaveLength(0)
+  })
+
   it('refuses the route write when its leftover key cannot be cleared', async () => {
-    const { call, inner } = harness({ 'credentials.unset': () => ({ ok: false, error: { code: 'internal', message: 'store locked', details: {} } }) })
+    const { call, inner } = harness({
+      'settings.describe': () => ({ ok: true, value: { namespaces: [] } }),
+      'credentials.unset': () => ({ ok: false, error: { code: 'internal', message: 'store locked', details: {} } }),
+    })
     const result = await call('settings.mutate', { ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'relay-z'], value: relayRoute('relay-z') }] })
     expect(result).toMatchObject({ ok: false, error: { code: 'forbidden', message: expect.stringContaining('store locked') } })
     expect(forwarded(inner, 'settings.mutate')).toHaveLength(0)

@@ -179,7 +179,12 @@ function flagSegment(segment: string): UrlValueFlag | undefined {
   if (UUID.test(segment)) return undefined
   const flag = flagValue(segment)
   if (flag !== 'long') return flag
-  const wordlike = (segment.match(/[A-Za-z0-9]+/g) ?? []).every((run) => run.length <= 20 && !(/\d/.test(run) && /[A-Za-z]/.test(run)))
+  const runs = segment.match(/[A-Za-z0-9]+/g) ?? []
+  const word = (run: string): boolean => run.length <= 20 && !(/\d/.test(run) && /[A-Za-z]/.test(run))
+  // Blog platforms end a readable slug with a short id (`…-closures-3f2a1b`);
+  // a single trailing piece that short cannot carry a token on its own.
+  const last = runs.at(-1) ?? ''
+  const wordlike = runs.every(word) || (runs.length >= 3 && runs.slice(0, -1).every(word) && last.length <= 12 && segment.endsWith(last))
   return wordlike ? undefined : 'long'
 }
 
