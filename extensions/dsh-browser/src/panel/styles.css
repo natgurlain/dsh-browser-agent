@@ -4118,3 +4118,22 @@ textarea:focus-visible {
 .watchers-card .watcher-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .watchers-card .watcher-copy small { color: var(--muted, #666); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .watchers-card .watcher-condition { font-weight: 600; }
+
+/* Learning features (LearningPanel.tsx, LearningSettings.tsx). */
+.learning-panel { display: flex; flex-direction: column; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--line, #e5e5e5); font-size: 12px; }
+.learning-block { display: flex; flex-direction: column; gap: 6px; }
+.learning-row { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.learning-row > span { flex: 1; min-width: 0; }
+.learning-form, .learning-suggestion, .learning-list { display: flex; flex-direction: column; gap: 4px; padding: 6px; border: 1px solid var(--line, #e5e5e5); border-radius: 8px; }
+.learning-steps { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; max-height: 220px; overflow: auto; }
+.learning-steps label { display: inline-flex; gap: 4px; align-items: center; overflow-wrap: anywhere; }
+.learning-variable { margin-left: 8px; font-size: 11px; }
+.learning-variable input[type=text], .learning-variable input:not([type]) { width: 110px; }
+.learning-item { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.learning-item small { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.learning-minutes { width: 64px; }
+.learning-request { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; max-height: 140px; overflow: auto; }
+.learning-import { position: relative; cursor: pointer; padding: 4px 10px; border: 1px solid var(--line, #e5e5e5); border-radius: 8px; }
+.learning-import input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.learning-message, .learning-error { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+.learning-settings .learning-origins { display: flex; flex-direction: column; gap: 4px; }

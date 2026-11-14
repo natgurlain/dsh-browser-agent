@@ -21,6 +21,8 @@ import { WatchersCard } from './WatchersCard.tsx'
 import { connectPanel, PanelRpcError, type AgentPauseState, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type PanelApi, type PanelSettings } from './api.ts'
 import { StepTimeline } from './StepTimeline.tsx'
 import { AgentControls } from './AgentControls.tsx'
+import { LearningPanel } from './LearningPanel.tsx'
+import { LearningSettings } from './LearningSettings.tsx'
 import { renderMarkdown } from './markdown.ts'
 import whaleUrl from '../../assets/icons/deepseek-256.png'
 import type { ApprovalDecision, ApprovalDetail, ApprovalRequest } from '../security/approval.ts'
@@ -3170,6 +3172,7 @@ export function App(): React.JSX.Element {
           locale={locale}
           activeTab={async () => (await chrome.tabs.query({ active: true, currentWindow: true }))[0]}
         />
+        <LearningSettings locale={locale} {...(sessionRef.current === null ? {} : { sessionId: sessionRef.current })} />
         <div className="settings-actions">
           <button className="primary" onClick={saveSettings}>{copy.settings.save}</button>
           <button className="secondary" onClick={() => setShowSettings(false)}>{copy.settings.cancel}</button>
@@ -3239,6 +3242,7 @@ export function App(): React.JSX.Element {
         onTakeOver={() => { void api.pauseAgent?.('take-over').catch(() => {}) }}
         onResume={() => { void api.resumeAgent?.().catch(() => {}) }}
       />
+      <LearningPanel locale={locale} connected={state === 'connected'} {...(sessionRef.current === null ? {} : { sessionId: sessionRef.current })} />
       <TabAffinityBanner
         state={tabAffinity}
         copy={copy}
