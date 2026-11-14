@@ -157,6 +157,36 @@ interface KillSwitchMessage {
   engaged: boolean
 }
 
+/** Pause / take-over state of the agent's browser actions. */
+export interface AgentPauseState {
+  mode: 'running' | 'paused' | 'taken-over' | 'resuming'
+  since?: number
+  tookOver?: boolean
+  held: Array<{ id: string; name: string; sessionId?: string; heldAt: number }>
+}
+
+interface PauseStateMessage {
+  type: 'agent.pause-state'
+  state: AgentPauseState
+}
+
+/** Parse a pause state from the background, falling back to running. */
+export function parsePauseState(value: unknown): AgentPauseState {
+  if (typeof value !== 'object' || value === null) return { mode: 'running', held: [] }
+  const raw = value as { mode?: unknown; since?: unknown; tookOver?: unknown; held?: unknown }
+  const mode = raw.mode === 'paused' || raw.mode === 'taken-over' || raw.mode === 'resuming' ? raw.mode : 'running'
+  const held = Array.isArray(raw.held)
+    ? raw.held.filter((entry): entry is AgentPauseState['held'][number] => typeof entry === 'object' && entry !== null
+      && typeof (entry as { id?: unknown }).id === 'string' && typeof (entry as { name?: unknown }).name === 'string')
+    : []
+  return {
+    mode,
+    ...(typeof raw.since === 'number' ? { since: raw.since } : {}),
+    ...(raw.tookOver === true ? { tookOver: true } : {}),
+    held,
+  }
+}
+
 interface DevToolsDetachResultMessage {
   type: 'devtools.detach.result'
   id: string
@@ -164,7 +194,7 @@ interface DevToolsDetachResultMessage {
   error?: { message?: unknown }
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | TabAffinityReturnResultMessage | SelectionMessage | SessionResumeHintMessage | DevToolsStatusMessage | DevToolsDetachResultMessage | DiscoveryProgressMessage | DiscoveryResultMessage | KillSwitchMessage
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | TabAffinityReturnResultMessage | SelectionMessage | SessionResumeHintMessage | DevToolsStatusMessage | DevToolsDetachResultMessage | DiscoveryProgressMessage | DiscoveryResultMessage | KillSwitchMessage | PauseStateMessage
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -232,6 +262,11 @@ export interface PanelApi {
   /** Clear an engaged kill switch and reconnect. */
   releaseKillSwitch(): Promise<void>
   onKillSwitch(callback: (engaged: boolean) => void): () => void
+  /** Hold the next browser action ("after-step") or hand the page to the user ("take-over"). */
+  pauseAgent?(mode: 'after-step' | 'take-over'): Promise<void>
+  /** Tell the agent what changed while paused, then release held actions. */
+  resumeAgent?(): Promise<void>
+  onPauseState?(callback: (state: AgentPauseState) => void): () => void
 }
 
 /** Connect to the background service worker and return the panel API. */
@@ -265,6 +300,7 @@ export function connectPanel(): PanelApi {
   const sessionResumeHintListeners = new Set<(sessionId: string | null) => void>()
   const devToolsStatusListeners = new Set<(status: DevToolsStatus) => void>()
   const killSwitchListeners = new Set<(engaged: boolean) => void>()
+  const pauseStateListeners = new Set<(state: AgentPauseState) => void>()
   const pendingDetaches = new Map<string, { resolve: () => void; reject: (error: Error) => void }>()
 
   let port: chrome.runtime.Port | null = null
@@ -384,6 +420,11 @@ export function connectPanel(): PanelApi {
       case 'kill-switch':
         for (const listener of killSwitchListeners) listener(msg.engaged === true)
         break
+      case 'agent.pause-state': {
+        const state = parsePauseState(msg.state)
+        for (const listener of pauseStateListeners) listener(state)
+        break
+      }
       case 'devtools.status':
         for (const listener of devToolsStatusListeners) listener({
           supported: msg.supported === true,
@@ -681,6 +722,16 @@ export function connectPanel(): PanelApi {
     onKillSwitch(callback) {
       killSwitchListeners.add(callback)
       return () => { killSwitchListeners.delete(callback) }
+    },
+    pauseAgent(mode) {
+      return send({ type: 'agent.pause', mode })
+    },
+    resumeAgent() {
+      return send({ type: 'agent.resume' })
+    },
+    onPauseState(callback) {
+      pauseStateListeners.add(callback)
+      return () => { pauseStateListeners.delete(callback) }
     },
     startDiscovery() {
       const id = crypto.randomUUID()

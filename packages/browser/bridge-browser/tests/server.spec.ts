@@ -15,6 +15,8 @@ import {
   createBridgeNonce,
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_SESSION_PURGE_METHOD,
+  BRIDGE_AUDIT_EXPORT_METHOD,
+  BRIDGE_AUDIT_RECORD_METHOD,
   DEVTOOLS_CAPS_VERSION,
   type BridgeFrame,
 } from '../src/protocol.ts'
@@ -1037,5 +1039,77 @@ describe('BridgeServer', () => {
     const countBefore = frames.filter((f) => f.t === 'event').length
     await new Promise((resolve) => { setTimeout(resolve, 80) })
     expect(frames.filter((f) => f.t === 'event').length).toBe(countBefore)
+  })
+})
+
+describe('BridgeServer audit hooks', () => {
+  const ready = async (h: Harness): Promise<{ ws: WebSocket; frames: BridgeFrame[] }> => {
+    const { ws, frames } = await connect(h.url)
+    await sendHello(ws, TOKEN, CAPS)
+    await waitFor(() => frames.some((frame) => frame.t === 'hello.ok'))
+    return { ws, frames }
+  }
+  const observer = () => ({ dispatched: vi.fn(), annotated: vi.fn(), settled: vi.fn(), killSwitch: vi.fn() })
+
+  it('reports dispatch, annotation before result, and settlement of every call', async () => {
+    const audit = observer()
+    const order: string[] = []
+    audit.annotated.mockImplementation(() => { order.push('annotated') })
+    audit.settled.mockImplementation(() => { order.push('settled') })
+    const h = await startBridge({ audit })
+    harnesses.push(h)
+    const { ws, frames } = await ready(h)
+    const result = h.bridge.requestTool('browser_click', { index: 2 }, new AbortController().signal, 1_000, 'session-a')
+    await waitFor(() => frames.some((frame) => frame.t === 'tool.call'))
+    const call = frames.find((frame) => frame.t === 'tool.call') as Extract<BridgeFrame, { t: 'tool.call' }>
+    expect(audit.dispatched).toHaveBeenCalledWith({ id: call.id, name: 'browser_click', args: { index: 2 }, sessionId: 'session-a', connection: expect.any(String) })
+    send(ws, { t: 'rpc', id: 'note', method: BRIDGE_AUDIT_RECORD_METHOD, payload: { callId: call.id, decision: 'allowed', url: 'https://a.test/' } })
+    send(ws, { t: 'tool.result', id: call.id, ok: true, result: { text: 'clicked' } })
+    await expect(result).resolves.toEqual({ text: 'clicked' })
+    await waitFor(() => frames.some((frame) => frame.t === 'rpc.result' && frame.id === 'note'))
+    expect(order).toEqual(['annotated', 'settled'])
+    expect(audit.annotated).toHaveBeenCalledWith(call.id, { decision: 'allowed', url: 'https://a.test/' })
+    expect(audit.settled).toHaveBeenCalledWith(call.id, { ok: true, result: { text: 'clicked' } })
+    expect(h.callMock).not.toHaveBeenCalled()
+
+    const failing = h.bridge.requestTool('browser_type', {}, new AbortController().signal, 30)
+    await expect(failing).rejects.toMatchObject({ code: 'timeout' })
+    expect(audit.settled).toHaveBeenLastCalledWith(expect.any(String), { ok: false, error: { code: 'timeout', message: expect.stringContaining('timed out') } })
+
+    send(ws, { t: 'rpc', id: 'kill', method: BRIDGE_AUDIT_RECORD_METHOD, payload: { event: 'kill-switch' } })
+    send(ws, { t: 'rpc', id: 'bad', method: BRIDGE_AUDIT_RECORD_METHOD, payload: { callId: 'x', heldMs: -1 } })
+    await waitFor(() => ['kill', 'bad'].every((id) => frames.some((frame) => frame.t === 'rpc.result' && frame.id === id)))
+    expect(audit.killSwitch).toHaveBeenCalledOnce()
+    expect(frames.find((frame) => frame.t === 'rpc.result' && frame.id === 'bad')).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    ws.close()
+  })
+
+  it('exports only sessions in the extension scope, and unscoped calls', async () => {
+    const exportAudit = vi.fn(async (sessionId: string | undefined) => ({ sessionId: sessionId ?? null, entries: [] }))
+    const allowsSession = vi.fn(async (sessionId: string) => sessionId === 'mine')
+    const h = await startBridge({ exportAudit, sessionScope: { allowsSession } })
+    harnesses.push(h)
+    const { ws, frames } = await ready(h)
+    send(ws, { t: 'rpc', id: 'mine', method: BRIDGE_AUDIT_EXPORT_METHOD, payload: { sessionId: 'mine' } })
+    send(ws, { t: 'rpc', id: 'other', method: BRIDGE_AUDIT_EXPORT_METHOD, payload: { sessionId: 'desktop' } })
+    send(ws, { t: 'rpc', id: 'unscoped', method: BRIDGE_AUDIT_EXPORT_METHOD, payload: {} })
+    await waitFor(() => ['mine', 'other', 'unscoped'].every((id) => frames.some((frame) => frame.t === 'rpc.result' && frame.id === id)))
+    expect(frames.find((frame) => frame.t === 'rpc.result' && frame.id === 'mine')).toMatchObject({ ok: true, result: { type: 'server-response', result: { ok: true, value: { sessionId: 'mine' } } } })
+    expect(frames.find((frame) => frame.t === 'rpc.result' && frame.id === 'other')).toMatchObject({ ok: false, error: { code: 'forbidden' } })
+    expect(frames.find((frame) => frame.t === 'rpc.result' && frame.id === 'unscoped')).toMatchObject({ ok: true, result: { result: { value: { sessionId: null } } } })
+    expect(exportAudit).toHaveBeenCalledTimes(2)
+    ws.close()
+  })
+
+  it('passes the resume reason through snapshot injection', async () => {
+    const injectBrowserSnapshot = vi.fn()
+    const h = await startBridge({ injectBrowserSnapshot })
+    harnesses.push(h)
+    const { ws, frames } = await ready(h)
+    send(ws, { t: 'rpc', id: 'r', method: BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, payload: { sessionId: 's', snapshot: 'delta', reason: 'resume' } })
+    send(ws, { t: 'rpc', id: 'bad', method: BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, payload: { sessionId: 's', snapshot: 'delta', reason: 'other' } })
+    await waitFor(() => ['r', 'bad'].every((id) => frames.some((frame) => frame.t === 'rpc.result' && frame.id === id)))
+    expect(injectBrowserSnapshot).toHaveBeenCalledExactlyOnceWith('s', 'delta', 'resume')
+    ws.close()
   })
 })

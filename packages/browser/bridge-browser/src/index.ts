@@ -31,6 +31,7 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { BridgeServer, DEFAULT_MAX_APPROVAL_HOLD_MS } from './server.ts'
 import { createHostApprovalRequester, type AgentLookup, type ApprovalServiceLike } from './host-approval.ts'
 import { BrowserContextInjector } from './browser-context.ts'
+import { AuditLog, ToolCallAuditor } from './audit-log.ts'
 import { createBrowserToolCall, registerBrowserTools } from './tools.ts'
 import { registerScreenshotTool } from './screenshot-tools.ts'
 import { registerPdfTool } from './pdf-tools.ts'
@@ -78,6 +79,9 @@ const DEFAULT_DEVTOOLS_MAX_CHARS = 24_000
 /** Default directory backing the browser extension's session group. */
 const DEFAULT_SESSION_WORKSPACE_PATH = dshHomePath('browser-sessions')
 
+/** Default directory of the per-session browser audit logs. */
+const DEFAULT_AUDIT_LOG_PATH = dshHomePath('browser-audit')
+
 /** Durable session storage root written by the JSONL persistence plugin. */
 const SESSIONS_ROOT = dshHomePath('sessions')
 
@@ -107,6 +111,11 @@ export interface Config {
   devToolsMaxChars?: number
   /** Dedicated workspace path for extension-created sessions. Empty disables grouping. */
   sessionWorkspacePath?: string
+  /**
+   * Directory of the hash-chained per-session audit logs (one 0600 JSONL file
+   * per session). Defaults to `<dsh home>/browser-audit`; empty disables.
+   */
+  auditLogPath?: string
   /** Defer real session creation until the first prompt. Defaults to true. */
   deferSessionCreate?: boolean
   /**
@@ -162,6 +171,7 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   maxInteractiveItems: z.number().step(1).min(1).default(DEFAULT_MAX_INTERACTIVE_ITEMS),
   devToolsMaxChars: z.number().step(1).min(MIN_SNAPSHOT_MAX_CHARS).default(DEFAULT_DEVTOOLS_MAX_CHARS),
   sessionWorkspacePath: z.string().default(DEFAULT_SESSION_WORKSPACE_PATH),
+  auditLogPath: z.string().default(DEFAULT_AUDIT_LOG_PATH),
   deferSessionCreate: z.boolean().default(DEFAULT_DEFER_SESSION_CREATE),
   beacon: z.boolean().default(DEFAULT_BEACON),
   beaconPorts: z.array(z.number().step(1).min(1).max(65535)).default([...BEACON_PORTS]),
@@ -327,6 +337,8 @@ function mountBridge(
     safePresetNames: resolved.safePermissionPresets,
     ledger,
   })
+  // Hash-chained per-session record of every browser action (0600 JSONL).
+  const auditLog = resolved.auditLogPath === '' ? undefined : new AuditLog(resolved.auditLogPath)
   const server = new BridgeServer({
     token: tokenRes.token,
     api: withTaintMethods(fenced, taint, (sessionId, signal) => fenced.allowsSession(sessionId, signal, 'own')),
@@ -340,11 +352,17 @@ function mountBridge(
       maxInteractiveItems: resolved.maxInteractiveItems,
       devTools: { version: DEVTOOLS_CAPS_VERSION },
     },
-    injectBrowserSnapshot: (sessionId, snapshot) => {
-      browserContext.inject(sessionId, snapshot)
+    injectBrowserSnapshot: (sessionId, snapshot, reason) => {
+      browserContext.inject(sessionId, snapshot, reason)
       taint.mark(sessionId, 'snapshot-injection')
     },
     purgeSession,
+    ...(auditLog === undefined ? {} : {
+      audit: new ToolCallAuditor(auditLog, (error) => {
+        ctx.logger.warn(`browser bridge: audit log write failed: ${error instanceof Error ? error.message : String(error)}`)
+      }),
+      exportAudit: (sessionId: string | undefined) => auditLog.read(sessionId),
+    }),
     onCapsChange: () => { syncDevToolsTools() },
     // Browser approvals raised while no side panel is open are also put to
     // dsh's approval service, so the web UI or CLI can answer them.

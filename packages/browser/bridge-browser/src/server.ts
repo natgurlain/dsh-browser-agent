@@ -91,6 +91,8 @@ import {
   type ToolErrorCode,
 } from './protocol.ts'
 import { SessionPurgeError } from './session-purge.ts'
+import type { BridgeAuditObserver } from './audit-log.ts'
+import { handleAuditRpc } from './audit-rpc.ts'
 import { verifyToken } from './token.ts'
 
 /**
@@ -236,12 +238,16 @@ export interface BridgeServerDeps {
    */
   onCapsChange?: (clientCaps: BridgeCaps) => void
   /** Seed a followed-page snapshot into a live or deferred Agent session. */
-  injectBrowserSnapshot: (sessionId: string, snapshot: string) => void | Promise<void>
+  injectBrowserSnapshot: (sessionId: string, snapshot: string, reason?: 'follow' | 'resume') => void | Promise<void>
   /**
    * Permanently delete one session's durable storage. Callers archive the
    * session through the gateway first; this only removes files.
    */
   purgeSession: (sessionId: string) => Promise<void>
+  /** Audit observer told about every tool call's dispatch, annotations, and outcome. */
+  audit?: BridgeAuditObserver
+  /** Read and verify one session's audit log (undefined: agentless calls). */
+  exportAudit?: (sessionId: string | undefined) => Promise<unknown>
   /**
    * Test seam: force the remote address seen by the privilege gate. The
    * sandbox cannot bind arbitrary loopback literals, so the non-loopback
@@ -428,11 +434,19 @@ export class BridgeServer {
     const id = randomUUID()
     const startedAt = this.now()
     const expiresAt = startedAt + timeoutMs
+    this.auditSafely(audit => {
+      audit.dispatched({
+        id, name, args, connection: conn.key,
+        ...(sessionId === undefined ? {} : { sessionId }),
+        ...(callId === undefined ? {} : { toolCallId: callId }),
+      })
+    })
     return new Promise<unknown>((resolve, reject) => {
       const settle = (error: BridgeToolError): void => {
         clearTimeout(entry.timer)
         this.dropPendingTool(id)
         signal.removeEventListener('abort', onAbort)
+        this.auditSettled(id, error)
         reject(error)
       }
       const cancel = (error: BridgeToolError): void => {
@@ -815,6 +829,23 @@ export class BridgeServer {
       sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'forbidden', message: 'method is loopback-only' } })
       return
     }
+    const audited = handleAuditRpc(frame.method, frame.payload, {
+      connection: conn.key,
+      // Only the connection a call was sent to may annotate it.
+      ownsCall: (callId: string) => this.pendingTools.get(callId)?.conn === conn,
+      ...(this.deps.audit === undefined ? {} : { audit: this.deps.audit }),
+      ...(this.deps.exportAudit === undefined ? {} : { exportAudit: this.deps.exportAudit }),
+      ...(this.deps.sessionScope === undefined
+        ? {}
+        : { allowsSession: (sessionId: string) => this.deps.sessionScope!.allowsSession(sessionId, conn.abort.signal, 'read') }),
+    })
+    if (audited !== undefined) {
+      const answer = await audited
+      sendFrame(conn, answer.ok
+        ? { t: 'rpc.result', id: frame.id, ok: true, result: { type: 'server-response', rpcId: frame.id, result: { ok: true, value: answer.result } } }
+        : { t: 'rpc.result', id: frame.id, ok: false, error: answer.error })
+      return
+    }
     if (frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD || frame.method === BRIDGE_SESSION_PURGE_METHOD) {
       const sessionId = frame.method === BRIDGE_SESSION_PURGE_METHOD
         ? purgeSessionPayload(frame.payload)
@@ -848,7 +879,9 @@ export class BridgeServer {
         return
       }
       try {
-        await this.deps.injectBrowserSnapshot(payload.sessionId, payload.snapshot)
+        await (payload.reason === undefined
+          ? this.deps.injectBrowserSnapshot(payload.sessionId, payload.snapshot)
+          : this.deps.injectBrowserSnapshot(payload.sessionId, payload.snapshot, payload.reason))
         sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { accepted: true } })
       } catch (error: unknown) {
         sendFrame(conn, {
@@ -1021,10 +1054,25 @@ export class BridgeServer {
     this.dropPendingTool(frame.id)
     if (frame.ok) {
       if (pending.sessionId !== undefined) this.sessionAffinity.set(pending.sessionId, conn.key)
+      this.auditSafely(audit => { audit.settled(frame.id, { ok: true, result: frame.result }) })
       pending.resolve(frame.result)
     } else {
-      pending.reject(new BridgeToolError(frame.error.code, frame.error.message || 'browser action failed'))
+      const error = new BridgeToolError(frame.error.code, frame.error.message || 'browser action failed')
+      this.auditSettled(frame.id, error)
+      pending.reject(error)
     }
+  }
+
+  /** Record a failed or withdrawn call; auditing never affects the call itself. */
+  private auditSettled(id: string, error: BridgeToolError): void {
+    this.auditSafely(audit => { audit.settled(id, { ok: false, error: { code: error.code, message: error.message } }) })
+  }
+
+  private auditSafely(record: (audit: BridgeAuditObserver) => void): void {
+    if (this.deps.audit === undefined) return
+    try {
+      record(this.deps.audit)
+    } catch { /* the audit observer owns its own failures */ }
   }
 
   /** Forget one pending call and withdraw any approval it forwarded to dsh. */
@@ -1048,7 +1096,9 @@ export class BridgeServer {
       if (pending.conn !== conn) continue
       clearTimeout(pending.timer)
       this.dropPendingTool(id)
-      pending.reject(new BridgeToolError('bridge-closed', reason))
+      const error = new BridgeToolError('bridge-closed', reason)
+      this.auditSettled(id, error)
+      pending.reject(error)
     }
     if (!this.closed) this.deps.onCapsChange?.(conn.clientCaps)
   }
@@ -1066,12 +1116,13 @@ function localEndpointOf(socket: Socket): BridgeEndpoint | undefined {
   return { host: localAddress, port: localPort }
 }
 
-function browserSnapshotPayload(payload: unknown): { sessionId: string; snapshot: string } | undefined {
+function browserSnapshotPayload(payload: unknown): { sessionId: string; snapshot: string; reason?: 'follow' | 'resume' } | undefined {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
-  const { sessionId, snapshot } = payload as Record<string, unknown>
+  const { sessionId, snapshot, reason } = payload as Record<string, unknown>
   if (typeof sessionId !== 'string' || sessionId.trim() === '') return undefined
   if (typeof snapshot !== 'string' || snapshot.trim() === '') return undefined
-  return { sessionId, snapshot }
+  if (reason !== undefined && reason !== 'follow' && reason !== 'resume') return undefined
+  return { sessionId, snapshot, ...(reason === undefined ? {} : { reason }) }
 }
 
 function purgeSessionPayload(payload: unknown): string | undefined {

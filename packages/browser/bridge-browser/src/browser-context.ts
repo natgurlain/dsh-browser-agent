@@ -29,32 +29,51 @@ export const BROWSER_CONTEXT_KIND = 'browser-context' as const
 /** Bound orphaned provisional sessions while retaining normal recent tabs. */
 const DEFAULT_MAX_PENDING = 32
 
+/**
+ * Why the extension captured browser context: `follow` after an explicit tab
+ * handoff, `resume` after the user paused or took over and then resumed.
+ */
+export type BrowserContextReason = 'follow' | 'resume'
+
+const SECTION_BY_REASON: Record<BrowserContextReason, string> = {
+  follow: 'browser-page',
+  resume: 'browser-resume',
+}
+
 /** Build one immutable context message from a captured browser snapshot. */
-export function createBrowserSnapshotMessage(snapshot: string): UserMessage {
-  const text = [
-    'The user chose to follow the newly active browser tab. The browser page context was refreshed immediately after that choice.',
-    'The following is an already completed browser_snapshot of the current page. Use its stable indices directly for the next request; do not take an immediate duplicate snapshot unless required context is missing.',
-    snapshot,
-  ].join('\n\n')
+export function createBrowserSnapshotMessage(snapshot: string, reason: BrowserContextReason = 'follow'): UserMessage {
+  const text = (reason === 'resume'
+    ? [
+        'The user paused browser control and has now resumed it. Below is what changed in the browser while you were paused (the user may have acted on the page).',
+        'Continue from this state. If a pending browser action no longer fits the page, take a fresh browser_snapshot before acting.',
+        snapshot,
+      ]
+    : [
+        'The user chose to follow the newly active browser tab. The browser page context was refreshed immediately after that choice.',
+        'The following is an already completed browser_snapshot of the current page. Use its stable indices directly for the next request; do not take an immediate duplicate snapshot unless required context is missing.',
+        snapshot,
+      ]).join('\n\n')
   return createUserMessage({
     content: [{ type: 'text', text }],
     source: {
       kind: BROWSER_CONTEXT_KIND,
       form: 'snapshot',
-      sections: [{ name: 'browser-page', text }],
+      sections: [{ name: SECTION_BY_REASON[reason], text }],
     },
   })
 }
 
-/** Supersede pending tab context through the durable Inbox command surface. */
-function injectLatestSnapshot(agent: Agent, snapshot: string): void {
+/** Supersede pending context of the same reason through the durable Inbox command surface. */
+function injectLatestSnapshot(agent: Agent, snapshot: string, reason: BrowserContextReason = 'follow'): void {
+  const section = SECTION_BY_REASON[reason]
   for (const message of agent.inbox.nextStep) {
     if (message.source.kind === BROWSER_CONTEXT_KIND
-      && message.source.form === 'snapshot') {
+      && message.source.form === 'snapshot'
+      && (message.source.sections[0]?.name ?? SECTION_BY_REASON.follow) === section) {
       agent.inbox.remove(message.id)
     }
   }
-  agent.inject(createBrowserSnapshotMessage(snapshot))
+  agent.inject(createBrowserSnapshotMessage(snapshot, reason))
 }
 
 /** Deliver followed-page snapshots to live or not-yet-materialized Agents. */
@@ -70,9 +89,18 @@ export class BrowserContextInjector {
     }
   }
 
-  /** Inject now when possible; otherwise retain the newest snapshot per session. */
-  inject(sessionId: string, snapshot: string): 'injected' | 'queued' {
+  /**
+   * Inject now when possible; otherwise retain the newest follow snapshot per
+   * session. A resume delta only matters to a live Agent (one that was paused
+   * mid-turn), so it is dropped when no Agent exists.
+   */
+  inject(sessionId: string, snapshot: string, reason: BrowserContextReason = 'follow'): 'injected' | 'queued' | 'dropped' {
     const agent = this.agents.get(sessionId as Parameters<AgentRegistry['get']>[0])
+    if (reason === 'resume') {
+      if (agent === undefined) return 'dropped'
+      injectLatestSnapshot(agent, snapshot, 'resume')
+      return 'injected'
+    }
     if (agent !== undefined) {
       this.pending.delete(sessionId)
       injectLatestSnapshot(agent, snapshot)

@@ -77,6 +77,15 @@ export const MAX_HOST_APPROVAL_REASON_CHARS = 32 * 1024
 export const HOST_APPROVALS_CAPS_VERSION = 1
 
 /**
+ * Internal RPC: the extension annotates one in-flight tool call (approval
+ * decision, page URL, navigation) or records the kill switch in the audit log.
+ */
+export const BRIDGE_AUDIT_RECORD_METHOD = 'bridge.audit.record'
+
+/** Internal RPC: read and verify one session's audit log for the panel's export. */
+export const BRIDGE_AUDIT_EXPORT_METHOD = 'bridge.audit.export'
+
+/**
  * Seconds a fresh socket may take to present `hello` before it is closed.
  * Short on purpose: an unauthenticated socket holds server resources, and the
  * handshake costs the client two HMACs.

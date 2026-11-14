@@ -28,6 +28,9 @@
  *   panel → bg: { type: 'discovery.cancel' }
  *   panel → bg: { type: 'kill-switch.engage' }
  *   panel → bg: { type: 'kill-switch.release' }
+ *   panel → bg: { type: 'agent.pause', mode: 'after-step' | 'take-over' }
+ *   panel → bg: { type: 'agent.resume' }
+ *   bg → panel: { type: 'agent.pause-state', state: PauseState }
  *   bg → panel: { type: 'kill-switch', engaged }
  *   bg → panel: { type: 'discovery.progress', id, done, total, instances }
  *   bg → panel: { type: 'discovery.result', id, ok, instances? | error? }
@@ -52,6 +55,7 @@
 import {
   BRIDGE_APPROVAL_ASK_METHOD,
   BRIDGE_APPROVAL_WITHDRAW_METHOD,
+  BRIDGE_AUDIT_RECORD_METHOD,
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_TOOL_HOLD_METHOD,
   HOST_APPROVALS_CAPS_VERSION,
@@ -72,11 +76,15 @@ import {
   isTabManagementTool,
   resetInputState,
   resetTabSnapshot,
+  type CallPolicyHook,
   type InputRuntime,
   type ToolAnswer,
   type ToolCall,
 } from './tools.ts'
 import { createDebuggerBroker } from './debugger-broker.ts'
+import { HOLD_EXPIRED_MESSAGE, PauseGate, type PauseRequest } from './pause-gate.ts'
+import { capturePauseBaseline, prepareResume, type PauseBaseline, type ResumeFlowDeps } from './resume-flow.ts'
+import { AgentOverlayController } from './agent-overlay.ts'
 import { DialogController } from './dialogs.ts'
 import {
   isApprovalDecision,
@@ -183,6 +191,8 @@ export interface Settings {
    * prompt. 2: it means "trusted everywhere except policy-restricted sites".
    */
   settingsVersion: number
+  /** Show the ghost cursor, target outlines, and the "AI controlling" frame on pages. */
+  showAgentOverlay: boolean
 }
 
 /** Current settings schema; see {@link Settings.settingsVersion}. */
@@ -204,6 +214,7 @@ const SETTINGS_DEFAULTS: Settings = {
   siteDefaultsEnabled: true,
   strictSites: [],
   settingsVersion: SETTINGS_VERSION,
+  showAgentOverlay: true,
 }
 
 /** Longest no-panel approval window the bridge's hold can cover. */
@@ -457,7 +468,12 @@ const commitGate = new CommitGate({
     const caller = commitGateCallers.get(tabId)
     // A request held behind an unanswered card would hang the page: bound it.
     const signal = AbortSignal.timeout(120_000)
-    return authorizeToolCall(prompt, signal, caller?.windowId ?? 0, caller?.sessionId, false, tabId)
+    const decision = await authorizeToolCall(prompt, signal, caller?.windowId ?? 0, caller?.sessionId, false, tabId)
+    // Audit: attach the write decision to the agent call(s) running on this tab.
+    for (const call of unsettledToolCalls) {
+      if (call.tabId === tabId) (call.commit ??= []).push(decision === 'approved' ? 'allowed' : decision)
+    }
+    return decision
   },
 })
 
@@ -587,6 +603,19 @@ const devToolsGrants = new DevToolsGrants()
 interface ActiveToolCall {
   controller: AbortController
   tabId?: number
+  /** Approval outcome reported to the audit log. */
+  decision?: string
+  /** Page URL when the call ran, for the audit log. */
+  url?: string
+  /** Time spent held by the user's pause. */
+  heldMs?: number
+  /** Policy-layer outcome for the audit log: blocked, tainted, site-ask, site-trusted. */
+  policy?: string
+  policyReason?: string
+  /** Strict mode (commit gate) covered this call: armed, or refused because it could not intercept. */
+  strict?: 'armed' | 'refused'
+  /** Commit-gate decisions on writes the page made during this call. */
+  commit?: string[]
   /** Tool name, so a revocation can target the developer-tools group only. */
   name: string
   unrestrictedAccess: boolean
@@ -687,9 +716,11 @@ async function persistSettings(next: Partial<Settings>): Promise<void> {
   const revokesUnrestrictedAccess = settings.unrestrictedBrowserAccess && !updated.unrestrictedBrowserAccess
   const changesDevTools = typeof next.allowDevTools === 'boolean'
   const revokesDevTools = changesDevTools && (settings.allowDevTools || devToolsGrants.hasAny()) && !updated.allowDevTools
+  const togglesOverlay = settings.showAgentOverlay !== updated.showAgentOverlay
   settings = updated
   if (!updated.unrestrictedBrowserAccess) unrestrictedAccessActive = false
   if (revokesDevTools) devToolsGrants.clear()
+  if (togglesOverlay) refreshActionBadges()
   syncSelectionWatch()
   let accessTransition: Promise<void> | undefined
   if (revokesUnrestrictedAccess) {
@@ -763,6 +794,7 @@ function normalizeUserSettings(candidate: Settings): Settings {
       ? [...new Set(candidate.strictSites.map(normalizeSitePattern).filter((entry): entry is string => entry !== undefined))].sort()
       : [],
     settingsVersion: SETTINGS_VERSION,
+    showAgentOverlay: candidate.showAgentOverlay !== false,
   }
 }
 
@@ -906,6 +938,8 @@ function controlledTabIds(): Set<number> {
  * connected, and a global "OFF" (on every tab) while the kill switch is engaged.
  */
 function refreshActionBadges(): void {
+  // The on-page frame and pill follow the same truth as the badge.
+  agentOverlay.syncControl(controlledTabIds())
   const api = actionApi()
   if (api === undefined) return
   if (killSwitchEngaged) {
@@ -936,6 +970,9 @@ function refreshActionBadges(): void {
 async function engageKillSwitch(): Promise<void> {
   killSwitchEngaged = true
   persistKillSwitch()
+  // Sent before the bridge drops so the audit log records why calls ended.
+  if (rpc !== null && bridge?.connected === true) void rpc.request(BRIDGE_AUDIT_RECORD_METHOD, { event: 'kill-switch' }).catch(() => {})
+  pauseGate.cancelAll()
   // Nothing may reconnect or resume while the switch is engaged.
   bridgeStartRevision += 1
   activeScan?.controller.abort()
@@ -983,6 +1020,128 @@ async function releaseKillSwitch(): Promise<void> {
   if (panelPorts.size > 0) armBridgeKeepalive()
   await settingsReady
   await startBridge()
+}
+
+// ---- Show the agent on the page; pause, take over, resume ----
+
+const agentOverlay = new AgentOverlayController({
+  send: (tabId, message, target) => (target === undefined
+    ? chrome.tabs.sendMessage(tabId, message)
+    : chrome.tabs.sendMessage(tabId, message, target)),
+  enabled: () => settingsLoaded && settings.showAgentOverlay,
+  locale: () => getUiLocale(),
+})
+
+const PAUSE_KEY = 'dshAgentPause'
+let persistedPause = 'null'
+/** Tab facts recorded when the user paused; compared on resume. */
+let pauseBaseline: Promise<PauseBaseline> | undefined
+
+/** Tabs the agent is bound to, connected or not (the takeover banner goes there). */
+function boundTabIds(): Set<number> {
+  const ids = new Set<number>()
+  const controlled = tabAffinity.snapshot().controlled
+  if (controlled !== null) ids.add(controlled.tabId)
+  for (const tab of Object.values(tabAffinity.sessionMap())) ids.add(tab.tabId)
+  return ids
+}
+
+const pauseGate = new PauseGate({
+  onChange: (state) => {
+    const persisted = JSON.stringify(pauseGate.persisted() ?? null)
+    if (persisted !== persistedPause) {
+      persistedPause = persisted
+      const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
+      // A worker restart must not silently unpause the agent.
+      if (area !== undefined) void Promise.resolve(area.set({ [PAUSE_KEY]: pauseGate.persisted() ?? null })).catch(() => {})
+    }
+    agentOverlay.setTakeover(state.mode === 'taken-over' ? boundTabIds() : new Set())
+    for (const port of panelPorts) {
+      try { port.postMessage({ type: 'agent.pause-state', state }) } catch { /* port closed */ }
+    }
+  },
+})
+
+const pauseReady = (async (): Promise<void> => {
+  const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
+  try {
+    const stored = area === undefined ? undefined : await area.get(PAUSE_KEY)
+    pauseGate.restore(stored?.[PAUSE_KEY])
+  } catch { /* unreadable: running */ }
+})()
+
+function resumeFlowDeps(): ResumeFlowDeps {
+  const toFacts = (tab: chrome.tabs.Tab) => ({
+    id: tab.id!,
+    ...(tab.url === undefined ? {} : { url: tab.url }),
+    ...(tab.title === undefined ? {} : { title: tab.title }),
+    ...(tab.openerTabId === undefined ? {} : { openerTabId: tab.openerTabId }),
+  })
+  return {
+    queryTabs: async () => (await chrome.tabs.query({})).filter((tab) => tab.id !== undefined).map(toFacts),
+    getTab: (tabId) => chrome.tabs.get(tabId).then(toFacts, () => undefined),
+    boundSessions: () => {
+      const controlled = tabAffinity.snapshot().controlled
+      return controlled === null ? [] : tabAffinity.sessionIdsForTab(controlled.tabId)
+    },
+    sessionTab: (sessionId) => sessionId === ''
+      ? tabAffinity.snapshot().controlled?.tabId
+      : tabAffinity.getSessionTab(sessionId)?.tabId,
+    shareDetails: () => unrestrictedAccessEnabled() || settings.sharePageContent !== 'off',
+    pageDelta: async (sessionId, tabId) => {
+      const controller = new AbortController()
+      const timer = setTimeout(() => { controller.abort() }, 20_000)
+      try {
+        const target = await resolveToolTab(sessionId)
+        if ('ok' in target || target.id !== tabId) return undefined
+        const unrestrictedAccess = unrestrictedAccessEnabled()
+        const answer = await dispatchToolCall(
+          { id: crypto.randomUUID(), name: 'browser_snapshot', args: { delta: true } },
+          unrestrictedAccess ? 'auto' : settings.sharePageContent,
+          caps === null ? undefined : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars },
+          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId ?? 0, sessionId, unrestrictedAccess),
+          controller.signal,
+          target,
+          () => tabAffinity.allowsTarget(tabId, sessionId),
+          // Site rules and managed policy apply to the resume read like any other.
+          { unrestrictedAccess, policy: policyRuntime.hook(crypto.randomUUID(), sessionId, unrestrictedAccess) },
+        )
+        const text = answer.ok && typeof answer.result === 'object' && answer.result !== null
+          ? (answer.result as { text?: unknown }).text
+          : undefined
+        return typeof text === 'string' ? text : undefined
+      } finally {
+        clearTimeout(timer)
+      }
+    },
+    inject: async (sessionId, text) => {
+      await gatewayRpc(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId, snapshot: text, reason: 'resume' })
+      const tabId = tabAffinity.getSessionTab(sessionId)?.tabId
+      const url = tabId === undefined ? undefined : await chrome.tabs.get(tabId).then((tab) => tab.url, () => undefined)
+      policyRuntime.recordInjection(sessionId, originFromUrl(url ?? ''))
+    },
+  }
+}
+
+/** "Pause after this step" or "Take over": hold every next tool call. */
+async function pauseAgent(request: PauseRequest): Promise<void> {
+  await pauseReady
+  const wasRunning = !pauseGate.holding()
+  pauseGate.pause(request)
+  if (wasRunning) pauseBaseline = capturePauseBaseline(resumeFlowDeps())
+}
+
+/** Tell the agent what changed, then release (or fail) the held calls. */
+async function resumeAgent(): Promise<void> {
+  await pauseReady
+  // The kill switch already cancelled every held call; nothing resumes while it holds.
+  if (killSwitchEngaged) {
+    pauseGate.cancelAll()
+    return
+  }
+  const baseline = pauseBaseline
+  pauseBaseline = undefined
+  await pauseGate.resume(async (held, context) => prepareResume(held, context, await baseline, resumeFlowDeps()))
 }
 
 function broadcastStatus(): void {
@@ -1698,6 +1857,8 @@ async function authorizeToolCall(
   unrestrictedAccess: boolean = unrestrictedAccessEnabled(),
   tabId?: number,
   toolCallId?: string,
+  /** Told when a card is actually shown (the audit log tells user approvals from standing rules). */
+  onPrompt?: () => void,
 ): Promise<ApprovalAuthorization> {
   if (signal.aborted) return 'cancelled'
   const grantKind = devToolsGrantKind(prompt)
@@ -1713,6 +1874,7 @@ async function authorizeToolCall(
     ),
   })
   if (gate !== 'prompt') return gate
+  onPrompt?.()
   const result: ApprovalRequestResult = await approvals.request(prompt, signal, windowId, sessionId, toolCallId)
   if (signal.aborted) return 'cancelled'
   if (result.status !== 'decision') return result.status
@@ -1991,7 +2153,7 @@ function routeToolCall(call: ToolCall): void {
     ? undefined
     : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
   const sharePageContent = unrestrictedAccess ? 'auto' : settings.sharePageContent
-  const policy = policyRuntime.hook(call.id, call.sessionId, unrestrictedAccess)
+  const policy = auditedPolicy(activeCall, policyRuntime.hook(call.id, call.sessionId, unrestrictedAccess))
   let policyTabOrigin: string | undefined
   const managementDispatch = async (): Promise<ToolAnswer> => {
     await affinityReady
@@ -2009,7 +2171,7 @@ function routeToolCall(call: ToolCall): void {
       call,
       sharePageContent,
       budget,
-      (prompt) => authorizeToolCall(prompt, controller.signal, windowId ?? 0, call.sessionId, unrestrictedAccess, undefined, call.id),
+      auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(prompt, controller.signal, windowId ?? 0, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt)),
       controller.signal,
       undefined,
       undefined,
@@ -2025,7 +2187,7 @@ function routeToolCall(call: ToolCall): void {
       },
     )
   }
-  void policyRuntime.ready.then(() => isTabManagementTool(call.name)
+  const dispatch = (): Promise<ToolAnswer> => policyRuntime.ready.then(() => isTabManagementTool(call.name)
     ? managementDispatch()
     : isDevToolsTool(call.name)
     ? dispatchDevToolsTool(call, controller.signal)
@@ -2037,7 +2199,7 @@ function routeToolCall(call: ToolCall): void {
           target.windowId,
           sharePageContent,
           budget,
-          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess, undefined, call.id),
+          auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt)),
           controller.signal,
           (tab) => bindOpenedTab(tab, call.sessionId, { active: call.args.active !== false }),
           (tabId) => tabAffinity.allowsTarget(tabId, call.sessionId),
@@ -2050,13 +2212,16 @@ function routeToolCall(call: ToolCall): void {
           call,
           sharePageContent,
           budget,
-          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess, undefined, call.id),
+          auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt)),
           controller.signal,
-          target,
+          noteCallTarget(activeCall, target, call.sessionId),
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
-          { unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit, policy },
+          { unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit, policy, overlay: agentOverlay },
         ))))
-  ).then(
+  )
+  // Paused or taken over: the call waits here, before any tab resolution,
+  // policy check, or approval card, so nothing can approve or run it.
+  void heldDispatch(call, activeCall, dispatch).then(
     async (answer) => {
       // Untrusted page content entered the session: taint it (security/taint.ts).
       policyRuntime.recordResult(call, answer.ok, policyTabOrigin)
@@ -2076,13 +2241,16 @@ function routeToolCall(call: ToolCall): void {
       }
       if (answer.ok) {
         if (isNavigationCandidateTool(call.name)) await checkpointSessionPage(call.sessionId)
+        const navigatedTo = await navigationAfter(call, activeCall)
         if (activeToolCalls.get(call.id) !== activeCall) return
         const socket = bridge
         if (socket === null) return
+        recordAuditNote(call, activeCall, answer, navigatedTo)
         socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
       } else {
         const socket = bridge
         if (socket === null) return
+        recordAuditNote(call, activeCall, answer)
         socket.send({ t: 'tool.result', id: call.id, ok: false, error: answer.error! })
       }
     },
@@ -2114,6 +2282,98 @@ function routeToolCall(call: ToolCall): void {
     runtimeLease.touch()
     runtimeKeeper.update()
   })
+}
+
+/** Hold the call while the user has paused the agent, then run it (or fail it closed). */
+async function heldDispatch(call: ToolCall, activeCall: ActiveToolCall, dispatch: () => Promise<ToolAnswer>): Promise<ToolAnswer> {
+  await pauseReady
+  const outcome = await pauseGate.hold(call, activeCall.controller.signal)
+  switch (outcome.kind) {
+    case 'not-held':
+      return dispatch()
+    case 'released':
+      activeCall.heldMs = outcome.heldMs
+      return dispatch()
+    case 'cancelled':
+      return { ok: false, error: { code: 'action-failed', message: 'Tool call was cancelled' } }
+    case 'expired':
+      activeCall.heldMs = outcome.heldMs
+      activeCall.decision = 'held-expired'
+      return { ok: false, error: { code: 'timeout', message: HOLD_EXPIRED_MESSAGE } }
+    case 'failed':
+      activeCall.heldMs = outcome.heldMs
+      return { ok: false, error: { code: 'action-failed', message: outcome.message } }
+  }
+}
+
+/**
+ * Record the approval outcome of one call for the audit log: `allowed` only
+ * when the user approved a card, `auto-allowed` when a standing rule (a trusted
+ * site, a session grant) passed it without one.
+ */
+function auditedAuthorize(
+  activeCall: ActiveToolCall,
+  authorize: (prompt: ApprovalPrompt, onPrompt: () => void) => Promise<ApprovalAuthorization>,
+): (prompt: ApprovalPrompt) => Promise<ApprovalAuthorization> {
+  return async (prompt) => {
+    let prompted = false
+    const result = await authorize(prompt, () => { prompted = true })
+    activeCall.decision = result === 'approved' ? (prompted ? 'allowed' : 'auto-allowed') : result
+    return result
+  }
+}
+
+function noteCallTarget<T extends { id?: number; url?: string }>(activeCall: ActiveToolCall, target: T, sessionId?: string): T {
+  if (target.url !== undefined) activeCall.url = target.url
+  if (target.id !== undefined) activeCall.tabId ??= target.id
+  if (policyRuntime.strictFor(sessionId, target.url)) activeCall.strict = 'armed'
+  return target
+}
+
+/** Remember what the policy layer (site rules, managed policy, taint) decided, for the audit log. */
+function auditedPolicy(activeCall: ActiveToolCall, hook: CallPolicyHook): CallPolicyHook {
+  return (call, targets) => {
+    const decision = hook(call, targets)
+    if (decision.kind === 'deny') {
+      activeCall.policy = 'blocked'
+      activeCall.policyReason = decision.message
+    } else if (decision.kind === 'force') {
+      // Site "ask" rules phrase their reason this way; every other forced reason is taint.
+      activeCall.policy = decision.reasons.some((reason) => !reason.startsWith('Site policy asks')) ? 'tainted' : 'site-ask'
+      activeCall.policyReason = decision.reasons.join(' ')
+    } else if (decision.kind === 'trust') {
+      activeCall.policy = 'site-trusted'
+    }
+    return decision
+  }
+}
+
+async function navigationAfter(call: ToolCall, activeCall: ActiveToolCall): Promise<string | undefined> {
+  if (!isNavigationCandidateTool(call.name) || activeCall.tabId === undefined) return undefined
+  try {
+    const url = (await chrome.tabs.get(activeCall.tabId)).url
+    return url !== undefined && url !== activeCall.url ? url : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Annotate the bridge's audit entry for this call; sent ahead of its tool.result. */
+function recordAuditNote(call: ToolCall, activeCall: ActiveToolCall, answer: ToolAnswer, navigatedTo?: string): void {
+  if (rpc === null || bridge?.connected !== true) return
+  const decision = activeCall.decision ?? (isDevToolsTool(call.name) ? undefined : 'not-required')
+  const strict = activeCall.strict ?? (!answer.ok && /^Strict mode/u.test(answer.error?.message ?? '') ? 'refused' : undefined)
+  void rpc.request(BRIDGE_AUDIT_RECORD_METHOD, {
+    callId: call.id,
+    ...(decision === undefined ? {} : { decision }),
+    ...(activeCall.url === undefined ? {} : { url: activeCall.url }),
+    ...(navigatedTo === undefined ? {} : { navigatedTo }),
+    ...(activeCall.heldMs === undefined ? {} : { heldMs: activeCall.heldMs }),
+    ...(activeCall.policy === undefined ? {} : { policy: activeCall.policy }),
+    ...(activeCall.policyReason === undefined ? {} : { policyReason: activeCall.policyReason.slice(0, 1_000) }),
+    ...(strict === undefined ? {} : { strict }),
+    ...(activeCall.commit === undefined ? {} : { commit: activeCall.commit.slice(0, 20) }),
+  }).catch(() => {})
 }
 
 function cancelToolCall(id: string): void {
@@ -2461,11 +2721,23 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     // navigation.ts also listens for this frame-ready announcement; only this
     // listener answers it, telling a fresh document whether to watch
     // selections. The revision lets a slow reply lose to a newer broadcast.
+    const overlay = agentOverlay.readyState(sender.tab.id, sender.frameId)
     sendResponse({
       selectionWatch: selectionWatchEnabled(sender.tab.windowId),
       selectionWatchEpoch: selectionWatchEpoch,
       selectionWatchRevision: selectionWatchRevision,
+      ...(overlay === undefined ? {} : { overlay }),
     })
+    return
+  }
+  if (type === 'DSH_KILL_SWITCH') {
+    // The on-page pill's Stop link (trusted user clicks only, in a closed shadow root).
+    void engageKillSwitch()
+    return
+  }
+  if (type === 'DSH_AGENT_RESUME') {
+    // The takeover banner's Resume button, only from a tab showing it.
+    if (pauseGate.state().mode === 'taken-over' && boundTabIds().has(sender.tab.id)) void resumeAgent()
     return
   }
   if (type !== 'DSH_SELECTION' || sender.tab === undefined) return
@@ -2499,6 +2771,9 @@ chrome.runtime.onConnect.addListener((port) => {
   try { port.postMessage(statusPayload()) } catch { /* port closed */ }
   void killSwitchReady.then(() => {
     try { port.postMessage({ type: 'kill-switch', engaged: killSwitchEngaged }) } catch { /* port closed */ }
+  })
+  void pauseReady.then(() => {
+    try { port.postMessage({ type: 'agent.pause-state', state: pauseGate.state() }) } catch { /* port closed */ }
   })
   broadcastDevToolsState()
   void affinityReady.then(async () => {
@@ -2665,6 +2940,14 @@ chrome.runtime.onConnect.addListener((port) => {
         break
       case 'kill-switch.release':
         void releaseKillSwitch()
+        break
+      case 'agent.pause': {
+        const mode = (message as { mode?: unknown }).mode
+        if (mode === 'after-step' || mode === 'take-over') void pauseAgent(mode)
+        break
+      }
+      case 'agent.resume':
+        void resumeAgent()
         break
       case 'selection.clear': {
         // The user sent, dismissed, or explicitly abandoned this window's
@@ -3010,6 +3293,7 @@ chrome.webNavigation.onCommitted.addListener(({ tabId, frameId, url }) => {
 // A closed tab cannot stay debugged; release the attachment immediately so the
 // "being debugged" banner never outlives its page.
 chrome.tabs.onRemoved.addListener((tabId) => {
+  agentOverlay.forget(tabId)
   dialogs.clear(tabId)
   resetInputState(tabId)
   devTools.releaseTab(tabId)

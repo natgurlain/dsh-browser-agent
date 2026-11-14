@@ -18,6 +18,8 @@ const bridgeRequire = createRequire(join(bridge, 'package.json'))
 const { chromium } = bridgeRequire('playwright-core')
 const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
 const { PINNED_CHROME_EXTENSION_ID } = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
+const { startScriptedModel } = await import(pathToFileURL(join(root, 'scripts/fixtures/scripted-model.mjs')).href)
+const { runAgentUxSmoke, assertKillSwitchAudited } = await import(pathToFileURL(join(root, 'scripts/fixtures/agent-ux-smoke.mjs')).href)
 const artifacts = process.env.DSH_SMOKE_ARTIFACTS ?? join(root, '.artifacts/browser-smoke')
 await mkdir(artifacts, { recursive: true })
 const directory = await mkdtemp(join(artifacts, 'run-'))
@@ -58,6 +60,12 @@ const pendingSockets = new Set()
 let pendingRequests = 0
 /** Bodies the strict-mode fixture form delivered to the server. */
 const strictSubmissions = []
+let screenshots = []
+// A scripted model drives one real Agent session through the browser tools.
+const scripted = await startScriptedModel([
+  { name: 'browser_click', args: { selector: '#hoverTarget' }, delayMs: 5_000 },
+  { name: 'browser_screenshot', args: {} },
+], 'Timeline smoke done.')
 
 async function waitFor(check, label, timeout = 60_000) {
   const deadline = Date.now() + timeout
@@ -336,6 +344,11 @@ try {
     `        baseURL: http://127.0.0.1:${pendingPort}/v1`,
     '        headers:', '          Authorization: Bearer local-pending-check',
     '        models:', '          - id: pending-check',
+    '        retryPolicy:', '          mode: normal', '          maxRetries: 0',
+    '      scripted-check:', '        api: openai-completions',
+    `        baseURL: http://127.0.0.1:${scripted.port}/v1`,
+    '        headers:', '          Authorization: Bearer local-scripted-check',
+    '        models:', '          - id: scripted-check', '            input: [text, image]',
     '        retryPolicy:', '          mode: normal', '          maxRetries: 0',
     '- insert:', '    - id: browser-smoke-probe',
     `      name: ${JSON.stringify(pathToFileURL(join(root, 'scripts/fixtures/browser-probe.mjs')).href)}`,
@@ -1138,6 +1151,13 @@ try {
   await secondChat.getByRole('button', { name: 'Continue generating', exact: true }).waitFor()
   results.push('reconnection restores both panels, completed turn state, history and live projections without losing drafts')
 
+  // ---- Agent on the page, step timeline + audit log, pause / take over / resume ----
+  screenshots = await runAgentUxSmoke({
+    browser, page, panel, extensionId, directory, origin, bridge, env, downloadDirectory,
+    tool, succeed, settings, waitFor, hostRpc, bridgeRpc, scripted, results, delay,
+    knownSessions: [conversation.sessionId, secondConversation.sessionId],
+  })
+
   // ---- Kill switch (last: it drops the bridge) ----
   const badge = tab => panel.evaluate(tab => chrome.action.getBadgeText(tab === undefined ? {} : { tabId: tab }), tab)
   await waitFor(async () => await badge(tabId) === 'AI', 'agent-controlled tab badge')
@@ -1165,6 +1185,9 @@ try {
   succeed(await tool('browser_snapshot', {}))
   await waitFor(async () => await badge(tabId) === 'AI', 'controlled tab badge after reconnect')
   results.push('the kill switch cancels pending approvals and calls, drops the bridge until Reconnect, and the badge shows OFF / AI')
+  await page.bringToFront()
+  await assertKillSwitchAudited({ env, bridge, page, panel, waitFor, delay })
+  results.push('a real click on the page pill\'s Stop engages the kill switch, and every engagement is in the audit log without typed text')
 
   // ---- Panel-free runtime ----
   // Point the agent at the fixture page while a panel can still confirm it,
@@ -1239,7 +1262,9 @@ try {
   await waitFor(async () => (await currentWorker().evaluate(() => chrome.notifications.getAll()))[shown.id] === undefined,
     'approval notification cleared')
   await writeFile(join(directory, 'results.json'), JSON.stringify(results, null, 2))
+  await writeFile(join(directory, 'screenshots.json'), JSON.stringify(screenshots, null, 2))
   console.log(`Browser smoke passed: ${results.join('; ')}`)
+  console.log(`Screenshots: ${screenshots.join(', ')}`)
   console.log(`Evidence: ${directory}`)
 } finally {
   // Playwright may still hold dialogs the extension already answered.
@@ -1248,6 +1273,7 @@ try {
   if (bridgeProxy) await new Promise(resolve => bridgeProxy.close(resolve))
   for (const socket of pendingSockets) socket.destroy()
   await new Promise(resolve => pendingServer.close(resolve))
+  await scripted.close()
   if (host && host.exitCode === null && host.signalCode === null) {
     host.kill('SIGTERM')
     await once(host, 'exit')

@@ -2,8 +2,14 @@
 import { describe, expect, it } from 'vitest'
 import {
   appendLiveRow,
+  appendToolStep,
+  applyStepAudit,
+  auditByCall,
   completeLastTool,
+  completeToolStep,
   mergeHistoryRows,
+  resultFromEvent,
+  stepFromCall,
   pendingQuestionFromFrame,
   resolvedQuestionFromFrame,
   rowFromEvent,
@@ -103,7 +109,7 @@ describe('toolSummary', () => {
 })
 
 describe('appendLiveRow / completeLastTool', () => {
-  it('merges consecutive tool rows into one line (no tool spam)', () => {
+  it('keeps consecutive tool calls in one timeline row, one step each', () => {
     let rows: ReturnType<typeof appendLiveRow> = []
     rows = appendLiveRow(rows, 'user', '帮我操作页面', 1)
     rows = appendLiveRow(rows, 'tool', '读取页面', 2)
@@ -111,9 +117,65 @@ describe('appendLiveRow / completeLastTool', () => {
     rows = appendLiveRow(rows, 'tool', '填写内容 #9', 4)
     rows = completeLastTool(rows, 5)
     expect(rows.map((r) => r.kind)).toEqual(['user', 'tool'])
-    expect(rows[1]).toMatchObject({ text: '读取页面 → 点击元素 #7 → 填写内容 #9', status: 'complete' })
+    expect(rows[1]).toMatchObject({ status: 'complete' })
+    expect(rows[1]!.steps!.map((step) => [step.label, step.status])).toEqual([
+      ['读取页面', 'ok'], ['点击元素 #7', 'ok'], ['填写内容 #9', 'ok'],
+    ])
     rows = appendLiveRow(rows, 'assistant', '完成', 6)
     expect(rows.map((r) => r.kind)).toEqual(['user', 'tool', 'assistant'])
+  })
+})
+
+describe('step timeline', () => {
+  const call = (callId: string, name: string, args: unknown, time: number): SessionEventView => ({
+    type: 'tool/call', time, data: { callId, name, arguments: JSON.stringify(args) },
+  })
+  const result = (callId: string, text: string, time: number, extra: Record<string, unknown> = {}): SessionEventView => ({
+    type: 'tool/result', time, data: { message: { callId, content: [{ type: 'text', text }], ...extra } },
+  })
+
+  it('builds steps with targets, masked arguments, results, and durations, matched by call id', () => {
+    let rows = appendToolStep([], stepFromCall(call('c1', 'browser_type', { index: 4, text: 'hunter2' }, 1_000), 'x', 'en'), 1)
+    rows = appendToolStep(rows, stepFromCall(call('c2', 'browser_navigate', { url: 'https://shop.test/cart?x=1' }, 1_100), 'y', 'en'), 2)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.status).toBe('running')
+    // Parallel calls can finish out of order.
+    rows = completeToolStep(rows, resultFromEvent(result('c2', 'navigated', 1_400)), 3)
+    rows = completeToolStep(rows, resultFromEvent(result('c1', 'denied', 1_900, { isError: true })), 4)
+    const [typed, navigated] = rows[0]!.steps!
+    expect(typed).toMatchObject({ label: 'Enter text', target: '#4', status: 'error', result: 'denied', durationMs: 900 })
+    expect(typed!.args).toContain('•••• (7)')
+    expect(typed!.args).not.toContain('hunter2')
+    expect(navigated).toMatchObject({ label: 'Open page', target: 'shop.test/cart', status: 'ok', durationMs: 300 })
+    expect(rows[0]!.status).toBe('complete')
+  })
+
+  it('attaches screenshot thumbnails from result image blocks', () => {
+    let rows = appendToolStep([], stepFromCall(call('s', 'browser_screenshot', {}, 0), 'x', 'en'), 1)
+    const attachment = { attachmentId: 'att-1', mediaType: 'image/png', bytes: 10, width: 4, height: 3 }
+    rows = completeToolStep(rows, resultFromEvent({
+      type: 'tool/result', time: 5, data: { message: { callId: 's', content: [{ type: 'text', text: 'captured' }, { type: 'image', attachment }] } },
+    }), 2)
+    expect(rows[0]!.steps![0]).toMatchObject({ result: 'captured', images: [attachment] })
+  })
+
+  it('decorates steps with audit decisions and bridge durations', () => {
+    let rows = appendToolStep([], stepFromCall(call('c1', 'browser_click', { index: 1 }, 0), 'x', 'en'), 1)
+    rows = appendToolStep(rows, stepFromCall(call('c2', 'browser_click', { index: 2 }, 0), 'y', 'en'), 2)
+    const audit = auditByCall([
+      { kind: 'tool-call', toolCallId: 'c1' },
+      { kind: 'approval', toolCallId: 'c1', decision: 'allowed' },
+      { kind: 'result', toolCallId: 'c1', decision: 'allowed', durationMs: 42 },
+      { kind: 'result', toolCallId: 'c2', decision: 'not-required', durationMs: 7, policy: 'tainted', strictMode: 'armed' },
+      { kind: 'kill-switch' },
+      'garbage',
+    ])
+    const decorated = applyStepAudit(rows, audit)
+    expect(decorated[0]!.steps!.map((step) => [step.decision, step.durationMs])).toEqual([['allowed', 42], ['not-required', 7]])
+    expect(decorated[0]!.steps![1]).toMatchObject({ policy: 'tainted', strict: 'armed' })
+    expect(applyStepAudit(decorated, audit)).toBe(decorated)
+    expect(applyStepAudit(rows, new Map())).toBe(rows)
+    expect(auditByCall(undefined).size).toBe(0)
   })
 })
 
@@ -137,8 +199,9 @@ describe('mergeHistoryRows', () => {
     expect(rows.map((r) => r.kind)).toEqual(['user', 'tool', 'assistant'])
     expect(rows[0]!.text).toBe('操作页面')
     expect(rows[2]!.text).toBe('已点击')
-    // 连续工具调用归并一行（不逐条刷屏）
+    // 连续工具调用归并为一条时间线（每步一条）
     expect(rows[1]).toMatchObject({ text: '读取页面 → 点击元素 #7 → 点击元素 #8', status: 'complete' })
+    expect(rows[1]!.steps!.map((step) => step.status)).toEqual(['ok', 'ok', 'ok'])
   })
 
   it('does not restore empty assistant rows from history', () => {
@@ -148,7 +211,22 @@ describe('mergeHistoryRows', () => {
       ev('tool/call', { name: 'browser_snapshot', arguments: '{}' }),
       ev('tool/result', {}),
     ], () => { seq += 1; return seq }, 'zh')
-    expect(rows).toEqual([{ seq: 1, kind: 'tool', text: '读取页面', status: 'complete' }])
+    expect(rows).toMatchObject([{ kind: 'tool', text: '读取页面', status: 'complete' }])
+  })
+
+  it('keeps a step open across invisible events and fails steps a finished turn never answered', () => {
+    let seq = 0
+    const rows = mergeHistoryRows([
+      { type: 'tool/call', data: { callId: 'a', name: 'browser_click', arguments: '{"index":1}' } },
+      // Context injected while the call ran (e.g. the resume delta) renders nothing.
+      { type: 'user/message', data: { message: { content: [{ type: 'text', text: 'ctx' }], source: { kind: 'browser-context' } } } },
+      { type: 'tool/result', data: { message: { callId: 'a', content: [{ type: 'text', text: 'clicked' }] } } },
+      { type: 'tool/call', data: { callId: 'b', name: 'browser_snapshot', arguments: '{}' } },
+      { type: 'turn/end', data: {} },
+    ], () => { seq += 1; return seq }, 'en')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.steps!.map((step) => [step.callId, step.status])).toEqual([['a', 'ok'], ['b', 'error']])
+    expect(rows[0]!.status).toBe('complete')
   })
 
   it('handles empty history', () => {

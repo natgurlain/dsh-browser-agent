@@ -11,7 +11,8 @@
  */
 
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import { abortRunningActions, runAction, ActionError, typeTargetIsSensitive } from './actions.ts'
+import { abortRunningActions, runAction, ActionError, resolveActionTarget, typeTargetIsSensitive } from './actions.ts'
+import { AgentOverlay, type OverlayCopy, type PointKind } from './overlay.ts'
 import { ElementIds } from './ids.ts'
 import { handleInputSetup } from './input-support.ts'
 import { SelectionWatcher } from './selection.ts'
@@ -27,8 +28,14 @@ const selectionWatcher = new SelectionWatcher((selection) => {
   void chrome.runtime.sendMessage({ type: 'DSH_SELECTION', selection }).catch(() => {})
 })
 
+const overlay = new AgentOverlay({
+  killSwitch: () => { void chrome.runtime.sendMessage({ type: 'DSH_KILL_SWITCH' }).catch(() => {}) },
+  resume: () => { void chrome.runtime.sendMessage({ type: 'DSH_AGENT_RESUME' }).catch(() => {}) },
+})
+
 const CONTENT_SCRIPT_LISTENER = '__dshBrowserContentScriptListener__'
 const CONTENT_SELECTION_WATCHER = '__dshBrowserSelectionWatcher__'
+const CONTENT_OVERLAY = '__dshBrowserAgentOverlay__'
 type ContentListener = typeof onMessage
 
 /** A tool-call result for the bridge. */
@@ -61,6 +68,13 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
       })
     }
     return
+  }
+  if (msg.type === 'DSH_OVERLAY') {
+    handleOverlay(message as OverlayCommand).then(
+      () => { sendResponse({ ok: true }) },
+      () => { sendResponse({ ok: false }) },
+    )
+    return true
   }
   if (msg.type === 'DSH_BUDGET') {
     const incoming = (message as { budget?: Partial<SnapshotBudget> }).budget
@@ -123,12 +137,63 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
   return true // async response
 }
 
+interface OverlayCommand {
+  op?: unknown
+  on?: unknown
+  hidden?: unknown
+  kind?: unknown
+  args?: unknown
+  label?: unknown
+  copy?: Partial<OverlayCopy>
+}
+
+const POINT_KINDS = new Set<PointKind>(['click', 'hover', 'drag', 'type', 'select', 'press', 'upload', 'scroll'])
+
+function overlayTarget(args: unknown): Element | undefined {
+  if (typeof args !== 'object' || args === null) return undefined
+  try {
+    return resolveActionTarget(args as Record<string, unknown>, ids)
+  } catch {
+    return undefined
+  }
+}
+
+/** Apply one overlay command from the background; never throws into the page. */
+async function handleOverlay(command: OverlayCommand): Promise<void> {
+  switch (command.op) {
+    case 'control':
+      overlay.setControl(command.on === true, command.copy)
+      return
+    case 'takeover':
+      overlay.setTakeover(command.on === true, command.copy)
+      return
+    case 'hide':
+      overlay.setHidden(command.hidden === true)
+      return
+    case 'acting':
+      overlay.markActing()
+      return
+    case 'point': {
+      const kind = command.kind as PointKind
+      if (!POINT_KINDS.has(kind)) return
+      const args = (typeof command.args === 'object' && command.args !== null ? command.args : {}) as Record<string, unknown>
+      const targets = kind === 'drag'
+        ? [overlayTarget(args.from), overlayTarget(args.to)].filter((el): el is Element => el !== undefined)
+        : [overlayTarget(args)].filter((el): el is Element => el !== undefined)
+      if (targets.length === 0) return
+      await overlay.point(kind, targets, typeof command.label === 'string' ? command.label : undefined, command.copy)
+      return
+    }
+  }
+}
+
 // executeScript is used to recover tabs opened before extension install/reload.
 // Replace any stale listener left in the isolated world so a reload always
 // installs a listener belonging to the current extension context.
 const contentGlobal = globalThis as typeof globalThis & {
   [CONTENT_SCRIPT_LISTENER]?: ContentListener
   [CONTENT_SELECTION_WATCHER]?: { dispose: () => void }
+  [CONTENT_OVERLAY]?: { dispose: () => void }
 }
 const previousListener = contentGlobal[CONTENT_SCRIPT_LISTENER]
 if (previousListener !== undefined) {
@@ -137,8 +202,10 @@ if (previousListener !== undefined) {
 // A replaced content script keeps its page listeners until this instance
 // releases them: `selectionchange` is a document listener, not an extension one.
 contentGlobal[CONTENT_SELECTION_WATCHER]?.dispose()
+contentGlobal[CONTENT_OVERLAY]?.dispose()
 contentGlobal[CONTENT_SCRIPT_LISTENER] = onMessage
 contentGlobal[CONTENT_SELECTION_WATCHER] = selectionWatcher
+contentGlobal[CONTENT_OVERLAY] = overlay
 chrome.runtime.onMessage.addListener(onMessage)
 
 // A navigation action answers before unloading. The replacement content
@@ -150,6 +217,11 @@ void chrome.runtime.sendMessage({ type: 'DSH_CONTENT_READY' }).then((response: u
     selectionWatch?: unknown
     selectionWatchEpoch?: unknown
     selectionWatchRevision?: unknown
+    overlay?: { control?: unknown; takeover?: unknown; copy?: Partial<OverlayCopy> }
+  }
+  if (typeof ready.overlay === 'object' && ready.overlay !== null) {
+    if (ready.overlay.control === true) overlay.setControl(true, ready.overlay.copy)
+    if (ready.overlay.takeover === true) overlay.setTakeover(true, ready.overlay.copy)
   }
   const epoch = typeof ready.selectionWatchEpoch === 'string' ? ready.selectionWatchEpoch : undefined
   const revision = typeof ready.selectionWatchRevision === 'number' ? ready.selectionWatchRevision : undefined

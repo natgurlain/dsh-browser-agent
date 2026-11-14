@@ -86,3 +86,35 @@ describe('browser page context', () => {
     expect(injector.activate(third)).toBe(true)
   })
 })
+
+describe('resume context', () => {
+  it('describes what changed while paused and never supersedes a follow snapshot', () => {
+    const followed = createBrowserSnapshotMessage('Followed page')
+    const removed: string[] = []
+    const agent = {
+      id: 'live',
+      inbox: {
+        nextStep: [
+          { id: 'follow-1', source: followed.source },
+          { id: 'resume-old', source: createBrowserSnapshotMessage('old delta', 'resume').source },
+        ],
+        remove: (id: string) => { removed.push(id) },
+      },
+      inject: vi.fn(),
+    } as unknown as Agent & { inject: ReturnType<typeof vi.fn> }
+    const injector = new BrowserContextInjector({ get: vi.fn(() => agent) } as unknown as Pick<AgentRegistry, 'get'>)
+
+    expect(injector.inject('live', 'URL changed', 'resume')).toBe('injected')
+    expect(removed).toEqual(['resume-old'])
+    const message = agent.inject.mock.calls[0]![0]
+    expect(message.source.sections[0].name).toBe('browser-resume')
+    expect(message.content[0].text).toContain('paused browser control and has now resumed')
+    expect(message.content[0].text).toContain('URL changed')
+  })
+
+  it('drops a resume delta when no Agent is live', () => {
+    const injector = new BrowserContextInjector({ get: vi.fn(() => undefined) } as unknown as Pick<AgentRegistry, 'get'>)
+    expect(injector.inject('gone', 'delta', 'resume')).toBe('dropped')
+    expect(injector.activate(fakeAgent('gone'))).toBe(false)
+  })
+})

@@ -190,6 +190,16 @@ export interface TabManagementContext {
    * prompt; absent means the ordinary approval flow only.
    */
   policy?: CallPolicyHook
+  /** On-page agent overlay (ghost cursor, target outline); best effort. */
+  overlay?: ActionOverlay
+}
+
+/** What the dispatcher asks of the on-page overlay. Never fails a call. */
+export interface ActionOverlay {
+  /** Point at the call's target in `frame` just before it runs. */
+  beforeAction(tabId: number, frame: TabFrame, call: ToolCall): Promise<void>
+  /** Keep the overlay out of a captured screenshot. */
+  hiddenDuring<T>(tabId: number, run: () => Promise<T>): Promise<T>
 }
 
 /** Evaluate the policy layer for one call against the origins it touches. */
@@ -2086,7 +2096,18 @@ export async function dispatchToolCall(
       ?? unavailable('The current page DOM is protected by the browser.')
   }
   if (call.name === 'browser_screenshot') {
-    return await dispatchScreenshot(tab, call, signal, targetStillAllowed)
+    const overlay = tabManagement.overlay
+    return overlay === undefined
+      ? await dispatchScreenshot(tab, call, signal, targetStillAllowed)
+      : await overlay.hiddenDuring(tab.id, () => dispatchScreenshot(tab, call, signal, targetStillAllowed))
+  }
+  if (tabManagement.overlay !== undefined) {
+    const frame = executionFrames.find((candidate) => candidate.frameId === requestedFrame(call.args))
+    if (frame !== undefined) {
+      await tabManagement.overlay.beforeAction(tab.id, frame, call).catch(() => {})
+      if (isCancelled(call, signal)) return cancelled()
+      if (targetStillAllowed?.() === false) return targetChanged()
+    }
   }
   try {
     return await dispatchOnce(

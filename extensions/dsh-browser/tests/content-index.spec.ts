@@ -83,3 +83,36 @@ describe('selection watch arming', () => {
     }, { timeout: 2_000 })
   })
 })
+
+describe('agent overlay commands', () => {
+  afterEach(() => {
+    document.documentElement.querySelectorAll(':scope > div').forEach((el) => { el.remove() })
+    delete (globalThis as Record<string, unknown>).__dshBrowserAgentOverlay__
+  })
+
+  it('restores the control frame on a new document and answers point commands', async () => {
+    const addListener = vi.fn()
+    vi.stubGlobal('chrome', {
+      runtime: {
+        onMessage: { addListener, removeListener: vi.fn() },
+        sendMessage: vi.fn(async (message: { type: string }) => message.type === 'DSH_CONTENT_READY'
+          ? { selectionWatch: false, overlay: { control: true, takeover: false } }
+          : undefined),
+      },
+    })
+    Object.defineProperty(window, 'matchMedia', { configurable: true, value: () => ({ matches: true }) })
+    document.body.innerHTML = '<button id="go">Go</button>'
+    await import('../src/content/index.ts')
+    await vi.waitFor(() => { expect(document.documentElement.querySelectorAll(':scope > div')).toHaveLength(1) })
+    const listener = addListener.mock.calls[0]![0] as (message: unknown, sender: unknown, respond: (value: unknown) => void) => unknown
+    const responses: unknown[] = []
+    const async = listener({ type: 'DSH_OVERLAY', op: 'point', kind: 'click', args: { selector: '#go' }, label: '#1' }, {}, (value) => { responses.push(value) })
+    expect(async).toBe(true)
+    await vi.waitFor(() => { expect(responses).toEqual([{ ok: true }]) })
+    // A missing target is not an error: the action itself will report it.
+    listener({ type: 'DSH_OVERLAY', op: 'point', kind: 'click', args: { selector: '#missing' } }, {}, (value) => { responses.push(value) })
+    await vi.waitFor(() => { expect(responses).toHaveLength(2) })
+    expect(document.documentElement.querySelectorAll(':scope > div')).toHaveLength(1)
+    Reflect.deleteProperty(window, 'matchMedia')
+  })
+})

@@ -3717,3 +3717,398 @@ textarea:focus-visible {
 .taint-banner span { flex: 1; }
 .site-policy .trusted-origin span { margin-left: auto; margin-right: 8px; font-size: 12px; }
 .site-policy .managed-policy { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+
+/* ---- Step timeline (replaces the collapsed "a → b → c" tool row) ---- */
+
+.step-timeline {
+  width: min(100%, 430px);
+  min-width: 0;
+  padding: 8px 9px 6px;
+  border: 1px solid #dfe5f5;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.step-timeline.running {
+  border-color: #ccd6ff;
+  background: var(--blue-wash);
+}
+
+.step-timeline-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px 5px;
+}
+
+.step-timeline-count {
+  color: var(--faint);
+  font-size: calc(9.5px * var(--ui-scale));
+  font-weight: 650;
+}
+
+.step-timeline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.timeline-step {
+  min-width: 0;
+  border-radius: 9px;
+}
+
+.timeline-step-head {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 4px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.timeline-step-head:disabled {
+  cursor: default;
+}
+
+.timeline-step-head:hover:not(:disabled) {
+  background: rgba(77, 107, 254, 0.06);
+}
+
+.timeline-step-icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--blue-soft);
+  color: var(--blue);
+}
+
+.timeline-step.error .timeline-step-icon {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.timeline-step-icon svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.55;
+}
+
+.timeline-step-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.timeline-step-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--ink);
+  font-size: calc(11.5px * var(--ui-scale));
+  font-weight: 620;
+  line-height: 1.3;
+}
+
+.timeline-step-index {
+  color: var(--faint);
+  font-size: calc(9.5px * var(--ui-scale));
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.timeline-step-target {
+  overflow: hidden;
+  color: #45506a;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: calc(10.5px * var(--ui-scale));
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-step-meta {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+}
+
+.timeline-step-duration {
+  color: var(--faint);
+  font-size: calc(9.5px * var(--ui-scale));
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+.timeline-step-failed {
+  color: var(--danger);
+  font-size: calc(9.5px * var(--ui-scale));
+  font-weight: 700;
+}
+
+.decision-badge {
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: calc(9px * var(--ui-scale));
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.decision-badge.good {
+  border-color: #b7e4c7;
+  background: #effaf3;
+  color: #18794e;
+}
+
+.decision-badge.bad {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.decision-badge.warn {
+  border-color: var(--security-border);
+  background: var(--security-soft);
+  color: var(--security);
+}
+
+.timeline-step-thumb {
+  padding: 0 4px 6px 36px;
+}
+
+/* A thumbnail, not the full preview: the expanded details show it larger. */
+.timeline-step-thumb .message-images {
+  zoom: 0.6;
+}
+
+.timeline-step-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 4px 6px 36px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+
+.timeline-detail-label {
+  color: var(--faint);
+  font-size: calc(9.5px * var(--ui-scale));
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.timeline-step-details pre {
+  max-height: 180px;
+  margin: 0 0 4px;
+  overflow: auto;
+  color: #45506a;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: calc(10.5px * var(--ui-scale));
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- Pause / take over / resume ---- */
+
+.agent-controls {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 10px;
+  margin: 10px 12px 0;
+  padding: 9px 10px 9px 13px;
+  border: 1px solid #dce3ff;
+  border-radius: 13px;
+  background: #f9faff;
+  box-shadow: 0 1px 2px rgba(23, 32, 51, 0.05);
+}
+
+.agent-controls.paused {
+  border-color: var(--security-border);
+  background: var(--security-soft);
+}
+
+.agent-controls-status {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: calc(11px * var(--ui-scale));
+  font-weight: 620;
+}
+
+.agent-controls-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--blue);
+  box-shadow: 0 0 0 3px rgba(77, 107, 254, 0.18);
+  animation: agent-pulse 1.6s ease-in-out infinite;
+}
+
+.agent-controls-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 180px;
+  flex-direction: column;
+  gap: 2px;
+  color: #4a3200;
+}
+
+.agent-controls-copy strong {
+  font-size: calc(12px * var(--ui-scale));
+}
+
+.agent-controls-copy span {
+  color: #6b4b00;
+  font-size: calc(11px * var(--ui-scale));
+  line-height: 1.4;
+}
+
+.agent-controls-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agent-controls-actions button {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  font-size: calc(11px * var(--ui-scale));
+  font-weight: 650;
+}
+
+.agent-controls-actions button:hover:not(:disabled) {
+  border-color: #adb7c7;
+}
+
+.agent-controls-actions button.primary {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: #fff;
+}
+
+.agent-controls-actions button.primary:hover:not(:disabled) {
+  border-color: var(--blue-hover);
+  background: var(--blue-hover);
+}
+
+.agent-controls-actions button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.agent-controls-actions svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.agent-controls-actions button.primary svg {
+  fill: currentColor;
+}
+
+@keyframes agent-pulse {
+  50% { box-shadow: 0 0 0 6px rgba(77, 107, 254, 0.06); }
+}
+
+/* ---- Audit log export (settings) ---- */
+
+.settings .audit-export {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 12px;
+  margin-top: 12px;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.audit-export-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.audit-export-copy small {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.settings .audit-export > button.secondary {
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.audit-export-status {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #18794e;
+  font-size: calc(11px * var(--ui-scale));
+}
+
+.audit-export-status.error {
+  color: var(--danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-controls-dot {
+    animation: none;
+  }
+}

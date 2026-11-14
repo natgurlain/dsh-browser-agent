@@ -136,6 +136,8 @@ export interface PanelCopy {
     catchPageDialogsHelp: string
     autoResumeSession: string
     autoResumeSessionHelp: string
+    showAgentOverlay: string
+    showAgentOverlayHelp: string
     trustedOrigins: string
     trustedOriginsHelp: string
     trustedOriginInput: string
@@ -213,6 +215,43 @@ export interface PanelCopy {
     copyCommand: string
     copied: string
     copyError: string
+  }
+  agentControl: {
+    /** Holds the next browser action once the current one finishes. */
+    pauseAfterStep: string
+    pauseAfterStepHint: string
+    takeOver: string
+    takeOverHint: string
+    resume: string
+    resumeHint: string
+    working: string
+    pausedTitle: string
+    pausedBody: (held: number) => string
+    takenOverTitle: string
+    takenOverBody: (held: number) => string
+    resuming: string
+  }
+  timeline: {
+    title: (count: number) => string
+    expand: string
+    collapse: string
+    arguments: string
+    result: string
+    screenshot: string
+    running: string
+    failed: string
+    decisions: Record<string, string>
+    /** Policy-layer badges (site policy, taint, strict mode). */
+    policies: Record<string, string>
+    duration: (ms: number) => string
+  }
+  audit: {
+    section: string
+    help: string
+    exportButton: string
+    exporting: string
+    exported: (count: number, verified: boolean) => string
+    failed: (message: string) => string
   }
   killSwitch: {
     /** Toolbar button that stops the agent. */
@@ -410,6 +449,15 @@ const EN: PanelCopy = {
       browser_devtools_list_requests: 'List network requests',
       browser_devtools_get_request: 'Read request detail',
       browser_devtools_request_body: 'Read request body',
+      browser_screenshot: 'Take screenshot',
+      browser_hover: 'Hover element',
+      browser_drag: 'Drag element',
+      browser_clipboard: 'Paste from clipboard',
+      browser_upload: 'Upload file',
+      browser_dialog: 'Answer page dialog',
+      browser_downloads: 'Check downloads',
+      browser_save_pdf: 'Save page as PDF',
+      browser_pdf_text: 'Read PDF text',
     },
     overflow: (shown, total) => `${shown.join(' → ')} → ${total - shown.length} more`,
   },
@@ -491,6 +539,8 @@ const EN: PanelCopy = {
     approvalTimeoutHelp: 'How long an approval waits for an answer while the side panel is closed — from a notification, the dsh web UI, or the CLI — before it is denied. 1–14 minutes.',
     autoResumeSession: "Resume this page's conversation",
     autoResumeSessionHelp: 'Reopen the conversation associated with this tab and page path; other pages start a new conversation',
+    showAgentOverlay: 'Show the agent on the page',
+    showAgentOverlayHelp: 'A ghost cursor and outline mark each target before the agent acts, and controlled tabs get a colored frame with a Stop button',
     trustedOrigins: 'Always-allowed domains',
     trustedOriginsHelp: 'The approval dialog can trust a domain for the current side-panel session only. Domains added here permanently skip action confirmation when every known origin is trusted. Wildcards include the base domain and subdomains, and stay scoped to their scheme and port; `*.example.com` defaults to HTTPS.',
     trustedOriginInput: 'Domain to always trust (e.g. https://example.com or https://*.example.com)',
@@ -568,6 +618,56 @@ const EN: PanelCopy = {
     copyCommand: 'Copy uninstall command',
     copied: 'Command copied',
     copyError: 'Copy failed',
+  },
+  agentControl: {
+    pauseAfterStep: 'Pause after this step',
+    pauseAfterStepHint: 'Let the current browser action finish, then hold the next one until you resume',
+    takeOver: 'Take over',
+    takeOverHint: 'Pause the agent and use the page yourself; resume to hand control back',
+    resume: 'Resume',
+    resumeHint: 'Tell the agent what changed and continue',
+    working: 'The agent is using the browser',
+    pausedTitle: 'Paused',
+    pausedBody: (held) => held === 0 ? 'The next browser action will wait for you.' : `${held} browser action${held === 1 ? ' is' : 's are'} waiting for you.`,
+    takenOverTitle: "You're in control",
+    takenOverBody: (held) => held === 0 ? 'Use the page freely. Resume when done.' : `Use the page freely; ${held} agent action${held === 1 ? ' is' : 's are'} waiting. Resume when done.`,
+    resuming: 'Resuming…',
+  },
+  timeline: {
+    title: (count) => `${count} browser step${count === 1 ? '' : 's'}`,
+    expand: 'Show details',
+    collapse: 'Hide details',
+    arguments: 'Arguments',
+    result: 'Result',
+    screenshot: 'Screenshot',
+    running: 'Running',
+    failed: 'Failed',
+    decisions: {
+      'not-required': 'Auto',
+      'auto-allowed': 'Trusted',
+      allowed: 'Approved',
+      denied: 'Denied',
+      'timed-out': 'Timed out',
+      unavailable: 'No approval',
+      cancelled: 'Cancelled',
+      'held-expired': 'Paused too long',
+    },
+    policies: {
+      blocked: 'Blocked by site policy',
+      tainted: 'Needs review (tainted)',
+      'site-ask': 'Site asks first',
+      'strict-armed': 'Strict mode',
+      'strict-refused': 'Strict mode: refused',
+    },
+    duration: (ms) => ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`,
+  },
+  audit: {
+    section: 'Audit log',
+    help: 'Every browser action, approval, navigation, and result is written to a tamper-evident (hash-chained) log on this computer. Typed text and secrets are never stored.',
+    exportButton: 'Export audit log',
+    exporting: 'Exporting…',
+    exported: (count, verified) => `Exported ${count} entr${count === 1 ? 'y' : 'ies'}${verified ? ' — chain verified' : ' — chain verification FAILED'}`,
+    failed: (message) => `Could not export the audit log: ${message}`,
   },
   killSwitch: {
     engage: 'Stop the agent',
@@ -765,6 +865,15 @@ const ZH: PanelCopy = {
       browser_devtools_list_requests: '列出网络请求',
       browser_devtools_get_request: '查看请求详情',
       browser_devtools_request_body: '读取请求正文',
+      browser_screenshot: '截取页面截图',
+      browser_hover: '悬停元素',
+      browser_drag: '拖动元素',
+      browser_clipboard: '从剪贴板粘贴',
+      browser_upload: '上传文件',
+      browser_dialog: '回应页面对话框',
+      browser_downloads: '查看下载',
+      browser_save_pdf: '将页面保存为 PDF',
+      browser_pdf_text: '读取 PDF 文本',
     },
     overflow: (shown, total) => `${shown.join(' → ')} 等${total}个工具`,
   },
@@ -846,6 +955,8 @@ const ZH: PanelCopy = {
     approvalTimeoutHelp: '侧栏关闭时，审批请求（通知、dsh 网页端或命令行均可回答）等待多久后自动拒绝。范围 1–14 分钟。',
     autoResumeSession: '续接当前页面会话',
     autoResumeSessionHelp: '重新打开当前标签页此页面的会话；其他页面会新建会话',
+    showAgentOverlay: '在页面上显示助手操作',
+    showAgentOverlayHelp: '助手操作前用光标和高亮框标出目标，受控标签页显示彩色边框和停止按钮',
     trustedOrigins: '永久免确认域名',
     trustedOriginsHelp: '审批框可只信任本次侧栏会话。这里添加的域名仅在所有已知来源均受信任时免除操作确认。通配符包含主域及其子域，并严格区分协议和端口；`*.example.com` 默认使用 HTTPS。',
     trustedOriginInput: '要永久信任的域名（如 https://example.com 或 https://*.example.com）',
@@ -923,6 +1034,56 @@ const ZH: PanelCopy = {
     copyCommand: '复制卸载命令',
     copied: '命令已复制',
     copyError: '复制失败',
+  },
+  agentControl: {
+    pauseAfterStep: '本步后暂停',
+    pauseAfterStepHint: '当前浏览器操作完成后，暂停下一步，直到你点击继续',
+    takeOver: '接管',
+    takeOverHint: '暂停助手，由你直接操作页面；完成后点击继续交还控制',
+    resume: '继续',
+    resumeHint: '告知助手期间的变化并继续',
+    working: '助手正在操作浏览器',
+    pausedTitle: '已暂停',
+    pausedBody: (held) => held === 0 ? '下一步浏览器操作将等待你继续。' : `有 ${held} 个浏览器操作正在等待。`,
+    takenOverTitle: '由你接管',
+    takenOverBody: (held) => held === 0 ? '你可以自由操作页面，完成后点击继续。' : `你可以自由操作页面；有 ${held} 个助手操作在等待，完成后点击继续。`,
+    resuming: '正在继续…',
+  },
+  timeline: {
+    title: (count) => `${count} 个浏览器步骤`,
+    expand: '展开详情',
+    collapse: '收起详情',
+    arguments: '参数',
+    result: '结果',
+    screenshot: '截图',
+    running: '进行中',
+    failed: '失败',
+    decisions: {
+      'not-required': '自动',
+      'auto-allowed': '已信任',
+      allowed: '已批准',
+      denied: '已拒绝',
+      'timed-out': '已超时',
+      unavailable: '无法审批',
+      cancelled: '已取消',
+      'held-expired': '暂停超时',
+    },
+    policies: {
+      blocked: '已被站点策略阻止',
+      tainted: '需审核（已受污染）',
+      'site-ask': '站点要求确认',
+      'strict-armed': '严格模式',
+      'strict-refused': '严格模式：已拒绝',
+    },
+    duration: (ms) => ms < 1000 ? `${ms} 毫秒` : `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} 秒`,
+  },
+  audit: {
+    section: '审计日志',
+    help: '每次浏览器操作、审批、跳转和结果都会写入本机上防篡改（哈希链）的日志。输入的文字和密钥不会被记录。',
+    exportButton: '导出审计日志',
+    exporting: '正在导出…',
+    exported: (count, verified) => `已导出 ${count} 条记录${verified ? '，哈希链校验通过' : '，哈希链校验失败'}`,
+    failed: (message) => `无法导出审计日志：${message}`,
   },
   killSwitch: {
     engage: '停止代理',

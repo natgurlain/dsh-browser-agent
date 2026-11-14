@@ -11,6 +11,36 @@ import { getUiLocale, type UiLocale } from '../i18n.ts'
 import { imageRefsFromBlocks, type ImageAttachmentRef } from './attachments.ts'
 import { PANEL_COPY } from './strings.ts'
 
+/**
+ * One step of the agent's browser timeline: a tool call and, once it
+ * finished, its outcome. Decision and duration come from the bridge's audit
+ * log when it is available; the session's own timestamps fill in otherwise.
+ */
+export interface ToolStep {
+  /** The model's tool-call id (joins the call, its result, and audit entries). */
+  callId: string
+  name: string
+  /** Localized action label, e.g. "Click element". */
+  label: string
+  /** What the step acted on: "#7", a selector, a host and path, a key. */
+  target?: string
+  /** Pretty-printed arguments with typed text masked. */
+  args?: string
+  /** Result text preview (truncated). */
+  result?: string
+  status: 'running' | 'ok' | 'error'
+  startedAt?: number
+  durationMs?: number
+  /** Approval decision recorded in the audit log. */
+  decision?: string
+  /** Policy layer outcome (`blocked`, `tainted`, `site-ask`, `site-trusted`). */
+  policy?: string
+  /** Strict mode (`armed`, `refused`). */
+  strict?: string
+  /** Screenshot (or other image) the step returned. */
+  images?: ImageAttachmentRef[]
+}
+
 /** One rendered conversation row. */
 export interface Row {
   seq: number
@@ -18,19 +48,24 @@ export interface Row {
   text: string
   images?: ImageAttachmentRef[]
   status?: 'running' | 'complete'
+  /** Tool rows: one entry per step, in call order. */
+  steps?: ToolStep[]
 }
 
 /** Minimal view of a SessionEvent (payload in `data`). */
 export interface SessionEventView {
   type: string
   seq?: number
+  /** Unix epoch milliseconds. */
+  time?: number
   surfaceOp?: unknown
   data?: {
     content?: unknown
     source?: { kind?: string }
-    message?: { content?: unknown; source?: { kind?: string } }
+    message?: { content?: unknown; source?: { kind?: string }; callId?: string; isError?: boolean }
     turn?: number
     step?: number
+    callId?: string
     name?: string
     arguments?: string
     title?: unknown
@@ -184,7 +219,203 @@ export function toolSummary(name: string, argsJson: unknown, locale: UiLocale = 
   return summary
 }
 
-/** live 合并：若最后一行是工具行则并入（连续工具调用不刷屏），否则新增一行。 */
+/** Argument names whose values the timeline never shows (only their length). */
+const MASKED_ARGS = new Set(['text', 'promptText', 'password', 'secret', 'token', 'value', 'values'])
+const MAX_PREVIEW = 600
+
+function parseArgs(argsJson: unknown): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(String(argsJson ?? '{}')) as unknown
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function hostAndPath(raw: string): string {
+  try {
+    const url = new URL(raw)
+    return `${url.host}${url.pathname === '/' ? '' : url.pathname}`
+  } catch {
+    return raw
+  }
+}
+
+/** The thing a step acted on, as a short label. */
+export function stepTarget(args: Record<string, unknown> | undefined): string | undefined {
+  if (args === undefined) return undefined
+  const end = (value: unknown): string | undefined => {
+    if (typeof value !== 'object' || value === null) return undefined
+    const { index, selector } = value as Record<string, unknown>
+    return typeof index === 'number' ? `#${index}` : typeof selector === 'string' ? selector : undefined
+  }
+  if (typeof args.index === 'number') return `#${args.index}`
+  if (typeof args.selector === 'string' && args.selector !== '') return args.selector
+  const from = end(args.from)
+  if (from !== undefined) return `${from} → ${end(args.to) ?? '…'}`
+  if (typeof args.url === 'string' && args.url !== '') return hostAndPath(args.url)
+  if (typeof args.key === 'string' && args.key !== '') return args.key
+  if (typeof args.tabId === 'number') return `tab ${args.tabId}`
+  return undefined
+}
+
+/** Arguments for the expandable preview, with typed text replaced by its length. */
+export function maskedArgsPreview(args: Record<string, unknown> | undefined): string | undefined {
+  if (args === undefined || Object.keys(args).length === 0) return undefined
+  const masked: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(args)) {
+    masked[key] = MASKED_ARGS.has(key) && typeof value === 'string' ? `•••• (${value.length})` : value
+  }
+  const text = JSON.stringify(masked, null, 2)
+  return text.length > MAX_PREVIEW ? `${text.slice(0, MAX_PREVIEW)}…` : text
+}
+
+/** A running step from a `tool/call` event. */
+export function stepFromCall(event: SessionEventView, fallbackId: string, locale: UiLocale = getUiLocale()): ToolStep {
+  const name = event.data?.name ?? 'tool'
+  const args = parseArgs(event.data?.arguments)
+  const target = stepTarget(args)
+  const preview = maskedArgsPreview(args)
+  return {
+    callId: event.data?.callId ?? fallbackId,
+    name,
+    label: PANEL_COPY[locale].tool.labels[name] ?? name,
+    ...(target === undefined ? {} : { target }),
+    ...(preview === undefined ? {} : { args: preview }),
+    status: 'running',
+    ...(event.time === undefined ? {} : { startedAt: event.time }),
+  }
+}
+
+/** The outcome carried by a `tool/result` event. */
+export interface StepResult {
+  callId?: string
+  isError: boolean
+  text: string
+  images: ImageAttachmentRef[]
+  time?: number
+}
+
+export function resultFromEvent(event: SessionEventView): StepResult {
+  const message = event.data?.message
+  const text = textFromBlocks(message?.content ?? [])
+  return {
+    ...(message?.callId === undefined ? {} : { callId: message.callId }),
+    isError: message?.isError === true,
+    text: text.length > MAX_PREVIEW ? `${text.slice(0, MAX_PREVIEW)}…` : text,
+    images: imageRefsFromBlocks(message?.content),
+    ...(event.time === undefined ? {} : { time: event.time }),
+  }
+}
+
+function stepsText(steps: ToolStep[]): string {
+  return steps.map((step) => step.target === undefined ? step.label : `${step.label} ${step.target}`).join(' → ')
+}
+
+function toolRow(seq: number, steps: ToolStep[]): Row {
+  return {
+    seq,
+    kind: 'tool',
+    text: stepsText(steps),
+    status: steps.some((step) => step.status === 'running') ? 'running' : 'complete',
+    steps,
+  }
+}
+
+/** Add one running step: consecutive tool calls share one timeline row. */
+export function appendToolStep(rows: Row[], step: ToolStep, seq: number): Row[] {
+  const last = rows[rows.length - 1]
+  if (last?.kind === 'tool') {
+    const steps = [...(last.steps ?? []).filter((existing) => existing.callId !== step.callId), step]
+    return [...rows.slice(0, -1), toolRow(seq, steps)]
+  }
+  return [...rows, toolRow(seq, [step])]
+}
+
+/** Finish the step a `tool/result` answers (by call id; else the oldest running step). */
+export function completeToolStep(rows: Row[], result: StepResult, seq: number): Row[] {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index]!
+    if (row.kind !== 'tool' || row.steps === undefined) continue
+    const position = result.callId === undefined
+      ? row.steps.findIndex((step) => step.status === 'running')
+      : row.steps.findIndex((step) => step.callId === result.callId)
+    if (position < 0) continue
+    const steps = row.steps.map((step, at) => at !== position ? step : {
+      ...step,
+      status: result.isError ? 'error' as const : 'ok' as const,
+      ...(result.text === '' ? {} : { result: result.text }),
+      ...(result.images.length === 0 ? {} : { images: result.images }),
+      ...(step.durationMs === undefined && step.startedAt !== undefined && result.time !== undefined
+        ? { durationMs: Math.max(0, result.time - step.startedAt) }
+        : {}),
+    })
+    const next = [...rows]
+    next[index] = { ...toolRow(index === rows.length - 1 ? seq : row.seq, steps) }
+    return next
+  }
+  return rows
+}
+
+/** What the audit log knows about one step. */
+export interface StepAudit {
+  decision?: string
+  durationMs?: number
+  policy?: string
+  strict?: string
+}
+
+/** Index audit-log entries by the model's tool-call id. */
+export function auditByCall(entries: unknown): Map<string, StepAudit> {
+  const byCall = new Map<string, StepAudit>()
+  if (!Array.isArray(entries)) return byCall
+  for (const raw of entries) {
+    if (!isRecord(raw) || typeof raw.toolCallId !== 'string') continue
+    const current = byCall.get(raw.toolCallId) ?? {}
+    if (raw.kind === 'approval' && typeof raw.decision === 'string') current.decision = raw.decision
+    if (typeof raw.policy === 'string') current.policy = raw.policy
+    if (typeof raw.strictMode === 'string') current.strict = raw.strictMode
+    if (raw.kind === 'result') {
+      if (typeof raw.decision === 'string' && current.decision === undefined) current.decision = raw.decision
+      if (typeof raw.durationMs === 'number') current.durationMs = raw.durationMs
+    }
+    byCall.set(raw.toolCallId, current)
+  }
+  return byCall
+}
+
+/** Decorate timeline steps with decisions and bridge-measured durations. */
+export function applyStepAudit(rows: Row[], audit: Map<string, StepAudit>): Row[] {
+  if (audit.size === 0) return rows
+  let changed = false
+  const next = rows.map((row) => {
+    if (row.kind !== 'tool' || row.steps === undefined) return row
+    let rowChanged = false
+    const steps = row.steps.map((step) => {
+      const found = audit.get(step.callId)
+      if (found === undefined) return step
+      const decision = found.decision ?? step.decision
+      const durationMs = found.durationMs ?? step.durationMs
+      const policy = found.policy ?? step.policy
+      const strict = found.strict ?? step.strict
+      if (decision === step.decision && durationMs === step.durationMs && policy === step.policy && strict === step.strict) return step
+      rowChanged = true
+      return {
+        ...step,
+        ...(decision === undefined ? {} : { decision }),
+        ...(durationMs === undefined ? {} : { durationMs }),
+        ...(policy === undefined ? {} : { policy }),
+        ...(strict === undefined ? {} : { strict }),
+      }
+    })
+    if (!rowChanged) return row
+    changed = true
+    return { ...row, steps }
+  })
+  return changed ? next : rows
+}
+
+/** live 合并：工具调用并入同一时间线行（每步一条），其他行直接追加。 */
 export function appendLiveRow(
   rows: Row[],
   kind: Row['kind'],
@@ -193,11 +424,7 @@ export function appendLiveRow(
   images?: ImageAttachmentRef[],
 ): Row[] {
   if (kind === 'tool') {
-    const last = rows[rows.length - 1]
-    if (last?.kind === 'tool') {
-      return [...rows.slice(0, -1), { seq, kind: 'tool', text: `${last.text} → ${text}`, status: 'running' }]
-    }
-    return [...rows, { seq, kind, text, status: 'running' }]
+    return appendToolStep(rows, { callId: `live-${seq}`, name: text, label: text, status: 'running' }, seq)
   }
   return [...rows, { seq, kind, text, ...(images === undefined || images.length === 0 ? {} : { images }) }]
 }
@@ -206,43 +433,48 @@ export function appendLiveRow(
 export function completeLastTool(rows: Row[], seq: number): Row[] {
   const last = rows[rows.length - 1]
   if (last?.kind === 'tool') {
-    return [...rows.slice(0, -1), { ...last, seq, status: 'complete' }]
+    const steps = (last.steps ?? []).map((step) => step.status === 'running' ? { ...step, status: 'ok' as const } : step)
+    return [...rows.slice(0, -1), { ...last, seq, status: 'complete', steps }]
   }
   return rows
 }
 
-/** 历史渲染：连续工具调用归并成一行（tool/call..result 不逐条刷屏；超 3 个折叠计数）。 */
+/**
+ * 历史渲染：与实时路径相同的归并规则——连续工具调用并入同一条时间线，结果按 callId
+ * 回填。不产生可见行的事件（注入的浏览器上下文、请求头等）不会打断时间线；
+ * `turn/end` 时仍未返回结果的步骤视为已中断。
+ */
 export function mergeHistoryRows(
   events: SessionEventView[],
   nextSeq: () => number,
   locale: UiLocale = getUiLocale(),
 ): Row[] {
-  const rows: Row[] = []
-  let pendingTool: { items: string[]; total: number } | null = null
-  const flushTool = (): void => {
-    if (pendingTool === null) return
-    const shown = pendingTool.items.slice(0, 3)
-    const label = pendingTool.total > shown.length
-      ? PANEL_COPY[locale].tool.overflow(shown, pendingTool.total)
-      : shown.join(' → ')
-    rows.push({ seq: nextSeq(), kind: 'tool', text: label, status: 'complete' })
-    pendingTool = null
-  }
+  let rows: Row[] = []
+  let fallback = 0
   for (const ev of events) {
     if (ev.type === 'tool/call') {
-      const summary = toolSummary(ev.data?.name ?? 'tool', ev.data?.arguments, locale)
-      if (pendingTool === null) pendingTool = { items: [summary], total: 1 }
-      else {
-        pendingTool.items.push(summary)
-        pendingTool.total += 1
-      }
+      fallback += 1
+      rows = appendToolStep(rows, stepFromCall(ev, `history-${fallback}-${ev.seq ?? 0}`, locale), nextSeq())
       continue
     }
-    if (ev.type === 'tool/result') continue
-    flushTool()
+    if (ev.type === 'tool/result') {
+      rows = completeToolStep(rows, resultFromEvent(ev), nextSeq())
+      continue
+    }
+    if (ev.type === 'turn/end') {
+      rows = settleInterruptedSteps(rows)
+      continue
+    }
     const row = rowFromEvent(ev)
     if (row !== null) rows.push({ ...row, seq: nextSeq() })
   }
-  flushTool()
   return rows
+}
+
+/** Steps still running when their turn ended never got a result: show them as failed. */
+function settleInterruptedSteps(rows: Row[]): Row[] {
+  if (!rows.some((row) => row.steps?.some((step) => step.status === 'running') === true)) return rows
+  return rows.map((row) => row.steps === undefined || !row.steps.some((step) => step.status === 'running')
+    ? row
+    : { ...row, status: 'complete', steps: row.steps.map((step) => step.status === 'running' ? { ...step, status: 'error' as const } : step) })
 }

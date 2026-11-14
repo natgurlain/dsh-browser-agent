@@ -79,6 +79,7 @@ describe('config', () => {
     expect(new Config()).toEqual({
       ...VALID,
       sessionWorkspacePath: dshHomePath('browser-sessions'),
+      auditLogPath: dshHomePath('browser-audit'),
       deferSessionCreate: true,
       beacon: true,
       beaconPorts: [...BEACON_PORTS],
@@ -113,6 +114,7 @@ describe('config', () => {
       maxInteractiveItems: 3,
       devToolsMaxChars: 24_000,
       sessionWorkspacePath: '',
+      auditLogPath: dshHomePath('browser-audit'),
       deferSessionCreate: false,
       beacon: false,
       beaconPorts: [...BEACON_PORTS],

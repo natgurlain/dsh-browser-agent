@@ -9,6 +9,7 @@ import WebSocket from 'ws'
 import { BridgeServer, BridgeToolError, MAX_READY_CONNECTIONS, toolCallIdArg, type HostApprovalRequest } from '../src/server.ts'
 import {
   BRIDGE_APPROVAL_ASK_METHOD,
+  BRIDGE_AUDIT_RECORD_METHOD,
   BRIDGE_APPROVAL_WITHDRAW_METHOD,
   BRIDGE_CLOSE_CODES,
   BRIDGE_PROTOCOL_VERSION,
@@ -293,6 +294,25 @@ describe('tool routing', () => {
     const frame = await nextToolCall(b)
     b.send({ t: 'tool.result', id: frame.id, ok: true, result: { text: 'b' } })
     await expect(call).resolves.toEqual({ text: 'b' })
+  })
+
+  it('audits which connection served a call and lets only that connection annotate it', async () => {
+    const audit = { dispatched: vi.fn(), annotated: vi.fn(), settled: vi.fn(), killSwitch: vi.fn() }
+    const h = await startBridge({ audit })
+    const a = await connectClient(h.url, identity('client-aaaa'))
+    const b = await connectClient(h.url, identity('client-bbbb'))
+    const call = h.bridge.requestTool('browser_click', { index: 1 }, new AbortController().signal, 1_000, 'sess', 'toolu_9')
+    const frame = await nextToolCall(b)
+    const served = audit.dispatched.mock.calls[0]![0] as { connection: string; toolCallId: string }
+    expect(served.toolCallId).toBe('toolu_9')
+    expect(served.connection).toMatch(/bbbb/u)
+    expect((await a.rpc(BRIDGE_AUDIT_RECORD_METHOD, { callId: frame.id, decision: 'allowed' })).ok).toBe(false)
+    expect((await b.rpc(BRIDGE_AUDIT_RECORD_METHOD, { callId: frame.id, decision: 'allowed' })).ok).toBe(true)
+    expect(audit.annotated).toHaveBeenCalledExactlyOnceWith(frame.id, { decision: 'allowed' })
+    await a.rpc(BRIDGE_AUDIT_RECORD_METHOD, { event: 'kill-switch' })
+    expect(audit.killSwitch).toHaveBeenCalledWith([], expect.stringMatching(/aaaa/u))
+    b.send({ t: 'tool.result', id: frame.id, ok: true, result: { text: 'ok' } })
+    await expect(call).resolves.toEqual({ text: 'ok' })
   })
 
   it('ignores a tool.result from a connection the call was not sent to', async () => {

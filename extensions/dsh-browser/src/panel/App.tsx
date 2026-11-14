@@ -8,14 +8,16 @@
  */
 
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_AUDIT_EXPORT_METHOD, BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeCaps } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeFailure, BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
 import { SitePolicySettings } from './SitePolicySettings.tsx'
 import { TaintBanner } from './TaintBanner.tsx'
-import { connectPanel, PanelRpcError, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type PanelApi, type PanelSettings } from './api.ts'
+import { connectPanel, PanelRpcError, type AgentPauseState, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type PanelApi, type PanelSettings } from './api.ts'
+import { StepTimeline } from './StepTimeline.tsx'
+import { AgentControls } from './AgentControls.tsx'
 import { renderMarkdown } from './markdown.ts'
 import whaleUrl from '../../assets/icons/deepseek-256.png'
 import type { ApprovalDecision, ApprovalDetail, ApprovalRequest } from '../security/approval.ts'
@@ -120,12 +122,16 @@ import {
 /** One rendered conversation row. */
 import {
   appendLiveRow,
-  completeLastTool,
+  appendToolStep,
+  applyStepAudit,
+  auditByCall,
+  completeToolStep,
+  resultFromEvent,
+  stepFromCall,
   mergeHistoryRows,
   pendingQuestionFromFrame,
   resolvedQuestionFromFrame,
   rowFromEvent,
-  toolSummary,
   type Row,
   type PendingQuestion,
   type ResolvedQuestion,
@@ -392,14 +398,6 @@ function QuoteIcon(): React.JSX.Element {
   return (
     <svg viewBox="0 0 20 20" aria-hidden="true">
       <path d="M8.4 5.5 6.9 8.2h1.9v4.8H4.5V8.5l2-3h1.9Zm7 0L13.9 8.2h1.9v4.8h-4.3V8.5l2-3h1.9Z" />
-    </svg>
-  )
-}
-
-function ToolIcon(): React.JSX.Element {
-  return (
-    <svg viewBox="0 0 20 20" aria-hidden="true">
-      <path d="M12.1 3.35a4 4 0 0 0-4.75 5.27l-4.1 4.1a1.85 1.85 0 1 0 2.62 2.62l4.1-4.1a4 4 0 0 0 5.25-4.78l-2.45 2.45-1.9-.5-.5-1.9 2.45-2.45a4 4 0 0 0-.72-.71Z" />
     </svg>
   )
 }
@@ -882,22 +880,6 @@ interface HistoryPage {
   }
 }
 
-const ToolActivity = memo(function ToolActivity({ row, copy }: { row: Row; copy: PanelCopy }): React.JSX.Element {
-  const running = row.status === 'running'
-  return (
-    <div className={`tool-activity ${running ? 'running' : 'complete'}`} role="status">
-      <span className="tool-icon"><ToolIcon /></span>
-      <span className="tool-copy">
-        <span className="tool-label">{running ? copy.tool.running : copy.tool.complete}</span>
-        <span className="tool-summary">{row.text}</span>
-      </span>
-      <span className="tool-state" aria-label={running ? copy.tool.inProgress : copy.tool.completed}>
-        {running ? <span className="spinner" /> : copy.tool.done}
-      </span>
-    </div>
-  )
-})
-
 export function App(): React.JSX.Element {
   const [locale, setLocale] = useState<UiLocale>(() => getUiLocale())
   const [localePreference, setLocalePreference] = useState<UiLocalePreference>(() => getUiLocalePreference())
@@ -1119,6 +1101,7 @@ export function App(): React.JSX.Element {
         siteDefaultsEnabled: raw?.siteDefaultsEnabled ?? true,
         strictSites: raw?.strictSites ?? [],
         settingsVersion: raw?.settingsVersion ?? 1,
+        showAgentOverlay: raw?.showAgentOverlay ?? true,
       })
     })
   }, [])
@@ -1130,6 +1113,50 @@ export function App(): React.JSX.Element {
   // Kill switch: the toolbar button and Ctrl+Shift+K stop the agent at once.
   const [killSwitchEngaged, setKillSwitchEngaged] = useState(false)
   useEffect(() => api.onKillSwitch?.(setKillSwitchEngaged), [api])
+
+  // Pause / take over / resume: the background holds the next tool call.
+  const [pauseState, setPauseState] = useState<AgentPauseState>({ mode: 'running', held: [] })
+  useEffect(() => api.onPauseState?.(setPauseState), [api])
+
+  // Step decisions and durations come from the bridge's audit log.
+  const auditRefreshRef = useRef<{ timer?: ReturnType<typeof setTimeout>; sessionId?: string }>({})
+  function scheduleStepAudit(sessionId: string, delayMs = 250): void {
+    const pending = auditRefreshRef.current
+    if (pending.timer !== undefined) clearTimeout(pending.timer)
+    pending.sessionId = sessionId
+    pending.timer = setTimeout(() => {
+      pending.timer = undefined
+      void api.rpc<{ entries?: unknown }>(BRIDGE_AUDIT_EXPORT_METHOD, { sessionId }).then((exported) => {
+        if (sessionRef.current !== sessionId) return
+        const audit = auditByCall(exported?.entries)
+        setRows((prev) => applyStepAudit(prev, audit))
+      }, () => { /* an older bridge without the audit log: no badges */ })
+    }, delayMs)
+  }
+
+  const [auditExport, setAuditExport] = useState<{ busy: boolean; message?: string; error?: boolean }>({ busy: false })
+  async function exportAuditLog(): Promise<void> {
+    setAuditExport({ busy: true })
+    const sessionId = sessionRef.current
+    try {
+      const exported = await api.rpc<{ entries?: unknown[]; verification?: { ok?: boolean } }>(
+        BRIDGE_AUDIT_EXPORT_METHOD,
+        sessionId === null ? {} : { sessionId },
+      )
+      const blob = new Blob([JSON.stringify(exported, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `dsh-browser-audit-${sessionId ?? 'unscoped'}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
+      document.body.append(anchor)
+      anchor.click()
+      anchor.remove()
+      setTimeout(() => { URL.revokeObjectURL(url) }, 10_000)
+      setAuditExport({ busy: false, message: copy.audit.exported(exported?.entries?.length ?? 0, exported?.verification?.ok === true), error: exported?.verification?.ok !== true })
+    } catch (cause) {
+      setAuditExport({ busy: false, message: copy.audit.failed(cause instanceof Error ? cause.message : String(cause)), error: true })
+    }
+  }
 
   // Discovery state reported by the background. 'not-found' is terminal for the
   // current panel lease, so the status chip can say so instead of "未连接".
@@ -1469,13 +1496,16 @@ export function App(): React.JSX.Element {
       return
     }
     if (payload.event.type === 'tool/call') {
-      const summary = toolSummary(payload.event.data?.name ?? 'tool', payload.event.data?.arguments, locale)
-      setRows((prev) => appendLiveRow(prev, 'tool', summary, nextSeq()))
+      const seq = nextSeq()
+      const step = stepFromCall(payload.event, `live-${seq}`, locale)
+      setRows((prev) => appendToolStep(prev, step, seq))
       return
     }
     if (payload.event.type === 'tool/result') {
-      // 并入最后一行工具行：调用已完成（不新增行）。
-      setRows((prev) => completeLastTool(prev, nextSeq()))
+      // 完成对应步骤（按 callId 匹配），再从审计日志补全审批结果与耗时。
+      const result = resultFromEvent(payload.event)
+      setRows((prev) => completeToolStep(prev, result, nextSeq()))
+      scheduleStepAudit(payload.sessionId)
       return
     }
   }
@@ -1576,6 +1606,7 @@ export function App(): React.JSX.Element {
     const historyTitle = latestSessionTitle(events)
     if (historyTitle !== undefined) setSessionTitle(historyTitle)
     setRows(mergeHistoryRows(events, nextSeq, locale))
+    scheduleStepAudit(id, 0)
     // Only the baseline correlated with this history may have a newer live
     // suffix. A view left by a previous follower is stale, even when revisiting
     // the same session; absent stream state authoritatively clears that view.
@@ -2943,7 +2974,35 @@ export function App(): React.JSX.Element {
             />
             <span className="setting-toggle-control" aria-hidden="true"><span /></span>
           </label>
+          <label className="setting-toggle">
+            <span className="setting-toggle-copy">
+              <strong>{copy.settings.showAgentOverlay}</strong>
+              <small>{copy.settings.showAgentOverlayHelp}</small>
+            </span>
+            <input
+              className="setting-toggle-input"
+              type="checkbox"
+              checked={settings?.showAgentOverlay ?? true}
+              onChange={(event) => setSettings((current) => current === null
+                ? current
+                : { ...current, showAgentOverlay: event.target.checked })}
+            />
+            <span className="setting-toggle-control" aria-hidden="true"><span /></span>
+          </label>
         </div>
+        <section className="audit-export" aria-labelledby="audit-title">
+          <span id="audit-title" className="audit-export-copy">
+            <strong>{copy.audit.section}</strong>
+            <small>{copy.audit.help}</small>
+          </span>
+          <button type="button" className="secondary" disabled={auditExport.busy || state !== 'connected'}
+            onClick={() => { void exportAuditLog() }}>
+            {auditExport.busy ? copy.audit.exporting : copy.audit.exportButton}
+          </button>
+          {auditExport.message !== undefined && (
+            <p className={`audit-export-status${auditExport.error === true ? ' error' : ''}`} role="status">{auditExport.message}</p>
+          )}
+        </section>
         <section className="relay-config" aria-labelledby="relay-title">
           <div className="relay-heading">
             <span id="relay-title">
@@ -3133,6 +3192,14 @@ export function App(): React.JSX.Element {
           </button>
         </section>
       )}
+      <AgentControls
+        state={pauseState}
+        working={working && state === 'connected'}
+        copy={copy}
+        onPause={() => { void api.pauseAgent?.('after-step').catch(() => {}) }}
+        onTakeOver={() => { void api.pauseAgent?.('take-over').catch(() => {}) }}
+        onResume={() => { void api.resumeAgent?.().catch(() => {}) }}
+      />
       <TabAffinityBanner
         state={tabAffinity}
         copy={copy}
@@ -3201,7 +3268,7 @@ export function App(): React.JSX.Element {
           <div key={row.seq} className={`row ${row.kind}`}>
             {row.kind === 'assistant' && <span className="assistant-avatar"><img src={whaleUrl} alt={copy.app.assistant} /></span>}
             {row.kind === 'tool'
-              ? <ToolActivity row={row} copy={copy} />
+              ? <StepTimeline row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />
               : <MessageBody row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />}
           </div>
         ))}
