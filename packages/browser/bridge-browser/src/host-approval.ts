@@ -18,9 +18,14 @@ export interface ApprovalServiceLike {
   request(request: {
     agent: never
     toolName: string
+    callId?: never
     reason?: string
     signal?: AbortSignal
   }): Promise<unknown>
+  /** The session's approval-policy override, if any. */
+  overrideOf?(session: never): unknown
+  /** The deployment default policy. */
+  config?: { policy?: unknown }
 }
 
 /** The slice of dsh's AgentRegistry this adapter uses. */
@@ -40,13 +45,26 @@ export function createHostApprovalRequester(
   approval: () => ApprovalServiceLike | undefined,
   agents: () => AgentLookup | undefined,
 ): (request: HostApprovalRequest) => Promise<HostApprovalOutcome> {
-  return async ({ sessionId, toolName, reason, signal }) => {
+  return async ({ sessionId, toolName, callId, reason, signal }) => {
     if (signal.aborted) return 'cancelled'
     const service = approval()
     const agent = agents()?.get(sessionId as never)
     if (service === undefined || agent === undefined || agent === null) return 'unavailable'
     try {
-      const outcome = await service.request({ agent: agent as never, toolName, reason, signal })
+      // Under the `never` policy dsh rejects every ask without showing it to
+      // anyone. That decision is about dsh's own prompts, not the browser
+      // user's: report "nobody can answer here" so the notification and the
+      // side panel stay able to decide (still fail closed on timeout).
+      const session = (agent as { session?: unknown }).session
+      const policy = (session === undefined ? undefined : service.overrideOf?.(session as never)) ?? service.config?.policy
+      if (policy === 'never') return 'unavailable'
+      const outcome = await service.request({
+        agent: agent as never,
+        toolName,
+        ...(callId === undefined ? {} : { callId: callId as never }),
+        reason,
+        signal,
+      })
       return OUTCOMES.has(outcome) ? outcome as HostApprovalOutcome : 'unavailable'
     } catch {
       // No open turn, a failed audit append, or a throwing answerer.

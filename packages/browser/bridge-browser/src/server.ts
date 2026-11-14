@@ -163,6 +163,8 @@ export type HostApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'u
 export interface HostApprovalRequest {
   /** Agent session the tool call belongs to (from the bridge's own record). */
   sessionId: string
+  /** The model's tool call id, so a UI can attach the question to that call. */
+  callId?: string
   /** Tool the approval is about. */
   toolName: string
   /** Human-readable question, including the full payload the user approves. */
@@ -172,6 +174,15 @@ export interface HostApprovalRequest {
 }
 
 const DEVTOOLS_TOOLS: ReadonlySet<string> = new Set(DEVTOOLS_TOOL_NAMES)
+
+/**
+ * The trailing `callId` argument for {@link BridgeServer.requestTool}, read
+ * from a tool execution (empty when the executor supplied none).
+ */
+export function toolCallIdArg(exec: object): [] | [string] {
+  const callId = (exec as { callId?: unknown }).callId
+  return typeof callId === 'string' && callId !== '' ? [callId] : []
+}
 
 /**
  * Lower or restore one socket's inbound message limit. `ws` sets `maxPayload`
@@ -274,6 +285,8 @@ interface PendingTool {
   conn: ReadyConnection
   name: string
   sessionId: string | undefined
+  /** The model's tool call id, when the executor supplied one. */
+  callId: string | undefined
   /** Latest deadline a hold may reach (call start + budget + max hold). */
   holdCeiling: number
   expiresAt: number
@@ -387,6 +400,7 @@ export class BridgeServer {
    * @param signal - caller cancellation (abort settles the call as cancelled).
    * @param timeoutMs - per-call budget; defaults to the plugin config value.
    * @param sessionId - optional owning Agent session for approval continuity.
+   * @param callId - the model's tool call id (presented with forwarded approvals).
    * @returns the extension's action result.
    * @throws BridgeToolError when no extension is connected, the call times
    *   out, is cancelled, or the extension reports a failure.
@@ -397,6 +411,7 @@ export class BridgeServer {
     signal: AbortSignal,
     timeoutMs: number = this.deps.toolTimeoutMs,
     sessionId?: string,
+    callId?: string,
   ): Promise<unknown> {
     const conn = this.pickConnection(name, sessionId)
     if (conn === undefined) {
@@ -437,6 +452,7 @@ export class BridgeServer {
         conn,
         name,
         sessionId,
+        callId,
         holdCeiling: expiresAt + (this.deps.maxApprovalHoldMs ?? DEFAULT_MAX_APPROVAL_HOLD_MS),
         expiresAt,
         resolve: (result) => {
@@ -954,7 +970,13 @@ export class BridgeServer {
     tool.approvals.set(approvalId, controller)
     let outcome: HostApprovalOutcome
     try {
-      outcome = await request({ sessionId: tool.sessionId, toolName: tool.name, reason, signal: controller.signal })
+      outcome = await request({
+        sessionId: tool.sessionId,
+        toolName: tool.name,
+        ...(tool.callId === undefined ? {} : { callId: tool.callId }),
+        reason,
+        signal: controller.signal,
+      })
     } catch {
       outcome = 'unavailable'
     } finally {

@@ -14,6 +14,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { BridgeServer } from './server.ts'
+import { toolCallIdArg } from './server.ts'
 import { WorkspaceWriteError, workspaceWriteTarget, writeWorkspaceFile, type WorkspaceWriteResult } from './workspace-write.ts'
 
 /** Options for the PDF tool. */
@@ -113,7 +114,7 @@ export function registerPdfTool(ctx: Context, bridge: BridgeServer, options: Pdf
       const sessionId = exec.agent === undefined ? undefined : String((exec.agent as { id: unknown }).id)
       const result = await (sessionId === undefined
         ? bridge.requestTool('browser_save_pdf', wireArgs, exec.signal, options.toolTimeoutMs)
-        : bridge.requestTool('browser_save_pdf', wireArgs, exec.signal, options.toolTimeoutMs, sessionId)) as PdfWireResult
+        : bridge.requestTool('browser_save_pdf', wireArgs, exec.signal, options.toolTimeoutMs, sessionId, ...toolCallIdArg(exec))) as PdfWireResult
       const data = result.pdf?.data
       if (typeof data !== 'string' || data === '') {
         throw new Error('The browser returned no PDF data.')

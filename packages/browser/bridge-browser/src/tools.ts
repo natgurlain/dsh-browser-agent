@@ -17,6 +17,7 @@ import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { BridgeServer } from './server.ts'
+import { toolCallIdArg } from './server.ts'
 import { extractDataOf, normalizeSavePath, saveExtract } from './extract-save.ts'
 import { workspaceWriteTarget, type WorkspaceWriteTarget } from './workspace-write.ts'
 
@@ -55,7 +56,7 @@ export function createBrowserToolCall(
     const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
     const result = sessionId === undefined
       ? await bridge.requestTool(name, args, exec.signal, toolTimeoutMs)
-      : await bridge.requestTool(name, args, exec.signal, toolTimeoutMs, sessionId)
+      : await bridge.requestTool(name, args, exec.signal, toolTimeoutMs, sessionId, ...toolCallIdArg(exec))
     return normalizeTextResult(result, name)
   }
 }
@@ -145,7 +146,7 @@ export function registerBrowserTools(
     const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
     return sessionId === undefined
       ? bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs)
-      : bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, sessionId)
+      : bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, sessionId, ...toolCallIdArg(exec))
   }
 
   for (const tool of [...defineTools(call, options), ...defineContentTools(ctx, call, rawCall, options)]) {

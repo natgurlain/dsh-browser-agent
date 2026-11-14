@@ -6,7 +6,7 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
-import { BridgeServer, BridgeToolError, MAX_READY_CONNECTIONS, type HostApprovalRequest } from '../src/server.ts'
+import { BridgeServer, BridgeToolError, MAX_READY_CONNECTIONS, toolCallIdArg, type HostApprovalRequest } from '../src/server.ts'
 import {
   BRIDGE_APPROVAL_ASK_METHOD,
   BRIDGE_APPROVAL_WITHDRAW_METHOD,
@@ -484,6 +484,20 @@ describe('approval forwarding to dsh', () => {
       .toMatchObject({ ok: false, error: { code: 'bad-request' } })
     release()
     expect(await first).toMatchObject({ ok: true, result: { decision: 'deny' } })
+  })
+
+  it('forwards the model tool call id with the approval', async () => {
+    const requestHostApproval = vi.fn(async () => 'rejected' as const)
+    const h = await startBridge({ requestHostApproval })
+    const a = await connectClient(h.url, identity('client-aaaa'))
+    const call = h.bridge.requestTool('browser_click', { index: 1 }, new AbortController().signal, 1_000, 'sess-9', 'call-42')
+    void call.catch(() => {})
+    const frame = await nextToolCall(a)
+    await a.rpc(BRIDGE_APPROVAL_ASK_METHOD, { toolCallId: frame.id, approvalId: 'ap', reason: 'r' })
+    expect(requestHostApproval).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'sess-9', callId: 'call-42' }))
+    expect(toolCallIdArg({ callId: 'call-1' })).toEqual(['call-1'])
+    expect(toolCallIdArg({ callId: '' })).toEqual([])
+    expect(toolCallIdArg({})).toEqual([])
   })
 
   it('reports unavailable for calls without an agent session', async () => {

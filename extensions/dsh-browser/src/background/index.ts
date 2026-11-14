@@ -1138,6 +1138,16 @@ const runtimeKeeper = new RuntimeKeeper(runtimeLease, {
   },
 })
 
+/** Sessions that sent this browser a tool call (bounded, most recent last). */
+const runtimeSessions = new Set<string>()
+const MAX_RUNTIME_SESSIONS = 32
+
+function noteRuntimeSession(sessionId: string): void {
+  runtimeSessions.delete(sessionId)
+  runtimeSessions.add(sessionId)
+  if (runtimeSessions.size > MAX_RUNTIME_SESSIONS) runtimeSessions.delete(runtimeSessions.values().next().value as string)
+}
+
 /** Whether anything wants the bridge connection: a panel or an active runtime lease. */
 function runtimeWantsBridge(): boolean {
   return panelPorts.size > 0 || runtimeLease.active()
@@ -1791,6 +1801,7 @@ function routeToolCall(call: ToolCall): void {
   }
   activeToolCalls.set(call.id, activeCall)
   unsettledToolCalls.add(activeCall)
+  if (call.sessionId !== undefined) noteRuntimeSession(call.sessionId)
   runtimeLease.touch()
   runtimeKeeper.update()
   const commitAction = (): void => { activeCall.committed = true }
@@ -2137,8 +2148,10 @@ async function startBridge(): Promise<void> {
       },
       onFrame: (frame) => {
         if (frame.t === 'event') {
-          // Session traffic keeps a panel-free runtime alive while an agent works.
-          runtimeLease.touch()
+          // Traffic of a session that has used this browser keeps a panel-free
+          // runtime alive while its agent works; other sessions never do.
+          const eventSessionId = (frame.frame.payload as { sessionId?: unknown } | null)?.sessionId
+          if (typeof eventSessionId === 'string' && runtimeSessions.has(eventSessionId)) runtimeLease.touch()
           transientEvents.ingest(frame)
           broadcastEvent(frame)
         }
@@ -2320,6 +2333,9 @@ chrome.runtime.onConnect.addListener((port) => {
         const refresh = rpcSessionId === undefined
           ? Promise.resolve()
           : sessionSnapshotRefreshes.get(rpcSessionId) ?? Promise.resolve()
+        // A session prompted from this browser keeps its panel-free runtime
+        // alive while it works, even after the panel closes.
+        if (rpcMsg.method === 'session.prompt' && typeof rpcSessionId === 'string') noteRuntimeSession(rpcSessionId)
         const prepare = rpcMsg.method === 'session.prompt'
           ? Promise.resolve().then(async () => {
               await refresh

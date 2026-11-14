@@ -26,6 +26,27 @@ describe('createHostApprovalRequester', () => {
     await expect(createHostApprovalRequester(() => ({ request: async () => 'rejected' }), agents)(request())).resolves.toBe('rejected')
   })
 
+  it('passes the model tool call id so a UI can attach the question to it', async () => {
+    const service = { request: vi.fn(async () => 'rejected') }
+    const ask = createHostApprovalRequester(() => service, () => ({ get: () => ({ session: {} }) }))
+    await ask({ ...request(), callId: 'call-7' })
+    expect(service.request).toHaveBeenCalledWith(expect.objectContaining({ callId: 'call-7' }))
+  })
+
+  it('leaves the decision to the browser when dsh would reject without asking (never policy)', async () => {
+    const session = { id: 's1' }
+    const request1 = vi.fn(async () => 'rejected')
+    const overridden = { request: request1, overrideOf: (s: unknown) => (s === session ? 'never' : undefined), config: { policy: 'ask' } }
+    await expect(createHostApprovalRequester(() => overridden, () => ({ get: () => ({ session }) }))(request())).resolves.toBe('unavailable')
+    expect(request1).not.toHaveBeenCalled()
+    const request2 = vi.fn(async () => 'rejected')
+    const defaulted = { request: request2, overrideOf: () => undefined, config: { policy: 'never' } }
+    await expect(createHostApprovalRequester(() => defaulted, () => ({ get: () => ({ session }) }))(request())).resolves.toBe('unavailable')
+    expect(request2).not.toHaveBeenCalled()
+    const asking = { request: vi.fn(async () => 'rejected'), overrideOf: () => 'ask', config: { policy: 'never' } }
+    await expect(createHostApprovalRequester(() => asking, () => ({ get: () => ({ session }) }))(request())).resolves.toBe('rejected')
+  })
+
   it('does not ask once the browser has already withdrawn the question', async () => {
     const service = { request: vi.fn(async () => 'allowed-once') }
     const controller = new AbortController()

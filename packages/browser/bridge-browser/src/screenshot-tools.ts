@@ -17,6 +17,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { BridgeServer } from './server.ts'
+import { toolCallIdArg } from './server.ts'
 
 /** The extension's screenshot wire payload. */
 interface ScreenshotImage {
@@ -59,7 +60,7 @@ export function registerScreenshotTool(
     const sessionId = exec.agent === undefined ? undefined : String((exec.agent as { id: unknown }).id)
     const call = sessionId === undefined
       ? bridge.requestTool('browser_screenshot', args, exec.signal, options.toolTimeoutMs)
-      : bridge.requestTool('browser_screenshot', args, exec.signal, options.toolTimeoutMs, sessionId)
+      : bridge.requestTool('browser_screenshot', args, exec.signal, options.toolTimeoutMs, sessionId, ...toolCallIdArg(exec))
     return call as Promise<ScreenshotResult>
   }
 
