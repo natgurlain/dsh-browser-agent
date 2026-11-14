@@ -127,6 +127,7 @@ import {
 import { RUNTIME_LEASE_STORAGE_KEY, RuntimeKeeper, RuntimeLease } from './runtime-lifecycle.ts'
 import { loadClientIdentity } from './client-identity.ts'
 import type { BridgeClientIdentity } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import { ExternalRequesters, isExternalSessionId } from './external-requesters.ts'
 import { DevToolsError, devToolsSupported } from './debugger-session.ts'
 import { createDevToolsController } from './devtools-controller.ts'
 import {
@@ -1161,6 +1162,8 @@ function resumeFlowDeps(): ResumeFlowDeps {
       }
     },
     inject: async (sessionId, text) => {
+      // An MCP client's session has no DSH conversation to inform.
+      if (isExternalSessionId(sessionId)) return
       await gatewayRpc(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId, snapshot: text, reason: 'resume' })
       const tabId = tabAffinity.getSessionTab(sessionId)?.tabId
       const url = tabId === undefined ? undefined : await chrome.tabs.get(tabId).then((tab) => tab.url, () => undefined)
@@ -1751,7 +1754,7 @@ function validSessionId(value: unknown): string | undefined {
 /** Refresh one session's recovery checkpoint from its actual controlled tab. */
 async function checkpointSessionPage(sessionValue: unknown): Promise<void> {
   const sessionId = validSessionId(sessionValue)
-  if (sessionId === undefined) return
+  if (sessionId === undefined || isExternalSessionId(sessionId)) return
   await Promise.all([affinityReady, pageSessionContexts.ready])
   const bound = tabAffinity.getSessionTab(sessionId)
   if (bound === undefined) return
@@ -1909,7 +1912,7 @@ function bindOpenedTab(
 }
 
 async function authorizeToolCall(
-  prompt: ApprovalPrompt,
+  unlabelledPrompt: ApprovalPrompt,
   signal: AbortSignal,
   windowId: number,
   sessionId?: string,
@@ -1920,6 +1923,8 @@ async function authorizeToolCall(
   onPrompt?: () => void,
 ): Promise<ApprovalAuthorization> {
   if (signal.aborted) return 'cancelled'
+  // An MCP client's card says which client is asking.
+  const prompt = externalRequesters.label(unlabelledPrompt, sessionId)
   const grantKind = devToolsGrantKind(prompt)
   const gate = resolveApprovalGate({
     prompt,
@@ -1982,6 +1987,7 @@ async function taintAttachedSelection(sessionId: string, payload: unknown): Prom
 
 /** Capture the newly controlled tab and seed it into this session's next Agent step. */
 async function refreshFollowedPage(sessionId: string, tabId: number): Promise<void> {
+  if (isExternalSessionId(sessionId)) return
   activeFollowRefreshes.get(sessionId)?.controller.abort()
   const controller = new AbortController()
   const unrestrictedAccess = unrestrictedAccessEnabled()
@@ -2192,6 +2198,9 @@ async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> 
   }
 }
 
+/** Requester labels of external (MCP client) sessions, for their approval cards. */
+const externalRequesters = new ExternalRequesters()
+
 /** Route one tool.call frame to the user-approved controlled tab. */
 function routeToolCall(call: ToolCall): void {
   if (bridge === null) return
@@ -2211,6 +2220,7 @@ function routeToolCall(call: ToolCall): void {
   activeToolCalls.set(call.id, activeCall)
   unsettledToolCalls.add(activeCall)
   if (call.sessionId !== undefined) noteRuntimeSession(call.sessionId)
+  externalRequesters.note(call)
   runtimeLease.touch()
   runtimeKeeper.update()
   const commitAction = (): void => { activeCall.committed = true }

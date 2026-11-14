@@ -14,7 +14,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { BridgeServer } from './server.ts'
-import { toolCallIdArg } from './server.ts'
+import { bridgeCallArgs, externalCallerOf, EXTERNAL_WRITE_REFUSAL } from './external-caller.ts'
 import { WorkspaceWriteError, workspaceWriteTarget, writeWorkspaceFile, type WorkspaceWriteResult } from './workspace-write.ts'
 
 /** Options for the PDF tool. */
@@ -124,16 +124,14 @@ export function registerPdfTool(ctx: Context, bridge: BridgeServer, options: Pdf
     },
     execute: async (args, exec) => {
       const a = args as { filename?: string; landscape?: boolean; background?: boolean }
+      if (externalCallerOf(exec) !== undefined) throw new Error(EXTERNAL_WRITE_REFUSAL)
       // Ask the sandbox before the page is touched: a read-only session fails here.
       workspaceWriteTarget(ctx, exec.agent, options.workspacePath ?? '')
       const wireArgs = {
         ...a.landscape !== undefined ? { landscape: a.landscape } : {},
         ...a.background !== undefined ? { background: a.background } : {},
       }
-      const sessionId = exec.agent === undefined ? undefined : String((exec.agent as { id: unknown }).id)
-      const result = await (sessionId === undefined
-        ? bridge.requestTool('browser_save_pdf', wireArgs, exec.signal, options.toolTimeoutMs)
-        : bridge.requestTool('browser_save_pdf', wireArgs, exec.signal, options.toolTimeoutMs, sessionId, ...toolCallIdArg(exec))) as PdfWireResult
+      const result = await bridge.requestTool('browser_save_pdf', wireArgs, exec.signal, options.toolTimeoutMs, ...bridgeCallArgs(exec)) as PdfWireResult
       const data = result.pdf?.data
       if (typeof data !== 'string' || data === '') {
         throw new Error('The browser returned no PDF data.')

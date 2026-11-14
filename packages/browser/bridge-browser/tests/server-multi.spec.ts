@@ -495,6 +495,24 @@ describe('approval forwarding to dsh', () => {
     }))
   })
 
+  it('labels an external (MCP) session\'s call with its requester and never forwards its approvals to dsh', async () => {
+    const requestHostApproval = vi.fn(async () => 'allowed-once' as const)
+    const h = await startBridge({ requestHostApproval, toolTimeoutMs: 2_000 })
+    const a = await connectClient(h.url, identity('client-aaaa'))
+    const call = h.bridge.requestTool('browser_type', { index: 2, text: 'hi' }, new AbortController().signal, 2_000, 'mcp-42', undefined, undefined, 'Claude Code')
+    void call.catch(() => {})
+    const frame = await nextToolCall(a)
+    expect(frame).toMatchObject({ sessionId: 'mcp-42', requester: 'Claude Code' })
+    const result = await a.rpc(BRIDGE_APPROVAL_ASK_METHOD, { toolCallId: frame.id, approvalId: 'ap-1', binding: BINDING, reason: 'Type "hi"' })
+    expect(result).toMatchObject({ ok: true, result: { approvalId: 'ap-1', decision: 'unavailable' } })
+    expect(requestHostApproval).not.toHaveBeenCalled()
+    // An Agent session's call never carries a requester label.
+    const agentCall = h.bridge.requestTool('browser_type', { index: 2, text: 'hi' }, new AbortController().signal, 2_000, 'sess-1')
+    void agentCall.catch(() => {})
+    const agentFrame = await nextToolCall(a, 2)
+    expect('requester' in agentFrame).toBe(false)
+  })
+
   it.each([
     ['rejected', 'deny'],
     ['cancelled', 'cancelled'],

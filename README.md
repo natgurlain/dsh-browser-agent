@@ -76,6 +76,10 @@ Clicks, text entry, and scrolling run in the selected document, including cross-
 
 Before every click the target's center is hit-tested; a target covered by another element is refused with `covered by <element>` instead of clicking what lies on top. `browser_click { trusted: true }` clicks with real mouse input (Chrome), and a plain click on a custom element that visibly changed nothing is retried that way once. The **stop button** in the side panel (or Ctrl+Shift+K / ⌘⇧K; Alt+Shift+K in Firefox; rebindable on the browser's extension shortcuts page) cancels pending approvals and running actions, revokes session trust and developer-tools grants, turns unrestricted access off, detaches the debugger, and disconnects until you press Reconnect. Tabs the agent controls show an **AI** badge.
 
+### Use the browser from Claude Code, Cursor or Codex (MCP)
+
+Set `mcp: { enabled: true }` in the `bridge-browser` plugin config. Then register the stdio shim `packages/browser/mcp-server/bin/dsh-browser-mcp.mjs` with your MCP client, for example `claude mcp add dsh-browser -- node /abs/path/to/dsh-browser-mcp.mjs`. Every MCP call goes through the same approval cards, site policy, taint rules, kill switch and audit log as DSH's own sessions. Each card names the MCP client that is asking. Setup snippets for Cursor and Codex are in [packages/browser/mcp-server/README.md](packages/browser/mcp-server/README.md).
+
 ## Detailed installation and usage
 
 Requirements: Node.js `>=24.9.0`, Corepack/pnpm, and Chrome 125+ or Firefox 140+. Windows additionally needs Windows PowerShell 5.1, which ships with Windows, or PowerShell 7+.

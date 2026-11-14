@@ -70,6 +70,12 @@ export interface ApprovalPrompt {
    * The reasons are shown on the card as a text detail.
    */
   forced?: true
+  /**
+   * The external (MCP) client that asked, for a bridge-owned external
+   * session: its self-reported name, sanitized by the bridge. Shown on the
+   * card; absent for DSH Agent sessions.
+   */
+  requester?: string
 }
 
 /** Correlated request delivered to every open side-panel view. */

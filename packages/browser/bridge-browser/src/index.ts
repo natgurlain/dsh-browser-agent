@@ -63,6 +63,8 @@ import {
   type TypertGatewayLike,
 } from './remote-host-api.ts'
 import { isRecord, type BrowserHostApi } from './host-api.ts'
+import { mountMcpEndpoint, type McpConfig } from './mcp-mount.ts'
+import { createMcpToolHost, type ToolRegistryLike } from './mcp-tools.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'bridge-browser'
@@ -99,6 +101,9 @@ const DEFAULT_DEFER_SESSION_CREATE = true
 
 /** Default: advertise a fixed-port discovery beacon so a random host port stays discoverable. */
 const DEFAULT_BEACON = true
+
+/** Reported to MCP clients as the server version. */
+const BRIDGE_PACKAGE_VERSION = '0.0.7'
 
 /** Instance metadata the discovery endpoints advertise for the extension's picker. */
 const INSTANCE_INFO = { pid: process.pid, startedAt: new Date().toISOString() }
@@ -165,10 +170,17 @@ export interface Config {
    * session transcripts and page content. Defaults to false.
    */
   allowForwardedPorts?: boolean
+  /**
+   * Loopback MCP endpoint for other agent harnesses (Claude Code, Cursor,
+   * Codex): `enabled` (default false) and `port` (default 0, any free port).
+   * Its token and URL are written to `<dsh home>/browser-mcp-token` and
+   * `<dsh home>/browser-mcp.json` (0600) for the `dsh-browser-mcp` shim.
+   */
+  mcp?: McpConfig
 }
 
 /** The shape after schemastery applies its defaults to every field. */
-type ResolvedConfig = Required<Omit<Config, 'token'>> & Pick<Config, 'token'>
+type ResolvedConfig = Required<Omit<Config, 'token' | 'mcp'>> & Pick<Config, 'token'> & { mcp: Required<McpConfig> }
 
 export const Config: z<Config, ResolvedConfig> = z.object({
   token: z.string(),
@@ -186,7 +198,11 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   safePermissionPresets: z.array(z.string()).default([]),
   forwardedPorts: z.array(z.number().step(1).min(1).max(65535)).default([]),
   allowForwardedPorts: z.boolean().default(false),
-})
+  mcp: z.object({
+    enabled: z.boolean().default(false),
+    port: z.number().step(1).min(0).max(65535).default(0),
+  }).default({ enabled: false, port: 0 }),
+}) as unknown as z<Config, ResolvedConfig>
 
 /**
  * Mount the bridge: resolve the token, register the upgrade route, the tool
@@ -366,7 +382,9 @@ function mountBridge(
     : undefined
   const server = new BridgeServer({
     token: tokenRes.token,
-    api: withTaintMethods(fenced, taint, (sessionId, signal) => fenced.allowsSession(sessionId, signal, 'own')),
+    // An MCP client's external session is the bridge's own: the panel may clear its taint too.
+    api: withTaintMethods(fenced, taint, async (sessionId, signal) =>
+      ledger.external(sessionId) !== undefined || fenced.allowsSession(sessionId, signal, 'own')),
     sessionScope: fenced,
     sessionLineage: taint,
     allowedChromeExtensionIds: resolved.allowedChromeExtensionIds,
@@ -477,6 +495,14 @@ function mountBridge(
       for (const dispose of disposers.values()) dispose()
     }
   }, 'bridge-browser: browser tools')
+
+  // Other harnesses drive the same browser tools over a loopback MCP endpoint
+  // (opt-in): one external session per MCP client, same extension gates.
+  mountMcpEndpoint(ctx, resolved.mcp, {
+    ledger,
+    tools: createMcpToolHost(() => ctx.get('tools') as unknown as ToolRegistryLike | undefined, server, resolved.toolTimeoutMs),
+    version: BRIDGE_PACKAGE_VERSION,
+  })
 
   // High-privilege developer-tools group: registered only while the connected
   // extension advertises the capability (Chrome builds), so a Firefox or older

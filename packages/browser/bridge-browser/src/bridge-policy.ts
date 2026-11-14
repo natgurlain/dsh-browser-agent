@@ -143,6 +143,10 @@ export const FULL_ACCESS_SESSION_REFUSAL = (preset: string): string =>
 const NOT_BRIDGE_SESSION = (sessionId: string): string =>
   `session ${JSON.stringify(sessionId)} was not created by the browser extension; it can be viewed but not prompted, changed, or deleted from the browser`
 
+/** Refusal for a bridge-owned external (MCP client) session: it has no DSH session behind it. */
+export const EXTERNAL_SESSION_REFUSAL = (sessionId: string): string =>
+  `session ${JSON.stringify(sessionId)} belongs to an external MCP client; it has no DSH conversation to read, prompt, or change`
+
 /** Options for {@link withBridgePolicy}. */
 export interface BridgePolicyOptions {
   /** Allow full-access presets from the extension (switching to and prompting in them). */
@@ -278,6 +282,8 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
   }
 
   const allowsSession = async (sessionId: string, signal: AbortSignal, access: SessionAccess = 'read'): Promise<boolean> => {
+    // External (MCP client) sessions: their audit log is readable, nothing else.
+    if (ledger.external(sessionId) !== undefined) return access === 'read'
     if (access === 'read' ? !(owned(sessionId) || listable.has(sessionId)) : !owned(sessionId)) {
       await refreshList(signal)
     }
@@ -374,6 +380,11 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
     if (refusal !== undefined) return refusal
 
     const sessionId = sessionIdOf(call.payload)
+    // An external session id never reaches the Host: no history, no prompt,
+    // no preset, no command. Only the bridge's own browser path serves it.
+    if (sessionId !== undefined && ledger.external(sessionId) !== undefined) {
+      return forbidden(EXTERNAL_SESSION_REFUSAL(sessionId))
+    }
     const readMethod = SESSION_READ_METHODS.has(call.method)
     const writeMethod = SESSION_WRITE_METHODS.has(call.method)
     if ((readMethod || writeMethod) && sessionId === undefined && call.method !== 'session.models') {

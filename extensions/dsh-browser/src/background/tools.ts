@@ -71,6 +71,8 @@ export interface ToolCall {
   tainted?: true
   /** Set by the bridge's program runner: this call is one step of an approved `browser_run`. */
   program?: { id: string; step: number }
+  /** External (MCP) client label for a bridge-owned external session's call. */
+  requester?: string
 }
 
 /** The wire answer for one tool call. */

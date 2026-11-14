@@ -17,7 +17,7 @@ import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { BridgeServer } from './server.ts'
-import { toolCallIdArg } from './server.ts'
+import { bridgeCallArgs, externalCallerOf, EXTERNAL_WRITE_REFUSAL } from './external-caller.ts'
 import { extractDataOf, normalizeSavePath, saveExtract } from './extract-save.ts'
 import { workspaceWriteTarget, type WorkspaceWriteTarget } from './workspace-write.ts'
 
@@ -53,10 +53,7 @@ export function createBrowserToolCall(
   toolTimeoutMs: number,
 ): (exec: Pick<ToolRunContext, 'agent' | 'signal'>, name: string, args: Record<string, unknown>) => Promise<TextResult> {
   return async (exec, name, args) => {
-    const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
-    const result = sessionId === undefined
-      ? await bridge.requestTool(name, args, exec.signal, toolTimeoutMs)
-      : await bridge.requestTool(name, args, exec.signal, toolTimeoutMs, sessionId, ...toolCallIdArg(exec))
+    const result = await bridge.requestTool(name, args, exec.signal, toolTimeoutMs, ...bridgeCallArgs(exec))
     return normalizeTextResult(result, name)
   }
 }
@@ -142,12 +139,8 @@ export function registerBrowserTools(
 ): Map<string, () => void> {
   const disposers = new Map<string, () => void>()
   const call = createBrowserToolCall(bridge, options.toolTimeoutMs)
-  const rawCall: RawCall = async (exec, name, args) => {
-    const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
-    return sessionId === undefined
-      ? bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs)
-      : bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, sessionId, ...toolCallIdArg(exec))
-  }
+  const rawCall: RawCall = async (exec, name, args) =>
+    bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, ...bridgeCallArgs(exec))
 
   for (const tool of [...defineTools(call, options), ...defineContentTools(ctx, call, rawCall, options)]) {
     disposers.set(tool.name, ctx.tools.register(tool))
@@ -583,6 +576,7 @@ function defineContentTools(ctx: Context, call: Call, rawCall: RawCall, options:
       const saveTo = typeof a.saveTo === 'string' && a.saveTo !== '' ? a.saveTo : undefined
       const format = typeof a.format === 'string' ? a.format : undefined
       if (saveTo !== undefined) {
+        if (externalCallerOf(exec) !== undefined) throw new Error(EXTERNAL_WRITE_REFUSAL)
         // Validate on the host before the page is touched, as upload does:
         // the path, and whether this session's sandbox lets it write at all.
         normalizeSavePath(saveTo, format)

@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -23,6 +23,25 @@ describe('fileSessionLedger', () => {
     expect(ledger.has('a')).toBe(true)
     await ledger.add('b')
     expect((await fileSessionLedger(file, warn)).has('b')).toBe(true)
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('persists external sessions apart from owned ones, readable by older bridges as plain ids only', async () => {
+    const file = join(temp(), 'ledger.json')
+    const warn = vi.fn()
+    const ledger = await fileSessionLedger(file, warn)
+    await ledger.add('owned')
+    const record = { kind: 'mcp' as const, client: 'cursor', createdAt: '2026-01-01T00:00:00Z' }
+    await ledger.addExternal('mcp-1', record)
+    expect(ledger.has('mcp-1')).toBe(false)
+    await expect(ledger.addExternal('owned', record)).rejects.toThrow(/cannot become external/)
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as unknown[]
+    expect(raw.filter((row) => typeof row === 'string')).toEqual(['owned'])
+    const reloaded = await fileSessionLedger(file, warn)
+    expect(reloaded.has('owned')).toBe(true)
+    expect(reloaded.has('mcp-1')).toBe(false)
+    expect(reloaded.external('mcp-1')).toEqual(record)
+    expect(reloaded.external('owned')).toBeUndefined()
     expect(warn).not.toHaveBeenCalled()
   })
 

@@ -739,7 +739,14 @@ export type ServerFrame =
    * for this session id (a subagent's first call). Absent means "no Host
    * taint known", never "untainted" (the extension's own record still counts).
    */
-  | { t: 'tool.call'; id: string; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string; tainted?: true; program?: ProgramStepRef }
+  | { t: 'tool.call'; id: string; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string; tainted?: true; program?: ProgramStepRef
+    /**
+     * Who asked, when it is not a DSH Agent: the sanitized, self-reported
+     * name of the external (MCP) client behind an external session. Shown on
+     * approval cards; older extensions ignore it.
+     */
+    requester?: string
+  }
   /** Withdraw a tool call that timed out or whose caller was cancelled. */
   | { t: 'tool.cancel'; id: string }
   /** Liveness probe. */
@@ -879,6 +886,7 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
             ...(typeof frame.sessionId === 'string' ? { sessionId: frame.sessionId } : {}),
             ...(frame.tainted === true ? { tainted: true as const } : {}),
             ...(isProgramStepRef(frame.program) ? { program: frame.program } : {}),
+            ...(typeof frame.requester === 'string' && isRequesterLabel(frame.requester) ? { requester: frame.requester } : {}),
           }
         : undefined
     case 'tool.cancel':
@@ -1022,4 +1030,36 @@ export function parseBridgeConfigPayload(value: unknown): BridgeConfigPayload | 
     ...(typeof body.pid === 'number' && Number.isInteger(body.pid) && body.pid > 0 ? { pid: body.pid } : {}),
     ...(typeof body.startedAt === 'string' && body.startedAt !== '' ? { startedAt: body.startedAt } : {}),
   }
+}
+
+/**
+ * Prefix of bridge-owned external session ids (one per MCP client
+ * connection). Such a session has no DSH Agent: the extension must not treat
+ * it as a Host session (no panel focus, no snapshot injection, no resume).
+ */
+export const EXTERNAL_SESSION_PREFIX = 'mcp-'
+
+/** Whether a session id names a bridge-owned external (MCP client) session. */
+export function isExternalSessionId(sessionId: string | undefined): boolean {
+  return typeof sessionId === 'string' && sessionId.startsWith(EXTERNAL_SESSION_PREFIX)
+}
+
+/** Longest requester label carried on the wire. */
+export const MAX_REQUESTER_LABEL = 64
+
+/** Whether a value is an acceptable requester label (printable ASCII, 1–64 chars). */
+export function isRequesterLabel(value: string): boolean {
+  return value.length > 0 && value.length <= MAX_REQUESTER_LABEL && /^[\x20-\x7e]+$/u.test(value) && value.trim() === value
+}
+
+/**
+ * Reduce a self-reported client name to a safe requester label: printable
+ * ASCII, collapsed whitespace, at most {@link MAX_REQUESTER_LABEL} chars.
+ * @param raw - untrusted name (MCP `clientInfo.name`/`title`).
+ * @returns the label, or `unknown client` when nothing printable remains.
+ */
+export function sanitizeRequesterLabel(raw: unknown): string {
+  const text = typeof raw === 'string' ? raw.replace(/[^\x20-\x7e]+/gu, ' ').replace(/\s+/gu, ' ').trim() : ''
+  const label = text.slice(0, MAX_REQUESTER_LABEL).trim()
+  return label === '' ? 'unknown client' : label
 }

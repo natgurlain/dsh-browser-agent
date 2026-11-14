@@ -12,6 +12,7 @@ import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:net'
 import { createServer as createHttpServer } from 'node:http'
 import { zstdCompressSync } from 'node:zlib'
+import { smokeMcp } from './smoke-mcp.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const bridge = join(root, 'packages/browser/bridge-browser')
@@ -143,6 +144,8 @@ async function start(reopen) {
     `    token: ${JSON.stringify(token)}`,
     `    sessionWorkspacePath: ${JSON.stringify(join(temp, 'browser-sessions'))}`,
     '    deferSessionCreate: false',
+    '    mcp:',
+    '      enabled: true',
     '- id: llm-pi-ai',
     '  config:',
     '    providers:',
@@ -647,6 +650,16 @@ try {
     }
   }
 
+  // ---- MCP clients drive the same browser path through an external session ----
+  await smokeMcp({
+    root,
+    home,
+    wsUrl: rpc.base.replace('http:', 'ws:') + '/ext/bridge',
+    connectClient,
+    waitFor,
+    methods: { BRIDGE_APPROVAL_ASK_METHOD, BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD },
+  })
+
   await stop()
   rpc = await start(true)
   assert.equal((await observation()).source, 'prepared')
@@ -819,7 +832,7 @@ try {
   assert.equal((await rpc('session.permissions', { sessionId: retrySession })).current, 'read-only',
     'prompt text must never act as a /permission command')
 
-  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), multi-client bridge with per-install replacement and session routing, browser approvals forwarded to dsh and answered by another owner client (allow and deny), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, browser context, a page watcher waking only its owned session (untrusted boundary, rate limit), a tab fleet of real subagents restricted to read tools with structured results, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
+  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), multi-client bridge with per-install replacement and session routing, browser approvals forwarded to dsh and answered by another owner client (allow and deny), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, MCP clients through the stdio shim on an external session (requester-labelled cards answered in the browser, audit log, Host methods refused), browser context, a page watcher waking only its owned session (untrusted boundary, rate limit), a tab fleet of real subagents restricted to read tools with structured results, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
   succeeded = true
 } catch (error) {
   console.error(hostLog)

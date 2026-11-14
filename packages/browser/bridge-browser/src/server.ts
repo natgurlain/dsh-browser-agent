@@ -82,6 +82,7 @@ import {
   helloProtocolVersion,
   PING_INTERVAL_MS,
   isDevToolsCaps,
+  isExternalSessionId,
   parseBridgeFrame,
   type BridgeEndpoint,
   type BridgeFrame,
@@ -429,6 +430,7 @@ export class BridgeServer {
    * @param sessionId - optional owning Agent session for approval continuity.
    * @param callId - the model's tool call id (presented with forwarded approvals).
    * @param program - marks the call as one step of an approved `browser_run` program.
+   * @param requester - external (MCP) client label for an external session's call.
    * @returns the extension's action result.
    * @throws BridgeToolError when no extension is connected, the call times
    *   out, is cancelled, or the extension reports a failure.
@@ -441,6 +443,7 @@ export class BridgeServer {
     sessionId?: string,
     callId?: string,
     program?: ProgramStepRef,
+    requester?: string,
   ): Promise<unknown> {
     const conn = this.pickConnection(name, sessionId)
     if (conn === undefined) {
@@ -519,6 +522,7 @@ export class BridgeServer {
         ...(sessionId === undefined ? {} : { sessionId }),
         ...(sessionId !== undefined && this.sessionTainted(sessionId) ? { tainted: true as const } : {}),
         ...(program === undefined ? {} : { program }),
+        ...(requester === undefined || sessionId === undefined ? {} : { requester }),
       } satisfies BridgeFrame), (error) => {
         /* v8 ignore next -- teardown race: when the write fails, the socket's
         close handler settles the same call with the same code; the callback
@@ -1062,7 +1066,9 @@ export class BridgeServer {
       return
     }
     const echo = { approvalId, ...(binding === undefined ? {} : { binding }) }
-    if (tool.sessionId === undefined) {
+    // An external (MCP client) session has no DSH turn to put a question to:
+    // its approvals are answered in the browser only.
+    if (tool.sessionId === undefined || isExternalSessionId(tool.sessionId)) {
       sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { ...echo, decision: 'unavailable' } })
       return
     }

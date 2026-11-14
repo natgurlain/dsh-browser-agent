@@ -88,6 +88,7 @@ describe('config', () => {
       safePermissionPresets: [],
       forwardedPorts: [],
       allowForwardedPorts: false,
+      mcp: { enabled: false, port: 0 },
     })
   })
 
@@ -123,6 +124,7 @@ describe('config', () => {
       safePermissionPresets: [],
       forwardedPorts: [],
       allowForwardedPorts: false,
+      mcp: { enabled: false, port: 0 },
     })
   })
 
@@ -130,6 +132,12 @@ describe('config', () => {
     expect(() => new Config({ beaconPorts: [0] })).toThrow()
     expect(() => new Config({ beaconPorts: [1.5] })).toThrow()
     expect(() => new Config({ beaconPorts: [65536] })).toThrow()
+  })
+
+  it('keeps the MCP endpoint off by default and validates its port', () => {
+    expect(new Config({ mcp: { enabled: true } }).mcp).toEqual({ enabled: true, port: 0 })
+    expect(new Config({ mcp: { port: 4100 } }).mcp).toEqual({ enabled: false, port: 4100 })
+    expect(() => new Config({ mcp: { port: 70000 } })).toThrow()
   })
 
   it('keeps an empty port list when the beacon is disabled', () => {

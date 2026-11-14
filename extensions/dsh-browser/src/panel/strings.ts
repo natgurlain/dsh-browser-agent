@@ -47,6 +47,10 @@ export interface PanelCopy {
     flagDescriptions: Record<string, string>
     perCallNote: string
     fingerprint: string
+    /** Label of the requester row on an external (MCP) client's card. */
+    requestedBy: string
+    /** The external client, by its self-reported name. */
+    mcpClient: (name: string) => string
   }
   tool: {
     running: string
@@ -417,6 +421,8 @@ const EN: PanelCopy = {
     },
     perCallNote: 'This call always needs its own approval; no setting or session trust covers it.',
     fingerprint: 'Approval fingerprint',
+    requestedBy: 'Requested by',
+    mcpClient: (name) => `MCP client “${name}” (name reported by the client)`,
   },
   tool: {
     running: 'Working on page',
@@ -836,6 +842,8 @@ const ZH: PanelCopy = {
     },
     perCallNote: '此调用每次都需要单独确认，任何设置或会话信任都不能代替。',
     fingerprint: '审批指纹',
+    requestedBy: '请求方',
+    mcpClient: (name) => `MCP 客户端“${name}”（名称由客户端自报）`,
   },
   tool: {
     running: '正在操作页面',

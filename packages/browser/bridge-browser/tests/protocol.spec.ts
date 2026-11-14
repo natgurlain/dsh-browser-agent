@@ -22,6 +22,8 @@ import {
   isDevToolsCaps,
   isServerFrame,
   parseBridgeFrame,
+  isExternalSessionId,
+  sanitizeRequesterLabel,
 } from '../src/protocol.ts'
 
 const NONCE = 'a'.repeat(64)
@@ -224,6 +226,19 @@ describe('parseBridgeFrame', () => {
       .toEqual({ t: 'tool.call', id: '4', name: 'browser_click', args: { index: 1 }, expiresAt: 123, sessionId: 'session-1' })
     expect(parseBridgeFrame(JSON.stringify({ t: 'tool.cancel', id: '4' })))
       .toEqual({ t: 'tool.cancel', id: '4' })
+  })
+
+  it('carries a well-formed requester label on tool.call and drops a malformed one', () => {
+    const base = { t: 'tool.call', id: '4', name: 'browser_click', args: {}, expiresAt: 123, sessionId: 'mcp-1' }
+    expect(parseBridgeFrame(JSON.stringify({ ...base, requester: 'Claude Code' }))).toEqual({ ...base, requester: 'Claude Code' })
+    expect(parseBridgeFrame(JSON.stringify({ ...base, requester: 'x'.repeat(65) }))).toEqual(base)
+    expect(parseBridgeFrame(JSON.stringify({ ...base, requester: 'line\nbreak' }))).toEqual(base)
+    expect(parseBridgeFrame(JSON.stringify({ ...base, requester: 7 }))).toEqual(base)
+    expect(isExternalSessionId('mcp-1')).toBe(true)
+    expect(isExternalSessionId('session-1')).toBe(false)
+    expect(isExternalSessionId(undefined)).toBe(false)
+    expect(sanitizeRequesterLabel(' \u0007Cursor\tIDE ')).toBe('Cursor IDE')
+    expect(sanitizeRequesterLabel(42)).toBe('unknown client')
   })
 
   it('parses rpc.result success and error forms', () => {

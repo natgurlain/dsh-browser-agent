@@ -12,7 +12,7 @@
   "scripts": {
     "build": "pnpm --filter @natgurlain/dsh-bridge-browser run build && pnpm --filter dsh-browser-extension run build",
     "start": "dsh web",
-    "test": "pnpm --filter @natgurlain/dsh-bridge-browser run test && pnpm --filter dsh-browser-extension run test",
+    "test": "pnpm --filter @natgurlain/dsh-bridge-browser run test && pnpm --filter dsh-browser-extension run test && pnpm --filter @natgurlain/dsh-browser-mcp run test",
     "typecheck": "pnpm --filter @natgurlain/dsh-bridge-browser run typecheck && pnpm --filter dsh-browser-extension run typecheck",
     "check:runtime": "node scripts/check-runtime.mjs",
     "test:smoke": "node scripts/smoke-runtime.mjs",
@@ -54,5 +54,8 @@
     "@deepseek-ai/dsh-util-time": "0.2.2-rc.2",
     "@deepseek-ai/dsh-util-workspace-path": "0.2.2-rc.2",
     "@deepseek-ai/dsh-workflow": "0.2.2-rc.2"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.2.0"
   }
 }

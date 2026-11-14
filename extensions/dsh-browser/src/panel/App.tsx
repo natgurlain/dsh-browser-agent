@@ -11,6 +11,7 @@ import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { BRIDGE_AUDIT_EXPORT_METHOD, BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeCaps } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import { isExternalSessionId } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeFailure, BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
 import { SitePolicySettings } from './SitePolicySettings.tsx'
@@ -704,6 +705,12 @@ function ApprovalDialog({
             </h2>
           </div>
         </div>
+        {request.requester !== undefined && (
+          <div className="approval-detail approval-requester">
+            <span>{copy.approval.requestedBy}</span>
+            <strong>{copy.approval.mcpClient(request.requester)}</strong>
+          </div>
+        )}
         <div className="approval-detail">
           <span>{copy.approval.request}</span>
           <strong>{request.summary}</strong>
@@ -2081,7 +2088,9 @@ export function App(): React.JSX.Element {
   /** Load the session that owns an approval before exposing its decision UI. */
   async function focusApprovalSession(request: ApprovalRequest): Promise<void> {
     const sessionId = request.sessionId
-    if (sessionId === undefined || sessionChangingRef.current || sessionRef.current === sessionId) return
+    // An MCP client's session has no conversation to open in the panel.
+    if (sessionId === undefined || request.requester !== undefined || isExternalSessionId(sessionId)
+      || sessionChangingRef.current || sessionRef.current === sessionId) return
     const transition = beginSessionTransition()
     let history: HistoryPage | undefined
     let historyError: unknown

@@ -19,6 +19,8 @@ Page snapshots contain structured text with numbered controls and masked form fi
 | `deferSessionCreate` | `boolean` | `true` | Sessions materialize only on the first message: `session.create` answers with a provisional id (nothing persisted), history reads empty, and the first `session.prompt` creates the real session (same id, original payload). Opening the panel without chatting leaves zero trace in the session store/GUI. |
 | `beacon` | `boolean` | `true` | Also answer the discovery endpoint on a fixed loopback port, so a randomly assigned Web port (DSH Desktop starts its host with `--port 0`) stays discoverable. Binding failures are diagnostics only; the bridge itself is unaffected. |
 | `beaconPorts` | `number[]` | `43189…43198` | Candidate beacon ports, tried in order until one binds; the first free port wins, which keeps several local instances discoverable. Ignored when `beacon` is false. |
+| `mcp.enabled` | `boolean` | `false` | Serve a loopback MCP endpoint (Streamable HTTP) so Claude Code, Cursor, Codex and other MCP clients can drive the browser. See [MCP clients](#mcp-clients). |
+| `mcp.port` | `number` | `0` | Loopback port of the MCP endpoint (`0`: any free port; the URL is written to `~/.dsh/browser-mcp.json`). |
 
 Workspace grouping is best-effort. If the composition has no workspace domain, directory creation fails, or `workspace.create` rejects the path, the plugin logs one warning and sends every session creation without an injected workspace so browser chat remains usable.
 
@@ -124,6 +126,21 @@ This group is registered only while the connected extension advertises the `devT
 | `browser_devtools_list_requests` / `browser_devtools_get_request` / `browser_devtools_request_body` | List captured requests, read one in full, and fetch a request or response body. Credential headers (`Authorization`, `Cookie`, …) are redacted unless the caller opts in per call, and bodies of authentication-shaped URLs are redacted by default. |
 
 Capture notes: Chrome allows only one debugger per tab, so the browser's own DevTools cannot stay open on a tab while capture is attached; the error names that cause. Capture is in-memory, bounded (200 requests, 500 console entries) and resets on attach and on every top-level navigation. All returned page data is untrusted input.
+
+## MCP clients
+
+With `mcp.enabled: true` the plugin serves an MCP endpoint at `http://127.0.0.1:<port>/mcp`. Other agent harnesses reach it through the `dsh-browser-mcp` stdio shim ([setup for Claude Code, Cursor and Codex](../mcp-server/README.md)).
+
+- **Same tool path.** `tools/list` returns the registered `browser_*` definitions from `ctx.tools`, with the same schemas and descriptions DSH Agents get. `tools/call` runs those same definitions. An execution carries an external-caller marker instead of an Agent (`external-caller.ts`), so every call becomes a normal `tool.call` frame to the extension. The pause gate, site policy, taint rules, kill switch, payload-bound approval cards and the audit log all apply unchanged.
+- **One external session per MCP connection.** `initialize` mints `mcp-<uuid>` and records it in the session ledger as *external*. It never counts as an owned DSH session, so every Host session method refuses it (`bridge-policy.ts`), as do snapshot injection and purge. Its audit log stays readable from the panel, and the panel may clear its taint.
+- **Approvals.** Each frame carries the client's sanitized, self-reported name as `requester`. The approval card and the OS notification show "Requested by MCP client “<name>”". These approvals are never forwarded to DSH's approval service, because no DSH turn exists to ask. They are answered in the browser only.
+- **Hardening.**
+  - Binds `127.0.0.1` only and refuses non-loopback peers.
+  - Uses a separate 0600 token (`~/.dsh/browser-mcp-token`), compared in constant time.
+  - Refuses any `Origin` header (browser CSRF) and any `Host` other than the loopback address and bound port (DNS rebinding).
+  - Accepts JSON bodies only, with a 1 MB cap. JSON-RPC batches are not supported.
+  - Allows at most 16 sessions and expires them after 1 h idle. `DELETE` ends a session, and a dropped HTTP request cancels its call and withdraws its card.
+- **Refusals.** Tools that write into a DSH workspace (`browser_save_pdf`, `browser_extract { saveTo }`) refuse MCP callers. `browser_screenshot` returns an MCP image block.
 
 ## Extension points
 

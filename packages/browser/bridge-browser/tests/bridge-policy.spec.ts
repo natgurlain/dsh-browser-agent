@@ -129,6 +129,31 @@ describe('session ownership', () => {
     expect(await call('workspace.list', {})).toEqual({ ok: true, value: { archivedSessionIds: ['created'] } })
   })
 
+  it('refuses every Host session method for an external (MCP client) session; only its audit log is readable', async () => {
+    const ledger = memorySessionLedger()
+    await ledger.addExternal('mcp-abc', { kind: 'mcp', client: 'claude-code', createdAt: '2026-01-01T00:00:00Z' })
+    const { policy, call, inner } = harness({}, { ledger })
+    const signal = new AbortController().signal
+    expect(await policy.allowsSession('mcp-abc', signal, 'read')).toBe(true)
+    expect(await policy.allowsSession('mcp-abc', signal, 'own')).toBe(false)
+    expect(await policy.allowsSession('mcp-abc', signal, 'write')).toBe(false)
+    expect(ledger.has('mcp-abc')).toBe(false)
+    inner.mockClear()
+    for (const [method, payload] of [
+      ['session.prompt', { sessionId: 'mcp-abc', mode: 'queue', content: [] }],
+      ['session.history', { sessionId: 'mcp-abc' }],
+      ['session.setPermission', { sessionId: 'mcp-abc', preset: 'read-only' }],
+      ['commands.execute', { sessionId: 'mcp-abc', line: '/plan' }],
+      ['session.cancel', { sessionId: 'mcp-abc' }],
+    ] as const) {
+      const refused = await call(method, payload) as { ok: false; error: { code: string; message: string } }
+      expect(refused.ok).toBe(false)
+      expect(refused.error.code).toBe('forbidden')
+      expect(refused.error.message).toContain('external MCP client')
+    }
+    expect(inner).not.toHaveBeenCalled()
+  })
+
   it('keeps durable ownership through the ledger only; a session in the bridge directory is not owned (CLI can start there)', async () => {
     const ledger = memorySessionLedger(['from-last-run'])
     const { policy, call } = harness({}, { ledger })
