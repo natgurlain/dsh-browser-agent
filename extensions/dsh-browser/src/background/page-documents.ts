@@ -157,7 +157,7 @@ export async function readTabPdfText(
       // Server headers (content-type included) are page-controlled: not echoed.
       return failure('action-failed', 'The controlled tab is not showing a PDF document. Use browser_snapshot or browser_get_text for web pages.')
     }
-    const { pages, pageCount } = await extractPdfText(bytes, maxPages)
+    const { pages, pageCount } = await extractPdfText(bytes, maxPages, signal === undefined ? {} : { signal })
     const body = pages.map((text, index) => `--- page ${index + 1} ---\n${text}`).join('\n\n')
     const empty = pages.every((text) => text === '')
     const status = empty
