@@ -22,6 +22,12 @@ import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-
 export interface BrowserDevToolsOptions {
   /** Per-tool-call budget in ms. */
   toolTimeoutMs: number
+  /**
+   * Extra time a pending browser approval may hold one call (the bridge
+   * extends its own deadline by at most this much); added to the cooperative
+   * dsh timeout so the executor does not cut a held call short.
+   */
+  approvalHoldMs?: number
   /** Cap on the model-visible text one devtools result may carry. */
   devToolsMaxChars: number
 }
@@ -115,7 +121,7 @@ export function defineDevTools(call: Call, options: BrowserDevToolsOptions): Too
         description: 'Optional computed-style property names to return, such as ["display","color"]. Omit for a curated default set.',
       },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: options.toolTimeoutMs + (options.approvalHoldMs ?? 0),
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_devtools_elements', compact(args as Record<string, unknown>)),
   })
@@ -147,7 +153,7 @@ export function defineDevTools(call: Call, options: BrowserDevToolsOptions): Too
         description: 'inline (default) writes the element style attribute, which a page reload reverts; rule edits the matched stylesheet rule and lasts until the sheet is replaced.',
       },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: options.toolTimeoutMs + (options.approvalHoldMs ?? 0),
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_devtools_set_element_style', compact(args as Record<string, unknown>)),
   })
@@ -163,7 +169,7 @@ export function defineDevTools(call: Call, options: BrowserDevToolsOptions): Too
       value: { type: 'string', description: 'Value to set; omit with remove=true to delete the attribute and omit both to only read it.' },
       remove: { type: 'boolean', description: 'Remove the attribute instead of setting it.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: options.toolTimeoutMs + (options.approvalHoldMs ?? 0),
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_devtools_set_element_attribute', compact(args as Record<string, unknown>)),
   })
@@ -178,7 +184,7 @@ export function defineDevTools(call: Call, options: BrowserDevToolsOptions): Too
       includePreview: { type: 'boolean', description: 'Include a property preview when the value cannot be returned by value.' },
       maxChars: { type: 'number', description: 'Cap on the rendered result characters.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: options.toolTimeoutMs + (options.approvalHoldMs ?? 0),
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_console_eval', compact(args as Record<string, unknown>)),
   })
@@ -191,7 +197,7 @@ export function defineDevTools(call: Call, options: BrowserDevToolsOptions): Too
       level: { type: 'string', enum: ['log', 'info', 'warning', 'error'], description: 'Only entries at this level.' },
       sinceIndex: { type: 'number', description: 'Only entries after this sequence number, for incremental reading.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: options.toolTimeoutMs + (options.approvalHoldMs ?? 0),
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_console_logs', compact(args as Record<string, unknown>)),
   })
@@ -203,7 +209,7 @@ export function defineDevTools(call: Call, options: BrowserDevToolsOptions): Too
     parameters: {
       action: { type: 'string', required: true, enum: ['start', 'stop', 'status'], description: 'Capture action.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: options.toolTimeoutMs + (options.approvalHoldMs ?? 0),
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_devtools_network', compact(args as Record<string, unknown>)),
   })
@@ -221,7 +227,7 @@ export function defineDevTools(call: Call, options: BrowserDevToolsOptions): Too
       limit: { type: 'number', description: 'Maximum entries, most recent last. Defaults to 50.' },
       sinceIndex: { type: 'number', description: 'Only entries after this sequence number, for incremental reading.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: options.toolTimeoutMs + (options.approvalHoldMs ?? 0),
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_devtools_list_requests', compact(args as Record<string, unknown>)),
   })
@@ -236,7 +242,7 @@ export function defineDevTools(call: Call, options: BrowserDevToolsOptions): Too
       includeSensitiveHeaders: { type: 'boolean', description: `Show Authorization, Cookie, Set-Cookie, and similar values instead of [redacted]. ${SENSITIVE_OPT_OUT_NOTE}` },
       includeSensitiveBody: { type: 'boolean', description: `Show bodies of authentication-looking requests instead of [redacted]. ${SENSITIVE_OPT_OUT_NOTE}` },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: options.toolTimeoutMs + (options.approvalHoldMs ?? 0),
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_devtools_get_request', compact(args as Record<string, unknown>)),
   })
@@ -250,7 +256,7 @@ export function defineDevTools(call: Call, options: BrowserDevToolsOptions): Too
       maxChars: { type: 'number', description: 'Cap on the returned characters; the extension caps bodies at 64 KB.' },
       includeSensitiveBody: { type: 'boolean', description: `Show bodies of authentication-looking requests instead of [redacted]. ${SENSITIVE_OPT_OUT_NOTE}` },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: options.toolTimeoutMs + (options.approvalHoldMs ?? 0),
     output: TEXT_OUTPUT,
     execute: (args, exec) => call(exec, 'browser_devtools_request_body', compact(args as Record<string, unknown>)),
   })

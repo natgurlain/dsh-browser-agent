@@ -28,7 +28,8 @@ import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-experimental-worktree'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import { BridgeServer } from './server.ts'
+import { BridgeServer, DEFAULT_MAX_APPROVAL_HOLD_MS } from './server.ts'
+import { createHostApprovalRequester, type AgentLookup, type ApprovalServiceLike } from './host-approval.ts'
 import { BrowserContextInjector } from './browser-context.ts'
 import { createBrowserToolCall, registerBrowserTools } from './tools.ts'
 import { registerScreenshotTool } from './screenshot-tools.ts'
@@ -337,6 +338,13 @@ function mountBridge(
     injectBrowserSnapshot: (sessionId, snapshot) => { browserContext.inject(sessionId, snapshot) },
     purgeSession,
     onCapsChange: () => { syncDevToolsTools() },
+    // Browser approvals raised while no side panel is open are also put to
+    // dsh's approval service, so the web UI or CLI can answer them.
+    requestHostApproval: createHostApprovalRequester(
+      () => ctx.get('approval' as never) as ApprovalServiceLike | undefined,
+      () => ctx.agents as unknown as AgentLookup,
+    ),
+    maxApprovalHoldMs: DEFAULT_MAX_APPROVAL_HOLD_MS,
   })
 
   const route: WebUpgradeRoute = {
@@ -394,6 +402,7 @@ function mountBridge(
     // sandbox-checked writer (the bridge's workspace for agentless calls).
     const disposePdf = registerPdfTool(ctx, server, {
       toolTimeoutMs: resolved.toolTimeoutMs,
+      approvalHoldMs: DEFAULT_MAX_APPROVAL_HOLD_MS,
       workspacePath: resolved.sessionWorkspacePath,
     })
     return () => {
@@ -420,6 +429,7 @@ function mountBridge(
     }
     devToolsDisposers = registerBrowserDevTools(ctx, devToolsCall, {
       toolTimeoutMs: resolved.toolTimeoutMs,
+      approvalHoldMs: DEFAULT_MAX_APPROVAL_HOLD_MS,
       devToolsMaxChars: resolved.devToolsMaxChars,
     })
     ctx.logger.info('browser bridge: developer-tools group registered for the connected extension')

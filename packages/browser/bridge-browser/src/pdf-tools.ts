@@ -19,6 +19,12 @@ import { WorkspaceWriteError, workspaceWriteTarget, writeWorkspaceFile, type Wor
 /** Options for the PDF tool. */
 export interface PdfToolOptions {
   toolTimeoutMs: number
+  /**
+   * Extra time a pending browser approval may hold one call (the bridge
+   * extends its own deadline by at most this much); added to the cooperative
+   * dsh timeout so the executor does not cut a held call short.
+   */
+  approvalHoldMs?: number
   /** The bridge's configured browser-session workspace ('' for none). */
   workspacePath?: string
 }
@@ -83,7 +89,7 @@ export function registerPdfTool(ctx: Context, bridge: BridgeServer, options: Pdf
       landscape: { type: 'boolean', description: 'Landscape orientation. Defaults to false.' },
       background: { type: 'boolean', description: 'Print background graphics. Defaults to true.' },
     },
-    timeoutMs: options.toolTimeoutMs,
+    timeoutMs: options.toolTimeoutMs + (options.approvalHoldMs ?? 0),
     output: {
       schema: {
         type: 'object',

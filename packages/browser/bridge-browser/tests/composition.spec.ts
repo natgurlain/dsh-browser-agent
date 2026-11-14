@@ -440,8 +440,9 @@ describe('real Loader composition', () => {
       t: 'hello.ok',
       mac: expect.stringMatching(/^[0-9a-f]{64}$/),
       // `devTools` is the host's offer; the extension's own hello decides
-      // whether the matching tool group is registered (asserted below).
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60, devTools: { version: 1 } },
+      // whether the matching tool group is registered (asserted below);
+      // `hostApprovals` says this bridge forwards approvals to dsh.
+      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60, devTools: { version: 1 }, hostApprovals: 1 },
     })
 
     // Gateway RPC round-trip against the real session store.

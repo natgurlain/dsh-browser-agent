@@ -43,6 +43,34 @@ export const BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD = 'bridge.injectBrowserSnapsh
 export const BRIDGE_SESSION_PURGE_METHOD = 'bridge.session.purge'
 
 /**
+ * Bridge-handled RPC: extend one pending tool call's deadline while a user
+ * approval for it is outstanding (`{ toolCallId, holdMs }` → `{ expiresAt }`).
+ * Only the connection that received the call may hold it; the bridge caps the
+ * hold at its own maximum. Requires `caps.hostApprovals` from the server.
+ */
+export const BRIDGE_TOOL_HOLD_METHOD = 'bridge.tool.hold'
+
+/**
+ * Bridge-handled RPC: forward one pending browser approval to dsh's own
+ * approval service so any owner client (web UI, CLI) can answer it
+ * (`{ toolCallId, approvalId, binding?, reason }` →
+ * `{ approvalId, binding?, decision: 'allow-once' | 'deny' | 'unavailable' | 'cancelled' }`).
+ * The session and tool come from the bridge's own record of that call, never
+ * from the payload. The extension accepts the answer only for the approval id
+ * and payload binding it asked about.
+ */
+export const BRIDGE_APPROVAL_ASK_METHOD = 'bridge.approval.ask'
+
+/** Bridge-handled RPC: withdraw a forwarded approval (`{ toolCallId, approvalId }`). */
+export const BRIDGE_APPROVAL_WITHDRAW_METHOD = 'bridge.approval.withdraw'
+
+/** Largest approval `reason` the bridge forwards to dsh (never truncated: larger is refused). */
+export const MAX_HOST_APPROVAL_REASON_CHARS = 32 * 1024
+
+/** Version of the host-approval forwarding feature advertised in server caps. */
+export const HOST_APPROVALS_CAPS_VERSION = 1
+
+/**
  * Seconds a fresh socket may take to present `hello` before it is closed.
  * Short on purpose: an unauthenticated socket holds server resources, and the
  * handshake costs the client two HMACs.
@@ -64,7 +92,11 @@ export const BRIDGE_PROTOCOL_VERSION = 4
 
 /** WebSocket close codes the bridge uses; the reason string carries human text. */
 export const BRIDGE_CLOSE_CODES = {
-  /** Another authenticated connection took the single active slot. */
+  /**
+   * Another authenticated connection took this connection's slot: the same
+   * client identity reconnected, or the bridge evicted its least recently
+   * active connection to stay within its connection limit.
+   */
   replaced: 4000,
   /**
    * No valid `hello` within {@link HELLO_TIMEOUT_MS}. The bridge now
@@ -571,6 +603,51 @@ export interface BridgeCaps {
   maxInteractiveItems: number
   /** Present only when the connected extension supports the developer-tools group. */
   devTools?: DevToolsCaps
+  /**
+   * Client only: which browser install this connection belongs to. The bridge
+   * holds one connection per identity (a reconnect replaces only its own
+   * predecessor) and routes a session's tool calls back to the same install.
+   * Bound into both handshake proofs like every other cap.
+   */
+  client?: BridgeClientIdentity
+  /**
+   * Server only: the bridge handles {@link BRIDGE_TOOL_HOLD_METHOD} and
+   * {@link BRIDGE_APPROVAL_ASK_METHOD}. Absent on older bridges, which would
+   * route those methods to the gateway and refuse them.
+   */
+  hostApprovals?: typeof HOST_APPROVALS_CAPS_VERSION
+}
+
+/** Per-install identity a client advertises in `hello` caps. */
+export interface BridgeClientIdentity {
+  /** Random per-install id ([A-Za-z0-9_-], 8–64 chars). */
+  id: string
+  /** Browser family (`chrome`, `firefox`, …), lower-case letters only. */
+  browser?: string
+  /** Optional profile label (printable ASCII, at most 64 chars). */
+  profile?: string
+}
+
+/** Whether a value is a well-formed {@link BridgeClientIdentity}. */
+export function isBridgeClientIdentity(value: unknown): value is BridgeClientIdentity {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const identity = value as Record<string, unknown>
+  for (const key of Object.keys(identity)) {
+    if (key !== 'id' && key !== 'browser' && key !== 'profile') return false
+  }
+  return typeof identity.id === 'string' && /^[A-Za-z0-9_-]{8,64}$/u.test(identity.id)
+    && (identity.browser === undefined || (typeof identity.browser === 'string' && /^[a-z]{1,16}$/u.test(identity.browser)))
+    && (identity.profile === undefined || (typeof identity.profile === 'string' && /^[\x20-\x7e]{1,64}$/u.test(identity.profile)))
+}
+
+/**
+ * Registry key for a client identity: one live connection per key. Clients
+ * that advertise no identity share the single legacy key, which keeps the old
+ * "a new connection replaces the previous one" behavior for them.
+ */
+export function bridgeClientKey(identity: BridgeClientIdentity | undefined): string {
+  if (identity === undefined) return 'legacy'
+  return `${identity.browser ?? ''}/${identity.id}/${identity.profile ?? ''}`
 }
 
 /** Version of the developer-tools tool group this plugin speaks. */
@@ -775,6 +852,8 @@ function isCaps(value: unknown): value is BridgeCaps {
     && typeof caps.maxInteractiveItems === 'number' && caps.maxInteractiveItems > 0
     // Optional: an older extension omits it and simply gets no devtools tools.
     && (caps.devTools === undefined || isDevToolsCaps(caps.devTools))
+    && (caps.client === undefined || isBridgeClientIdentity(caps.client))
+    && (caps.hostApprovals === undefined || caps.hostApprovals === HOST_APPROVALS_CAPS_VERSION)
 }
 
 /** Validate the optional developer-tools capability; unknown versions are unusable. */

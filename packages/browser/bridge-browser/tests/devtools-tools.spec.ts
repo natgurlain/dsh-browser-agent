@@ -91,4 +91,10 @@ describe('registerBrowserDevTools', () => {
     const result = await (network.execute as (args: unknown, e: { signal: AbortSignal }) => Promise<unknown>)({ action: 'status' }, { signal: new AbortController().signal })
     expect(result).toEqual({ text: 'plain' })
   })
+
+  it('extends the cooperative dsh timeout by the approval hold so a held call is not cut short', () => {
+    for (const tool of defineDevTools(async () => ({ text: '' }), { ...OPTIONS, approvalHoldMs: 600_000 })) {
+      expect(tool.timeoutMs).toBe(601_000)
+    }
+  })
 })

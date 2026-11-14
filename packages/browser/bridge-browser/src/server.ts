@@ -33,9 +33,22 @@
  * stay loopback-only here regardless of the token, defense in depth for
  * `--host 0.0.0.0` deployments.
  *
- * One active connection at a time: a new authenticated socket replaces the
- * previous one (the old socket is closed and its in-flight tool calls settle
- * as `bridge-closed`).
+ * Several authenticated connections at once, one per client identity
+ * (`caps.client`: a per-install id plus browser and profile, bound into the
+ * handshake proofs). The same identity reconnecting replaces only its own
+ * predecessor, whose in-flight tool calls settle as `bridge-closed`; clients
+ * without an identity share one legacy slot. At most MAX_READY_CONNECTIONS
+ * stay open: the least recently active one is evicted beyond that.
+ * Tool calls go to the connection a session last prompted from (or that last
+ * answered one of its tool calls), else to the most recently active
+ * connection that can serve the tool. A `tool.result` is accepted only from
+ * the connection the call was sent to.
+ *
+ * Panel-independent approvals: while a call waits on the user, the owning
+ * connection may hold its deadline (`bridge.tool.hold`, capped by
+ * `maxApprovalHoldMs`) and forward the approval to dsh's approval service
+ * (`bridge.approval.ask`), which any owner client can answer. The session and
+ * tool are taken from the bridge's own record of the call.
  *
  * @module
  */
@@ -47,8 +60,16 @@ import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { BrowserHostApi } from './host-api.ts'
 import {
+  BRIDGE_APPROVAL_ASK_METHOD,
+  BRIDGE_APPROVAL_WITHDRAW_METHOD,
   BRIDGE_CLOSE_CODES,
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
+  BRIDGE_TOOL_HOLD_METHOD,
+  DEVTOOLS_TOOL_NAMES,
+  HOST_APPROVALS_CAPS_VERSION,
+  MAX_HOST_APPROVAL_REASON_CHARS,
+  bridgeClientKey,
+  isBridgeHex256,
   BRIDGE_PROTOCOL_VERSION,
   BRIDGE_SESSION_PURGE_METHOD,
   HELLO_TIMEOUT_MS,
@@ -128,6 +149,29 @@ export const PRE_AUTH_MAX_PAYLOAD = 64 * 1024
 
 /** Sockets allowed to sit in the handshake at once; the oldest is evicted as busy. */
 export const MAX_PENDING_SOCKETS = 16
+
+/** Authenticated connections kept at once; the least recently active is evicted beyond it. */
+export const MAX_READY_CONNECTIONS = 8
+
+/** Default ceiling on how long an approval may hold a tool call past its own budget. */
+export const DEFAULT_MAX_APPROVAL_HOLD_MS = 15 * 60_000
+
+/** Outcome vocabulary of dsh's approval service (`ctx.approval.request`). */
+export type HostApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+
+/** One approval the bridge forwards to dsh on behalf of a pending tool call. */
+export interface HostApprovalRequest {
+  /** Agent session the tool call belongs to (from the bridge's own record). */
+  sessionId: string
+  /** Tool the approval is about. */
+  toolName: string
+  /** Human-readable question, including the full payload the user approves. */
+  reason: string
+  /** Aborted when the approval is answered elsewhere or the call settles. */
+  signal: AbortSignal
+}
+
+const DEVTOOLS_TOOLS: ReadonlySet<string> = new Set(DEVTOOLS_TOOL_NAMES)
 
 /**
  * Lower or restore one socket's inbound message limit. `ws` sets `maxPayload`
@@ -211,17 +255,45 @@ export interface BridgeServerDeps {
   helloTimeoutMs?: number
   /** Server ping cadence; defaults to PING_INTERVAL_MS. */
   pingIntervalMs?: number
+  /**
+   * Ask dsh's approval service to decide one browser approval (any owner
+   * client may answer; the first answer wins). Absent disables forwarding and
+   * the `hostApprovals` cap. Must fail closed: anything but `allowed-once` is
+   * treated as no grant.
+   */
+  requestHostApproval?: (request: HostApprovalRequest) => Promise<HostApprovalOutcome>
+  /** Upper bound on one call's approval hold; defaults to DEFAULT_MAX_APPROVAL_HOLD_MS. */
+  maxApprovalHoldMs?: number
+  /** Clock seam for tests. */
+  now?: () => number
 }
 
 /** One in-flight tool call awaiting the extension's `tool.result`. */
 interface PendingTool {
+  /** The connection the call was sent to: the only one allowed to answer it. */
+  conn: ReadyConnection
+  name: string
+  sessionId: string | undefined
+  /** Latest deadline a hold may reach (call start + budget + max hold). */
+  holdCeiling: number
+  expiresAt: number
   resolve: (result: unknown) => void
   reject: (error: BridgeToolError) => void
+  /** Re-arm the deadline timer to `expiresAt`. */
+  rearm: () => void
   timer: NodeJS.Timeout
+  /** Forwarded approvals still waiting on dsh, by extension approval id. */
+  approvals: Map<string, AbortController>
 }
 
-/** A socket that passed authentication and owns the single active slot. */
+/** A socket that passed authentication and owns its client identity's slot. */
 interface ReadyConnection {
+  /** Registry key derived from `caps.client`. */
+  key: string
+  /** Last time this connection sent a non-liveness frame (routing fallback). */
+  lastActiveAt: number
+  /** Promotion order, the tie-breaker for equally recent connections. */
+  serial: number
   ws: WebSocket
   /** Remote address captured at upgrade time (loopback gate for privileged methods). */
   remoteAddress: string | undefined
@@ -268,7 +340,12 @@ export function messageToText(data: Buffer | ArrayBuffer | Buffer[]): string {
  */
 export class BridgeServer {
   private readonly wss = new WebSocketServer({ noServer: true })
-  private current: ReadyConnection | null = null
+  /** Authenticated connections by client key. */
+  private readonly connections = new Map<string, ReadyConnection>()
+  /** Session → client key that last prompted it or answered one of its tool calls. */
+  private readonly sessionAffinity = new Map<string, string>()
+  private connectionSerial = 0
+  private readonly serverCaps: BridgeCaps
   private readonly pendingTools = new Map<string, PendingTool>()
   private readonly orderedSessionRpcs = new Map<string, Promise<void>>()
   private closed = false
@@ -278,6 +355,14 @@ export class BridgeServer {
 
   constructor(private readonly deps: BridgeServerDeps) {
     this.chromeExtensionIds = new Set(deps.allowedChromeExtensionIds ?? [PINNED_CHROME_EXTENSION_ID])
+    const { hostApprovals: _hostApprovals, client: _client, ...caps } = deps.caps
+    this.serverCaps = deps.requestHostApproval === undefined
+      ? caps
+      : { ...caps, hostApprovals: HOST_APPROVALS_CAPS_VERSION }
+  }
+
+  private now(): number {
+    return this.deps.now?.() ?? Date.now()
   }
 
   /**
@@ -313,9 +398,11 @@ export class BridgeServer {
     timeoutMs: number = this.deps.toolTimeoutMs,
     sessionId?: string,
   ): Promise<unknown> {
-    const conn = this.current
-    if (conn === null) {
-      throw new BridgeToolError('bridge-closed', 'no browser extension is connected to the bridge')
+    const conn = this.pickConnection(name, sessionId)
+    if (conn === undefined) {
+      throw new BridgeToolError('bridge-closed', this.connections.size === 0
+        ? 'no browser extension is connected to the bridge'
+        : `no connected browser extension can serve "${name}"`)
     }
     // A caller that already aborted must not dispatch: the abort listener
     // below does not replay for pre-aborted signals, so the call would be
@@ -324,12 +411,12 @@ export class BridgeServer {
       throw new BridgeToolError('bridge-closed', 'tool call cancelled before dispatch')
     }
     const id = randomUUID()
-    const expiresAt = Date.now() + timeoutMs
+    const startedAt = this.now()
+    const expiresAt = startedAt + timeoutMs
     return new Promise<unknown>((resolve, reject) => {
-      let timer: NodeJS.Timeout
       const settle = (error: BridgeToolError): void => {
-        clearTimeout(timer)
-        this.pendingTools.delete(id)
+        clearTimeout(entry.timer)
+        this.dropPendingTool(id)
         signal.removeEventListener('abort', onAbort)
         reject(error)
       }
@@ -343,11 +430,32 @@ export class BridgeServer {
       const onAbort = (): void => {
         cancel(new BridgeToolError('bridge-closed', 'tool call cancelled before the extension answered'))
       }
-      timer = setTimeout(() => {
-        cancel(new BridgeToolError('timeout', `browser action "${name}" timed out after ${timeoutMs}ms`))
-      }, timeoutMs)
+      const onExpire = (): void => {
+        cancel(new BridgeToolError('timeout', `browser action "${name}" timed out after ${String(entry.expiresAt - startedAt)}ms`))
+      }
+      const entry: PendingTool = {
+        conn,
+        name,
+        sessionId,
+        holdCeiling: expiresAt + (this.deps.maxApprovalHoldMs ?? DEFAULT_MAX_APPROVAL_HOLD_MS),
+        expiresAt,
+        resolve: (result) => {
+          signal.removeEventListener('abort', onAbort)
+          resolve(result)
+        },
+        reject: (error) => {
+          signal.removeEventListener('abort', onAbort)
+          reject(error)
+        },
+        rearm: () => {
+          clearTimeout(entry.timer)
+          entry.timer = setTimeout(onExpire, Math.max(0, entry.expiresAt - this.now()))
+        },
+        timer: setTimeout(onExpire, timeoutMs),
+        approvals: new Map(),
+      }
       signal.addEventListener('abort', onAbort, { once: true })
-      this.pendingTools.set(id, { resolve, reject, timer })
+      this.pendingTools.set(id, entry)
       conn.ws.send(conn.channel.seal({
         t: 'tool.call',
         id,
@@ -376,11 +484,10 @@ export class BridgeServer {
     // "The server is not running" when closing an already-closed server).
     if (this.closed) return
     this.closed = true
-    // Capture the live pump BEFORE replaceConnection nulls the connection.
-    const pumps = this.current === null ? [] : [this.current.pump]
-    this.replaceConnection()
+    // Capture the live pumps BEFORE dropConnection forgets the connections.
+    const pumps = [...this.connections.values()].map((conn) => conn.pump)
+    for (const conn of [...this.connections.values()]) this.dropConnection(conn, 'the bridge closed')
     for (const socket of this.wss.clients) socket.terminate()
-    this.current = null
     await new Promise<void>((resolve, reject) => {
       this.wss.close((error) => {
         /* v8 ignore next -- acceptor close cannot fail: close() is idempotent
@@ -395,16 +502,49 @@ export class BridgeServer {
 
   /** @returns whether an authenticated extension is currently connected. */
   hasConnection(): boolean {
-    return this.current !== null
+    return this.connections.size > 0
+  }
+
+  /** @returns how many authenticated extensions are connected right now. */
+  connectionCount(): number {
+    return this.connections.size
   }
 
   /**
-   * Whether the connected extension can serve the developer-tools group.
-   * Read by the plugin when it (re)registers that tool group.
-   * @returns true only for a live connection whose `hello` advertised devtools.
+   * Whether some connected extension can serve the developer-tools group.
+   * Read by the plugin when it (re)registers that tool group; calls in that
+   * group are routed only to connections that advertised it.
+   * @returns true when at least one live connection's `hello` advertised devtools.
    */
   devToolsSupported(): boolean {
-    return isDevToolsCaps(this.current?.clientCaps.devTools)
+    for (const conn of this.connections.values()) {
+      if (isDevToolsCaps(conn.clientCaps.devTools)) return true
+    }
+    return false
+  }
+
+  /**
+   * Choose the connection for one tool call: the session's affine client
+   * when it is connected and can serve the tool, else the most recently
+   * active capable connection.
+   */
+  private pickConnection(name: string, sessionId: string | undefined): ReadyConnection | undefined {
+    const capable = (conn: ReadyConnection): boolean =>
+      conn.ws.readyState === WebSocket.OPEN
+      && (!DEVTOOLS_TOOLS.has(name) || isDevToolsCaps(conn.clientCaps.devTools))
+    if (sessionId !== undefined) {
+      const key = this.sessionAffinity.get(sessionId)
+      const affine = key === undefined ? undefined : this.connections.get(key)
+      if (affine !== undefined && capable(affine)) return affine
+    }
+    let best: ReadyConnection | undefined
+    for (const conn of this.connections.values()) {
+      if (!capable(conn)) continue
+      if (best === undefined
+        || conn.lastActiveAt > best.lastActiveAt
+        || (conn.lastActiveAt === best.lastActiveAt && conn.serial > best.serial)) best = conn
+    }
+    return best
   }
 
   private attach(
@@ -479,8 +619,8 @@ export class BridgeServer {
         leavePending()
         if (limited) setSocketMaxPayload(ws, this.wss.options.maxPayload ?? 100 * 1024 * 1024)
         channel = BridgeFrameChannel.derive(this.deps.token, 'server', serverNonce, frame.nonce, frame.endpoint, nodeHmac)
-        this.promote(ws, remoteAddress, frame.caps, channel,
-          bridgeProof(this.deps.token, 'server', frame.nonce, serverNonce, frame.endpoint, { client: frame.caps, server: this.deps.caps }, nodeHmac))
+        ready = this.promote(ws, remoteAddress, frame.caps, channel,
+          bridgeProof(this.deps.token, 'server', frame.nonce, serverNonce, frame.endpoint, { client: frame.caps, server: this.serverCaps }, nodeHmac))
         return
       }
       const frame = channel?.open(text)
@@ -488,12 +628,18 @@ export class BridgeServer {
         ws.close(BRIDGE_CLOSE_CODES.authFailed, 'frame authentication failed')
         return
       }
-      this.handleReadyFrame(frame)
+      const conn = ready
+      /* v8 ignore next -- a sealed frame can only follow promotion on this socket */
+      if (conn === undefined) return
+      this.handleReadyFrame(conn, frame)
     }
+    let ready: ReadyConnection | undefined
     const onClose = (): void => {
       leavePending()
       if (helloTimer !== undefined) clearTimeout(helloTimer)
-      if (this.current !== null && this.current.ws === ws) this.replaceConnection()
+      if (ready !== undefined && this.connections.get(ready.key) === ready) {
+        this.dropConnection(ready, 'the extension connection closed')
+      }
     }
     ws.on('message', onMessage)
     ws.once('close', onClose)
@@ -508,15 +654,29 @@ export class BridgeServer {
     return forwarded.includes(claimed.port) && isLoopbackHost(claimed.host)
   }
 
-  /** Promote an authenticated socket to the single active slot. */
+  /**
+   * Promote an authenticated socket into its client identity's slot,
+   * replacing only a previous connection with the same identity.
+   */
   private promote(
     ws: WebSocket,
     remoteAddress: string | undefined,
     clientCaps: BridgeCaps,
     channel: BridgeFrameChannel,
     serverMac: string,
-  ): void {
-    this.replaceConnection()
+  ): ReadyConnection {
+    const key = bridgeClientKey(clientCaps.client)
+    const previous = this.connections.get(key)
+    if (previous !== undefined) this.dropConnection(previous, 'the extension connection was replaced')
+    if (this.connections.size >= MAX_READY_CONNECTIONS) {
+      let stalest: ReadyConnection | undefined
+      for (const conn of this.connections.values()) {
+        if (stalest === undefined || conn.lastActiveAt < stalest.lastActiveAt
+          || (conn.lastActiveAt === stalest.lastActiveAt && conn.serial < stalest.serial)) stalest = conn
+      }
+      /* v8 ignore next -- the map is non-empty here */
+      if (stalest !== undefined) this.dropConnection(stalest, 'the extension connection was evicted')
+    }
     const abort = new AbortController()
     const target = { ws, channel }
     const ping = setInterval(() => { sendFrame(target, { t: 'ping' }) }, this.deps.pingIntervalMs ?? PING_INTERVAL_MS)
@@ -539,8 +699,20 @@ export class BridgeServer {
         }
       }
     })()
-    this.current = { ws, remoteAddress, clientCaps, channel, abort, pump, ping }
-    sendHandshakeFrame(ws, { t: 'hello.ok', caps: this.deps.caps, mac: serverMac })
+    const conn: ReadyConnection = {
+      key,
+      lastActiveAt: this.now(),
+      serial: ++this.connectionSerial,
+      ws,
+      remoteAddress,
+      clientCaps,
+      channel,
+      abort,
+      pump,
+      ping,
+    }
+    this.connections.set(key, conn)
+    sendHandshakeFrame(ws, { t: 'hello.ok', caps: this.serverCaps, mac: serverMac })
     // Notify only after the new connection owns the slot, so a listener reading
     // `devToolsSupported()` sees the capability that just arrived.
     this.deps.onCapsChange?.(clientCaps)
@@ -548,18 +720,22 @@ export class BridgeServer {
       clearInterval(ping)
       abort.abort()
     })
+    return conn
   }
 
-  private handleReadyFrame(frame: BridgeFrame): void {
+  private handleReadyFrame(conn: ReadyConnection, frame: BridgeFrame): void {
+    // Liveness replies (and client heartbeats, which reuse `pong`) do not
+    // count as activity: every connection answers pings.
+    if (frame.t !== 'pong') conn.lastActiveAt = this.now()
     switch (frame.t) {
       case 'rpc':
-        this.routeRpc(frame)
+        this.routeRpc(conn, frame)
         break
       case 'respond':
-        void this.handleRespond(frame)
+        void this.handleRespond(conn, frame)
         break
       case 'tool.result':
-        this.settleTool(frame)
+        this.settleTool(conn, frame)
         break
       case 'pong':
       case 'hello':
@@ -583,16 +759,20 @@ export class BridgeServer {
    * first prompt may still be materializing a provisional session; its cancel
    * must not reach the gateway until that admission has completed.
    */
-  private routeRpc(frame: Extract<ClientFrame, { t: 'rpc' }>): void {
+  private routeRpc(conn: ReadyConnection, frame: Extract<ClientFrame, { t: 'rpc' }>): void {
     const sessionId = orderedSessionId(frame)
     if (sessionId === undefined) {
-      void this.handleRpc(frame)
+      void this.handleRpc(conn, frame)
       return
+    }
+    // The browser a session is driven from is where its tools should act.
+    if (frame.method === 'session.prompt' || frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD) {
+      this.sessionAffinity.set(sessionId, conn.key)
     }
     const previous = this.orderedSessionRpcs.get(sessionId) ?? Promise.resolve()
     const task = previous.then(
-      () => this.handleRpc(frame),
-      () => this.handleRpc(frame),
+      () => this.handleRpc(conn, frame),
+      () => this.handleRpc(conn, frame),
     )
     this.orderedSessionRpcs.set(sessionId, task)
     const clear = (): void => {
@@ -601,11 +781,19 @@ export class BridgeServer {
     void task.then(clear, clear)
   }
 
-  private async handleRpc(frame: Extract<ClientFrame, { t: 'rpc' }>): Promise<void> {
-    const conn = this.current
-    /* v8 ignore next -- replacement race: a frame can land between a socket
-    replacement and the next promotion; the re-check keeps the handler total */
-    if (conn === null) return
+  private async handleRpc(conn: ReadyConnection, frame: Extract<ClientFrame, { t: 'rpc' }>): Promise<void> {
+    if (frame.method === BRIDGE_TOOL_HOLD_METHOD) {
+      this.handleToolHold(conn, frame)
+      return
+    }
+    if (frame.method === BRIDGE_APPROVAL_ASK_METHOD) {
+      await this.handleApprovalAsk(conn, frame)
+      return
+    }
+    if (frame.method === BRIDGE_APPROVAL_WITHDRAW_METHOD) {
+      this.handleApprovalWithdraw(conn, frame)
+      return
+    }
     const forbidden = PRIVILEGED_METHODS.has(frame.method) && !isLoopbackAddress(conn.remoteAddress)
     if (forbidden) {
       sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'forbidden', message: 'method is loopback-only' } })
@@ -695,11 +883,106 @@ export class BridgeServer {
     }
   }
 
+  /** The pending call `payload.toolCallId` names, if this connection owns it. */
+  private ownedTool(conn: ReadyConnection, payload: unknown): PendingTool | undefined {
+    if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
+    const id = (payload as Record<string, unknown>).toolCallId
+    if (typeof id !== 'string') return undefined
+    const tool = this.pendingTools.get(id)
+    // Another client must not hold, or raise approvals for, a call it was not sent.
+    return tool !== undefined && tool.conn === conn ? tool : undefined
+  }
+
+  private rpcError(conn: ReadyConnection, id: string, code: string, message: string): void {
+    sendFrame(conn, { t: 'rpc.result', id, ok: false, error: { code, message } })
+  }
+
+  /** Extend one owned call's deadline while its approval is outstanding. */
+  private handleToolHold(conn: ReadyConnection, frame: Extract<ClientFrame, { t: 'rpc' }>): void {
+    const tool = this.ownedTool(conn, frame.payload)
+    if (tool === undefined) {
+      this.rpcError(conn, frame.id, 'not-found', 'no pending tool call with that id on this connection')
+      return
+    }
+    const holdMs = (frame.payload as Record<string, unknown>).holdMs
+    if (typeof holdMs !== 'number' || !Number.isFinite(holdMs) || holdMs <= 0) {
+      this.rpcError(conn, frame.id, 'bad-request', 'holdMs must be a positive number')
+      return
+    }
+    const target = Math.min(this.now() + holdMs, tool.holdCeiling)
+    if (target > tool.expiresAt) {
+      tool.expiresAt = target
+      tool.rearm()
+    }
+    sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { expiresAt: tool.expiresAt } })
+  }
+
+  /** Forward one approval for an owned call to dsh's approval service. */
+  private async handleApprovalAsk(conn: ReadyConnection, frame: Extract<ClientFrame, { t: 'rpc' }>): Promise<void> {
+    const request = this.deps.requestHostApproval
+    if (request === undefined) {
+      this.rpcError(conn, frame.id, 'unsupported', 'this bridge does not forward approvals')
+      return
+    }
+    const tool = this.ownedTool(conn, frame.payload)
+    if (tool === undefined) {
+      this.rpcError(conn, frame.id, 'not-found', 'no pending tool call with that id on this connection')
+      return
+    }
+    const { approvalId, binding, reason } = frame.payload as Record<string, unknown>
+    if (typeof approvalId !== 'string' || approvalId === '' || approvalId.length > 128
+      || (binding !== undefined && !isBridgeHex256(binding))
+      || typeof reason !== 'string' || reason.trim() === '') {
+      this.rpcError(conn, frame.id, 'bad-request', 'approvalId, reason and an optional SHA-256 binding are required')
+      return
+    }
+    if (reason.length > MAX_HOST_APPROVAL_REASON_CHARS) {
+      // Never truncate what the user approves: refuse instead.
+      this.rpcError(conn, frame.id, 'too-large', 'the approval is too large to forward; review it in the browser')
+      return
+    }
+    if (tool.approvals.has(approvalId)) {
+      this.rpcError(conn, frame.id, 'bad-request', 'that approval is already forwarded')
+      return
+    }
+    const echo = { approvalId, ...(binding === undefined ? {} : { binding }) }
+    if (tool.sessionId === undefined) {
+      sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { ...echo, decision: 'unavailable' } })
+      return
+    }
+    const controller = new AbortController()
+    tool.approvals.set(approvalId, controller)
+    let outcome: HostApprovalOutcome
+    try {
+      outcome = await request({ sessionId: tool.sessionId, toolName: tool.name, reason, signal: controller.signal })
+    } catch {
+      outcome = 'unavailable'
+    } finally {
+      tool.approvals.delete(approvalId)
+    }
+    // Only a grant to the still-pending call counts; everything else fails closed.
+    const decision = controller.signal.aborted
+      ? 'cancelled'
+      : outcome === 'allowed-once' ? 'allow-once'
+      : outcome === 'rejected' ? 'deny'
+      : outcome === 'cancelled' ? 'cancelled'
+      : 'unavailable'
+    sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { ...echo, decision } })
+  }
+
+  /** Withdraw a forwarded approval once the browser has settled it. */
+  private handleApprovalWithdraw(conn: ReadyConnection, frame: Extract<ClientFrame, { t: 'rpc' }>): void {
+    const tool = this.ownedTool(conn, frame.payload)
+    const approvalId = tool === undefined ? undefined : (frame.payload as Record<string, unknown>).approvalId
+    const controller = tool === undefined || typeof approvalId !== 'string'
+      ? undefined
+      : tool.approvals.get(approvalId)
+    controller?.abort()
+    sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { withdrawn: controller !== undefined } })
+  }
+
   /** Relay a pending Host waterfall response through the active adapter. */
-  private async handleRespond(frame: Extract<ClientFrame, { t: 'respond' }>): Promise<void> {
-    const conn = this.current
-    /* v8 ignore next -- replacement race; a closed socket simply drops the receipt */
-    if (conn === null) return
+  private async handleRespond(conn: ReadyConnection, frame: Extract<ClientFrame, { t: 'respond' }>): Promise<void> {
     try {
       const result = await this.deps.api.respond(frame.rpcId, frame.result, conn.abort.signal)
       sendFrame(conn, { t: 'respond.result', id: frame.id, ok: true, result })
@@ -708,30 +991,44 @@ export class BridgeServer {
     }
   }
 
-  private settleTool(frame: Extract<ClientFrame, { t: 'tool.result' }>): void {
+  private settleTool(conn: ReadyConnection, frame: Extract<ClientFrame, { t: 'tool.result' }>): void {
     const pending = this.pendingTools.get(frame.id)
-    if (pending === undefined) return
+    // Only the connection the call was sent to may answer it.
+    if (pending === undefined || pending.conn !== conn) return
     clearTimeout(pending.timer)
-    this.pendingTools.delete(frame.id)
-    if (frame.ok) pending.resolve(frame.result)
-    else pending.reject(new BridgeToolError(frame.error.code, frame.error.message || 'browser action failed'))
+    this.dropPendingTool(frame.id)
+    if (frame.ok) {
+      if (pending.sessionId !== undefined) this.sessionAffinity.set(pending.sessionId, conn.key)
+      pending.resolve(frame.result)
+    } else {
+      pending.reject(new BridgeToolError(frame.error.code, frame.error.message || 'browser action failed'))
+    }
   }
 
-  /** Close the current connection (if any) and settle its in-flight calls. */
-  private replaceConnection(): void {
-    const conn = this.current
-    if (conn === null) return
-    this.current = null
+  /** Forget one pending call and withdraw any approval it forwarded to dsh. */
+  private dropPendingTool(id: string): void {
+    const pending = this.pendingTools.get(id)
+    if (pending === undefined) return
+    this.pendingTools.delete(id)
+    for (const controller of pending.approvals.values()) controller.abort()
+    pending.approvals.clear()
+  }
+
+  /** Close one connection and settle only its own in-flight calls. */
+  private dropConnection(conn: ReadyConnection, reason: string): void {
+    if (this.connections.get(conn.key) === conn) this.connections.delete(conn.key)
     clearInterval(conn.ping)
     conn.abort.abort()
     if (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING) {
       conn.ws.close(BRIDGE_CLOSE_CODES.replaced, 'replaced')
     }
-    for (const [id, pending] of this.pendingTools) {
+    for (const [id, pending] of [...this.pendingTools]) {
+      if (pending.conn !== conn) continue
       clearTimeout(pending.timer)
-      this.pendingTools.delete(id)
-      pending.reject(new BridgeToolError('bridge-closed', 'the extension connection was replaced'))
+      this.dropPendingTool(id)
+      pending.reject(new BridgeToolError('bridge-closed', reason))
     }
+    if (!this.closed) this.deps.onCapsChange?.(conn.clientCaps)
   }
 }
 
