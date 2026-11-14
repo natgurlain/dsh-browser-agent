@@ -27,7 +27,6 @@ const BRIDGE_CWD = '/home/u/.dsh/browser-sessions'
 const DEFAULT_OPTIONS: BridgePolicyOptions = {
   allowDangerFullAccess: false,
   presetSandbox: (preset) => SANDBOXES[preset],
-  bridgeSessionCwd: BRIDGE_CWD,
 }
 
 function harness(handlers: Record<string, Handler> = {}, options: Partial<BridgePolicyOptions> = {}) {
@@ -119,15 +118,24 @@ describe('session ownership', () => {
     const { call } = harness()
     await call('session.create', {})
     const listed = await call('session.list', {}) as { ok: true; value: { items: Array<{ sessionId: string }> } }
-    expect(listed.value.items.map((item) => item.sessionId)).toEqual(['earlier-bridge'])
+    expect(listed.value.items.map((item) => item.sessionId)).toEqual([])
   })
 
-  it('keeps durable ownership through the ledger and the bridge workspace directory', async () => {
+  it('projects workspace.list down to archived ids of the bridge\'s own sessions', async () => {
+    const { call } = harness({
+      'workspace.list': () => ({ ok: true, value: { items: [{ workspaceId: 'w', path: '/home/u/secret-repo', sessionIds: ['listed'] }], archivedSessionIds: ['listed', 'created', 7] } }),
+    })
+    await call('session.create', {})
+    expect(await call('workspace.list', {})).toEqual({ ok: true, value: { archivedSessionIds: ['created'] } })
+  })
+
+  it('keeps durable ownership through the ledger only; a session in the bridge directory is not owned (CLI can start there)', async () => {
     const ledger = memorySessionLedger(['from-last-run'])
     const { policy, call } = harness({}, { ledger })
     const signal = new AbortController().signal
     expect(await policy.allowsSession('from-last-run', signal, 'own')).toBe(true)
-    expect(await policy.allowsSession('earlier-bridge', signal, 'own')).toBe(true)
+    expect(await policy.allowsSession('earlier-bridge', signal, 'own')).toBe(false)
+    expect(await policy.allowsSession('earlier-bridge', signal, 'read')).toBe(true)
     expect(await policy.allowsSession('listed', signal, 'own')).toBe(false)
     expect(await policy.allowsSession('listed', signal, 'read')).toBe(true)
     expect(await policy.allowsSession('child', signal, 'read')).toBe(false)
@@ -375,10 +383,34 @@ describe('relay settings and credentials', () => {
       'settings.mutate': (c) => {
         const op = (c.payload as { ops: Array<{ op: string; path: string[]; value: unknown }> }).ops[0]!
         if (op.op === 'set' && op.path[0] === 'providers') providers[op.path[1]!] = op.value
+        if (op.op === 'unset' && op.path[0] === 'providers') delete providers[op.path[1]!]
         return { ok: true, value: {} }
       },
     })
   }
+
+  it('clears a relay key when its route is removed and before a re-created route is written (policy3 unset-then-set)', async () => {
+    const { call, inner } = storedRelay()
+    const order: string[] = []
+    inner.mockImplementation(((original) => async (c: HostRpcCall) => {
+      order.push(c.method === 'settings.mutate' ? `mutate:${(c.payload as { ops: Array<{ op: string }> }).ops[0]!.op}` : c.method)
+      return original(c)
+    })(inner.getMockImplementation()!))
+    expect(await call('settings.mutate', { ns: 'llm-pi-ai', ops: [{ op: 'unset', path: ['providers', 'relay-a'] }] })).toMatchObject({ ok: true })
+    expect(order.filter((m) => m !== 'settings.describe')).toEqual(['mutate:unset', 'credentials.unset'])
+    order.length = 0
+    const evil = { ...relayRoute('relay-a'), baseURL: 'https://evil.example/v1' }
+    expect(await call('settings.mutate', { ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'relay-a'], value: evil }] })).toMatchObject({ ok: true })
+    expect(order.filter((m) => m !== 'settings.describe')).toEqual(['credentials.unset', 'mutate:set'])
+    expect(forwarded(inner, 'credentials.unset').map(([c]) => c.payload)).toEqual([{ ref: 'DSH_RELAY_A_TOKEN' }, { ref: 'DSH_RELAY_A_TOKEN' }])
+  })
+
+  it('refuses the route write when its leftover key cannot be cleared', async () => {
+    const { call, inner } = harness({ 'credentials.unset': () => ({ ok: false, error: { code: 'internal', message: 'store locked', details: {} } }) })
+    const result = await call('settings.mutate', { ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'relay-z'], value: relayRoute('relay-z') }] })
+    expect(result).toMatchObject({ ok: false, error: { code: 'forbidden', message: expect.stringContaining('store locked') } })
+    expect(forwarded(inner, 'settings.mutate')).toHaveLength(0)
+  })
   const discover = (extra: Record<string, unknown>) => ({ settingsNs: 'llm-pi-ai', provider: 'relay-a', api: 'openai-completions', ...extra })
 
   it('spends a stored relay key in model discovery only against the address it was saved for', async () => {
@@ -411,8 +443,10 @@ describe('relay settings and credentials', () => {
 
   it('keeps the stored key when the route is re-saved at the same address or with a fresh key', async () => {
     const { call, inner } = storedRelay()
-    // A new route without a key has nothing stored to clear.
+    // A new route without a fresh key starts keyless: any leftover key in its slot is cleared.
     expect(await call('settings.mutate', { ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'relay-b'], value: relayRoute('relay-b') }] })).toMatchObject({ ok: true })
+    expect(forwarded(inner, 'credentials.unset').map(([c]) => c.payload)).toEqual([{ ref: 'DSH_RELAY_B_TOKEN' }])
+    inner.mockClear()
     expect(await call('settings.mutate', { ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'relay-a'], value: { ...relayRoute('relay-a'), displayName: 'Renamed' } }] })).toMatchObject({ ok: true })
     expect(await call('credentials.set', { ref: 'DSH_RELAY_A_TOKEN', value: 'sk-new' })).toMatchObject({ ok: true })
     expect(await call('settings.mutate', { ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'relay-a'], value: { ...relayRoute('relay-a'), baseURL: 'https://new.example' } }] })).toMatchObject({ ok: true })

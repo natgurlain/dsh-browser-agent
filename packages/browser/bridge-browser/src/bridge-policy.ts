@@ -8,12 +8,13 @@
  * - an explicit method allowlist (no `host.*`, no workspace mutation, no
  *   settings/credential writes outside the panel's relay-profile editor);
  * - session ownership: `session.create` is stripped to `{}` so the bridge
- *   always mints a fresh id, and only sessions the bridge created (this run,
- *   the durable ledger, or the bridge workspace directory) can be prompted,
+ *   always mints a fresh id, and only sessions the bridge created (this run or
+ *   the durable ledger; a matching working directory proves nothing, since any
+ *   CLI session can be started there) can be prompted,
  *   steered, injected into, or purged. Other listable non-subagent sessions
  *   (Desktop, CLI) stay readable — history, state, cancel — so an approval
- *   raised by such a session can still be shown; `session.list` answers only
- *   the bridge's own sessions;
+ *   raised by such a session can still be shown; `session.list` and
+ *   `workspace.list` answer only about the bridge's own sessions;
  * - no full access: bridge sessions start on a safe preset even when the Host
  *   default is full access, no switch to a full-access preset, and no prompt,
  *   snapshot injection, or command for a session currently running one —
@@ -21,7 +22,9 @@
  *   safe only when the Host's preset table (public API) bundles a
  *   `read-only` or `workspace-write` sandbox, or the operator names it in
  *   `safePermissionPresets`; unknown presets (including `custom`) are refused;
- * - relay credentials stay bound to the route they were entered for;
+ * - relay credentials stay bound to the route they were entered for: cleared
+ *   before a route moves to a new address without a fresh key, when a route is
+ *   removed, and before a new route reuses a slot an earlier route left behind;
  * - `settings.describe` projected down to the fields the panel reads, so other
  *   plugins' configuration (including secrets) never reaches the extension.
  *
@@ -151,14 +154,8 @@ export interface BridgePolicyOptions {
   presetSandbox?: (preset: string) => string | undefined
   /** Preset names the operator vouches for as restricted (plugin config). */
   safePresetNames?: readonly string[]
-  /** Durable record of bridge-created sessions; defaults to memory only. */
+  /** Durable record of bridge-created sessions (the only ownership proof); defaults to memory only. */
   ledger?: SessionLedger
-  /**
-   * Directory every bridge-created session runs in (the bridge workspace);
-   * a listed session with exactly this `cwd` is the bridge's. Empty disables
-   * the marker.
-   */
-  bridgeSessionCwd?: string
 }
 
 /** How a server-owned method touches a session. */
@@ -183,10 +180,6 @@ function sessionIdOf(payload: unknown): string | undefined {
   if (!isRecord(payload)) return undefined
   const value = payload.sessionId
   return typeof value === 'string' && value.trim() !== '' ? value : undefined
-}
-
-function normalizeDirectory(path: string): string {
-  return path.replace(/[\\/]+$/u, '')
 }
 
 /**
@@ -236,11 +229,8 @@ export function permissionCommandOf(line: string): { kind: 'none' } | { kind: 's
  */
 export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptions): BridgePolicyApi {
   const ledger = options.ledger ?? memorySessionLedger()
-  const bridgeCwd = normalizeDirectory(options.bridgeSessionCwd ?? '')
   /** Non-subagent sessions the Host listed (read tier). */
   const listable = new Set<string>()
-  /** Listed sessions whose cwd is the bridge workspace (durable ownership marker). */
-  const inBridgeWorkspace = new Set<string>()
   /** Relay route keys whose baseURL changed this run without a fresh key. */
   const reroutedWithoutKey = new Set<string>()
   /** Relay credential references set since their route was last written. */
@@ -267,13 +257,10 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
     for (const item of value.items) {
       if (!isRecord(item) || typeof item.sessionId !== 'string' || item.origin === 'subagent') continue
       listable.add(item.sessionId)
-      if (bridgeCwd !== '' && typeof item.cwd === 'string' && normalizeDirectory(item.cwd) === bridgeCwd) {
-        inBridgeWorkspace.add(item.sessionId)
-      }
     }
   }
 
-  const owned = (sessionId: string): boolean => ledger.has(sessionId) || inBridgeWorkspace.has(sessionId)
+  const owned = (sessionId: string): boolean => ledger.has(sessionId)
 
   const refreshList = async (signal: AbortSignal): Promise<void> => {
     const listed = await inner('session.list', {}, signal)
@@ -345,20 +332,34 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
     return undefined
   }
 
-  /** Relay routes in a settings.mutate whose baseURL changes without a fresh key. */
-  const reroutesOf = async (payload: Record<string, unknown>, signal: AbortSignal): Promise<string[]> => {
-    if (payload.ns !== 'llm-pi-ai' || !Array.isArray(payload.ops)) return []
-    const keys: string[] = []
+  /**
+   * Relay credentials a settings.mutate must clear BEFORE it is forwarded:
+   * routes whose baseURL changes without a fresh key (`rerouted`), and new
+   * routes (no stored address) whose credential slot was not just filled by
+   * the panel, so a key left behind by an earlier route (unset-then-set)
+   * never follows the route to a new address.
+   */
+  const credentialsToClear = async (payload: Record<string, unknown>, signal: AbortSignal): Promise<{ rerouted: string[]; orphaned: string[] }> => {
+    const rerouted: string[] = []
+    const orphaned: string[] = []
+    if (payload.ns !== 'llm-pi-ai' || !Array.isArray(payload.ops)) return { rerouted, orphaned }
     for (const raw of payload.ops) {
       const op = opShape(raw)
       if (op?.op !== 'set' || !isRecord(op.value)) continue
       const key = op.path[1]!
       if (freshCredentials.has(relayTokenRef(key))) continue
       const stored = await storedBaseUrl(key, signal)
-      // A brand-new route has no stored key to protect.
-      if (stored !== undefined && stored !== normalizeBaseUrl(op.value.baseURL)) keys.push(key)
+      if (stored === undefined) orphaned.push(key)
+      else if (stored !== normalizeBaseUrl(op.value.baseURL)) rerouted.push(key)
     }
-    return keys
+    return { rerouted, orphaned }
+  }
+
+  const clearCredential = async (key: string, signal: AbortSignal): Promise<HostRpcResult | undefined> => {
+    const cleared = await inner('credentials.unset', { ref: relayTokenRef(key) }, signal)
+    return cleared.ok
+      ? undefined
+      : forbidden(`The stored key of relay route ${key} could not be cleared (${cleared.error.message}); nothing was changed. Re-enter the key.`)
   }
 
   const call = async (call: HostRpcCall): Promise<HostRpcResult> => {
@@ -417,7 +418,14 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
       })) {
         return forbidden('Re-enter the API key of a relay whose address changed before making it the default model.')
       }
-      rerouted = await reroutesOf(payload, call.signal)
+      const clear = await credentialsToClear(payload, call.signal)
+      rerouted = clear.rerouted
+      // Cleared before the route is written: a Host call between the two
+      // (model selection, a prompt) must never spend the old key at the new address.
+      for (const key of [...clear.rerouted, ...clear.orphaned]) {
+        const failed = await clearCredential(key, call.signal)
+        if (failed !== undefined) return failed
+      }
     }
 
     const result = await api.call(call)
@@ -432,12 +440,14 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
         if (key !== undefined) freshCredentials.delete(relayTokenRef(key))
       }
       // A stored key never follows its route to a new address.
-      for (const key of rerouted) {
-        reroutedWithoutKey.add(key)
-        const cleared = await inner('credentials.unset', { ref: relayTokenRef(key) }, call.signal)
-        if (!cleared.ok) {
-          return forbidden(`The relay address changed but its stored key could not be cleared (${cleared.error.message}); re-enter the key.`)
-        }
+      for (const key of rerouted) reroutedWithoutKey.add(key)
+      // A removed route takes its key with it, so a later route of the same name starts keyless.
+      for (const raw of payload.ops) {
+        const op = opShape(raw)
+        if (op?.op !== 'unset') continue
+        reroutedWithoutKey.delete(op.path[1]!)
+        const failed = await clearCredential(op.path[1]!, call.signal)
+        if (failed !== undefined) return failed
       }
     }
     if (call.method === 'session.list') {
@@ -445,6 +455,7 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
       return { ok: true, value: ownedListing(result.value, owned) }
     }
     if (call.method === 'settings.describe') return { ok: true, value: describedSettings(result.value) }
+    if (call.method === 'workspace.list') return { ok: true, value: ownedArchive(result.value, owned) }
     return result
   }
 
@@ -464,6 +475,15 @@ function ownedListing(value: unknown, owned: (sessionId: string) => boolean): un
     items: value.items.filter((item) => isRecord(item) && typeof item.sessionId === 'string'
       && item.origin !== 'subagent' && owned(item.sessionId)),
   }
+}
+
+/**
+ * The panel reads only which of its sessions are archived; other sessions'
+ * ids and every workspace path stay on the Host.
+ */
+function ownedArchive(value: unknown, owned: (sessionId: string) => boolean): { archivedSessionIds: string[] } {
+  const archived = isRecord(value) && Array.isArray(value.archivedSessionIds) ? value.archivedSessionIds : []
+  return { archivedSessionIds: archived.filter((id): id is string => typeof id === 'string' && owned(id)) }
 }
 
 /** Payload-level refusals that do not depend on session scope. */

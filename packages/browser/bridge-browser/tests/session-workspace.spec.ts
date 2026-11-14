@@ -105,7 +105,7 @@ describe('withSessionWorkspace', () => {
     expect(withSessionWorkspace(api, '', vi.fn())).toBe(api)
   })
 
-  it('caches a workspace failure and preserves ungrouped Session creation', async () => {
+  it('refuses creation when grouping fails instead of falling back to the Host default cwd, and retries next time', async () => {
     const workspacePath = await tempWorkspacePath()
     const workspaceCreate = vi.fn(async (): Promise<HostRpcResult> => ({
       ok: false,
@@ -116,16 +116,15 @@ describe('withSessionWorkspace', () => {
     const wrapped = withSessionWorkspace(api, workspacePath, warn)
     const original = request({ cwd: '/original' })
 
-    await wrapped.call(original)
-    await wrapped.call(original)
+    expect(await wrapped.call(original)).toMatchObject({ ok: false, error: { code: 'unavailable' } })
+    expect(await wrapped.call(original)).toMatchObject({ ok: false })
 
-    expect(workspaceCreate).toHaveBeenCalledOnce()
-    expect(sessionCreate).toHaveBeenCalledTimes(2)
-    expect(sessionCreate).toHaveBeenNthCalledWith(1, original)
+    expect(workspaceCreate).toHaveBeenCalledTimes(2)
+    expect(sessionCreate).not.toHaveBeenCalled()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('workspace.create failed'))
   })
 
-  it('catches a thrown workspace failure and preserves Session creation', async () => {
+  it('catches a thrown workspace failure and refuses Session creation', async () => {
     const workspacePath = await tempWorkspacePath()
     const workspaceCreate = vi.fn(async (): Promise<HostRpcResult> => { throw new Error('domain unavailable') })
     const { api, sessionCreate } = apiHarness(workspaceCreate)
@@ -133,9 +132,9 @@ describe('withSessionWorkspace', () => {
     const wrapped = withSessionWorkspace(api, workspacePath, warn)
     const original = request({ cwd: '/original' })
 
-    await wrapped.call(original)
+    expect(await wrapped.call(original)).toMatchObject({ ok: false, error: { code: 'unavailable' } })
 
-    expect(sessionCreate).toHaveBeenCalledWith(original)
+    expect(sessionCreate).not.toHaveBeenCalled()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('domain unavailable'))
   })
 })

@@ -68,6 +68,7 @@ const RemoteApiHost = {
   name: 'remote-api-host',
   inject: ['sessions'],
   apply(ctx: Context, config: { cwd: string }): void {
+    const workspaces = new Map<string, string>()
     const gateway = {
       wireStream: {
         async open(
@@ -97,11 +98,16 @@ const RemoteApiHost = {
       },
       async invoke(request: { namespace: string; method: string; args: Record<string, unknown>; peer: unknown }) {
         if (request.peer === undefined) throw new Error('composition hosts must name the calling Peer')
+        if (request.namespace === 'workspace' && request.method === 'create') {
+          const path = (request.args.request as { path: string }).path
+          workspaces.set('workspace-browser', path)
+          return { created: true, workspace: { workspaceId: 'workspace-browser', path, title: 'browser-sessions', sessionIds: [] } }
+        }
         if (request.namespace === 'session' && request.method === 'create') {
-          const payload = request.args.request as { sessionId?: string; cwd?: string }
+          const payload = request.args.request as { sessionId?: string; cwd?: string; workspaceId?: string }
           const session = ctx.sessions.create(
             SessionId(payload.sessionId ?? `session-${crypto.randomUUID()}`),
-            { meta: { cwd: payload.cwd ?? config.cwd } },
+            { meta: { cwd: (payload.workspaceId === undefined ? undefined : workspaces.get(payload.workspaceId)) ?? payload.cwd ?? config.cwd } },
           )
           return { sessionId: session.id }
         }
@@ -445,7 +451,8 @@ describe('real Loader composition', () => {
     expect(created.ok).toBe(true)
     const sessionId = ((created as { result: { result: { value: { sessionId: string } } } }).result).result.value.sessionId
     expect(sessionId).toMatch(/^session-[0-9a-f-]{36}$/)
-    expect(ctx.sessions.get(SessionId(sessionId))?.header.cwd).toBe(root)
+    // The bridge groups its sessions in its own workspace, never the Host default cwd.
+    expect(ctx.sessions.get(SessionId(sessionId))?.header.cwd).toBe(join(root, 'browser-sessions'))
 
     send(client.ws, { t: 'rpc', id: 'c-2', method: 'session.list', payload: {} })
     await waitFor(() => client.frames.some((f) => f.t === 'rpc.result' && f.id === 'c-2'))

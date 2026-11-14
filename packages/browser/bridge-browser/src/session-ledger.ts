@@ -4,15 +4,18 @@
  * Desktop, CLI, or subagent sessions.
  *
  * The file is a JSON array of session ids under the dsh home, written with
- * mode 0600 through an exclusive temp file and an atomic rename. A missing or
- * unreadable file starts empty (the bridge then only reaches sessions it
+ * mode 0600 through an exclusive temp file and an atomic rename. It is loaded
+ * only when it is a regular file (not a symlink) owned by this user and not
+ * writable by group or others, since it grants ownership of sessions; a
+ * missing, unreadable, or untrusted file starts empty (the bridge then only reaches sessions it
  * creates from now on, plus the workspace-path marker in bridge-policy.ts).
  *
  * @module @natgurlain/dsh-bridge-browser/src/session-ledger
  */
 
 import { randomBytes } from 'node:crypto'
-import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { mkdir, open, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 /** Most ids kept; the oldest are dropped first. */
@@ -41,16 +44,8 @@ export function memorySessionLedger(ids: Iterable<string> = []): SessionLedger {
  */
 export async function fileSessionLedger(file: string, warn: (message: string) => void): Promise<SessionLedger> {
   const ids = new Set<string>()
-  try {
-    if (!(await lstat(file)).isSymbolicLink()) {
-      const parsed = JSON.parse(await readFile(file, 'utf8')) as unknown
-      if (Array.isArray(parsed)) for (const id of parsed) if (typeof id === 'string' && id !== '') ids.add(id)
-    } else {
-      warn(`browser bridge: ignoring session ledger ${file}: it is a symlink`)
-    }
-  } catch {
-    // Absent or unreadable: start empty.
-  }
+  const untrusted = await loadTrusted(file, ids)
+  if (untrusted !== undefined) warn(`browser bridge: ignoring session ledger ${file}: ${untrusted}`)
   let writing = Promise.resolve()
   const persist = async (): Promise<void> => {
     await mkdir(dirname(file), { recursive: true })
@@ -74,5 +69,33 @@ export async function fileSessionLedger(file: string, warn: (message: string) =>
       })
       await writing
     },
+  }
+}
+
+/**
+ * Read the ledger into `ids` when the file is trustworthy.
+ * @returns why the file was ignored, or undefined (loaded, or simply absent/unreadable).
+ */
+async function loadTrusted(file: string, ids: Set<string>): Promise<string | undefined> {
+  let handle
+  try {
+    handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+  } catch (error: unknown) {
+    const code = (error as { code?: string }).code
+    return code === 'ELOOP' ? 'it is a symlink' : undefined
+  }
+  try {
+    const stat = await handle.stat()
+    if (!stat.isFile()) return 'it is not a regular file'
+    const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+    if (uid !== undefined && stat.uid !== uid) return `it is owned by uid ${String(stat.uid)}, not this user (${String(uid)})`
+    if (process.platform !== 'win32' && (stat.mode & 0o022) !== 0) return 'it is writable by group or others'
+    const parsed = JSON.parse(await handle.readFile('utf8')) as unknown
+    if (Array.isArray(parsed)) for (const id of parsed) if (typeof id === 'string' && id !== '') ids.add(id)
+    return undefined
+  } catch {
+    return undefined
+  } finally {
+    await handle.close()
   }
 }

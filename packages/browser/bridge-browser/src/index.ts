@@ -310,7 +310,6 @@ function mountBridge(
     presetSandbox: (preset) => presetSandbox(ctx, preset),
     safePresetNames: resolved.safePermissionPresets,
     ledger,
-    bridgeSessionCwd: resolved.sessionWorkspacePath,
   })
   const server = new BridgeServer({
     token: tokenRes.token,
