@@ -24,7 +24,7 @@ main() {
     trap 'if [ -d "$download_dir" ]; then rm -rf -- "$download_dir"; fi' EXIT
     engine="$download_dir/uninstall.mjs"
     curl --fail --location --silent --show-error \
-      https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/uninstall.mjs \
+      https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/uninstall.mjs \
       --output "$engine"
   fi
   node "$engine" "$@"

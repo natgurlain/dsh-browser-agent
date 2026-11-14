@@ -16,7 +16,7 @@ const anchor = realpathSync(join(root, 'node_modules', '@deepseek-ai', 'dsh', 'p
 const require = createRequire(anchor)
 const { initProfile } = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-app-boot')).href)
 const { runPluginCommand } = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-plugin-manager/operations')).href)
-const current = '@yuxianglin/dsh-bridge-browser'
+const current = '@natgurlain/dsh-bridge-browser'
 const legacy = '@deepseek-ai/dsh-bridge-browser'
 const other = '@deepseek-ai/dsh-experimental-terminal-bundle'
 

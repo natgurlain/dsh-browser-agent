@@ -7,7 +7,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep, toNamespacedPath } f
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 
-const BRIDGES = ['@yuxianglin/dsh-bridge-browser', '@deepseek-ai/dsh-bridge-browser']
+const BRIDGES = ['@natgurlain/dsh-bridge-browser', '@yuxianglin/dsh-bridge-browser', '@deepseek-ai/dsh-bridge-browser']
 const DEPENDENCY_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies']
 const scriptRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 

@@ -1,4 +1,4 @@
-# @yuxianglin/dsh-bridge-browser
+# @natgurlain/dsh-bridge-browser
 
 English | [中文](README.zh.md)
 
@@ -86,7 +86,7 @@ permission switch and answers `provisional-session` for everything else.
 
 ## Wire protocol
 
-Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/protocol.ts) and shared with the extension through the workspace package's `./src/*` export. The built package exposes `@yuxianglin/dsh-bridge-browser/protocol` for external consumers.
+Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/protocol.ts) and shared with the extension through the workspace package's `./src/*` export. The built package exposes `@natgurlain/dsh-bridge-browser/protocol` for external consumers.
 
 - Client → server: `hello` (auth + caps), `rpc` (gateway method passthrough), `respond` (resolve a host interaction by its RPC id), `tool.result`, `pong`.
 - Server → client: `hello.ok` (echoes negotiated caps), `rpc.result`, `respond.result` (correlated acceptance or error), `event` (bridge-owned projection of dsh Remote streams and waterfalls), `tool.call`, `tool.cancel`, `ping`, `error`.

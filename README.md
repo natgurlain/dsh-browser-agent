@@ -22,13 +22,13 @@ The installer installs the bridge plugin and Chrome extension.
 macOS and Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/install.sh | bash
 ```
 
 Windows, in PowerShell:
 
 ```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
 When the installer opens `chrome://extensions`, follow its instructions to load or reload **dsh Browser Assistant**. If dsh is already running, restart it after installation. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
@@ -81,7 +81,7 @@ Run the [quick install command](#quick-install) to install or update. The instal
 To install the current branch from a source checkout instead:
 
 ```sh
-git clone https://github.com/Lum1104/dsh-browser.git
+git clone https://github.com/natgurlain/dsh-browser-agent.git
 cd dsh-browser
 ./scripts/install.sh
 ```
@@ -95,13 +95,13 @@ Open **Settings → Uninstall dsh-browser** in the extension, copy the command, 
 You can also run it directly. On macOS or Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/uninstall.sh | bash
 ```
 
 On Windows:
 
 ```powershell
-& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
+& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
 ```
 
 From a checkout, run `bash scripts/uninstall.sh` or `.\scripts\uninstall.ps1`.
@@ -155,9 +155,9 @@ pnpm run test
 pnpm run check:runtime
 pnpm run test:smoke
 
-pnpm --filter @yuxianglin/dsh-bridge-browser run build
-pnpm --filter @yuxianglin/dsh-bridge-browser run typecheck
-pnpm --filter @yuxianglin/dsh-bridge-browser run test
+pnpm --filter @natgurlain/dsh-bridge-browser run build
+pnpm --filter @natgurlain/dsh-bridge-browser run typecheck
+pnpm --filter @natgurlain/dsh-bridge-browser run test
 
 pnpm --filter dsh-browser-extension run build
 pnpm --filter dsh-browser-extension run build:firefox

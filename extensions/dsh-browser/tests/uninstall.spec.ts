@@ -19,7 +19,7 @@ describe('uninstall handoff', () => {
       parseExtensionInstallInfo(null),
     ]) {
       expect(uninstallCommand(info, 'Linux'))
-        .toBe('curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/uninstall.sh | bash')
+        .toBe('curl -fsSL https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/uninstall.sh | bash')
       expect(uninstallCommand(info, 'Windows')).toContain('-File $s } finally {')
     }
   })

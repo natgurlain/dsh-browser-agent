@@ -8,9 +8,9 @@
  */
 
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import type { BridgeCaps } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import type { BridgeCaps } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
 import { connectPanel, PanelRpcError, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type PanelApi, type PanelSettings } from './api.ts'

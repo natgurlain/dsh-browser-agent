@@ -46,9 +46,9 @@ import {
   isRespondResult,
   type BridgeCaps,
   type RespondResult,
-} from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
-import { BRIDGE_CONFIG_PATH, BRIDGE_PATH, DEVTOOLS_CAPS_VERSION, parseBridgeConfigPayload } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+} from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_CONFIG_PATH, BRIDGE_PATH, DEVTOOLS_CAPS_VERSION, parseBridgeConfigPayload } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, type BridgeState } from './bridge.ts'
 import { createRpc } from './rpc.ts'
 import { discoverInstances, planDiscovery, readBridgeConfig } from './discovery.ts'

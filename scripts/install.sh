@@ -5,7 +5,7 @@
 # No further configuration is required: the extension discovers local dsh automatically and loopback connections require no token.
 set -euo pipefail
 
-REPOSITORY="Lum1104/dsh-browser"
+REPOSITORY="natgurlain/dsh-browser-agent"
 REMOTE_REF="main"
 DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
 MANAGED_ROOT="$DSH_HOME_DIR/dsh-browser"
@@ -322,13 +322,13 @@ require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not f
 
 print_step 1 "构建浏览器桥" "Build the browser bridge"
 (cd "$ROOT" && pnpm install --frozen-lockfile >/dev/null 2>&1)
-(cd "$ROOT" && pnpm --filter @yuxianglin/dsh-bridge-browser run build >/dev/null 2>&1)
+(cd "$ROOT" && pnpm --filter @natgurlain/dsh-bridge-browser run build >/dev/null 2>&1)
 
 print_step 2 "注册到本机 web profile" "Register with the local web profile"
 if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$LEGACY_PLUGIN"; then
   (cd "$ROOT" && pnpm exec dsh plugin --profile web remove "$LEGACY_PLUGIN" >/dev/null)
 fi
-(cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "@yuxianglin/dsh-bridge-browser@link:$PLUGIN" >/dev/null)
+(cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "@natgurlain/dsh-bridge-browser@link:$PLUGIN" >/dev/null)
 
 print_step 3 "构建 Chrome 扩展" "Build the Chrome extension"
 (cd "$ROOT" && pnpm --filter dsh-browser-extension run build >/dev/null 2>&1)
@@ -414,4 +414,4 @@ printf '• 启动固定版本：cd %q && pnpm start\n' "$ROOT"
 printf '   Start the pinned version: cd %q && pnpm start\n' "$ROOT"
 print_pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.2.2-rc.2 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.2-rc.2 web"
 printf '\n'
-print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/Lum1104/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/Lum1104/dsh-browser"
+print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/natgurlain/dsh-browser-agent" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/natgurlain/dsh-browser-agent"

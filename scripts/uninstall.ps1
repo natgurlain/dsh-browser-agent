@@ -14,7 +14,7 @@ try {
     New-Item -ItemType Directory -Path $DownloadDir | Out-Null
     $Engine = Join-Path $DownloadDir 'uninstall.mjs'
     Invoke-WebRequest -UseBasicParsing `
-      -Uri 'https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/uninstall.mjs' `
+      -Uri 'https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/uninstall.mjs' `
       -OutFile $Engine
   }
 

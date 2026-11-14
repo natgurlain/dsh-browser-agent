@@ -6,7 +6,7 @@
   "version": "0.1.4",
   "browser_specific_settings": {
     "gecko": {
-      "id": "dsh-browser@lum1104.github.io",
+      "id": "dsh-browser-agent@natgurlain.github.io",
       "strict_min_version": "140.0",
       "data_collection_permissions": {
         "required": [

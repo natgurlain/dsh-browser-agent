@@ -1,6 +1,6 @@
 import { powerShellQuote, shellQuote, type ExtensionInstallInfo } from './updates.ts'
 
-const SCRIPT_ROOT = 'https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts'
+const SCRIPT_ROOT = 'https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts'
 
 export function uninstallCommand(info: ExtensionInstallInfo, userAgent: string = navigator.userAgent): string {
   const home = info.mode === 'unknown' ? undefined : info.dshHome

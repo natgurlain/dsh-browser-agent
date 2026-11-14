@@ -10,7 +10,7 @@
  * @module
  */
 
-import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { runAction, ActionError } from './actions.ts'
 import { ElementIds } from './ids.ts'
 import { handleInputSetup } from './input-support.ts'

@@ -117,7 +117,7 @@ await once(pendingServer, 'listening')
 const pendingPort = pendingServer.address().port
 
 try {
-  await command(['plugin', '--profile', 'web', 'add', '-w', `@yuxianglin/dsh-bridge-browser@link:${bridge}`])
+  await command(['plugin', '--profile', 'web', 'add', '-w', `@natgurlain/dsh-bridge-browser@link:${bridge}`])
   const patch = join(directory, 'host.patch.yml')
   await writeFile(patch, [
     '- id: bridge-browser', '  config:', `    token: ${JSON.stringify(token)}`,

@@ -1,4 +1,4 @@
-# @yuxianglin/dsh-bridge-browser
+# @natgurlain/dsh-bridge-browser
 
 [English](README.md) | 中文
 
@@ -68,7 +68,7 @@ dsh 的**浏览器操作桥**挂载经过 token 认证的 WebSocket 通道（`/e
 
 ## 线协议
 
-消息帧是通过 `t` 区分类型的 JSON 对象，定义在 [`protocol.ts`](src/protocol.ts)，通过 workspace 包的 `./src/*` export 与扩展共享。构建后的包提供 `@yuxianglin/dsh-bridge-browser/protocol` 入口，供外部调用方使用。
+消息帧是通过 `t` 区分类型的 JSON 对象，定义在 [`protocol.ts`](src/protocol.ts)，通过 workspace 包的 `./src/*` export 与扩展共享。构建后的包提供 `@natgurlain/dsh-bridge-browser/protocol` 入口，供外部调用方使用。
 
 - 客户端 → 服务端：`hello`（认证+caps）、`rpc`（网关方法透传）、`respond`（按 RPC id 结算宿主交互）、`tool.result`、`pong`。
 - 服务端 → 客户端：`hello.ok`（回显协商后的 caps）、`rpc.result`、`respond.result`（相关联的受理结果或错误）、`event`（由 dsh Remote 流与 waterfall 投影而来的 bridge 内部事件）、`tool.call`、`tool.cancel`、`ping`、`error`。

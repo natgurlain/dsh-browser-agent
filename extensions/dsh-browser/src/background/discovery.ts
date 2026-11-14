@@ -20,7 +20,7 @@ import {
   BRIDGE_CONFIG_PATH,
   parseBridgeConfigPayload,
   type BridgeConfigPayload,
-} from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+} from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 
 /** How long one known-port probe may take before it counts as absent. */
 export const GROUP_PROBE_TIMEOUT_MS = 1_500

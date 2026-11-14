@@ -1,5 +1,5 @@
 {
-  "name": "@yuxianglin/dsh-bridge-browser",
+  "name": "@natgurlain/dsh-bridge-browser",
   "description": "Browser bridge: authenticated WebSocket transport, page controls, screenshots, and developer tools through the user's browser extension",
   "version": "0.0.7",
   "author": "Yuxiang Lin",

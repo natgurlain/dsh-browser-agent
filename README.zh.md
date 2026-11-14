@@ -22,13 +22,13 @@
 macOS 与 Linux：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/install.sh | bash
 ```
 
 Windows（PowerShell）：
 
 ```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 ```
 
 安装器打开 `chrome://extensions` 后，请按提示加载或重新加载 **dsh 浏览器助手**。如果 dsh 已经在运行，安装完成后请重启。前置要求、启动命令、更新方式和开发者安装详见[详细安装与使用](#详细安装与使用)。
@@ -81,7 +81,7 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 如需从源码 checkout 安装当前分支：
 
 ```sh
-git clone https://github.com/Lum1104/dsh-browser.git
+git clone https://github.com/natgurlain/dsh-browser-agent.git
 cd dsh-browser
 ./scripts/install.sh
 ```
@@ -95,13 +95,13 @@ Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版�
 也可以直接运行。macOS 或 Linux：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/uninstall.sh | bash
 ```
 
 Windows 请运行：
 
 ```powershell
-& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
+& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
 ```
 
 在源码目录中运行 `bash scripts/uninstall.sh` 或 `.\scripts\uninstall.ps1`。
@@ -155,9 +155,9 @@ pnpm run test
 pnpm run check:runtime
 pnpm run test:smoke
 
-pnpm --filter @yuxianglin/dsh-bridge-browser run build
-pnpm --filter @yuxianglin/dsh-bridge-browser run typecheck
-pnpm --filter @yuxianglin/dsh-bridge-browser run test
+pnpm --filter @natgurlain/dsh-bridge-browser run build
+pnpm --filter @natgurlain/dsh-bridge-browser run typecheck
+pnpm --filter @natgurlain/dsh-bridge-browser run test
 
 pnpm --filter dsh-browser-extension run build
 pnpm --filter dsh-browser-extension run build:firefox

@@ -3,7 +3,7 @@ import { defineConfig } from 'tsdown'
 /**
  * The bridge package ships TWO runtime entries: the plugin (index) and the
  * protocol module — the extension imports
- * `@yuxianglin/dsh-bridge-browser/protocol`, so the protocol bundle is part
+ * `@natgurlain/dsh-bridge-browser/protocol`, so the protocol bundle is part
  * of the published surface, not an internal module.
  */
 export default defineConfig({

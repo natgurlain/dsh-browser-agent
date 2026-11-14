@@ -245,7 +245,7 @@ try {
   { cwd: worktreeRepository, env })
   await mkdir(legacyDirectory, { recursive: true })
   await writeFile(legacyFile, legacyBytes)
-  await command(['plugin', '--profile', 'web', 'add', '-w', `@yuxianglin/dsh-bridge-browser@link:${bridge}`])
+  await command(['plugin', '--profile', 'web', 'add', '-w', `@natgurlain/dsh-bridge-browser@link:${bridge}`])
   await command(['plugin', '--profile', 'web', 'add', `@deepseek-ai/dsh-experimental-tool-worktree@${expectedVersion}`])
   let rpc = await start(false)
   const created = await rpc('session.create', { sessionId, cwd: temp })
