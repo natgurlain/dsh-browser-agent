@@ -198,6 +198,20 @@ describe('apply', () => {
     await expect(stat(join(home, 'browser-extension', 'bridge-token'))).rejects.toThrow()
   })
 
+  it('warns when a pinned token differs from the installed extension copy instead of failing silently', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'dsh-bridge-home-'))
+    dirs.push(home)
+    vi.stubEnv('DSH_HOME', home)
+    await mkdir(join(home, 'browser-extension'), { recursive: true })
+    await writeFile(join(home, 'browser-extension', 'install-info.json'), '{}\n')
+    await writeFile(join(home, 'browser-extension', 'bridge-token'), 'an-older-installer-token-0123456789abcdef\n', { mode: 0o600 })
+    const ctx = stubContext()
+    const warn = vi.fn()
+    ;(ctx as unknown as { logger: { warn: typeof warn } }).logger.warn = warn
+    await apply(ctx, { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('token mismatch'))
+  })
+
   it('rejects invalid budgets loudly', async () => {
     await expect(apply(stubContext(), { ...VALID, toolTimeoutMs: 0 })).rejects.toThrow(/toolTimeoutMs/)
     await expect(apply(stubContext(), { ...VALID, snapshotMaxChars: -1 })).rejects.toThrow(/snapshotMaxChars/)
