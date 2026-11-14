@@ -675,6 +675,42 @@ describe('dispatchToolCall', () => {
     expect(chromeMock.sendMessage).not.toHaveBeenCalled()
   })
 
+  it('denies an approved action whose arguments changed after the prompt', async () => {
+    const call: ToolCall = { id: 'tool-mutated', name: 'browser_type', args: { selector: '#comment', text: 'hello' } }
+    const chromeMock = mockChrome({
+      tab: { id: 31, url: 'https://app.example/' },
+      respond: (message) => (message as { type?: string }).type === 'DSH_TARGET_INFO'
+        ? { ok: true, result: { sensitive: false } }
+        : { ok: true, result: { text: 'typed' } },
+    })
+    const authorize = vi.fn(async (prompt: { details?: unknown[] }) => {
+      expect(prompt.details).toEqual([{ kind: 'text', value: 'hello', masked: false }])
+      call.args.text = 'transfer all funds'
+      return 'approved' as const
+    })
+
+    const answer = await dispatchToolCall(call, 'auto', undefined, authorize)
+
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('changed while approval was pending') } })
+    expect(chromeMock.sendMessage.mock.calls.some(([, message]) => (message as { type?: string }).type === 'DSH_ACTION')).toBe(false)
+  })
+
+  it('masks typed text when the target probe reports a sensitive field or fails', async () => {
+    for (const probe of [{ ok: true, result: { sensitive: true } }, new Error('Receiving end does not exist')]) {
+      const call: ToolCall = { id: 'tool-sensitive', name: 'browser_type', args: { selector: '#pin', text: '424242' } }
+      mockChrome({
+        tab: { id: 32, url: 'https://app.example/' },
+        respond: (message) => (message as { type?: string }).type === 'DSH_TARGET_INFO' ? probe : { ok: true, result: { text: 'typed' } },
+      })
+      const prompts: unknown[] = []
+      await dispatchToolCall(call, 'auto', undefined, async (prompt) => {
+        prompts.push(prompt.details)
+        return 'denied'
+      })
+      expect(prompts).toEqual([[{ kind: 'text', value: '424242', masked: true }]])
+    }
+  })
+
   it('rejects an element reference after its frame document reloads', async () => {
     const frames = [
       { frameId: 0, parentFrameId: -1, documentId: 'top-doc', url: 'https://app.example/' },
@@ -958,6 +994,28 @@ describe('dispatchOpenTab', () => {
       ok: false,
       error: { code: 'action-failed', message: 'url must be a complete http or https URL.' },
     })
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('does not open a tab when its URL changed after approval', async () => {
+    const { dispatchOpenTab } = await import('../src/background/tools.ts')
+    const create = vi.fn()
+    vi.stubGlobal('chrome', { tabs: { create } })
+    const call: ToolCall = { id: 'open-mutated', name: 'browser_open_tab', args: { url: 'https://docs.example/' } }
+    const answer = await dispatchOpenTab(
+      call,
+      1,
+      'auto',
+      undefined,
+      async () => {
+        call.args.url = 'https://docs.example/?leak=9f86d081884c7d659a2feaa0c55ad015'
+        return 'approved'
+      },
+      undefined,
+      () => true,
+      () => true,
+    )
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('changed while approval was pending') } })
     expect(create).not.toHaveBeenCalled()
   })
 

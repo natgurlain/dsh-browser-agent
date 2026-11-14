@@ -1,9 +1,31 @@
 /** Shared panel/background contract for browser action approval. */
 
+import type { UrlAnalysis } from './url-risk.ts'
+
 export type ApprovalKind = 'read' | 'action'
-export type ApprovalDecision = 'deny' | 'allow-once' | 'always-allow-reads' | 'trust-session'
+/**
+ * `trust-eval-session` is sent only from a console-eval card whose
+ * "trust JavaScript on <origin> for this session" box is ticked.
+ */
+export type ApprovalDecision = 'deny' | 'allow-once' | 'always-allow-reads' | 'trust-session' | 'trust-eval-session'
 /** Background authorization result; transport failures must not masquerade as a user decision. */
 export type ApprovalAuthorization = 'approved' | 'denied' | 'unavailable' | 'timed-out' | 'cancelled'
+
+/**
+ * The payload an approval covers, rendered verbatim by the panel. Values are
+ * never truncated: the user approves exactly what is shown.
+ */
+export type ApprovalDetail =
+  /** Source code the call runs (browser_console_eval). */
+  | { kind: 'code'; value: string }
+  /** Text the call types; `masked` starts hidden (sensitive or uninspected field). */
+  | { kind: 'text'; value: string; masked: boolean }
+  /** Local file paths handed to the page. */
+  | { kind: 'paths'; values: string[] }
+  /** Destination URL, decoded, with suspicious values flagged. */
+  | { kind: 'url'; url: UrlAnalysis }
+  /** Redaction opt-outs the model requested (argument names). */
+  | { kind: 'flags'; values: string[] }
 
 /** A policy decision awaiting a user response. */
 export interface ApprovalPrompt {
@@ -19,6 +41,19 @@ export interface ApprovalPrompt {
    * allowlist or unrestricted access.
    */
   devTools?: true
+  /** Full payload shown on the card. */
+  details?: ApprovalDetail[]
+  /**
+   * SHA-256 over tool name, arguments, origins, and target document. The
+   * background recomputes it before executing and refuses on any mismatch.
+   */
+  binding?: string
+  /** Origin a developer-tools session grant from this card would cover. */
+  grantOrigin?: string
+  /** This call needs its own approval; no setting or session grant covers it. */
+  perCallOnly?: true
+  /** The destination URL carries a long or high-entropy value: trusted origins do not skip it. */
+  urlRisk?: true
 }
 
 /** Correlated request delivered to every open side-panel view. */
@@ -33,4 +68,5 @@ export function isApprovalDecision(value: unknown): value is ApprovalDecision {
     || value === 'allow-once'
     || value === 'always-allow-reads'
     || value === 'trust-session'
+    || value === 'trust-eval-session'
 }

@@ -1,8 +1,11 @@
 /** Pure authorization policy for model-requested browser tools. */
 
 import type { ToolCall } from './tools.ts'
-import type { TabFrame } from './frames.ts'
-import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
+import { frameDocumentKey, type TabFrame } from './frames.ts'
+import type { ApprovalAuthorization, ApprovalDecision, ApprovalDetail, ApprovalPrompt } from '../security/approval.ts'
+import { approvalBinding } from '../security/payload-binding.ts'
+import { analyzeUrl } from '../security/url-risk.ts'
+import type { DevToolsGrantKind } from './devtools-grants.ts'
 import { getUiLocale, type UiLocale } from '../i18n.ts'
 
 const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text'])
@@ -37,6 +40,9 @@ export const DEVTOOLS_TOOLS = new Set([
   'browser_devtools_request_body',
 ])
 
+/** Model-settable switches that turn off devtools redaction; each needs its own approval. */
+const SENSITIVE_OPT_OUTS = ['includeSensitiveHeaders', 'includeSensitiveBody'] as const
+
 /** Whether a tool belongs to the developer-tools group. */
 export function isDevToolsTool(name: string): boolean {
   return DEVTOOLS_TOOLS.has(name)
@@ -46,8 +52,9 @@ export function isDevToolsTool(name: string): boolean {
  * The approval prompt for one developer-tools call.
  *
  * Every devtools call requires its own consent or an explicit developer-tools
- * setting/session grant. Origin trust and unrestricted access never cover it. Only the
- * model-facing presentation differs between read-shaped and action-shaped calls.
+ * setting/session grant. Origin trust and unrestricted access never cover it.
+ * Console evaluation carries its full source, and redaction opt-outs are named
+ * and marked per-call so no grant can cover them.
  * @param call - the tool call awaiting a decision.
  * @param frames - the controlled tab's frames, for the origin list.
  * @param locale - UI locale for the summary text.
@@ -61,20 +68,71 @@ export function devToolsApprovalForCall(
   const destructive = call.name === 'browser_devtools_set_element_style'
     || call.name === 'browser_devtools_set_element_attribute'
     || call.name === 'browser_console_eval'
+  const frameId = requestedFrame(call.args)
+  const top = frames.filter((frame) => frame.frameId === 0)
+  const target = frames.find((frame) => frame.frameId === frameId)
+  const origins = uniqueOrigins(target === undefined ? top : [...top, target], frames)
+  const grantOrigin = target === undefined ? undefined : effectiveFrameOrigin(target, frames)
+  const optOuts = SENSITIVE_OPT_OUTS.filter((name) => call.args[name] === true)
+  const details: ApprovalDetail[] = []
+  if (call.name === 'browser_console_eval') {
+    details.push({ kind: 'code', value: typeof call.args.expression === 'string' ? call.args.expression : '' })
+  }
+  if (optOuts.length > 0) details.push({ kind: 'flags', values: [...optOuts] })
   return {
     kind: destructive ? 'action' : 'read',
     action: call.name,
-    summary: summarizeDevToolsAction(call, locale),
-    origins: uniqueOrigins(frames.filter((frame) => frame.frameId === 0), frames),
+    summary: summarizeDevToolsAction(call, locale, optOuts),
+    origins,
     // Session trust for devtools is granted through the dedicated prompt path,
     // never as a blanket "trust this origin for every browser action".
     canTrust: false,
     devTools: true,
+    ...details.length === 0 ? {} : { details },
+    ...grantOrigin === undefined ? {} : { grantOrigin },
+    ...optOuts.length === 0 ? {} : { perCallOnly: true as const },
+    binding: approvalBinding({
+      action: call.name,
+      args: call.args,
+      origins,
+      frameId,
+      ...target === undefined ? {} : { documentKey: frameDocumentKey(target) },
+    }),
   }
 }
 
-function summarizeDevToolsAction(call: ToolCall, locale: UiLocale): string {
+/**
+ * Which session grant could satisfy a devtools prompt, if any.
+ * Redaction opt-outs and prompts without a known origin have none.
+ */
+export function devToolsGrantKind(prompt: ApprovalPrompt): DevToolsGrantKind | undefined {
+  if (prompt.devTools !== true || prompt.perCallOnly === true || prompt.grantOrigin === undefined) return undefined
+  return prompt.action === 'browser_console_eval' ? 'eval' : 'devtools'
+}
+
+/**
+ * Turn a panel decision on a devtools card into an authorization plus at most
+ * one grant. A trust decision that does not match the card's grant kind (for
+ * example a forged "trust session" on a redaction opt-out) approves only this
+ * call and grants nothing.
+ */
+export function devToolsDecisionOutcome(
+  prompt: ApprovalPrompt,
+  decision: ApprovalDecision,
+): { authorization: 'approved' | 'denied'; grant?: DevToolsGrantKind } {
+  if (decision === 'deny' || decision === 'always-allow-reads') return { authorization: 'denied' }
+  const kind = devToolsGrantKind(prompt)
+  if (decision === 'trust-session' && kind === 'devtools') return { authorization: 'approved', grant: 'devtools' }
+  if (decision === 'trust-eval-session' && kind === 'eval') return { authorization: 'approved', grant: 'eval' }
+  return { authorization: 'approved' }
+}
+
+function summarizeDevToolsAction(call: ToolCall, locale: UiLocale, optOuts: readonly string[]): string {
   const detail = inlineArg(call)
+  const index = safeInline(String(call.args.index ?? '?'))
+  const unredacted = optOuts.length === 0
+    ? ''
+    : localized(locale, ` — UNREDACTED: ${optOuts.join(', ')}`, ` —— 不脱敏：${optOuts.join('、')}`)
   switch (call.name) {
     case 'browser_devtools_elements':
       return localized(locale, `Inspect page element (${detail})`, `查看页面元素（${detail}）`)
@@ -82,12 +140,15 @@ function summarizeDevToolsAction(call: ToolCall, locale: UiLocale): string {
       return localized(locale, `Modify live CSS on page element (${detail})`, `修改页面元素 CSS（${detail}）`)
     case 'browser_devtools_set_element_attribute':
       return localized(locale, `Change page element attribute (${detail})`, `修改页面元素属性（${detail}）`)
-    case 'browser_console_eval':
+    case 'browser_console_eval': {
+      const length = typeof call.args.expression === 'string' ? call.args.expression.length : 0
+      const frame = typeof call.args.frame === 'number' && call.args.frame !== 0 ? call.args.frame : undefined
       return localized(
         locale,
-        `Run JavaScript in the page (${typeof call.args.expression === 'string' ? `${call.args.expression.length} characters, not shown here}` : 'expression not shown'})`,
-        `在页面中执行 JavaScript（${typeof call.args.expression === 'string' ? `${call.args.expression.length} 个字符，此处不显示内容` : '表达式内容不显示'}）`,
+        `Run JavaScript in the page (${length} characters${frame === undefined ? '' : `, frame ${frame}`}; full source below)`,
+        `在页面中执行 JavaScript（${length} 个字符${frame === undefined ? '' : `，iframe ${frame}`}；完整代码见下方）`,
       )
+    }
     case 'browser_console_logs':
       return localized(locale, 'Read the page console output', '读取页面控制台输出')
     case 'browser_devtools_network':
@@ -95,22 +156,31 @@ function summarizeDevToolsAction(call: ToolCall, locale: UiLocale): string {
     case 'browser_devtools_list_requests':
       return localized(locale, 'List captured network requests', '列出已捕获的网络请求')
     case 'browser_devtools_get_request':
-      return localized(locale, `Read one captured request in full, including headers (index ${safeInline(String(call.args.index ?? '?'))})`, `查看单条网络请求的完整内容，含请求头（序号 ${safeInline(String(call.args.index ?? '?'))}）`)
+      return localized(locale, `Read one captured request in full, including headers (index ${index})${unredacted}`, `查看单条网络请求的完整内容，含请求头（序号 ${index}）${unredacted}`)
     case 'browser_devtools_request_body':
-      return localized(locale, `Read a captured request or response body (index ${safeInline(String(call.args.index ?? '?'))})`, `读取已捕获的请求或响应正文（序号 ${safeInline(String(call.args.index ?? '?'))}）`)
+      return localized(locale, `Read a captured request or response body (index ${index})${unredacted}`, `读取已捕获的请求或响应正文（序号 ${index}）${unredacted}`)
     default:
-      return call.name
+      return `${call.name}${unredacted}`
   }
 }
 
 /** A short, non-secret hint about which element a call targets. */
 function inlineArg(call: ToolCall): string {
-  if (typeof call.args.selector === 'string' && call.args.selector !== '') return safeInline(call.args.selector)
+  if (typeof call.args.selector === 'string' && call.args.selector !== '') return safeInline(call.args.selector, 160)
   if (typeof call.args.index === 'number') {
     const frame = typeof call.args.frame === 'number' && call.args.frame !== 0 ? `, frame ${call.args.frame}` : ''
     return `snapshot index ${call.args.index}${frame}`
   }
   return 'no selector given'
+}
+
+/** Facts about the call's target that the background learned before prompting. */
+export interface ApprovalContext {
+  /**
+   * For browser_type: whether the content script judged the target field
+   * sensitive. `undefined` (not inspected) masks, failing closed.
+   */
+  typedTargetSensitive?: boolean
 }
 
 /** Return an approval prompt, or undefined when this call needs no prompt. */
@@ -119,6 +189,31 @@ export function approvalPromptForCall(
   sharePageContent: 'ask' | 'auto' | 'off',
   frames: TabFrame[],
   locale: UiLocale = getUiLocale(),
+  context: ApprovalContext = {},
+): ApprovalPrompt | undefined {
+  const prompt = unboundPromptForCall(call, sharePageContent, frames, locale, context)
+  if (prompt === undefined) return undefined
+  // Reads are bound to the call and origins; actions also to the target document.
+  const target = prompt.kind === 'action' && call.name !== 'browser_open_tab'
+    ? frames.find((frame) => frame.frameId === requestedFrame(call.args))
+    : undefined
+  return {
+    ...prompt,
+    binding: approvalBinding({
+      action: call.name,
+      args: call.args,
+      origins: prompt.origins,
+      ...target === undefined ? {} : { frameId: target.frameId, documentKey: frameDocumentKey(target) },
+    }),
+  }
+}
+
+function unboundPromptForCall(
+  call: ToolCall,
+  sharePageContent: 'ask' | 'auto' | 'off',
+  frames: TabFrame[],
+  locale: UiLocale,
+  context: ApprovalContext,
 ): ApprovalPrompt | undefined {
   // A screenshot photographs exactly what the user sees — passwords, private
   // messages, account balances included — so it always prompts, regardless of
@@ -149,15 +244,24 @@ export function approvalPromptForCall(
   }
 
   if (!STATE_CHANGING_ACTIONS.has(call.name)) return undefined
+  const details = actionDetails(call, context)
+  const url = call.name === 'browser_navigate' || call.name === 'browser_open_tab'
+    ? analyzeUrl(typeof call.args.url === 'string' ? call.args.url : '')
+    : undefined
+  const extras: Partial<ApprovalPrompt> = {
+    ...details.length === 0 ? {} : { details },
+    ...url?.risky === true ? { urlRisk: true as const } : {},
+  }
   if (call.name === 'browser_open_tab') {
     const destination = originFromUrl(typeof call.args.url === 'string' ? call.args.url : '')
     return {
       kind: 'action',
       action: call.name,
-      summary: summarizeAction(call, locale),
+      summary: summarizeAction(call, locale, context),
       // A new tab does not mutate the current page; only the destination matters.
       origins: destination === undefined ? [] : [destination],
       canTrust: destination !== undefined,
+      ...extras,
     }
   }
   const frameId = requestedFrame(call.args)
@@ -177,11 +281,33 @@ export function approvalPromptForCall(
   return {
     kind: 'action',
     action: call.name,
-    summary: summarizeAction(call, locale),
+    summary: summarizeAction(call, locale, context),
     origins,
     // Cross-origin/invalid navigation and unknown history destinations always
     // require a fresh decision; they must never expand trust implicitly.
     canTrust,
+    ...extras,
+  }
+}
+
+/** The payload a state-changing call would carry out, for verbatim display. */
+function actionDetails(call: ToolCall, context: ApprovalContext): ApprovalDetail[] {
+  switch (call.name) {
+    case 'browser_type':
+      return [{
+        kind: 'text',
+        value: typeof call.args.text === 'string' ? call.args.text : '',
+        masked: context.typedTargetSensitive !== false,
+      }]
+    case 'browser_upload':
+      return [{ kind: 'paths', values: Array.isArray(call.args.paths) ? call.args.paths.map((path) => String(path)) : [] }]
+    case 'browser_navigate':
+    case 'browser_open_tab': {
+      const url = analyzeUrl(typeof call.args.url === 'string' ? call.args.url : '')
+      return url === undefined ? [] : [{ kind: 'url', url }]
+    }
+    default:
+      return []
   }
 }
 
@@ -217,28 +343,38 @@ export function originFromUrl(value: string): string | undefined {
   }
 }
 
-function summarizeAction(call: ToolCall, locale: UiLocale): string {
+function elementTarget(call: ToolCall, locale: UiLocale): string {
+  if (typeof call.args.selector === 'string' && call.args.selector !== '') {
+    const selector = safeInline(call.args.selector, 160)
+    return localized(locale, `selected element (${selector})`, `选择器元素（${selector}）`)
+  }
+  if (typeof call.args.index === 'number') return localized(locale, `element [${call.args.index}]`, `元素 [${call.args.index}]`)
+  return localized(locale, 'the focused element', '当前焦点元素')
+}
+
+function summarizeAction(call: ToolCall, locale: UiLocale, context: ApprovalContext): string {
   const frame = typeof call.args.frame === 'number' && call.args.frame !== 0
     ? localized(locale, `, iframe ${call.args.frame}`, `，iframe ${call.args.frame}`)
     : ''
-  const index = typeof call.args.index === 'number' ? call.args.index : '?'
   switch (call.name) {
     case 'browser_click': {
+      const index = typeof call.args.index === 'number' ? call.args.index : '?'
       const target = typeof call.args.selector === 'string'
-        ? `selected element (${safeInline(call.args.selector)})`
+        ? `selected element (${safeInline(call.args.selector, 160)})`
         : `element [${index}]`
       const targetZh = typeof call.args.selector === 'string'
-        ? `选择器元素（${safeInline(call.args.selector)}）`
+        ? `选择器元素（${safeInline(call.args.selector, 160)}）`
         : `元素 [${index}]`
       const gesture = typeof call.args.action === 'string' && call.args.action !== 'click' ? ` ${call.args.action}` : ''
       return localized(locale, `${gesture.trim() === '' ? 'Click' : gesture.trim()} ${target}${frame}`, `${gesture === '' ? '点击' : gesture.trim()} ${targetZh}${frame}`)
     }
     case 'browser_type': {
       const length = typeof call.args.text === 'string' ? call.args.text.length : 0
+      const masked = context.typedTargetSensitive !== false
       return localized(
         locale,
-        `Enter ${length} characters in element [${index}]${frame} (the text is not shown in this dialog)`,
-        `向元素 [${index}] 输入 ${length} 个字符${frame}（文本内容不会显示在确认框）`,
+        `Type ${length} characters into ${elementTarget(call, locale)}${frame}${masked ? ' (sensitive field or not inspected: masked)' : ''}`,
+        `向${elementTarget(call, locale)}输入 ${length} 个字符${frame}${masked ? '（敏感字段或未能检查：已遮盖）' : ''}`,
       )
     }
     case 'browser_press': return localized(
@@ -278,7 +414,11 @@ function summarizeAction(call: ToolCall, locale: UiLocale): string {
     }
     case 'browser_upload': {
       const count = Array.isArray(call.args.paths) ? call.args.paths.length : 0
-      return localized(locale, `Attach ${count} local file(s) to a page field`, `向页面字段附加 ${count} 个本地文件`)
+      return localized(
+        locale,
+        `Attach ${count} local file(s) to ${elementTarget(call, locale)}${frame}`,
+        `向${elementTarget(call, locale)}附加 ${count} 个本地文件${frame}`,
+      )
     }
     case 'browser_back': return localized(locale, 'Go back in browser history (destination domain unknown)', '返回浏览历史上一页（目标域名未知）')
     case 'browser_forward': return localized(locale, 'Go forward in browser history (destination domain unknown)', '前进到浏览历史下一页（目标域名未知）')
@@ -287,10 +427,10 @@ function summarizeAction(call: ToolCall, locale: UiLocale): string {
   }
 }
 
+/** The complete serialized URL: query and fragment included, never truncated. */
 function displayUrl(value: string, locale: UiLocale): string {
   try {
-    const url = new URL(value)
-    return safeInline(`${url.origin}${url.pathname}`, 160)
+    return new URL(value).href
   } catch {
     return localized(locale, '(invalid URL)', '(无效 URL)')
   }
@@ -310,7 +450,10 @@ export interface ApprovalGateInput {
   prompt: ApprovalPrompt
   /** Persisted "allow developer tools" setting. */
   devToolsAllowed: boolean
-  /** Ephemeral devtools grant the user made in this side-panel session. */
+  /**
+   * Whether an unexpired session grant of the prompt's own grant kind
+   * (`devToolsGrantKind`) covers this agent session and the prompt's origin.
+   */
   devToolsSessionGrant: boolean
   /** The user's blanket browser-control switch. */
   unrestrictedAccess: boolean
@@ -323,7 +466,9 @@ export interface ApprovalGateInput {
  *
  * Developer tools are their own consent surface: unrestricted access and the
  * persistent origin allowlist deliberately do not cover them, so enabling
- * either can never hand the model the debugger. Ordinary actions keep the
+ * either can never hand the model the debugger. Within the group, console
+ * evaluation is covered only by its own eval grant (never the setting), and
+ * redaction opt-outs are never covered at all. Ordinary actions keep the
  * existing shortcut semantics.
  *
  * @param input - the prompt plus the policy state it is evaluated against.
@@ -331,7 +476,12 @@ export interface ApprovalGateInput {
  */
 export function resolveApprovalGate(input: ApprovalGateInput): ApprovalAuthorization | 'prompt' {
   if (input.prompt.devTools === true) {
-    if (input.devToolsSessionGrant || input.devToolsAllowed) return 'approved'
+    const kind = devToolsGrantKind(input.prompt)
+    if (input.prompt.perCallOnly === true) return 'prompt'
+    if (input.prompt.action === 'browser_console_eval') {
+      return kind === 'eval' && input.devToolsSessionGrant ? 'approved' : 'prompt'
+    }
+    if (input.devToolsAllowed || (kind === 'devtools' && input.devToolsSessionGrant)) return 'approved'
     return 'prompt'
   }
   if (input.unrestrictedAccess || input.coveredByTrustedOrigins) return 'approved'

@@ -14,6 +14,7 @@ import { pageText, truncate } from './extract.ts'
 import { findElements, LocatorError, parseLocatorQuery, renderFound } from './find.ts'
 import type { ElementIds } from './ids.ts'
 import { dispatchPaste } from './paste.ts'
+import { isSensitiveField } from './privacy.ts'
 import type { SnapshotBudget } from './snapshot.ts'
 import { buildSnapshot, renderSnapshot } from './snapshot.ts'
 
@@ -172,6 +173,27 @@ export function resolveActionTarget(args: Record<string, unknown>, ids: ElementI
     throw new ActionError('action-failed', `No element matched selector: ${String(selector)}`)
   }
   return found
+}
+
+/**
+ * Approval-time probe for browser_type: is the element the text would go into
+ * a sensitive field? Resolves the target exactly as the type action does and
+ * reports only a boolean, never page content. An unresolvable target counts as
+ * sensitive so the approval card fails closed to a masked preview.
+ * @param args - the browser_type arguments (frame removed).
+ * @param ids - the frame's element registry.
+ * @returns whether the typed text should be masked on the approval card.
+ */
+export function typeTargetIsSensitive(args: Record<string, unknown>, ids: ElementIds): boolean {
+  let el: Element | null
+  try {
+    el = args.index === undefined && args.selector === undefined
+      ? document.activeElement
+      : resolveActionTarget(args, ids)
+  } catch {
+    return true
+  }
+  return !(el instanceof Element) || isSensitiveField(el)
 }
 
 /** React-compatible value write: native setter + input/change events. */

@@ -235,9 +235,11 @@ try {
   assert.match(succeed(await tool('browser_type', { selector: '#text', text: 'Y', trusted: true })), /PRIVATE_ask/)
   results.push('trusted input obeys off, ask, and automatic page sharing')
 
+  let lastApproval
   const approve = async (pending, decision, duringApproval) => {
     const request = await waitFor(() => panel.evaluate(() => messages.find(message => message.type === 'approval.request')?.request), 'developer-tools approval')
     assert.equal(request.devTools, true)
+    lastApproval = request
     if (duringApproval) await duringApproval()
     await panel.evaluate(({ id, decision }) => {
       messages = messages.filter(message => message.type !== 'approval.request')
@@ -250,8 +252,14 @@ try {
   assert.equal(await page.evaluate(() => window.executed), 0)
   results.push('navigation invalidates pending developer-tools approval')
 
-  succeed(await approve(tool('browser_console_eval', { expression: 'window.executed++' }), 'trust-session'))
+  // A developer-tools session grant never covers JavaScript evaluation.
+  succeed(await approve(tool('browser_console_logs', {}), 'trust-session'))
+  assert.equal(lastApproval.grantOrigin, origin)
+  succeed(await tool('browser_console_logs', {}))
+  succeed(await approve(tool('browser_console_eval', { expression: 'window.executed++' }), 'trust-eval-session'))
+  assert.deepEqual(lastApproval.details, [{ kind: 'code', value: 'window.executed++' }])
   succeed(await tool('browser_console_eval', { expression: 'window.executed++' }))
+  results.push('developer-tools trust is scoped per kind: the tools grant does not cover eval, the eval grant does')
   await panel.evaluate(() => panelPort.disconnect())
   await settingsDone(await openPanel())
   const renewal = await approve(tool('browser_console_eval', { expression: 'window.executed++' }), 'allow-once')
@@ -359,7 +367,9 @@ try {
     succeed(await tool('browser_upload', { frame, selector: '#upload', paths: [upload] }))
     const url = frameUrls[kind]
     assert.equal(await page.frame({ url }).locator('#upload').evaluate(input => input.files[0].name), 'upload.txt')
-    assert.match(succeed(await tool('browser_console_eval', { frame, expression: 'window.pageMarker' })), /frame-world/)
+    // The developer-tools setting does not cover eval: every call shows its source.
+    assert.match(succeed(await approve(tool('browser_console_eval', { frame, expression: 'window.pageMarker' }), 'allow-once')), /frame-world/)
+    assert.equal(lastApproval.details[0].value, 'window.pageMarker')
     succeed(await tool('browser_devtools_set_element_attribute', { frame, selector: '#inner', name: 'data-tested', value: kind }))
     assert.equal(await page.frame({ url }).locator('#inner').getAttribute('data-tested'), kind)
   }

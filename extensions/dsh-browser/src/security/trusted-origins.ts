@@ -44,12 +44,15 @@ export function originMatchesTrusted(origin: string, trusted: Iterable<string>):
  * Skip an action prompt only when its full destination boundary is known.
  * Cross-origin browser_navigate names both origins; history and invalid URLs
  * deliberately remain untrusted because their destination is not represented.
+ * A destination URL carrying a long or high-entropy query/fragment value
+ * (`urlRisk`) always prompts: a trusted origin can still be an exfiltration sink.
  */
 export function actionCoveredByTrustedOrigins(
   prompt: ApprovalPrompt,
   ...trustedCollections: Iterable<string>[]
 ): boolean {
   if (prompt.kind !== 'action' || prompt.origins.length === 0) return false
+  if (prompt.urlRisk === true) return false
   const hasKnownBoundary = prompt.canTrust
     || (prompt.action === 'browser_navigate' && prompt.origins.length > 1)
     || (prompt.action === 'browser_open_tab' && prompt.origins.length === 1)

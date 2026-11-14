@@ -18,7 +18,8 @@ import {
   type TabFrame,
 } from './frames.ts'
 import { wrapUntrustedContent } from '../security/untrusted.ts'
-import { approvalPromptForCall, originFromUrl } from './authorization.ts'
+import { approvalPromptForCall, originFromUrl, type ApprovalContext } from './authorization.ts'
+import { approvalBinding } from '../security/payload-binding.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
@@ -1007,6 +1008,8 @@ function tabManagementApproval(call: ToolCall, tab?: chrome.tabs.Tab): ApprovalP
       : (locale === 'zh' ? `关闭标签页 ${tab?.id ?? '?'}：${display}` : `Close tab ${tab?.id ?? '?'}: ${display}`),
     origins: origin === undefined ? [] : [origin],
     canTrust: false,
+    // Bound to the arguments and the tab's exact URL at prompt time.
+    binding: approvalBinding({ action: call.name, args: call.args, origins: [url] }),
   }
 }
 
@@ -1075,6 +1078,9 @@ async function dispatchTabManagementTool(
   if (current === undefined) return unavailable(`Tab ${tabId} closed while approval was pending. Call browser_list_tabs again.`)
   if (tabUrl(current) !== tabUrl(before)) {
     return unavailable(`Tab ${tabId} navigated while approval was pending. Call browser_list_tabs again before retrying.`)
+  }
+  if (!context.unrestrictedAccess && tabManagementApproval(call, current).binding !== approval.binding) {
+    return unavailable('The request changed while approval was pending. Call the tool again to request a new approval.')
   }
   if (isCancelled(call, signal)) return cancelled()
 
@@ -1293,9 +1299,13 @@ export async function dispatchToolCall(
   }
   const targetError = validateElementTarget(call, tab.id, frames)
   if (targetError !== undefined) return targetError
+  const approvalContext: ApprovalContext = tabManagement.unrestrictedAccess || call.name !== 'browser_type'
+    ? {}
+    : { typedTargetSensitive: await probeTypeTarget(tab.id, call, frames) }
+  if (isCancelled(call, signal)) return cancelled()
   const approval = tabManagement.unrestrictedAccess
     ? undefined
-    : approvalPromptForCall(call, sharePageContent, frames)
+    : approvalPromptForCall(call, sharePageContent, frames, undefined, approvalContext)
   if (approval !== undefined) {
     const authorization = authorize === undefined ? 'unavailable' : await authorize(approval)
     if (isCancelled(call, signal)) return cancelled()
@@ -1309,7 +1319,7 @@ export async function dispatchToolCall(
     executionFrames = await listTabFrames(tab.id, tab.url)
     if (isCancelled(call, signal)) return cancelled()
     if (targetStillAllowed?.() === false) return targetChanged()
-    const refreshedApproval = approvalPromptForCall(call, sharePageContent, executionFrames)
+    const refreshedApproval = approvalPromptForCall(call, sharePageContent, executionFrames, undefined, approvalContext)
     if (refreshedApproval === undefined
       || !sameApprovalBoundary(approval, refreshedApproval)
       || (approval.kind === 'action' && !sameTargetDocument(call, frames, executionFrames))) {
@@ -1367,7 +1377,7 @@ export async function dispatchToolCall(
       const refreshedTargetError = validateElementTarget(call, tab.id, refreshedFrames)
       if (refreshedTargetError !== undefined) return refreshedTargetError
       if (approval !== undefined) {
-        const refreshedApproval = approvalPromptForCall(call, sharePageContent, refreshedFrames)
+        const refreshedApproval = approvalPromptForCall(call, sharePageContent, refreshedFrames, undefined, approvalContext)
         if (refreshedApproval === undefined
           || !sameApprovalBoundary(approval, refreshedApproval)
           || (approval.kind === 'action' && !sameTargetDocument(call, executionFrames, refreshedFrames))) {
@@ -1428,11 +1438,38 @@ function validateElementTarget(call: ToolCall, tabId: number, frames: TabFrame[]
   return undefined
 }
 
+/**
+ * Whether the prompt recomputed right before execution still describes what
+ * the user approved: same kind, action, and origins, and the same payload
+ * binding (tool name + arguments + origins + target document).
+ */
 function sameApprovalBoundary(before: ApprovalPrompt, after: ApprovalPrompt): boolean {
   return before.kind === after.kind
     && before.action === after.action
     && before.origins.length === after.origins.length
     && before.origins.every((origin, index) => origin === after.origins[index])
+    && before.binding !== undefined
+    && before.binding === after.binding
+}
+
+/**
+ * Ask the target frame whether browser_type would write into a sensitive
+ * field, so the approval card can mask the text. Any failure (no content
+ * script yet, frame gone) returns undefined, which masks.
+ */
+async function probeTypeTarget(tabId: number, call: ToolCall, frames: TabFrame[]): Promise<boolean | undefined> {
+  const frame = frames.find((candidate) => candidate.frameId === requestedFrame(call.args))
+  if (frame === undefined) return undefined
+  try {
+    const response = await chrome.tabs.sendMessage(
+      tabId,
+      { type: 'DSH_TARGET_INFO', args: withoutFrame(call.args) },
+      frame.documentId === undefined ? { frameId: frame.frameId } : { documentId: frame.documentId },
+    ) as { ok?: unknown; result?: { sensitive?: unknown } } | undefined
+    return response?.ok === true && typeof response.result?.sensitive === 'boolean' ? response.result.sensitive : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function sameTargetDocument(call: ToolCall, before: TabFrame[], after: TabFrame[]): boolean {
@@ -1495,6 +1532,14 @@ export async function dispatchOpenTab(
     const authorization = authorize === undefined ? 'unavailable' : await authorize(approval)
     if (isCancelled(call, signal)) return cancelled()
     if (authorization !== 'approved') return approvalFailure(approval, authorization)
+    // The approval covers exactly the URL shown on the card.
+    if (approvalPromptForCall(call, sharePageContent, [])?.binding !== approval.binding) {
+      return unavailable('The request changed while approval was pending. Call the tool again to request a new approval.')
+    }
+  }
+  const approvedUrl = parseHttpUrl(call.args.url)
+  if (approvedUrl === undefined || approvedUrl.href !== parsed.href) {
+    return unavailable('The request changed while approval was pending. Call the tool again to request a new approval.')
   }
 
   let created: chrome.tabs.Tab

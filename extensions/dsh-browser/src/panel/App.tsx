@@ -16,7 +16,7 @@ import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../back
 import { connectPanel, PanelRpcError, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type PanelApi, type PanelSettings } from './api.ts'
 import { renderMarkdown } from './markdown.ts'
 import whaleUrl from '../../assets/icons/deepseek-256.png'
-import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
+import type { ApprovalDecision, ApprovalDetail, ApprovalRequest } from '../security/approval.ts'
 import {
   getUiLocale,
   getUiLocalePreference,
@@ -54,7 +54,14 @@ import {
   selectionSourceLabel,
   splitSelectionMessage,
 } from './selection.ts'
-import { approvalReadyForSession, approvalSessionToFocus } from './approvals.ts'
+import {
+  allowDecision,
+  approvalReadyForSession,
+  approvalSessionToFocus,
+  offersDevToolsTrust,
+  offersEvalTrust,
+  revealInvisible,
+} from './approvals.ts'
 import {
   browserTimeZone,
   draftImageDataUrl,
@@ -549,6 +556,92 @@ function TabAffinityBanner({
   )
 }
 
+/**
+ * One payload section of an approval card. Everything is rendered as plain
+ * React text (never markdown/HTML), untruncated, with invisible and bidi
+ * characters made visible, so the user approves exactly what will run.
+ */
+function ApprovalDetailView({ detail, copy }: { detail: ApprovalDetail; copy: PanelCopy }): React.JSX.Element {
+  const [revealed, setRevealed] = useState(false)
+  switch (detail.kind) {
+    case 'code':
+      return (
+        <details className="approval-payload" open>
+          <summary>{copy.approval.codeLabel(detail.value.length)}</summary>
+          <pre className="approval-code"><code>{revealInvisible(detail.value)}</code></pre>
+        </details>
+      )
+    case 'text':
+      return (
+        <div className="approval-payload">
+          <div className="approval-payload-head">
+            <span>{copy.approval.typedTextLabel}</span>
+            {detail.masked && (
+              <button type="button" className="approval-reveal" onClick={() => { setRevealed((value) => !value) }}>
+                {revealed ? copy.approval.hide : copy.approval.reveal}
+              </button>
+            )}
+          </div>
+          {detail.masked && !revealed
+            ? <p className="approval-masked">{'•'.repeat(Math.min(detail.value.length, 12))} <small>{copy.approval.maskedText(detail.value.length)}</small></p>
+            : <pre className="approval-code"><code>{revealInvisible(detail.value)}</code></pre>}
+        </div>
+      )
+    case 'paths':
+      return (
+        <div className="approval-payload">
+          <div className="approval-payload-head"><span>{copy.approval.pathsLabel(detail.values.length)}</span></div>
+          <ul className="approval-paths">
+            {detail.values.map((path, index) => <li key={index}><code>{revealInvisible(path)}</code></li>)}
+          </ul>
+        </div>
+      )
+    case 'url':
+      return (
+        <div className="approval-payload">
+          <div className="approval-payload-head"><span>{copy.approval.urlLabel}</span></div>
+          <code className="approval-url">{revealInvisible(detail.url.href)}</code>
+          {detail.url.params.length > 0 && (
+            <>
+              <div className="approval-payload-head"><span>{copy.approval.queryParams}</span></div>
+              <dl className="approval-params">
+                {detail.url.params.map((param, index) => (
+                  <div key={index} className={param.flag === undefined ? undefined : 'flagged'}>
+                    <dt>{param.source === 'fragment' ? '#' : ''}{revealInvisible(param.name)}</dt>
+                    <dd>
+                      <code>{revealInvisible(param.value)}</code>
+                      {param.flag !== undefined && (
+                        <span className="approval-flag">{param.flag === 'long' ? copy.approval.flagLong : copy.approval.flagEntropy}</span>
+                      )}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </>
+          )}
+          {detail.url.fragment !== '' && (
+            <dl className="approval-params">
+              <div className={detail.url.fragmentFlag === undefined ? undefined : 'flagged'}>
+                <dt>{copy.approval.fragmentLabel}</dt>
+                <dd><code>{revealInvisible(detail.url.fragment)}</code></dd>
+              </div>
+            </dl>
+          )}
+          {detail.url.risky && <p className="approval-note warning">{copy.approval.urlRiskNote}</p>}
+        </div>
+      )
+    case 'flags':
+      return (
+        <div className="approval-payload warning">
+          <div className="approval-payload-head"><span>{copy.approval.flagsLabel}</span></div>
+          <ul className="approval-paths">
+            {detail.values.map((flag) => <li key={flag}>{copy.approval.flagDescriptions[flag] ?? flag}</li>)}
+          </ul>
+        </div>
+      )
+  }
+}
+
 function ApprovalDialog({
   request,
   onDecision,
@@ -567,6 +660,8 @@ function ApprovalDialog({
   }, [request.id, onDecision])
 
   const devTools = request.devTools === true
+  const [trustEval, setTrustEval] = useState(false)
+  useEffect(() => { setTrustEval(false) }, [request.id])
   return (
     <div className="approval-backdrop">
       <section className="approval-dialog" role="alertdialog" aria-modal="true" aria-labelledby="approval-title">
@@ -590,19 +685,32 @@ function ApprovalDialog({
             ? <code className="unknown">{copy.approval.unknownOrigin}</code>
             : request.origins.map((origin) => <code key={origin}>{origin}</code>)}
         </div>
+        {(request.details ?? []).map((detail, index) => (
+          <ApprovalDetailView key={`${request.id}:${index}`} detail={detail} copy={copy} />
+        ))}
+        {request.perCallOnly === true && <p className="approval-note">{copy.approval.perCallNote}</p>}
+        {offersEvalTrust(request) && (
+          <label className="approval-trust-eval">
+            <input type="checkbox" checked={trustEval} onChange={(event) => { setTrustEval(event.target.checked) }} />
+            <span>{copy.approval.trustEval(request.grantOrigin!)}</span>
+          </label>
+        )}
         <div className="approval-actions">
           <button className="deny" autoFocus onClick={() => onDecision('deny')}>{copy.approval.deny}</button>
-          <button className="allow" onClick={() => onDecision('allow-once')}>{copy.approval.allowOnce}</button>
+          <button className="allow" onClick={() => onDecision(allowDecision(request, trustEval))}>{copy.approval.allowOnce}</button>
           {!devTools && request.kind === 'read' && (
             <button className="read-always" onClick={() => onDecision('always-allow-reads')}>{copy.approval.alwaysAllowReads}</button>
           )}
           {!devTools && request.kind === 'action' && request.canTrust && request.origins.length === 1 && (
             <button className="session-trust" onClick={() => onDecision('trust-session')}>{copy.approval.trustSession}</button>
           )}
-          {devTools && (
-            <button className="session-trust" onClick={() => onDecision('trust-session')}>{copy.approval.trustDevTools}</button>
+          {offersDevToolsTrust(request) && (
+            <button className="session-trust" onClick={() => onDecision('trust-session')}>{copy.approval.trustDevToolsOrigin(request.grantOrigin!)}</button>
           )}
         </div>
+        {request.binding !== undefined && (
+          <small className="approval-fingerprint">{copy.approval.fingerprint}: <code>{request.binding.slice(0, 16)}</code></small>
+        )}
         <small className="approval-footnote">
           {devTools
             ? copy.approval.devToolsFootnote

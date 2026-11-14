@@ -22,6 +22,28 @@ export interface PanelCopy {
     readFootnote: string
     actionFootnote: string
     devToolsFootnote: string
+    /** Label of the eval-trust checkbox on a console-eval card. */
+    trustEval: (origin: string) => string
+    /** Label of the developer-tools session trust button. */
+    trustDevToolsOrigin: (origin: string) => string
+    codeLabel: (characters: number) => string
+    showCode: string
+    hideCode: string
+    typedTextLabel: string
+    maskedText: (characters: number) => string
+    reveal: string
+    hide: string
+    pathsLabel: (count: number) => string
+    urlLabel: string
+    queryParams: string
+    fragmentLabel: string
+    flagLong: string
+    flagEntropy: string
+    urlRiskNote: string
+    flagsLabel: string
+    flagDescriptions: Record<string, string>
+    perCallNote: string
+    fingerprint: string
   }
   tool: {
     running: string
@@ -306,8 +328,31 @@ const EN: PanelCopy = {
     devToolsTitle: 'Allow developer tools?',
     trustDevTools: 'Trust developer tools for this session',
     readFootnote: 'Esc to deny · You can disable automatic reading in Settings at any time',
-    actionFootnote: 'Esc to deny · Temporary trust ends when the side panel closes · Typed content is never shown',
-    devToolsFootnote: 'Developer tools expose page internals and captured traffic. Trust here lasts until the side panel closes. Chrome blocks its own DevTools while this runs.',
+    actionFootnote: 'Esc to deny · Temporary trust ends when the side panel closes · Text for sensitive fields starts masked',
+    devToolsFootnote: 'Developer tools expose page internals and captured traffic. Trust covers this conversation on this site for 30 minutes, ends when the tab leaves the site or the side panel closes, and never covers JavaScript or unredacted traffic. Chrome blocks its own DevTools while this runs.',
+    trustEval: (origin) => `Trust JavaScript on ${origin} for this conversation (30 min)`,
+    trustDevToolsOrigin: (origin) => `Trust developer tools on ${origin} for this conversation (30 min)`,
+    codeLabel: (characters) => `JavaScript to run (${characters} characters)`,
+    showCode: 'Show code',
+    hideCode: 'Hide code',
+    typedTextLabel: 'Text to type',
+    maskedText: (characters) => `Masked: ${characters} characters for a sensitive or uninspected field`,
+    reveal: 'Reveal',
+    hide: 'Hide',
+    pathsLabel: (count) => `Local files to attach (${count})`,
+    urlLabel: 'Full destination URL',
+    queryParams: 'Decoded parameters',
+    fragmentLabel: 'Fragment',
+    flagLong: 'long value',
+    flagEntropy: 'looks like a token or secret',
+    urlRiskNote: 'This URL carries data that could be leaked to the destination. Trusted domains still ask for these.',
+    flagsLabel: 'Redaction turned off for this call',
+    flagDescriptions: {
+      includeSensitiveHeaders: 'includeSensitiveHeaders — reveals Authorization, Cookie, Set-Cookie and similar header values',
+      includeSensitiveBody: 'includeSensitiveBody — reveals bodies of authentication-looking requests',
+    },
+    perCallNote: 'This call always needs its own approval; no setting or session trust covers it.',
+    fingerprint: 'Approval fingerprint',
   },
   tool: {
     running: 'Working on page',
@@ -406,10 +451,10 @@ const EN: PanelCopy = {
     unrestrictedBrowserAccess: 'Allow unrestricted browser control',
     unrestrictedBrowserAccessHelp: 'Let the model read every HTTP(S) page, inspect all open tab titles and URLs, and perform actions—including following and closing tabs—without confirmation. Browser-protected page content remains inaccessible.',
     allowDevTools: 'Allow developer tools',
-    allowDevToolsHelp: 'High privilege: lets the model inspect and modify page elements and CSS, run JavaScript in the page, and read captured network requests. Off by default, where every call asks for approval. Chrome cannot keep its own DevTools open on a tab while this is attached.',
+    allowDevToolsHelp: 'High privilege: lets the model inspect and modify page elements and CSS, run JavaScript in the page, and read captured network requests. Off by default, where every call asks for approval. Even when on, running JavaScript and reading unredacted headers or bodies still ask on every call. Chrome cannot keep its own DevTools open on a tab while this is attached.',
     devToolsUnsupported: 'Unavailable — this browser does not provide the debugger API.',
     devToolsOff: 'Off — every call asks for approval.',
-    devToolsIdle: 'Enabled — the debugger attaches on the first call.',
+    devToolsIdle: 'Enabled — the debugger attaches on the first call. JavaScript still asks each time.',
     devToolsAttached: 'Debugger attached',
     devToolsError: 'Last error:',
     devToolsDetach: 'Detach now',
@@ -618,8 +663,31 @@ const ZH: PanelCopy = {
     devToolsTitle: '允许使用开发者工具？',
     trustDevTools: '本次会话信任开发者工具',
     readFootnote: 'Esc 拒绝 · 可随时在设置中关闭自动读取',
-    actionFootnote: 'Esc 拒绝 · 关闭侧栏后临时信任失效 · 输入内容不会显示',
-    devToolsFootnote: '开发者工具会暴露页面内部结构与抓包内容。此处的信任在侧栏关闭后失效；附加期间 Chrome 自身无法在该标签页打开开发者工具。',
+    actionFootnote: 'Esc 拒绝 · 关闭侧栏后临时信任失效 · 敏感字段的输入内容默认遮盖',
+    devToolsFootnote: '开发者工具会暴露页面内部结构与抓包内容。信任仅覆盖本对话在此站点上的调用，30 分钟后、标签页离开该站点或侧栏关闭时失效，且从不覆盖 JavaScript 执行与不脱敏的抓包内容。附加期间 Chrome 自身无法在该标签页打开开发者工具。',
+    trustEval: (origin) => `本对话中信任在 ${origin} 上执行 JavaScript（30 分钟）`,
+    trustDevToolsOrigin: (origin) => `本对话中信任 ${origin} 上的开发者工具（30 分钟）`,
+    codeLabel: (characters) => `将执行的 JavaScript（${characters} 个字符）`,
+    showCode: '显示代码',
+    hideCode: '隐藏代码',
+    typedTextLabel: '将输入的文本',
+    maskedText: (characters) => `已遮盖：${characters} 个字符（敏感字段或未能检查的字段）`,
+    reveal: '显示',
+    hide: '隐藏',
+    pathsLabel: (count) => `将附加的本地文件（${count} 个）`,
+    urlLabel: '完整目标 URL',
+    queryParams: '解码后的参数',
+    fragmentLabel: '片段',
+    flagLong: '值过长',
+    flagEntropy: '疑似令牌或密钥',
+    urlRiskNote: '此 URL 携带的数据可能被泄露给目标站点。即使是受信任的域名，也会对此类请求再次确认。',
+    flagsLabel: '本次调用将关闭脱敏',
+    flagDescriptions: {
+      includeSensitiveHeaders: 'includeSensitiveHeaders —— 显示 Authorization、Cookie、Set-Cookie 等请求头的值',
+      includeSensitiveBody: 'includeSensitiveBody —— 显示疑似认证请求的正文',
+    },
+    perCallNote: '此调用每次都需要单独确认，任何设置或会话信任都不能代替。',
+    fingerprint: '审批指纹',
   },
   tool: {
     running: '正在操作页面',
@@ -718,10 +786,10 @@ const ZH: PanelCopy = {
     unrestrictedBrowserAccess: '允许模型完全控制浏览器',
     unrestrictedBrowserAccessHelp: '模型无需确认即可读取所有 HTTP(S) 页面、查看全部已打开标签页的标题和链接，并执行包括跟随、关闭标签页在内的所有操作。浏览器受保护页面的内容仍不可访问。',
     allowDevTools: '允许开发者工具',
-    allowDevToolsHelp: '高权限功能：允许模型查看并修改页面元素与 CSS、在页面中执行 JavaScript、读取已捕获的网络请求。默认关闭，关闭时每次调用都会弹出审批。附加调试器期间，Chrome 无法在同一标签页打开自带的开发者工具。',
+    allowDevToolsHelp: '高权限功能：允许模型查看并修改页面元素与 CSS、在页面中执行 JavaScript、读取已捕获的网络请求。默认关闭，关闭时每次调用都会弹出审批。即使开启，执行 JavaScript 以及读取不脱敏的请求头或正文仍会每次确认。附加调试器期间，Chrome 无法在同一标签页打开自带的开发者工具。',
     devToolsUnsupported: '不可用 —— 当前浏览器未提供调试器 API。',
     devToolsOff: '已关闭 —— 每次调用都会请求审批。',
-    devToolsIdle: '已开启 —— 首次调用时附加调试器。',
+    devToolsIdle: '已开启 —— 首次调用时附加调试器；执行 JavaScript 仍需逐次确认。',
     devToolsAttached: '调试器已附加',
     devToolsError: '最近一次错误：',
     devToolsDetach: '立即断开',

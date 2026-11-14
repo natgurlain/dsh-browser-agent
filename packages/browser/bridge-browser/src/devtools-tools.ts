@@ -59,6 +59,8 @@ const INDEX_PARAMETER = {
 }
 const LOCATOR_NOTE = 'Resolve the element with exactly one of selector or index; frame selects the document for either locator using the Chrome frame ID from browser_snapshot.'
 const APPROVAL_NOTE = 'Requires the user to allow developer tools (a side-panel approval unless they enabled the developer-tools setting).'
+const EVAL_APPROVAL_NOTE = 'The user sees the full source and approves each call, unless they chose to trust JavaScript on this site for this conversation; the developer-tools setting does not cover it.'
+const SENSITIVE_OPT_OUT_NOTE = 'Setting this to true always needs its own per-call user approval that names it; no setting or session trust covers it.'
 
 /** Call signature shared with `registerBrowserTools`. */
 type Call = (
@@ -168,7 +170,7 @@ export function defineDevTools(call: Call, options: BrowserDevToolsOptions): Too
 
   const consoleEval = (): ToolDefinition => defineTool({
     name: 'browser_console_eval',
-    description: `Run JavaScript in the page's own context, as typing in the DevTools console would. Prefer a single expression; use an async IIFE and awaitPromise for multi-step work. ${APPROVAL_NOTE} ${UNTRUSTED_CONTENT_WARNING}`,
+    description: `Run JavaScript in the page's own context, as typing in the DevTools console would. Prefer a single expression; use an async IIFE and awaitPromise for multi-step work. ${EVAL_APPROVAL_NOTE} ${UNTRUSTED_CONTENT_WARNING}`,
     parameters: {
       expression: { type: 'string', required: true, description: 'JavaScript source evaluated in the page context.' },
       frame: FRAME_PARAMETER,
@@ -231,8 +233,8 @@ export function defineDevTools(call: Call, options: BrowserDevToolsOptions): Too
       index: { type: 'number', required: true, description: 'Request index from browser_devtools_list_requests.' },
       includeBody: { type: 'boolean', description: 'Also fetch the response body.' },
       maxChars: { type: 'number', description: 'Cap on the rendered result characters.' },
-      includeSensitiveHeaders: { type: 'boolean', description: 'Show Authorization, Cookie, Set-Cookie, and similar values instead of [redacted].' },
-      includeSensitiveBody: { type: 'boolean', description: 'Show bodies of authentication-looking requests instead of [redacted].' },
+      includeSensitiveHeaders: { type: 'boolean', description: `Show Authorization, Cookie, Set-Cookie, and similar values instead of [redacted]. ${SENSITIVE_OPT_OUT_NOTE}` },
+      includeSensitiveBody: { type: 'boolean', description: `Show bodies of authentication-looking requests instead of [redacted]. ${SENSITIVE_OPT_OUT_NOTE}` },
     },
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
@@ -246,7 +248,7 @@ export function defineDevTools(call: Call, options: BrowserDevToolsOptions): Too
       index: { type: 'number', required: true, description: 'Request index from browser_devtools_list_requests.' },
       kind: { type: 'string', enum: ['request', 'response'], description: 'Which body to read. Defaults to response.' },
       maxChars: { type: 'number', description: 'Cap on the returned characters; the extension caps bodies at 64 KB.' },
-      includeSensitiveBody: { type: 'boolean', description: 'Show bodies of authentication-looking requests instead of [redacted].' },
+      includeSensitiveBody: { type: 'boolean', description: `Show bodies of authentication-looking requests instead of [redacted]. ${SENSITIVE_OPT_OUT_NOTE}` },
     },
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,

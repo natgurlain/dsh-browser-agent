@@ -91,7 +91,14 @@ import { parsePageSelection, parseSelectionCapture } from '../selection.ts'
 import { ApprovalCoordinator, type ApprovalRequestResult } from './approval-coordinator.ts'
 import { devToolsSupported } from './debugger-session.ts'
 import { createDevToolsController } from './devtools-controller.ts'
-import { devToolsApprovalForCall, isDevToolsTool, resolveApprovalGate } from './authorization.ts'
+import {
+  devToolsApprovalForCall,
+  devToolsDecisionOutcome,
+  devToolsGrantKind,
+  isDevToolsTool,
+  resolveApprovalGate,
+} from './authorization.ts'
+import { DevToolsGrants } from './devtools-grants.ts'
 import {
   LEGACY_RECENT_SESSION_STORAGE_KEY,
   PAGE_SESSION_CONTEXT_STORAGE_KEY,
@@ -345,7 +352,7 @@ const sessionTrustedActionOrigins = new Set<string>()
  * chooses "trust this session" on a devtools prompt; never persisted, and
  * never implied by the origin allowlist or unrestricted access.
  */
-let sessionDevToolsGrant = false
+const devToolsGrants = new DevToolsGrants()
 /** Tool calls that are either withdrawable or completing an already-dispatched action. */
 interface ActiveToolCall {
   controller: AbortController
@@ -440,10 +447,10 @@ async function persistSettings(next: Partial<Settings>): Promise<void> {
   const updated = normalizeSettings({ ...settings, ...next })
   const revokesUnrestrictedAccess = settings.unrestrictedBrowserAccess && !updated.unrestrictedBrowserAccess
   const changesDevTools = typeof next.allowDevTools === 'boolean'
-  const revokesDevTools = changesDevTools && (settings.allowDevTools || sessionDevToolsGrant) && !updated.allowDevTools
+  const revokesDevTools = changesDevTools && (settings.allowDevTools || devToolsGrants.hasAny()) && !updated.allowDevTools
   settings = updated
   if (!updated.unrestrictedBrowserAccess) unrestrictedAccessActive = false
-  if (revokesDevTools) sessionDevToolsGrant = false
+  if (revokesDevTools) devToolsGrants.clear()
   syncSelectionWatch()
   let accessTransition: Promise<void> | undefined
   if (revokesUnrestrictedAccess) {
@@ -1128,12 +1135,14 @@ async function authorizeToolCall(
   windowId: number,
   sessionId?: string,
   unrestrictedAccess: boolean = unrestrictedAccessEnabled(),
+  tabId?: number,
 ): Promise<ApprovalAuthorization> {
   if (signal.aborted) return 'cancelled'
+  const grantKind = devToolsGrantKind(prompt)
   const gate = resolveApprovalGate({
     prompt,
     devToolsAllowed: devToolsAllowed(),
-    devToolsSessionGrant: sessionDevToolsGrant,
+    devToolsSessionGrant: grantKind !== undefined && devToolsGrants.covers(grantKind, sessionId, prompt.grantOrigin!),
     unrestrictedAccess,
     coveredByTrustedOrigins: actionCoveredByTrustedOrigins(
       prompt,
@@ -1147,15 +1156,16 @@ async function authorizeToolCall(
   if (result.status !== 'decision') return result.status
   const { decision } = result
   if (prompt.devTools === true) {
-    // 授权持续到侧栏关闭、worker 终止或用户修改设置。
-    if (decision === 'trust-session') {
+    // A grant covers (agent session, origin) for DEVTOOLS_GRANT_TTL_MS, ends
+    // when its tab leaves the origin, and is cleared when the last side panel
+    // closes, the worker stops, or the user revokes the setting.
+    const outcome = devToolsDecisionOutcome(prompt, decision)
+    if (outcome.grant !== undefined) {
       if (panelPorts.size === 0) return 'cancelled'
-      sessionDevToolsGrant = true
-      devTools.resume()
-      return 'approved'
+      devToolsGrants.grant(outcome.grant, sessionId, prompt.grantOrigin!, tabId)
     }
-    if (decision === 'allow-once') devTools.resume()
-    return decision === 'allow-once' ? 'approved' : 'denied'
+    if (outcome.authorization === 'approved') devTools.resume()
+    return outcome.authorization
   }
   if (decision === 'always-allow-reads' && prompt.kind === 'read') {
     await persistSettings({ sharePageContent: 'auto' })
@@ -1543,7 +1553,7 @@ async function dispatchDevToolsTool(call: ToolCall, signal: AbortSignal): Promis
   if (signal.aborted) return devToolsCancelled()
   const frames = await listTabFrames(target.id!, target.url)
   const prompt = devToolsApprovalForCall(call, frames)
-  const authorization = await authorizeToolCall(prompt, signal, target.windowId ?? 0, call.sessionId)
+  const authorization = await authorizeToolCall(prompt, signal, target.windowId ?? 0, call.sessionId, undefined, target.id)
   if (signal.aborted) return devToolsCancelled()
   if (authorization !== 'approved') {
     return {
@@ -1564,6 +1574,10 @@ async function dispatchDevToolsTool(call: ToolCall, signal: AbortSignal): Promis
         return currentFrame === undefined || frameDocumentKey(frame) !== frameDocumentKey(currentFrame)
       })) {
         throw new Error('The page changed while approval was pending. Request approval again.')
+      }
+      // The approval covers exactly the payload shown on the card.
+      if (devToolsApprovalForCall(call, currentFrames).binding !== prompt.binding) {
+        throw new Error('The request changed while approval was pending. Request approval again.')
       }
     }
     return { ok: true, result: await devTools.handle(call.name, call.args, call.sessionId, validate) }
@@ -2202,7 +2216,7 @@ chrome.runtime.onConnect.addListener((port) => {
     }
     syncSelectionWatch()
     if (panelPorts.size === 0) {
-      sessionDevToolsGrant = false
+      devToolsGrants.clear()
       cancelDevToolsCalls()
       bridgeStartRevision += 1
       bridge?.suspendReconnect()
@@ -2301,7 +2315,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // fragment update does not, and must not drop a quote still on the screen.
 // Matching the exact frame keeps an iframe's navigation from invalidating a
 // quote taken from its parent page, and vice versa.
-chrome.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
+chrome.webNavigation.onCommitted.addListener(({ tabId, frameId, url }) => {
+  // Developer-tools grants end once their tab leaves the granted origin.
+  if (frameId === 0) devToolsGrants.onTopFrameCommit(tabId, url)
   cancelDevToolsCalls(tabId)
   broadcastSelections(selections.clearTab(tabId, frameId))
   // A new top-level document drops any modifier or button held by a trusted

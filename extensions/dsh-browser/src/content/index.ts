@@ -11,7 +11,7 @@
  */
 
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import { runAction, ActionError } from './actions.ts'
+import { runAction, ActionError, typeTargetIsSensitive } from './actions.ts'
 import { ElementIds } from './ids.ts'
 import { handleInputSetup } from './input-support.ts'
 import { SelectionWatcher } from './selection.ts'
@@ -76,6 +76,12 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
     const revision = typeof command.revision === 'number' ? command.revision : undefined
     selectionWatcher.setEnabled(command.enabled === true, revision, epoch)
     sendResponse({ ok: true })
+    return
+  }
+  if (msg.type === 'DSH_TARGET_INFO') {
+    // Approval-time probe: only a sensitivity bit leaves the page.
+    const args = (message as { args?: Record<string, unknown> }).args ?? {}
+    sendResponse({ ok: true, result: { sensitive: typeTargetIsSensitive(args, ids) } })
     return
   }
   if (msg.type === 'DSH_SELECTION_RESET') {

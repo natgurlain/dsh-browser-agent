@@ -2,7 +2,14 @@
 
 import { describe, expect, it } from 'vitest'
 import type { ApprovalRequest } from '../src/security/approval.ts'
-import { approvalReadyForSession, approvalSessionToFocus } from '../src/panel/approvals.ts'
+import {
+  allowDecision,
+  approvalReadyForSession,
+  approvalSessionToFocus,
+  offersDevToolsTrust,
+  offersEvalTrust,
+  revealInvisible,
+} from '../src/panel/approvals.ts'
 
 const request: ApprovalRequest = {
   id: 'approval-1',
@@ -20,6 +27,26 @@ describe('approval session presentation', () => {
     expect(approvalSessionToFocus(request, 'session-b', false, true)).toBe('session-a')
     expect(approvalReadyForSession(request, 'session-a', true)).toBe(false)
     expect(approvalReadyForSession(request, 'session-a', false)).toBe(true)
+  })
+
+  it('makes invisible and bidi-control characters visible in approved payloads', () => {
+    expect(revealInvisible('plain text\nnext line\ttab')).toBe('plain text\nnext line\ttab')
+    expect(revealInvisible('safe‮txt.exe')).toBe('safe⟦U+202E⟧txt.exe')
+    expect(revealInvisible('a​b⁦c﻿')).toBe('a⟦U+200B⟧b⟦U+2066⟧c⟦U+FEFF⟧')
+    expect(revealInvisible('bell\u0007')).toBe('bell⟦U+0007⟧')
+  })
+
+  it('sends the eval-trust decision only when the box is ticked on an eval card', () => {
+    const evalCard: ApprovalRequest = { ...request, action: 'browser_console_eval', devTools: true, grantOrigin: 'https://example.com', canTrust: false }
+    expect(allowDecision(evalCard, false)).toBe('allow-once')
+    expect(allowDecision(evalCard, true)).toBe('trust-eval-session')
+    expect(allowDecision(request, true)).toBe('allow-once')
+    expect(allowDecision({ ...evalCard, perCallOnly: true }, true)).toBe('allow-once')
+    expect(offersEvalTrust(evalCard)).toBe(true)
+    expect(offersEvalTrust({ ...evalCard, grantOrigin: undefined })).toBe(false)
+    expect(offersDevToolsTrust(evalCard)).toBe(false)
+    expect(offersDevToolsTrust({ ...evalCard, action: 'browser_console_logs' })).toBe(true)
+    expect(offersDevToolsTrust({ ...evalCard, action: 'browser_devtools_get_request', perCallOnly: true })).toBe(false)
   })
 
   it('keeps compatibility with approvals from an older bridge', () => {

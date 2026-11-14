@@ -2821,7 +2821,8 @@ textarea:focus-visible {
 .approval-dialog {
   position: relative;
   width: min(100%, 380px);
-  overflow: hidden;
+  max-height: calc(100vh - 32px);
+  overflow: hidden auto;
   padding: 18px;
   border: 1px solid var(--security-border);
   border-radius: 18px;
@@ -2981,6 +2982,182 @@ textarea:focus-visible {
 .approval-actions .read-always:hover {
   border-color: #fdb022;
   background: #fff4d6;
+}
+
+/* Approved payload: shown verbatim, scrolled rather than truncated. */
+.approval-payload {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 6px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--canvas);
+}
+
+.approval-payload.warning {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.approval-payload > summary,
+.approval-payload-head > span {
+  color: var(--faint);
+  font-size: calc(9px * var(--ui-scale));
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.approval-payload > summary {
+  cursor: pointer;
+}
+
+.approval-payload-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.approval-reveal {
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  font-size: calc(10px * var(--ui-scale));
+}
+
+.approval-code,
+.approval-url,
+.approval-paths code,
+.approval-params code {
+  color: #344054;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: calc(10px * var(--ui-scale));
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.approval-code {
+  max-height: 220px;
+  margin: 4px 0 0;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.approval-url {
+  display: block;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.approval-masked {
+  margin: 0;
+  color: var(--ink);
+  font-size: calc(11px * var(--ui-scale));
+  letter-spacing: 0.1em;
+}
+
+.approval-masked small {
+  color: var(--faint);
+  letter-spacing: normal;
+}
+
+.approval-paths {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding-left: 16px;
+  color: var(--ink);
+  font-size: calc(10.5px * var(--ui-scale));
+}
+
+.approval-params {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 200px;
+  margin: 0;
+  overflow: auto;
+}
+
+.approval-params > div {
+  display: grid;
+  grid-template-columns: minmax(48px, 30%) 1fr;
+  gap: 6px;
+  padding: 3px 5px;
+  border-radius: 6px;
+}
+
+.approval-params > div.flagged {
+  background: var(--danger-soft);
+  outline: 1px solid var(--danger-border);
+}
+
+.approval-params dt {
+  color: var(--faint);
+  font-size: calc(10px * var(--ui-scale));
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.approval-params dd {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+}
+
+.approval-flag {
+  align-self: flex-start;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-size: calc(9px * var(--ui-scale));
+  font-weight: 700;
+}
+
+.approval-note {
+  margin: 6px 0 0;
+  color: var(--ink);
+  font-size: calc(10px * var(--ui-scale));
+  line-height: 1.4;
+}
+
+.approval-note.warning {
+  color: var(--danger);
+}
+
+.approval-trust-eval {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 10px;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: calc(10.5px * var(--ui-scale));
+  line-height: 1.4;
+}
+
+.approval-fingerprint {
+  display: block;
+  margin-top: 8px;
+  color: var(--faint);
+  font-size: calc(9px * var(--ui-scale));
+}
+
+.approval-fingerprint code {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
 .approval-footnote {

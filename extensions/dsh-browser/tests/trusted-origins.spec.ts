@@ -7,6 +7,7 @@ import {
   originMatchesTrusted,
 } from '../src/security/trusted-origins.ts'
 import type { ApprovalPrompt } from '../src/security/approval.ts'
+import { approvalPromptForCall } from '../src/background/authorization.ts'
 
 function action(overrides: Partial<ApprovalPrompt> = {}): ApprovalPrompt {
   return {
@@ -83,6 +84,26 @@ describe('actionCoveredByTrustedOrigins', () => {
       action: 'browser_navigate',
       canTrust: false,
     }), trusted)).toBe(false)
+  })
+
+  it('still prompts on a trusted origin when the URL carries a long or high-entropy value', () => {
+    for (const name of ['browser_navigate', 'browser_open_tab']) {
+      const clean = approvalPromptForCall(
+        { id: 'c', name, args: { url: 'https://docs.example.com/guide?page=2' } },
+        'auto',
+        [{ frameId: 0, parentFrameId: -1, url: 'https://docs.example.com/' }],
+        'en',
+      )!
+      expect(actionCoveredByTrustedOrigins(clean, trusted), name).toBe(true)
+      const risky = approvalPromptForCall(
+        { id: 'c', name, args: { url: 'https://docs.example.com/guide?sid=9f86d081884c7d659a2feaa0c55ad015' } },
+        'auto',
+        [{ frameId: 0, parentFrameId: -1, url: 'https://docs.example.com/' }],
+        'en',
+      )!
+      expect(risky.urlRisk, name).toBe(true)
+      expect(actionCoveredByTrustedOrigins(risky, trusted), name).toBe(false)
+    }
   })
 
   it('requires every known navigation origin to be trusted', () => {
