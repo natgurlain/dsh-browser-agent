@@ -11,6 +11,7 @@ import { getUiLocale, type UiLocale } from '../i18n.ts'
 const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text'])
 const STATE_CHANGING_ACTIONS = new Set([
   'browser_click',
+  'browser_select',
   'browser_type',
   'browser_press',
   'browser_clipboard',
@@ -191,6 +192,35 @@ export interface ApprovalContext {
   typedTargetSensitive?: boolean
 }
 
+/**
+ * Whether a browser_wait call inspects the page (text, selector, network or
+ * URL conditions). Such a wait answers "is this on the page", so it is a page
+ * read; a bare settle/delay wait is not.
+ */
+export function isConditionalPageWait(args: Record<string, unknown>): boolean {
+  return (typeof args.text === 'string' && args.text !== '')
+    || (typeof args.selector === 'string' && args.selector !== '')
+    || (typeof args.urlMatches === 'string' && args.urlMatches !== '')
+    || args.networkIdle === true
+}
+
+/** browser_extract clicks a "next" control between pages, which changes page state. */
+function extractPaginates(call: ToolCall): boolean {
+  return call.name === 'browser_extract' && call.args.paginate !== undefined
+}
+
+/** Reads of page content: prompt under "ask", blocked under "off". */
+function isPageRead(call: ToolCall): boolean {
+  return PAGE_READS.has(call.name)
+    || (call.name === 'browser_extract' && !extractPaginates(call))
+    || (call.name === 'browser_wait' && isConditionalPageWait(call.args))
+}
+
+/** The verbatim call arguments, shown on the card for tools whose payload decides what happens. */
+function payloadDetail(call: ToolCall): ApprovalDetail {
+  return { kind: 'payload', value: JSON.stringify(call.args, null, 2) }
+}
+
 /** Return an approval prompt, or undefined when this call needs no prompt. */
 export function approvalPromptForCall(
   call: ToolCall,
@@ -235,23 +265,22 @@ function unboundPromptForCall(
       canTrust: false,
     }
   }
-  if (PAGE_READS.has(call.name)) {
+  if (isPageRead(call)) {
     if (sharePageContent !== 'ask') return undefined
-    const targetFrames = call.name === 'browser_get_text'
-      ? frames.filter((frame) => frame.frameId === requestedFrame(call.args))
-      : frames
+    const targetFrames = call.name === 'browser_snapshot'
+      ? frames
+      : frames.filter((frame) => frame.frameId === requestedFrame(call.args))
     return {
       kind: 'read',
       action: call.name,
-      summary: call.name === 'browser_snapshot'
-        ? localized(locale, 'Read the current page and accessible iframes', '读取当前页面及可访问 iframe')
-        : localized(locale, 'Read text from the specified area of the current page', '读取当前页面的指定文本区域'),
+      summary: summarizeRead(call, locale),
       origins: uniqueOrigins(targetFrames, frames),
       canTrust: false,
+      ...call.name === 'browser_extract' || call.name === 'browser_wait' ? { details: [payloadDetail(call)] } : {},
     }
   }
 
-  if (!STATE_CHANGING_ACTIONS.has(call.name)) return undefined
+  if (!STATE_CHANGING_ACTIONS.has(call.name) && !extractPaginates(call)) return undefined
   const details = actionDetails(call, context)
   const url = call.name === 'browser_navigate' || call.name === 'browser_open_tab'
     ? analyzeUrl(typeof call.args.url === 'string' ? call.args.url : '')
@@ -309,6 +338,9 @@ function actionDetails(call: ToolCall, context: ApprovalContext): ApprovalDetail
       }]
     case 'browser_upload':
       return [{ kind: 'paths', values: Array.isArray(call.args.paths) ? call.args.paths.map((path) => String(path)) : [] }]
+    case 'browser_select':
+    case 'browser_extract':
+      return [payloadDetail(call)]
     case 'browser_navigate':
     case 'browser_open_tab': {
       const url = analyzeUrl(typeof call.args.url === 'string' ? call.args.url : '')
@@ -428,10 +460,38 @@ function summarizeAction(call: ToolCall, locale: UiLocale, context: ApprovalCont
         `向${elementTarget(call, locale)}附加 ${count} 个本地文件${frame}`,
       )
     }
+    case 'browser_select': return localized(
+      locale,
+      `Select option(s) in ${elementTarget(call, locale)}${frame} (arguments below)`,
+      `在${elementTarget(call, locale)}中选择选项${frame}（参数见下方）`,
+    )
+    case 'browser_extract': {
+      const pages = typeof call.args.paginate === 'object' && call.args.paginate !== null
+        ? (call.args.paginate as { maxPages?: unknown }).maxPages
+        : undefined
+      return localized(
+        locale,
+        `Extract rows across pages, clicking the next-page control up to ${typeof pages === 'number' ? pages : 5} pages${frame} (arguments below)`,
+        `跨页提取数据行，最多点击下一页控件 ${typeof pages === 'number' ? pages : 5} 页${frame}（参数见下方）`,
+      )
+    }
     case 'browser_back': return localized(locale, 'Go back in browser history (destination domain unknown)', '返回浏览历史上一页（目标域名未知）')
     case 'browser_forward': return localized(locale, 'Go forward in browser history (destination domain unknown)', '前进到浏览历史下一页（目标域名未知）')
     case 'browser_reload': return localized(locale, 'Reload the current page', '重新加载当前页面')
     default: return call.name
+  }
+}
+
+function summarizeRead(call: ToolCall, locale: UiLocale): string {
+  switch (call.name) {
+    case 'browser_snapshot':
+      return localized(locale, 'Read the current page and accessible iframes', '读取当前页面及可访问 iframe')
+    case 'browser_extract':
+      return localized(locale, 'Extract structured rows from the current page (arguments below)', '从当前页面提取结构化数据行（参数见下方）')
+    case 'browser_wait':
+      return localized(locale, 'Wait for a condition on the current page (arguments below)', '等待当前页面满足条件（参数见下方）')
+    default:
+      return localized(locale, 'Read text from the specified area of the current page', '读取当前页面的指定文本区域')
   }
 }
 

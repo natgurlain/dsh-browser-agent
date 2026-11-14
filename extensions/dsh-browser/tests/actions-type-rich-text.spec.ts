@@ -12,7 +12,7 @@ import type { ElementIds } from '../src/content/ids.ts'
 const BUDGET = { maxItems: 20, maxForms: 10, maxChars: 2_000 }
 
 function idsFor(element: Element): ElementIds {
-  return { elementByIndex: vi.fn(() => element) } as unknown as ElementIds
+  return { elementByIndex: vi.fn(() => element), indexOf: vi.fn(() => undefined) } as unknown as ElementIds
 }
 
 function host(html = ''): HTMLElement {

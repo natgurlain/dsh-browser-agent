@@ -10,12 +10,14 @@
  * @module
  */
 
-import { deepActiveElement, resolveSelector } from './dom.ts'
-import { pageText } from './extract.ts'
-import { findElements, LocatorError, parseLocatorQuery, renderFound } from './find.ts'
+import { composedParent, deepActiveElement, querySelectorAllDeep, resolveSelector, resolveSelectorAll } from './dom.ts'
+import { accessibleName, collectInteractive, isVisible, pageText } from './extract.ts'
+import { findElements, LocatorError, parseLocatorQuery, renderFound, roleOfElement } from './find.ts'
 import type { ElementIds } from './ids.ts'
 import { dispatchPaste } from './paste.ts'
-import { isSensitiveField } from './privacy.ts'
+import { isSensitiveField, maskValue } from './privacy.ts'
+import { ExtractError, extractRows, parseExtractRequest } from './rows.ts'
+import { parseSelectRequest, SelectError, selectOptions } from './select.ts'
 import type { SnapshotBudget } from './snapshot.ts'
 import { buildSnapshot, renderSnapshot } from './snapshot.ts'
 
@@ -26,6 +28,8 @@ export interface ActionResult {
   pageContent?: string
   /** A same-frame document navigation was scheduled after this response. */
   navigationPending?: boolean
+  /** Structured page data (browser_extract rows); the background treats it as untrusted. */
+  data?: unknown
 }
 
 /** How long an action should observe a ready document before returning. */
@@ -218,10 +222,25 @@ export interface ActionContext {
   budget: SnapshotBudget
   /** Enabled only when the background may share page content without another approval. */
   includePageDelta?: boolean
+  /**
+   * Page sharing allows page-authored text in this result even without a
+   * snapshot baseline (post-action verification details).
+   */
+  shareContent?: boolean
 }
+
+/** Actions whose result carries a post-action verification report. */
+const VERIFIED_ACTIONS = new Set(['browser_click', 'browser_type', 'browser_press', 'browser_scroll', 'browser_select', 'browser_clipboard'])
 
 /** Run one named action with its args. */
 export async function runAction(action: string, args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+  if (!VERIFIED_ACTIONS.has(action)) return runUnverified(action, args, ctx)
+  const probe = beginVerification()
+  const result = await runUnverified(action, args, ctx)
+  return finishVerification(result, probe, action, args, ctx)
+}
+
+async function runUnverified(action: string, args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   switch (action) {
     case 'browser_snapshot':
       return snapshotAction(args, ctx)
@@ -233,6 +252,10 @@ export async function runAction(action: string, args: Record<string, unknown>, c
       return pressAction(args, ctx)
     case 'browser_scroll':
       return scrollAction(args, ctx)
+    case 'browser_select':
+      return selectAction(args, ctx)
+    case 'browser_extract':
+      return extractAction(args)
     case 'browser_clipboard':
       if (args.action !== 'paste') {
         throw new ActionError('bad-args', 'Only clipboard paste runs in the page; clipboard writes are dispatched by the browser background.')
@@ -659,27 +682,144 @@ async function clipboardPasteAction(args: Record<string, unknown>, ctx: ActionCo
   return withPageDelta(`Pasted ${text.length} characters (${detail}) into ${label}${note}.`, ctx)
 }
 
+/** What a scroll moves: the window, or one scrollable element. */
+interface ScrollTarget {
+  element: Element | null
+  label: string
+  top: () => number
+  height: () => number
+  viewport: () => number
+  scrollTo: (top: number) => void
+}
+
+function windowScrollTarget(): ScrollTarget {
+  return {
+    element: null,
+    label: 'the page',
+    top: () => window.scrollY,
+    height: () => document.documentElement.scrollHeight,
+    viewport: () => window.innerHeight,
+    scrollTo: (top) => { window.scrollTo({ top, behavior: 'instant' }) },
+  }
+}
+
+/** Whether an element scrolls its own content vertically. */
+function isScrollable(el: Element): boolean {
+  if (!(el instanceof HTMLElement)) return false
+  if (el === document.scrollingElement || el === document.body || el === document.documentElement) return false
+  const overflow = getComputedStyle(el).overflowY
+  return (overflow === 'auto' || overflow === 'scroll' || overflow === 'overlay') && el.scrollHeight > el.clientHeight + 1
+}
+
+/**
+ * The nearest scrollable ancestor-or-self of an element (across shadow
+ * boundaries), or the window when nothing between it and the root scrolls.
+ */
+function scrollTargetFor(el: Element, label: string): ScrollTarget {
+  for (let node: Element | null = el; node !== null; node = composedParent(node)) {
+    if (!isScrollable(node)) continue
+    const container = node as HTMLElement
+    return {
+      element: container,
+      label: node === el ? label : `the scrollable container of ${label}`,
+      top: () => container.scrollTop,
+      height: () => container.scrollHeight,
+      viewport: () => container.clientHeight,
+      scrollTo: (top) => { container.scrollTo({ top, behavior: 'instant' }) },
+    }
+  }
+  return { ...windowScrollTarget(), label: `the page (no scrollable container around ${label})` }
+}
+
+/** Upper bounds for infinite-scroll mode, well below the tool timeout. */
+const MAX_SCROLL_ROUNDS = 30
+const DEFAULT_SCROLL_ROUNDS = 10
+const SCROLL_ROUND_GROWTH_WAIT_MS = 2_500
+const SCROLL_TOTAL_BUDGET_MS = 25_000
+
 async function scrollAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
   const direction = typeof args.direction === 'string' ? args.direction : ''
-  const amount = typeof args.amount === 'number' ? args.amount : Math.floor(window.innerHeight * 0.8)
+  if (!['up', 'down', 'top', 'bottom'].includes(direction)) {
+    throw new ActionError('bad-args', `direction must be up, down, top, or bottom; received "${direction}".`)
+  }
+  const targeted = args.index !== undefined || (typeof args.selector === 'string' && args.selector !== '')
+  const target = targeted
+    ? (() => { const el = resolveActionTarget(args, ctx.ids); return scrollTargetFor(el, targetLabel(args, el)) })()
+    : windowScrollTarget()
+  const infinite = args.untilItems !== undefined || args.maxRounds !== undefined
+  if (infinite) return infiniteScroll(args, target, ctx)
+  const amount = typeof args.amount === 'number' ? args.amount : Math.floor(target.viewport() * 0.8)
   switch (direction) {
-    case 'top':
-      window.scrollTo({ top: 0, behavior: 'instant' })
-      break
-    case 'bottom':
-      window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'instant' })
-      break
-    case 'up':
-      window.scrollBy({ top: -amount, behavior: 'instant' })
-      break
-    case 'down':
-      window.scrollBy({ top: amount, behavior: 'instant' })
-      break
-    default:
-      throw new ActionError('bad-args', `direction must be up, down, top, or bottom; received "${direction}".`)
+    case 'top': target.scrollTo(0); break
+    case 'bottom': target.scrollTo(target.height()); break
+    case 'up': target.scrollTo(target.top() - amount); break
+    default: target.scrollTo(target.top() + amount); break
   }
   await waitForPageSettled(SCROLL_SETTLE)
-  return withPageDelta(`Scrolled ${direction}.`, ctx)
+  const position = `scroll position ${Math.round(target.top())} of ${Math.max(0, Math.round(target.height() - target.viewport()))}`
+  const label = targeted ? ` ${target.label}` : ''
+  return withPageDelta(`Scrolled${label} ${direction} (${position}).`, ctx)
+}
+
+/**
+ * Infinite-scroll mode: scroll to the bottom repeatedly until enough items
+ * exist, the content stops growing, or the round budget runs out.
+ */
+async function infiniteScroll(args: Record<string, unknown>, target: ScrollTarget, ctx: ActionContext): Promise<ActionResult> {
+  const untilItems = args.untilItems === undefined ? undefined : numberArg(args, 'untilItems')
+  const maxRounds = Math.min(MAX_SCROLL_ROUNDS, args.maxRounds === undefined ? DEFAULT_SCROLL_ROUNDS : numberArg(args, 'maxRounds'))
+  const itemSelector = typeof args.itemSelector === 'string' && args.itemSelector !== '' ? args.itemSelector : undefined
+  const scope = target.element ?? document
+  const countItems = (): number => {
+    if (itemSelector === undefined) return collectInteractive(scope).length
+    try {
+      return resolveSelectorAll(itemSelector, scope).length
+    } catch {
+      throw new ActionError('bad-args', `itemSelector is not a valid CSS selector: ${itemSelector}`)
+    }
+  }
+  const startedAt = performance.now()
+  const initial = countItems()
+  let items = initial
+  let rounds = 0
+  let reason = `reached maxRounds=${maxRounds}`
+  while (rounds < maxRounds) {
+    if (untilItems !== undefined && items >= untilItems) {
+      reason = `reached ${untilItems} items`
+      break
+    }
+    if (performance.now() - startedAt > SCROLL_TOTAL_BUDGET_MS) {
+      reason = 'time budget used up'
+      break
+    }
+    rounds += 1
+    const heightBefore = target.height()
+    target.scrollTo(target.height())
+    // Loaders fetch after the scroll event; wait for growth, then for quiet.
+    const deadline = performance.now() + SCROLL_ROUND_GROWTH_WAIT_MS
+    let grew = false
+    while (performance.now() < deadline) {
+      await sleep(100)
+      if (countItems() > items || target.height() > heightBefore) {
+        grew = true
+        break
+      }
+    }
+    await waitForPageSettled(SCROLL_SETTLE)
+    const now = countItems()
+    if (!grew && now <= items) {
+      reason = 'no new items appeared'
+      items = now
+      break
+    }
+    items = now
+  }
+  if (untilItems !== undefined && items >= untilItems) reason = `reached ${untilItems} items`
+  const counted = itemSelector === undefined ? 'interactive elements' : `"${itemSelector}" items`
+  return withPageDelta(
+    `Scrolled ${target.label} to the bottom ${rounds} time(s): ${counted} ${initial} → ${items} (stopped: ${reason}).`,
+    ctx,
+  )
 }
 
 async function navigateAction(args: Record<string, unknown>): Promise<ActionResult> {
@@ -751,10 +891,281 @@ async function getTextAction(args: Record<string, unknown>): Promise<ActionResul
 const GET_TEXT_CHUNK_CHARS = 8_000
 
 async function waitAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+  const conditions = parseWaitConditions(args)
+  if (conditions !== undefined) return conditionalWait(conditions, ctx)
   const ms = typeof args.ms === 'number' && args.ms > 0 ? args.ms : 0
   await waitForPageSettled(EXPLICIT_WAIT_SETTLE)
   if (ms > 0) await sleep(ms)
   return withPageDelta(`The page is stable${ms > 0 ? ` after an additional ${ms}ms wait` : ''}.`, ctx)
+}
+
+/** Conditions a browser_wait call can wait for inside the page. */
+export interface WaitConditions {
+  text?: string
+  selector?: string
+  /** Wait for the text/selector to disappear instead of appear. */
+  gone: boolean
+  networkIdle: boolean
+  timeoutMs: number
+}
+
+export const DEFAULT_WAIT_TIMEOUT_MS = 10_000
+export const MAX_WAIT_TIMEOUT_MS = 25_000
+/** Quiet window for the resource-timing network-idle heuristic. */
+const NETWORK_IDLE_MS = 500
+const WAIT_POLL_MS = 100
+
+/** Parse the conditional form of browser_wait; undefined keeps the plain settle. */
+export function parseWaitConditions(args: Record<string, unknown>): WaitConditions | undefined {
+  const text = typeof args.text === 'string' && args.text !== '' ? args.text : undefined
+  const selector = typeof args.selector === 'string' && args.selector !== '' ? args.selector : undefined
+  const networkIdle = args.networkIdle === true
+  if (text === undefined && selector === undefined && !networkIdle) {
+    if (args.gone === true) throw new ActionError('bad-args', 'gone needs text or selector.')
+    return undefined
+  }
+  const timeoutRaw = args.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS
+  if (typeof timeoutRaw !== 'number' || !Number.isFinite(timeoutRaw) || timeoutRaw <= 0) {
+    throw new ActionError('bad-args', 'timeoutMs must be a positive number of milliseconds.')
+  }
+  return {
+    ...text === undefined ? {} : { text },
+    ...selector === undefined ? {} : { selector },
+    gone: args.gone === true,
+    networkIdle,
+    timeoutMs: Math.min(timeoutRaw, MAX_WAIT_TIMEOUT_MS),
+  }
+}
+
+/** Visible elements matching a selector (piercing open shadow roots). */
+function visibleMatches(selector: string): Element[] {
+  let matches: Element[]
+  try {
+    matches = resolveSelectorAll(selector)
+  } catch {
+    throw new ActionError('bad-args', `selector is not a valid CSS selector: ${selector}`)
+  }
+  return matches.filter((el) => isVisible(el) || (!(el instanceof HTMLElement) && el.getBoundingClientRect().width > 0))
+}
+
+/**
+ * Network-idle heuristic without the webRequest permission: the document is
+ * complete and no resource finished loading for {@link NETWORK_IDLE_MS}. It
+ * cannot see requests that are still in flight with nothing finished yet.
+ */
+function networkQuietSince(): number {
+  const entries = performance.getEntriesByType('resource') as PerformanceResourceTiming[]
+  const lastEnd = entries.reduce((latest, entry) => Math.max(latest, entry.responseEnd || entry.startTime), 0)
+  return performance.now() - lastEnd
+}
+
+async function conditionalWait(conditions: WaitConditions, ctx: ActionContext): Promise<ActionResult> {
+  if (conditions.selector !== undefined) visibleMatches(conditions.selector) // validate before waiting
+  const startedAt = performance.now()
+  const describe = (): string[] => {
+    const parts: string[] = []
+    if (conditions.text !== undefined) parts.push(`text "${conditions.text}" ${conditions.gone ? 'gone' : 'present'}`)
+    if (conditions.selector !== undefined) parts.push(`selector ${conditions.selector} ${conditions.gone ? 'gone' : 'visible'}`)
+    if (conditions.networkIdle) parts.push('network idle')
+    return parts
+  }
+  const unmet = (): string[] => {
+    const missing: string[] = []
+    if (conditions.text !== undefined) {
+      const present = pageText().toLowerCase().includes(conditions.text.toLowerCase())
+      if (present === conditions.gone) missing.push(`text "${conditions.text}" ${conditions.gone ? 'is still present' : 'did not appear'}`)
+    }
+    if (conditions.selector !== undefined) {
+      const present = visibleMatches(conditions.selector).length > 0
+      if (present === conditions.gone) missing.push(`selector ${conditions.selector} ${conditions.gone ? 'is still visible' : 'did not become visible'}`)
+    }
+    if (conditions.networkIdle && (document.readyState !== 'complete' || networkQuietSince() < NETWORK_IDLE_MS)) {
+      missing.push('the network did not go idle')
+    }
+    return missing
+  }
+  let missing = unmet()
+  while (missing.length > 0) {
+    const elapsed = performance.now() - startedAt
+    if (elapsed >= conditions.timeoutMs) {
+      throw new ActionError('action-failed', `browser_wait timed out after ${Math.round(elapsed)}ms: ${missing.join('; ')}.`)
+    }
+    await sleep(Math.min(WAIT_POLL_MS, conditions.timeoutMs - elapsed))
+    missing = unmet()
+  }
+  const elapsed = Math.round(performance.now() - startedAt)
+  return withPageDelta(`Condition met after ${elapsed}ms: ${describe().join(', ')}.`, ctx)
+}
+
+async function selectAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+  let request
+  try {
+    request = parseSelectRequest(args)
+  } catch (error: unknown) {
+    if (error instanceof SelectError) throw new ActionError(error.code, error.message)
+    throw error
+  }
+  const el = resolveActionTarget(args, ctx.ids)
+  const label = targetLabel(args, el)
+  let outcome
+  try {
+    outcome = await selectOptions(el, request, {
+      click: (target) => {
+        target.scrollIntoView({ block: 'center', behavior: 'instant' })
+        dispatchPointerClick(target, 1, 0, [])
+      },
+      settle: async () => { await waitForPageSettled(ACTION_SETTLE) },
+      type: (field, text) => {
+        field.focus()
+        setNativeValue(field, text)
+      },
+    })
+  } catch (error: unknown) {
+    if (error instanceof SelectError) throw new ActionError(error.code, error.message)
+    throw error
+  }
+  await waitForPageSettled(ACTION_SETTLE)
+  const count = outcome.selected.length
+  // Option labels are page text: name them only when sharing allows it.
+  const detail = ctx.shareContent === true && count > 0
+    ? `: ${outcome.selected.map((name) => `"${name}"`).join(', ')}`
+    : ''
+  const kind = outcome.kind === 'native' ? 'select' : outcome.kind
+  return withPageDelta(`Selected in ${kind} ${label}; ${count} option(s) now selected${detail}.`, ctx)
+}
+
+/** Rows returned inline per page when the caller does not save to a file. */
+function extractAction(args: Record<string, unknown>): ActionResult {
+  let extracted
+  try {
+    extracted = extractRows(parseExtractRequest(args))
+  } catch (error: unknown) {
+    if (error instanceof ExtractError) throw new ActionError(error.code, error.message)
+    throw error
+  }
+  const dropped = extracted.dropped > 0 ? `; ${extracted.dropped} more matched beyond limit` : ''
+  return {
+    text: `Extracted ${extracted.rows.length} row(s) with columns ${extracted.columns.join(', ')}${dropped}.`,
+    data: { columns: extracted.columns, rows: extracted.rows, dropped: extracted.dropped, url: location.href },
+  }
+}
+
+/** Page state recorded before an action, compared after it. */
+interface VerificationProbe {
+  url: string
+  messages: Map<Element, string>
+  invalid: Set<Element>
+}
+
+/** Live regions and alerts where pages announce errors and confirmations. */
+const MESSAGE_SELECTOR = '[role="alert"], [role="alertdialog"], [aria-live]:not([aria-live="off"]), [role="status"]'
+
+function liveMessages(): Map<Element, string> {
+  const messages = new Map<Element, string>()
+  for (const el of querySelectorAllDeep(document, MESSAGE_SELECTOR)) {
+    if (!isVisible(el)) continue
+    const text = pageText(el)
+    if (text !== '') messages.set(el, text)
+  }
+  return messages
+}
+
+function invalidFields(): Set<Element> {
+  return new Set(querySelectorAllDeep(document, '[aria-invalid="true"]').filter((el) => isVisible(el)))
+}
+
+function beginVerification(): VerificationProbe {
+  return { url: location.href, messages: liveMessages(), invalid: invalidFields() }
+}
+
+/** The error text a field points at (aria-errormessage / aria-describedby). */
+function fieldErrorText(field: Element): string {
+  const root = field.getRootNode() as Document | ShadowRoot
+  const ids = `${field.getAttribute('aria-errormessage') ?? ''} ${field.getAttribute('aria-describedby') ?? ''}`
+    .split(/\s+/).filter((id) => id !== '')
+  return ids
+    .map((id) => ('getElementById' in root ? root.getElementById(id) : null) ?? document.getElementById(id))
+    .filter((el): el is HTMLElement => el !== null)
+    .map((el) => pageText(el))
+    .filter((text) => text !== '')
+    .join(' ')
+}
+
+const MAX_VERIFICATION_ITEM_CHARS = 200
+
+function clip(text: string): string {
+  return text.length <= MAX_VERIFICATION_ITEM_CHARS ? text : `${text.slice(0, MAX_VERIFICATION_ITEM_CHARS - 1)}…`
+}
+
+/**
+ * Append what changed around the action: navigation, focus, the value a
+ * typed field ended up with, and newly shown alert/error text.
+ *
+ * Facts that carry no page text (focus index, value length) go on the status
+ * line; page-authored text goes to `pageContent`, which the background
+ * releases only under the page-sharing setting.
+ */
+function finishVerification(
+  result: ActionResult,
+  probe: VerificationProbe,
+  action: string,
+  args: Record<string, unknown>,
+  ctx: ActionContext,
+): ActionResult {
+  if (result.navigationPending === true) return result
+  const facts: string[] = []
+  const details: string[] = []
+  if (location.href !== probe.url) {
+    facts.push('The URL changed (same document).')
+    details.push(`URL: ${location.href}`)
+  }
+  const active = deepActiveElement()
+  const focused = active !== null && active !== document.body && active !== document.documentElement ? active : null
+  // After typing, the field typed into is the subject even when the page moved focus.
+  let subject = focused
+  if (action === 'browser_type' && (args.index !== undefined || args.selector !== undefined)) {
+    try {
+      subject = resolveActionTarget(args, ctx.ids)
+    } catch {
+      // The target vanished after typing; report focus only.
+    }
+  }
+  if (focused !== null) {
+    const index = ctx.ids.indexOf(focused)
+    const role = roleOfElement(focused)
+    facts.push(`Focus: ${index === undefined ? role : `[${index}] ${role}`}.`)
+  }
+  if (subject !== null) {
+    const role = roleOfElement(subject)
+    const prefix = subject === focused ? 'Focused' : 'Typed into'
+    if (subject instanceof HTMLInputElement || subject instanceof HTMLTextAreaElement || subject instanceof HTMLSelectElement) {
+      const value = subject instanceof HTMLSelectElement ? [...subject.selectedOptions].map((option) => option.text).join(', ') : subject.value
+      if (action === 'browser_type' && typeof args.text === 'string' && !(subject instanceof HTMLSelectElement)) {
+        const landed = args.replace === true ? value === args.text : value.includes(args.text)
+        facts.push(landed
+          ? `The field holds ${value.length} characters, including the typed text.`
+          : `The field holds ${value.length} characters and does not contain the typed text; the page may have reformatted or rejected it.`)
+      }
+      details.push(`${prefix}: ${role} "${accessibleName(subject)}" value="${isSensitiveField(subject) ? maskValue(value) : clip(value)}"`)
+    } else {
+      details.push(`${prefix}: ${role} "${accessibleName(subject)}"`)
+    }
+  }
+  const newMessages = [...liveMessages()].filter(([el, text]) => probe.messages.get(el) !== text)
+  const newInvalid = [...invalidFields()].filter((el) => !probe.invalid.has(el))
+  if (newMessages.length > 0 || newInvalid.length > 0) {
+    facts.push(`${newMessages.length + newInvalid.length} new alert/validation message(s) appeared.`)
+    for (const [, text] of newMessages) details.push(`New message: "${clip(text)}"`)
+    for (const field of newInvalid) {
+      const index = ctx.ids.indexOf(field)
+      const error = fieldErrorText(field)
+      details.push(`Invalid field ${index === undefined ? '' : `[${index}] `}"${accessibleName(field)}"${error === '' ? '' : `: "${clip(error)}"`}`)
+    }
+  }
+  const text = facts.length === 0 ? result.text : `${result.text} ${facts.join(' ')}`
+  if (ctx.shareContent !== true || details.length === 0) return { ...result, text }
+  const block = `Verification:\n${details.map((line) => `  ${line}`).join('\n')}`
+  return { ...result, text, pageContent: result.pageContent === undefined ? block : `${block}\n\n${result.pageContent}` }
 }
 
 function numberArg(args: Record<string, unknown>, name: string): number {

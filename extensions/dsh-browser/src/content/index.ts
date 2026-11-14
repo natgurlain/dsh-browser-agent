@@ -96,6 +96,7 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
     args?: Record<string, unknown>
     budget?: Partial<SnapshotBudget>
     includePageDelta?: boolean
+    shareContent?: boolean
   }
   const action = actionMsg.action ?? ''
   const args = actionMsg.args ?? {}
@@ -104,6 +105,7 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
     ids,
     budget: actionBudget,
     includePageDelta: actionMsg.includePageDelta === true,
+    shareContent: actionMsg.shareContent === true,
   }).then(
     (result) => { sendResponse({ ok: true, result }) },
     (error: unknown) => {

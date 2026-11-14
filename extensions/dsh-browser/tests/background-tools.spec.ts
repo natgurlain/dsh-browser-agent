@@ -414,6 +414,7 @@ describe('dispatchToolCall', () => {
       args: { index: 3 },
       budget: expect.objectContaining({ maxItems: 60 }),
       includePageDelta: true,
+      shareContent: true,
     }, { documentId: 'child-doc' })
   })
 
@@ -451,6 +452,7 @@ describe('dispatchToolCall', () => {
       args: { index: 3 },
       budget,
       includePageDelta: true,
+      shareContent: true,
     }, { documentId: 'document-33' })
   })
 

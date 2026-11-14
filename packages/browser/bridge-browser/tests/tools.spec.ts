@@ -140,6 +140,29 @@ describe('registerBrowserTools', () => {
     expect(requestTool).toHaveBeenLastCalledWith('browser_wait', { frame: 4 }, exec.signal, 1_000)
   })
 
+  it('forwards the content-tool parameters', async () => {
+    const { ctx, bridge, requestTool, registered } = makeHarness()
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const byName = new Map(registered.map((r) => [r.name, r.definition]))
+    const exec = { signal: new AbortController().signal }
+    const run = async (name: string, args: unknown): Promise<void> => {
+      await (byName.get(name)!.execute as (a: unknown, e: { signal: AbortSignal }) => Promise<unknown>)(args, exec)
+    }
+    const snapshot = { mode: 'interactive', viewportOnly: true, collapse: false, region: 'main' }
+    await run('browser_snapshot', snapshot)
+    expect(requestTool).toHaveBeenLastCalledWith('browser_snapshot', snapshot, exec.signal, 1_000)
+    await run('browser_get_text', { selector: '#a >>> p', offset: 8_000 })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_get_text', { selector: '#a >>> p', offset: 8_000 }, exec.signal, 1_000)
+    const wait = { text: 'Saved', selector: '.toast', gone: true, urlMatches: '/done/', networkIdle: true, timeoutMs: 5_000, frame: 4 }
+    await run('browser_wait', wait)
+    expect(requestTool).toHaveBeenLastCalledWith('browser_wait', wait, exec.signal, 1_000)
+    const scroll = { direction: 'down', selector: '#list', untilItems: 40, maxRounds: 6, itemSelector: 'li' }
+    await run('browser_scroll', scroll)
+    expect(requestTool).toHaveBeenLastCalledWith('browser_scroll', scroll, exec.signal, 1_000)
+    await run('browser_select', { index: 4, values: ['a', 'b'] })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_select', { index: 4, values: ['a', 'b'] }, exec.signal, 1_000)
+  })
+
   it('normalizes every DSH parameter map to JSON Schema before registration', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
@@ -189,7 +212,7 @@ describe('registerBrowserTools', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const byName = new Map(registered.map((entry) => [entry.name, entry.definition]))
-    for (const name of ['browser_snapshot', 'browser_click', 'browser_type', 'browser_press', 'browser_scroll', 'browser_get_text', 'browser_wait', 'browser_clipboard', 'browser_upload']) {
+    for (const name of ['browser_snapshot', 'browser_click', 'browser_type', 'browser_press', 'browser_scroll', 'browser_get_text', 'browser_wait', 'browser_clipboard', 'browser_upload', 'browser_select', 'browser_extract']) {
       const params = byName.get(name)!.parameters as { properties: { frame?: { type?: unknown } } }
       expect(params.properties.frame?.type).toBe('number')
     }

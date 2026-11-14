@@ -17,6 +17,7 @@ import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { BridgeServer } from './server.ts'
+import { ExtractSaveError, extractDataOf, normalizeSavePath, saveExtract, sessionWorkspaceDir } from './extract-save.ts'
 
 /** Options resolved from plugin config before tool registration. */
 export interface BrowserToolsOptions {
@@ -26,6 +27,11 @@ export interface BrowserToolsOptions {
   snapshotMaxChars: number
   /** Upper bound on interactive inventory items per snapshot. */
   maxInteractiveItems: number
+  /**
+   * Workspace for `browser_extract { saveTo }` when the calling session has no
+   * recorded working directory (the browser-session workspace; '' disables).
+   */
+  workspacePath?: string
 }
 
 /** Canonical tool result: one text payload. */
@@ -100,6 +106,9 @@ export const BROWSER_TOOL_NAMES = [
   'browser_wait',
   'browser_clipboard',
   'browser_upload',
+  // Content tools (defineContentTools).
+  'browser_select',
+  'browser_extract',
 ] as const
 
 /**
@@ -120,8 +129,14 @@ export function registerBrowserTools(
 ): Map<string, () => void> {
   const disposers = new Map<string, () => void>()
   const call = createBrowserToolCall(bridge, options.toolTimeoutMs)
+  const rawCall: RawCall = async (exec, name, args) => {
+    const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
+    return sessionId === undefined
+      ? bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs)
+      : bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, sessionId)
+  }
 
-  for (const tool of defineTools(call, options)) {
+  for (const tool of [...defineTools(call, options), ...defineContentTools(call, rawCall, options)]) {
     disposers.set(tool.name, ctx.tools.register(tool))
   }
   return disposers
@@ -137,6 +152,11 @@ function normalizeTextResult(result: unknown, name: string): TextResult {
 
 interface Call {
   (exec: Pick<ToolRunContext, 'agent' | 'signal'>, name: string, args: Record<string, unknown>): Promise<TextResult>
+}
+
+/** Dispatcher that keeps the extension's whole result (structured extraction data). */
+interface RawCall {
+  (exec: Pick<ToolRunContext, 'agent' | 'signal'>, name: string, args: Record<string, unknown>): Promise<unknown>
 }
 
 /** The v1 tool set, model-perspective contracts only (no transport vocabulary). */
@@ -246,10 +266,15 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const scroll = (): ToolDefinition => defineTool({
     name: 'browser_scroll',
-    description: 'Scroll the page or an iframe up, down, top, or bottom; amount is optional pixels.',
+    description: 'Scroll the page, or the scroll container around index/selector. untilItems/maxRounds repeat scrolling to the bottom until content stops growing.',
     parameters: {
       direction: { type: 'string', required: true, enum: ['up', 'down', 'top', 'bottom'], description: 'Scroll direction.' },
       amount: { type: 'number', description: 'Number of pixels to scroll; ignored for top and bottom.' },
+      index: { type: 'number', description: 'Element index; scrolls its nearest scrollable container (or the element itself).' },
+      selector: { type: 'string', description: 'CSS selector; scrolls its nearest scrollable container (or the element itself).' },
+      untilItems: { type: 'number', description: 'Infinite scroll: keep scrolling to the bottom until at least this many items exist.' },
+      maxRounds: { type: 'number', description: 'Infinite scroll: maximum scroll rounds (default 10, max 30). Stops early when nothing new loads.' },
+      itemSelector: { type: 'string', description: 'Infinite scroll: CSS selector counting items; defaults to interactive elements in the container.' },
       frame: FRAME_PARAMETER,
     },
     timeoutMs: options.toolTimeoutMs,
@@ -419,17 +444,38 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const wait = (): ToolDefinition => defineTool({
     name: 'browser_wait',
-    description: 'Wait for loading and DOM changes to settle, with an optional extra delay.',
+    description: 'Wait for the page to settle, or until text/selector appears (gone=true: disappears), the URL matches, or the network idles. Fails on timeout.',
     parameters: {
       ms: { type: 'number', description: 'Additional milliseconds to wait. Omit to perform only the settle check.' },
+      text: { type: 'string', description: 'Wait until this text (case-insensitive) is on the page.' },
+      selector: { type: 'string', description: 'Wait until an element matching this CSS selector is visible.' },
+      gone: { type: 'boolean', description: 'Wait for the text or selector to disappear instead.' },
+      urlMatches: { type: 'string', description: 'Wait until the tab URL contains this string, or matches it when written as /regex/.' },
+      networkIdle: { type: 'boolean', description: 'Wait until no resource finished loading for 500ms (heuristic; cannot see requests still in flight).' },
+      timeoutMs: { type: 'number', description: 'Condition timeout in milliseconds (default 10000, max 25000).' },
       frame: FRAME_PARAMETER,
     },
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
     execute: (args, exec) => {
-      const a = args as { ms?: number; frame?: number }
+      const a = args as {
+        ms?: number
+        text?: string
+        selector?: string
+        gone?: boolean
+        urlMatches?: string
+        networkIdle?: boolean
+        timeoutMs?: number
+        frame?: number
+      }
       return call(exec, 'browser_wait', {
         ...a.ms !== undefined ? { ms: a.ms } : {},
+        ...a.text !== undefined ? { text: a.text } : {},
+        ...a.selector !== undefined ? { selector: a.selector } : {},
+        ...a.gone !== undefined ? { gone: a.gone } : {},
+        ...a.urlMatches !== undefined ? { urlMatches: a.urlMatches } : {},
+        ...a.networkIdle !== undefined ? { networkIdle: a.networkIdle } : {},
+        ...a.timeoutMs !== undefined ? { timeoutMs: a.timeoutMs } : {},
         ...a.frame !== undefined ? { frame: a.frame } : {},
       })
     },
@@ -454,4 +500,89 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     clipboard(),
     upload(),
   ]
+}
+
+// ---- Content tools: option selection and structured extraction ----
+
+/**
+ * Tools that read or operate structured page content: native and ARIA option
+ * selection, and row extraction with optional host-side saving.
+ */
+function defineContentTools(call: Call, rawCall: RawCall, options: BrowserToolsOptions): ToolDefinition[] {
+  const select = (): ToolDefinition => defineTool({
+    name: 'browser_select',
+    description: 'Choose options in a <select>, ARIA listbox, or combobox (opens it and clicks the option). Pass value(s), label, or optionIndex.',
+    parameters: {
+      index: { type: 'number', description: 'Element index of the select, listbox, or combobox.' },
+      selector: { type: 'string', description: 'CSS selector of the select, listbox, or combobox.' },
+      frame: FRAME_PARAMETER,
+      value: { type: 'string', description: 'Option value, or its visible label when no value matches.' },
+      values: { type: 'array', items: { type: 'string' }, description: 'Several options for a multi-select (value or label each); replaces the current selection.' },
+      label: { type: 'string', description: 'Visible option label (exact, else a unique substring).' },
+      optionIndex: { type: 'number', description: 'Zero-based option position.' },
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => call(exec, 'browser_select', args as Record<string, unknown>),
+  })
+
+  const extract = (): ToolDefinition => defineTool({
+    name: 'browser_extract',
+    description: `Extract rows from a table or repeated elements (schema), optionally across pages; saveTo writes CSV/JSON to the session workspace. ${UNTRUSTED_CONTENT_WARNING}`,
+    parameters: {
+      table: { type: 'string', description: 'CSS selector of a <table>; header cells become column names.' },
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'Rows described by CSS selectors.',
+        properties: {
+          rows: { type: 'string', required: true, description: 'CSS selector matching each row element.' },
+          fields: {
+            type: 'object',
+            additionalProperties: true,
+            required: true,
+            description: 'Column name → selector relative to the row, or { selector, attr, type: "number" }. An empty selector means the row itself; attr reads an attribute such as href.',
+          },
+        },
+      },
+      paginate: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'Click a next-page control between pages; stops when it is missing, disabled, or changes nothing.',
+        properties: {
+          nextSelector: { type: 'string', required: true, description: 'CSS selector of the next-page control.' },
+          maxPages: { type: 'number', description: 'Maximum pages to read, including the first (default 5, max 20).' },
+        },
+      },
+      limit: { type: 'number', description: 'Maximum rows per page (default 500).' },
+      saveTo: { type: 'string', description: 'Workspace-relative file path (.csv or .json); returns the path, row count, and a 5-row sample instead of all rows.' },
+      format: { type: 'string', enum: ['csv', 'json'], description: 'File format for saveTo; inferred from the extension, default csv.' },
+      frame: FRAME_PARAMETER,
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: async (args, exec) => {
+      const a = args as Record<string, unknown>
+      const saveTo = typeof a.saveTo === 'string' && a.saveTo !== '' ? a.saveTo : undefined
+      const format = typeof a.format === 'string' ? a.format : undefined
+      let workspace: string | undefined
+      if (saveTo !== undefined) {
+        // Validate on the host before the page is touched, as upload does.
+        normalizeSavePath(saveTo, format)
+        workspace = sessionWorkspaceDir(exec.agent, options.workspacePath ?? '')
+        if (workspace === undefined) {
+          throw new ExtractSaveError('browser_extract: this session has no workspace directory to save into; omit saveTo to receive the rows inline.')
+        }
+      }
+      const result = await rawCall(exec, 'browser_extract', a)
+      const text = normalizeTextResult(result, 'browser_extract')
+      if (saveTo === undefined || workspace === undefined) return text
+      const data = extractDataOf(result)
+      if (data === undefined) return text
+      const saved = await saveExtract(workspace, saveTo, data, format)
+      return { text: `Saved ${saved.rowCount} row(s) as ${saved.format.toUpperCase()} to ${saved.relativePath} (${saved.path}).\n${text.text}` }
+    },
+  })
+
+  return [select(), extract()]
 }

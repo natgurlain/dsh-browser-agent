@@ -26,6 +26,8 @@ export type ApprovalDetail =
   | { kind: 'url'; url: UrlAnalysis }
   /** Redaction opt-outs the model requested (argument names). */
   | { kind: 'flags'; values: string[] }
+  /** The call's verbatim arguments (JSON), when they decide what the call does. */
+  | { kind: 'payload'; value: string }
 
 /** A policy decision awaiting a user response. */
 export interface ApprovalPrompt {

@@ -23,6 +23,7 @@ import { listTabFrames } from './frames.ts'
 import type { CdpClient } from './debugger-session.ts'
 import {
   NetworkCapture,
+  type ConsoleEntry,
   type NetworkEntry,
 } from './devtools-network.ts'
 import {
@@ -162,6 +163,22 @@ export function undebuggableReason(url: string | undefined): string | undefined 
 }
 
 /**
+ * Console capture of the most recently created controller, read by the page
+ * action dispatcher to report errors an action raised. Read-only: it never
+ * attaches the debugger, so it only sees tabs developer tools already capture.
+ */
+let consoleSource: ((tabId: number) => ConsoleEntry[] | undefined) | undefined
+
+/**
+ * Console entries captured for a tab, when developer-tools capture is on.
+ * @param tabId - tab.
+ * @returns the captured entries, or undefined without an active capture.
+ */
+export function capturedConsoleEntries(tabId: number): ConsoleEntry[] | undefined {
+  return consoleSource?.(tabId)
+}
+
+/**
  * Create the developer-tools controller.
  * @param options - runtime dependencies and limits.
  * @returns the controller.
@@ -170,6 +187,7 @@ export function createDevToolsController(options: DevToolsControllerOptions): De
   const api = options.api ?? debuggerApi()
   const maxChars = options.maxChars ?? DEFAULT_DEVTOOLS_OUTPUT_CHARS
   const contexts = new Map<number, TabContext>()
+  consoleSource = (tabId) => contexts.get(tabId)?.capture.consoleLog()
   const broker = options.broker ?? createDebuggerBroker({
     ...(api === undefined ? {} : { api }),
     ...(options.commandTimeoutMs === undefined ? {} : { commandTimeoutMs: options.commandTimeoutMs }),

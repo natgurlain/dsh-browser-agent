@@ -340,6 +340,7 @@ function mountBridge(
       toolTimeoutMs: resolved.toolTimeoutMs,
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
+      workspacePath: resolved.sessionWorkspacePath,
     })
     const disposeScreenshot = registerScreenshotTool(ctx, server, {
       toolTimeoutMs: resolved.toolTimeoutMs,

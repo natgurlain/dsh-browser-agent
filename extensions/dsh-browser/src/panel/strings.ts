@@ -41,6 +41,7 @@ export interface PanelCopy {
     flagEntropy: string
     urlRiskNote: string
     flagsLabel: string
+    payloadLabel: string
     flagDescriptions: Record<string, string>
     perCallNote: string
     fingerprint: string
@@ -347,6 +348,7 @@ const EN: PanelCopy = {
     flagEntropy: 'looks like a token or secret',
     urlRiskNote: 'This URL carries data that could be leaked to the destination. Trusted domains still ask for these.',
     flagsLabel: 'Redaction turned off for this call',
+    payloadLabel: 'Request arguments',
     flagDescriptions: {
       includeSensitiveHeaders: 'includeSensitiveHeaders — reveals Authorization, Cookie, Set-Cookie and similar header values',
       includeSensitiveBody: 'includeSensitiveBody — reveals bodies of authentication-looking requests',
@@ -376,6 +378,8 @@ const EN: PanelCopy = {
       browser_reload: 'Reload page',
       browser_get_text: 'Extract text',
       browser_wait: 'Wait for page',
+      browser_select: 'Select option',
+      browser_extract: 'Extract data',
       browser_devtools_elements: 'Inspect element',
       browser_devtools_set_element_style: 'Edit element CSS',
       browser_devtools_set_element_attribute: 'Edit element attribute',
@@ -682,6 +686,7 @@ const ZH: PanelCopy = {
     flagEntropy: '疑似令牌或密钥',
     urlRiskNote: '此 URL 携带的数据可能被泄露给目标站点。即使是受信任的域名，也会对此类请求再次确认。',
     flagsLabel: '本次调用将关闭脱敏',
+    payloadLabel: '调用参数',
     flagDescriptions: {
       includeSensitiveHeaders: 'includeSensitiveHeaders —— 显示 Authorization、Cookie、Set-Cookie 等请求头的值',
       includeSensitiveBody: 'includeSensitiveBody —— 显示疑似认证请求的正文',
@@ -711,6 +716,8 @@ const ZH: PanelCopy = {
       browser_reload: '刷新页面',
       browser_get_text: '提取文字',
       browser_wait: '等待页面',
+      browser_select: '选择选项',
+      browser_extract: '提取数据',
       browser_devtools_elements: '查看元素',
       browser_devtools_set_element_style: '修改元素 CSS',
       browser_devtools_set_element_attribute: '修改元素属性',

@@ -18,7 +18,7 @@ import {
   type TabFrame,
 } from './frames.ts'
 import { wrapUntrustedContent } from '../security/untrusted.ts'
-import { approvalPromptForCall, originFromUrl, type ApprovalContext } from './authorization.ts'
+import { approvalPromptForCall, isConditionalPageWait, originFromUrl, type ApprovalContext } from './authorization.ts'
 import { approvalBinding } from '../security/payload-binding.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
@@ -39,6 +39,8 @@ import type { InputSetupRequest, InputSetupResult } from '../shared/input-setup.
 import { writeClipboard } from './clipboard-write.ts'
 import type { ClipboardWriteOutcome } from '../shared/clipboard.ts'
 import { resolveDebuggerFrame } from './debugger-frame.ts'
+import { capturedConsoleEntries } from './devtools-controller.ts'
+import type { ConsoleEntry } from './devtools-network.ts'
 
 /** A tool call from the bridge. */
 export interface ToolCall {
@@ -72,10 +74,12 @@ const ACTION_DELTA_TOOLS = new Set([
   'browser_scroll',
   'browser_clipboard',
   'browser_wait',
+  'browser_select',
 ])
 const ACTION_DELTA_GUIDANCE = 'The page settled and its current changes are included below. Continue from this state; take another snapshot only when broader page context is needed.'
 const NAVIGATION_CANDIDATE_TOOLS = new Set([
   'browser_click',
+  'browser_select',
   'browser_navigate',
   'browser_back',
   'browser_forward',
@@ -91,6 +95,7 @@ const TAB_NATIVE_TOOLS = new Set([
 ])
 const STATE_CHANGING_PAGE_TOOLS = new Set([
   'browser_click',
+  'browser_select',
   'browser_type',
   'browser_press',
   'browser_scroll',
@@ -188,6 +193,7 @@ async function sendAction(
   frame: TabFrame,
   budget?: ContentBudget,
   includePageDelta: boolean = false,
+  shareContent: boolean = false,
 ): Promise<unknown> {
   return chrome.tabs.sendMessage(tabId, {
     type: 'DSH_ACTION',
@@ -195,6 +201,7 @@ async function sendAction(
     args: withoutFrame(call.args),
     ...budget === undefined ? {} : { budget },
     ...includePageDelta ? { includePageDelta: true } : {},
+    ...shareContent ? { shareContent: true } : {},
   }, frame.documentId === undefined ? { frameId: frame.frameId } : { documentId: frame.documentId })
 }
 
@@ -897,11 +904,33 @@ async function dispatchOnce(
       return inputUnavailable('This browser has no trusted input channel for this action.')
     }
   }
+  if (call.name === 'browser_extract') {
+    return dispatchExtract(tabId, frame, call, budget, signal, targetStillAllowed, commitAction)
+  }
+  if (call.name === 'browser_wait' && typeof call.args.urlMatches === 'string' && call.args.urlMatches !== '') {
+    const waited = await waitForTabUrl(tabId, call, signal)
+    if (waited.answer !== undefined) return waited.answer
+    if (!waitHasPageConditions(call.args)) return { ok: true, result: { text: waited.status } }
+    // The remaining conditions run in the (possibly new) document.
+    const refreshed = (await listTabFrames(tabId, undefined)).find((candidate) => candidate.frameId === frameId)
+    if (refreshed === undefined) return unavailable(`Frame ${frameId} disappeared while waiting. Call browser_snapshot again.`)
+    const rest = await dispatchOnce(tabId, [refreshed], {
+      ...call,
+      args: { ...withoutUrlCondition(call.args), timeoutMs: waited.remainingMs },
+    }, budget, signal, targetStillAllowed, includeActionDelta, commitAction, rollbackActionCommit, inputRuntime)
+    const restText = answerText(rest)
+    return restText === undefined ? rest : { ok: true, result: { text: `${waited.status} ${restText}` } }
+  }
   // No await occurs between this guard and tabs.sendMessage, so an expired
   // approval cannot cross the final state-changing dispatch boundary.
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
   const requestPageDelta = includeActionDelta && hasSnapshotBaseline && ACTION_DELTA_TOOLS.has(call.name)
+  // Sharing allows page-authored verification details even without a baseline.
+  const shareContent = includeActionDelta && ACTION_DELTA_TOOLS.has(call.name)
+  const stateChangingAction = STATE_CHANGING_PAGE_TOOLS.has(call.name)
+  const tabWatch = stateChangingAction ? watchOpenedTabs(tabId) : undefined
+  const consoleMark = stateChangingAction ? consoleErrorMark(tabId) : undefined
   const navigationWait = includeActionDelta && isNavigationCandidateTool(call.name)
     ? waitForNextDocumentReady(tabId, frameId, frame.documentId, signal)
     : undefined
@@ -915,12 +944,15 @@ async function dispatchOnce(
       frame,
       requestPageDelta ? budget : undefined,
       requestPageDelta,
+      shareContent,
     )
   } catch (error: unknown) {
     if (stateChanging && contentScriptReceiverMissing(error)) rollbackActionCommit?.()
     navigationWait?.cancel()
+    tabWatch?.stop()
     throw error
   }
+  const openedTabs = tabWatch?.stop() ?? []
   if (isCancelled(call, signal)) {
     navigationWait?.cancel()
     return cancelled()
@@ -934,7 +966,8 @@ async function dispatchOnce(
     navigationWait?.cancel()
     return response
   }
-  const text = syntheticFallback ? `${rawText} (synthetic)` : rawText
+  const consoleErrors = consoleMark === undefined ? [] : consoleErrorsSince(tabId, consoleMark)
+  const text = `${syntheticFallback ? `${rawText} (synthetic)` : rawText}${describeSideEffects(openedTabs, consoleErrors, shareContent)}`
   if (answerNavigationPending(response) && navigationWait !== undefined) {
     const ready = await navigationWait.ready
     if (isCancelled(call, signal)) return cancelled()
@@ -954,13 +987,296 @@ async function dispatchOnce(
   if (call.name === 'browser_get_text') {
     return { ok: true, result: { text: wrapUntrustedContent(text, budget.maxChars) } }
   }
-  const pageContent = requestPageDelta ? answerPageContent(response) : undefined
+  const contentParts = [
+    requestPageDelta || shareContent ? answerPageContent(response) : undefined,
+    shareContent && consoleErrors.length > 0 ? renderConsoleErrors(consoleErrors) : undefined,
+  ].filter((part): part is string => part !== undefined && part !== '')
+  const pageContent = contentParts.length === 0 ? undefined : contentParts.join('\n\n')
   return {
     ok: true,
     result: {
       text: pageContent === undefined ? text : wrapActionDelta(text, pageContent, frame, budget.maxChars),
     },
   }
+}
+
+// ---- Content tools: extraction, conditional waits, action side effects ----
+
+/** Tabs a page opened (window.open, target=_blank) while one action ran. */
+function watchOpenedTabs(tabId: number): { stop: () => number[] } {
+  const onCreated = chrome.tabs?.onCreated
+  if (onCreated === undefined) return { stop: () => [] }
+  const opened: number[] = []
+  const listener = (tab: chrome.tabs.Tab): void => {
+    if (tab.openerTabId === tabId && tab.id !== undefined) opened.push(tab.id)
+  }
+  onCreated.addListener(listener)
+  let stopped = false
+  return {
+    stop: () => {
+      if (!stopped) {
+        stopped = true
+        onCreated.removeListener(listener)
+      }
+      return [...opened]
+    },
+  }
+}
+
+/** The last console entry index before an action, when developer-tools capture is on. */
+function consoleErrorMark(tabId: number): number | undefined {
+  const entries = capturedConsoleEntries(tabId)
+  if (entries === undefined) return undefined
+  return entries.reduce((max, entry) => Math.max(max, entry.index), 0)
+}
+
+/** Console errors and uncaught exceptions recorded after a mark. */
+function consoleErrorsSince(tabId: number, mark: number): ConsoleEntry[] {
+  return (capturedConsoleEntries(tabId) ?? [])
+    .filter((entry) => entry.index > mark && (entry.level === 'error' || entry.level === 'exception'))
+}
+
+const MAX_REPORTED_CONSOLE_ERRORS = 5
+
+function renderConsoleErrors(errors: ConsoleEntry[]): string {
+  const lines = errors.slice(0, MAX_REPORTED_CONSOLE_ERRORS).map((entry) => `  [${entry.level}] ${entry.text.slice(0, 300)}`)
+  const more = errors.length > MAX_REPORTED_CONSOLE_ERRORS ? `\n  …${errors.length - MAX_REPORTED_CONSOLE_ERRORS} more` : ''
+  return `Console errors during the action:\n${lines.join('\n')}${more}`
+}
+
+/** Extension-authored facts about an action's side effects (no page text). */
+function describeSideEffects(openedTabs: number[], consoleErrors: ConsoleEntry[], shareContent: boolean): string {
+  const facts: string[] = []
+  if (openedTabs.length > 0) {
+    facts.push(`The page opened ${openedTabs.length === 1 ? 'a new tab' : `${openedTabs.length} new tabs`} (tabId ${openedTabs.join(', ')}); call browser_follow_tab to control it.`)
+  }
+  if (consoleErrors.length > 0) {
+    facts.push(`${consoleErrors.length} console error(s) were logged during the action${shareContent ? '' : '; read them with browser_console_logs'}.`)
+  }
+  return facts.length === 0 ? '' : ` ${facts.join(' ')}`
+}
+
+/** Default and maximum time a browser_wait condition may take. */
+const DEFAULT_WAIT_TIMEOUT_MS = 10_000
+const MAX_WAIT_TIMEOUT_MS = 25_000
+const URL_POLL_MS = 100
+
+/** Whether a wait also has conditions that must be checked inside the page. */
+function waitHasPageConditions(args: Record<string, unknown>): boolean {
+  return (typeof args.text === 'string' && args.text !== '')
+    || (typeof args.selector === 'string' && args.selector !== '')
+    || args.networkIdle === true
+}
+
+function withoutUrlCondition(args: Record<string, unknown>): Record<string, unknown> {
+  const { urlMatches: _urlMatches, ...rest } = args
+  return rest
+}
+
+/** A URL condition: `/regex/flags`, else a plain substring. */
+function urlMatcher(pattern: string): ((url: string) => boolean) | undefined {
+  const regex = /^\/(.+)\/([a-z]*)$/.exec(pattern)
+  if (regex === null) return (url) => url.includes(pattern)
+  try {
+    const compiled = new RegExp(regex[1]!, regex[2])
+    return (url) => compiled.test(url)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Wait until the controlled tab's URL matches. Polled from the background
+ * because a cross-document navigation would destroy a content-script waiter.
+ */
+async function waitForTabUrl(
+  tabId: number,
+  call: ToolCall,
+  signal?: AbortSignal,
+): Promise<{ answer?: ToolAnswer; status: string; remainingMs: number }> {
+  const pattern = String(call.args.urlMatches)
+  const matches = urlMatcher(pattern)
+  if (matches === undefined) {
+    return { answer: { ok: false, error: { code: 'bad-args', message: `urlMatches is not a valid /regex/: ${pattern}` } }, status: '', remainingMs: 0 }
+  }
+  const requested = typeof call.args.timeoutMs === 'number' && call.args.timeoutMs > 0 ? call.args.timeoutMs : DEFAULT_WAIT_TIMEOUT_MS
+  const timeoutMs = Math.min(requested, MAX_WAIT_TIMEOUT_MS)
+  const startedAt = Date.now()
+  for (;;) {
+    if (isCancelled(call, signal)) return { answer: cancelled(), status: '', remainingMs: 0 }
+    let url = ''
+    try {
+      url = (await chrome.tabs.get(tabId)).url ?? ''
+    } catch {
+      return { answer: unavailable('The controlled tab closed while waiting.'), status: '', remainingMs: 0 }
+    }
+    const elapsed = Date.now() - startedAt
+    if (matches(url)) {
+      return { status: `URL matched ${pattern} after ${elapsed}ms.`, remainingMs: Math.max(1, timeoutMs - elapsed) }
+    }
+    if (elapsed >= timeoutMs) {
+      return {
+        answer: { ok: false, error: { code: 'action-failed', message: `browser_wait timed out after ${elapsed}ms: the URL did not match ${pattern}.` } },
+        status: '',
+        remainingMs: 0,
+      }
+    }
+    await new Promise((resolve) => { setTimeout(resolve, Math.min(URL_POLL_MS, timeoutMs - elapsed)) })
+  }
+}
+
+/** Pagination request for browser_extract. */
+interface PaginateSpec {
+  nextSelector: string
+  maxPages: number
+}
+
+const DEFAULT_EXTRACT_PAGES = 5
+const MAX_EXTRACT_PAGES = 20
+const MAX_EXTRACT_ROWS = 10_000
+/** Rows shown inline when the caller does not save to a file. */
+const INLINE_EXTRACT_ROWS = 100
+/** Rows sampled into the result when the bridge saves the full set. */
+const SAVED_EXTRACT_SAMPLE = 5
+const SAME_PAGE_RETRIES = 4
+const SAME_PAGE_RETRY_MS = 400
+
+function parsePaginate(value: unknown): PaginateSpec | ToolAnswer | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return { ok: false, error: { code: 'bad-args', message: 'paginate must be { nextSelector, maxPages }.' } }
+  }
+  const record = value as Record<string, unknown>
+  if (typeof record.nextSelector !== 'string' || record.nextSelector === '') {
+    return { ok: false, error: { code: 'bad-args', message: 'paginate.nextSelector must be a CSS selector for the next-page control.' } }
+  }
+  const maxPages = record.maxPages ?? DEFAULT_EXTRACT_PAGES
+  if (typeof maxPages !== 'number' || !Number.isInteger(maxPages) || maxPages < 1) {
+    return { ok: false, error: { code: 'bad-args', message: 'paginate.maxPages must be a positive integer.' } }
+  }
+  return { nextSelector: record.nextSelector, maxPages: Math.min(maxPages, MAX_EXTRACT_PAGES) }
+}
+
+/** Rows one content-script extraction returned. */
+interface ExtractedPage {
+  columns: string[]
+  rows: Record<string, unknown>[]
+}
+
+function extractedPage(answer: unknown): ExtractedPage | undefined {
+  if (!isToolAnswer(answer) || !answer.ok || typeof answer.result !== 'object' || answer.result === null) return undefined
+  const data = (answer.result as { data?: unknown }).data
+  if (typeof data !== 'object' || data === null) return undefined
+  const { columns, rows } = data as { columns?: unknown; rows?: unknown }
+  if (!Array.isArray(columns) || !Array.isArray(rows)) return undefined
+  return {
+    columns: columns.map(String),
+    rows: rows.filter((row): row is Record<string, unknown> => typeof row === 'object' && row !== null && !Array.isArray(row)),
+  }
+}
+
+/**
+ * browser_extract: read rows from the frame, optionally clicking a "next"
+ * control between pages. Pagination runs here rather than in the page so a
+ * full document navigation between pages does not lose the collected rows.
+ */
+async function dispatchExtract(
+  tabId: number,
+  frame: TabFrame,
+  call: ToolCall,
+  budget: ContentBudget,
+  signal?: AbortSignal,
+  targetStillAllowed?: () => boolean,
+  commitAction?: () => void,
+): Promise<ToolAnswer> {
+  const paginate = parsePaginate(call.args.paginate)
+  if (paginate !== undefined && 'ok' in paginate) return paginate
+  const maxPages = paginate?.maxPages ?? 1
+  const extractArgs: Record<string, unknown> = {
+    ...call.args.schema === undefined ? {} : { schema: call.args.schema },
+    ...call.args.table === undefined ? {} : { table: call.args.table },
+    ...call.args.limit === undefined ? {} : { limit: call.args.limit },
+  }
+  let current = frame
+  const columns: string[] = []
+  const rows: Record<string, unknown>[] = []
+  let previousSignature: string | undefined
+  let pages = 0
+  let stopReason = maxPages === 1 ? '' : `reached maxPages=${maxPages}`
+  while (pages < maxPages) {
+    if (isCancelled(call, signal)) return cancelled()
+    if (targetStillAllowed?.() === false) return targetChanged()
+    let page: ExtractedPage | undefined
+    for (let attempt = 0; ; attempt += 1) {
+      const answer = await sendAction(tabId, { ...call, args: extractArgs }, current)
+      page = extractedPage(answer)
+      if (page === undefined) {
+        if (pages === 0) return isToolAnswer(answer) && !answer.ok ? answer : unavailable('The page content script returned an invalid extraction.')
+        stopReason = 'the next page could not be read'
+        break
+      }
+      const signature = JSON.stringify(page.rows.slice(0, 3))
+      // A client-side pager may re-render a moment after the click settles.
+      if (signature !== previousSignature || page.rows.length === 0 || attempt >= SAME_PAGE_RETRIES) {
+        if (signature === previousSignature && page.rows.length > 0) {
+          stopReason = 'the next control did not change the rows'
+          page = undefined
+        }
+        previousSignature = signature
+        break
+      }
+      await new Promise((resolve) => { setTimeout(resolve, SAME_PAGE_RETRY_MS) })
+    }
+    if (page === undefined) break
+    pages += 1
+    for (const column of page.columns) if (!columns.includes(column)) columns.push(column)
+    rows.push(...page.rows.slice(0, MAX_EXTRACT_ROWS - rows.length))
+    if (rows.length >= MAX_EXTRACT_ROWS) {
+      stopReason = `reached the ${MAX_EXTRACT_ROWS}-row cap`
+      break
+    }
+    if (paginate === undefined || pages >= maxPages) break
+    if (isCancelled(call, signal)) return cancelled()
+    if (targetStillAllowed?.() === false) return targetChanged()
+    commitAction?.()
+    const navigation = waitForNextDocumentReady(tabId, current.frameId, current.documentId, signal)
+    const click = await sendAction(tabId, { ...call, name: 'browser_click', args: { selector: paginate.nextSelector } }, current)
+      .catch((error: unknown) => ({ ok: false, error: { code: 'action-failed', message: error instanceof Error ? error.message : String(error) } }))
+    if (!isToolAnswer(click) || !click.ok) {
+      navigation.cancel()
+      const detail = isToolAnswer(click) ? click.error?.message ?? '' : ''
+      stopReason = `no next page${detail === '' ? '' : ` (${detail})`}`
+      break
+    }
+    if (answerNavigationPending(click)) {
+      if (!await navigation.ready) {
+        stopReason = 'the next page did not finish loading'
+        break
+      }
+      const refreshed = (await listTabFrames(tabId, undefined)).find((candidate) => candidate.frameId === current.frameId)
+      if (refreshed === undefined) {
+        stopReason = 'the frame disappeared after navigation'
+        break
+      }
+      current = refreshed
+      previousSignature = undefined
+    } else {
+      navigation.cancel()
+    }
+  }
+  const pagesText = paginate === undefined ? '' : ` from ${pages} page(s)`
+  const stopped = stopReason === '' ? '' : ` (stopped: ${stopReason})`
+  const summary = `Extracted ${rows.length} row(s)${pagesText}${stopped}. Columns: ${columns.join(', ')}.`
+  const saving = typeof call.args.saveTo === 'string' && call.args.saveTo !== ''
+  const shown = rows.slice(0, saving ? SAVED_EXTRACT_SAMPLE : INLINE_EXTRACT_ROWS)
+  const body = shown.map((row) => JSON.stringify(row)).join('\n')
+  const note = saving
+    ? `Sample of the first ${shown.length} row(s):`
+    : rows.length > shown.length
+      ? `Showing ${shown.length} of ${rows.length} rows; pass saveTo to write all rows to a file.`
+      : 'Rows (one JSON object per line):'
+  const text = `${summary}\n${note}\n${wrapUntrustedContent(body === '' ? '(no rows)' : body, Math.max(500, budget.maxChars - summary.length - note.length - 2))}`
+  return { ok: true, result: { text, data: { columns, rows, pages, url: current.url } } }
 }
 
 function requestedTabId(args: Record<string, unknown>): number | undefined {
@@ -1280,7 +1596,8 @@ export async function dispatchToolCall(
   // Privacy boundary: with sharing off, no page content may leave the page.
   if (!tabManagement.unrestrictedAccess
     && sharePageContent === 'off'
-    && (call.name === 'browser_snapshot' || call.name === 'browser_get_text' || call.name === 'browser_screenshot')) {
+    && (call.name === 'browser_snapshot' || call.name === 'browser_get_text' || call.name === 'browser_screenshot'
+      || call.name === 'browser_extract' || (call.name === 'browser_wait' && isConditionalPageWait(call.args)))) {
     return { ok: false, error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing.' } }
   }
   const tab = targetTab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]
@@ -1417,6 +1734,7 @@ function validateFrameTarget(call: ToolCall, frames: TabFrame[]): ToolAnswer | u
 
 const INDEX_TARGETED_TOOLS = new Set([
   'browser_click',
+  'browser_select',
   'browser_type',
   'browser_press',
   'browser_scroll',

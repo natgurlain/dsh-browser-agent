@@ -630,6 +630,13 @@ function ApprovalDetailView({ detail, copy }: { detail: ApprovalDetail; copy: Pa
           {detail.url.risky && <p className="approval-note warning">{copy.approval.urlRiskNote}</p>}
         </div>
       )
+    case 'payload':
+      return (
+        <details className="approval-payload" open>
+          <summary>{copy.approval.payloadLabel}</summary>
+          <pre className="approval-code"><code>{revealInvisible(detail.value)}</code></pre>
+        </details>
+      )
     case 'flags':
       return (
         <div className="approval-payload warning">
