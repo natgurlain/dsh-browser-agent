@@ -142,20 +142,20 @@ const reliabilityPage = `<!doctype html><style>
       document.addEventListener('mouseup', () => { grab = undefined });
     </script></body>`
 // Hostile page (review PoCs): a "Next" button over a cross-site iframe whose own
-// button sits exactly under Next's center. The page makes Next transparent to
-// the pointer the moment it sees any marker attribute or the trusted mousemove.
+// button sits exactly under Next's center. Armed, the page makes Next
+// transparent to the pointer on any attribute mutation or on the trusted mousemove.
 const clickjackPage = `<!doctype html><title>Clickjack</title><body style="margin:0">
     <iframe id="victim" src="CROSS_SITE/inner?victim" style="position:absolute;left:120px;top:315px;width:200px;height:100px;border:0"></iframe>
     <button id="next" style="position:absolute;left:40px;top:300px;width:300px;height:120px;z-index:2">Next page</button>
     <p style="position:absolute;top:20px;left:10px;width:240px;font:16px monospace;margin:0">Read the <a id="w1" href="#one">long-agreement-x of</a> <a id="s1" href="#other">privacy policy and cookie notice</a></p>
     <p style="position:absolute;top:120px;left:10px;width:240px;font:16px monospace;margin:0">Read the <a id="w2" href="#two">long-agreement-x of</a> before you continue with checkout today</p>
     <script>
-      window.nextClicks = 0; window.armed = true; window.hits = [];
+      window.nextClicks = 0; window.dodgeOnMove = false; window.dodgeOnMutation = false; window.hits = [];
       const next = document.getElementById('next');
       next.addEventListener('click', () => { window.nextClicks++ });
-      const dodge = () => { if (window.armed && next.style.pointerEvents !== 'none') next.style.pointerEvents = 'none' };
-      new MutationObserver(dodge).observe(document, { subtree: true, attributes: true, attributeFilter: undefined });
-      next.addEventListener('mousemove', dodge);
+      const dodge = () => { if (next.style.pointerEvents !== 'none') next.style.pointerEvents = 'none' };
+      new MutationObserver(() => { if (window.dodgeOnMutation) dodge() }).observe(document, { subtree: true, attributes: true });
+      next.addEventListener('mousemove', () => { if (window.dodgeOnMove) dodge() });
       document.addEventListener('click', (event) => { if (event.target.tagName === 'A') { window.hits.push(event.target.id); event.preventDefault() } }, true);
     </script></body>`
 // Content-tool fixtures: widgets the inventory used to miss, selects, waits,
@@ -539,6 +539,22 @@ try {
     succeed(await tool('browser_scroll', { frame, direction: 'top' }))
     await waitFor(() => document.evaluate(() => scrollY === 0), `${kind} scroll to top`)
   }
+  // The CDP re-hit-test before a trusted press maps viewport points to
+  // document coordinates of each frame's local root: exercise scrolled frames.
+  for (const [kind, frame] of Object.entries(frameIds)) {
+    const document = page.frame({ url: frameUrls[kind] })
+    await document.evaluate(() => {
+      const low = document.createElement('button')
+      low.id = 'low'
+      low.textContent = 'Low'
+      low.style.cssText = 'position:absolute;left:20px;top:600px;width:100px;height:40px'
+      low.addEventListener('click', event => { if (event.isTrusted) window.lowClicks = (window.lowClicks ?? 0) + 1 })
+      document.body.append(low)
+    })
+    assert.match(succeed(await tool('browser_click', { frame, selector: '#low', trusted: true })), /\(trusted\)/, kind)
+    assert.equal(await document.evaluate(() => window.lowClicks), 1, kind)
+    assert.ok(await document.evaluate(() => scrollY > 0), `${kind} scrolled for the trusted click`)
+  }
   assert.equal(await page.evaluate(() => window.events.length), beforeEvents)
   results.push('element indices, selectors, trusted clicks, text input, and page scrolling work in all five frame types without clicking the outer page')
 
@@ -781,13 +797,19 @@ try {
   await page.goto(`${origin}/clickjack`)
   succeed(await tool('browser_snapshot', {}))
   const victimFrame = await waitFor(() => page.frames().find(frame => frame.url().includes('/inner?victim')), 'victim frame')
+  // Dodging on the trusted mousemove: refused by the CDP re-hit-test before the press.
+  await page.evaluate(() => { window.dodgeOnMove = true })
   const hijack = await tool('browser_click', { selector: '#next', trusted: true })
   assert.equal(hijack.isError, true, JSON.stringify(hijack))
-  assert.match(text(hijack), /<iframe>|covered by/)
+  assert.match(text(hijack), /occupied by <iframe>/)
+  assert.equal(await victimFrame.evaluate(() => window.innerClicks), 0, 'no trusted click may reach the cross-site iframe')
+  // Dodging on any attribute change: no pointer marker is written, and the click is still refused.
+  await page.evaluate(() => { window.dodgeOnMove = false; window.dodgeOnMutation = true; document.querySelector('#next').style.pointerEvents = '' })
+  assert.equal((await tool('browser_click', { selector: '#next', trusted: true })).isError, true)
   assert.equal(await victimFrame.evaluate(() => window.innerClicks), 0, 'no trusted click may reach the cross-site iframe')
   assert.equal(await page.evaluate(() => document.querySelector('#next').hasAttribute('data-dsh-pointer')), false)
   // Unarmed, the same trusted click lands on Next and nothing else.
-  await page.evaluate(() => { window.armed = false; document.querySelector('#next').style.pointerEvents = '' })
+  await page.evaluate(() => { window.dodgeOnMutation = false; document.querySelector('#next').style.pointerEvents = '' })
   succeed(await tool('browser_click', { selector: '#next', trusted: true }))
   assert.equal(await page.evaluate(() => window.nextClicks), 1)
   assert.equal(await victimFrame.evaluate(() => window.innerClicks), 0)

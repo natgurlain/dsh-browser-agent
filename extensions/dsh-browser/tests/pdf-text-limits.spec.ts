@@ -100,6 +100,24 @@ describe('PDF extraction limits', () => {
     expect(result.pages[0]!.length).toBe(300_000)
   })
 
+  it('keeps the event loop responsive while it parses (approvals, kill switch)', async () => {
+    const shown = 'BT (x) Tj 1 0 Td ET\n'.repeat(300_000)
+    const bytes = pdf(base(`4 0 obj << /Length ${shown.length} >> stream\n${shown}\nendstream endobj\n`))
+    let last = performance.now()
+    let worstGap = 0
+    const ticker = setInterval(() => {
+      const now = performance.now()
+      worstGap = Math.max(worstGap, now - last)
+      last = now
+    }, 5)
+    try {
+      await extractPdfText(bytes)
+    } finally {
+      clearInterval(ticker)
+    }
+    expect(worstGap).toBeLessThan(200)
+  }, 20_000)
+
   it('stops at the deadline and on abort', async () => {
     const shown = 'BT (x) Tj ET\n'.repeat(200_000)
     const bytes = pdf(base(`4 0 obj << /Length ${shown.length} >> stream\n${shown}\nendstream endobj\n`))

@@ -486,8 +486,16 @@ function decodeBytes(bytes: number[], font: FontDecoder | undefined): string {
 }
 
 /** Interpret one page's content stream into text with line breaks. */
-function pageText(source: string, fonts: Map<string, FontDecoder>, budget: Budget): string {
-  let output = ''
+async function pageText(source: string, fonts: Map<string, FontDecoder>, budget: Budget): Promise<string> {
+  // Pieces plus the last character: inspecting the end of a string built by
+  // repeated += flattens it every time (quadratic on large pages).
+  const parts: string[] = []
+  let last = ''
+  const write = (text: string): void => {
+    if (text === '') return
+    parts.push(text)
+    last = text[text.length - 1]!
+  }
   let font: FontDecoder | undefined
   let fontSize = 12
   const operands: Token[] = []
@@ -496,11 +504,11 @@ function pageText(source: string, fonts: Map<string, FontDecoder>, budget: Budge
   /** Characters shown since the current line start: a crude advance estimate. */
   let lineChars = 0
   const newline = (): void => {
-    if (output !== '' && !output.endsWith('\n')) output += '\n'
+    if (last !== '' && last !== '\n') write('\n')
     lineChars = 0
   }
   const space = (): void => {
-    if (output !== '' && !/\s$/.test(output)) output += ' '
+    if (last !== '' && !/\s/.test(last)) write(' ')
   }
   /**
    * A horizontal move is a word gap only when it lands clearly past where the
@@ -508,7 +516,7 @@ function pageText(source: string, fonts: Map<string, FontDecoder>, budget: Budge
    */
   const horizontalGap = (advance: number): boolean => advance - lineChars * fontSize * 0.5 > fontSize * 0.3
   const append = (text: string): void => {
-    output += text
+    write(text)
     lineChars += [...text].length
   }
   const show = (token: Token | undefined): void => {
@@ -517,13 +525,13 @@ function pageText(source: string, fonts: Map<string, FontDecoder>, budget: Budge
       for (const item of token.items) {
         if (item.kind === 'string') append(decodeBytes(item.bytes, font))
         // A large negative adjustment is a word gap in justified text.
-        else if (item.kind === 'number' && item.value < -200 && !output.endsWith(' ')) output += ' '
+        else if (item.kind === 'number' && item.value < -200 && last !== ' ') write(' ')
       }
     }
   }
   let seen = 0
   for (const token of tokens(source)) {
-    if ((seen += 1) % 8_192 === 0) budget.check()
+    if ((seen += 1) % 8_192 === 0) await budget.pause()
     if (token.kind !== 'op') {
       operands.push(token)
       continue
@@ -582,7 +590,7 @@ function pageText(source: string, fonts: Map<string, FontDecoder>, budget: Budge
     }
     operands.length = 0
   }
-  return output.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
+  return parts.join('').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
 }
 
 // ---- Document ----
@@ -704,7 +712,7 @@ export async function extractPdfText(bytes: Uint8Array, maxPages = 50, options: 
         // An undecodable stream contributes no text.
       }
     }
-    pages.push(pageText(content, fonts, budget))
+    pages.push(await pageText(content, fonts, budget))
   }
   return { pages, pageCount: order.length }
 }

@@ -387,6 +387,15 @@ const debuggerBroker = createDebuggerBroker({
   onCdpEvent: (tabId, method, params) => { dialogs.onCdpEvent(tabId, method, params) },
   onDetached: (tabId) => { dialogs.onDetached(tabId) },
 })
+{
+  // Every debugger attachment (trusted input, dialogs, developer tools) stops
+  // with the kill switch, even for a call that was already past its checks.
+  const acquire = debuggerBroker.acquire.bind(debuggerBroker)
+  debuggerBroker.acquire = async (...args: Parameters<typeof acquire>) => {
+    await refuseWhileKilled()
+    return await acquire(...args)
+  }
+}
 
 /**
  * JavaScript dialogs: CDP reports them while an attachment has the Page
