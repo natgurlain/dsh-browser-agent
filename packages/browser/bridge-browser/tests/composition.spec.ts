@@ -143,7 +143,7 @@ const RemoteApiHost = {
 }
 
 /** Write a dist fixture and the composition cordis.yml, then boot it through the real Loader. */
-async function loadComposition(): Promise<{ ctx: Context; configPath: string; port: number }> {
+async function loadComposition(options: { deferSessionCreate?: boolean } = {}): Promise<{ ctx: Context; configPath: string; port: number }> {
   root = await mkdtemp(join(tmpdir(), 'dsh-bridge-browser-'))
   const configPath = join(root, 'cordis.yml')
   const apiHostName = 'test:remote-api-host'
@@ -170,7 +170,7 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
     `    sessionWorkspacePath: '${join(root, 'browser-sessions')}'`,
     // This spec drives the raw gateway chain (create → real session); the
     // deferred-creation behavior is covered by its focused wrapper spec.
-    '    deferSessionCreate: false',
+    `    deferSessionCreate: ${String(options.deferSessionCreate ?? false)}`,
     '',
   ].join('\n'))
 
@@ -268,9 +268,15 @@ async function connectReady(port: number): Promise<Awaited<ReturnType<typeof con
 
 describe('real Loader composition', () => {
   it.each(['native', 'migrated'] as const)('supersedes a %s followed page through the durable inbox without waking an idle Agent', async (snapshotKind) => {
-    const { ctx, port } = await loadComposition()
+    // Production shape: the panel opens a deferred session, follows the page,
+    // and the Agent materializes later. The bridge only follows pages in
+    // sessions it created (or that the panel can list).
+    const { ctx, port } = await loadComposition({ deferSessionCreate: true })
     const client = await connectReady(port)
     const sessionId = SessionId('followed-page-lifecycle')
+    send(client.ws, { t: 'rpc', id: 'create', method: 'session.create', payload: { sessionId } })
+    await waitFor(() => client.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'create'))
+    expect(client.frames.find(frame => frame.t === 'rpc.result' && frame.id === 'create')).toMatchObject({ ok: true })
     const requests: GenerateOptions[] = []
     ctx.on('llm/stream', async function* (request) {
       requests.push(request)

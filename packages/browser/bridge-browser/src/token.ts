@@ -10,12 +10,21 @@
  */
 
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { chmod, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
 /** File name of the persisted token inside the dsh home. */
 export const TOKEN_FILE_NAME = 'ext-bridge-token'
+
+/** Directory the installers copy the unpacked Chrome extension into (under the dsh home). */
+export const INSTALLED_EXTENSION_DIR_NAME = 'browser-extension'
+
+/**
+ * Token copy inside the installed extension, read by the extension through
+ * `chrome.runtime.getURL` (it is not a web-accessible resource).
+ */
+export const INSTALLED_TOKEN_FILE_NAME = 'bridge-token'
 
 /**
  * Generate a fresh token as lowercase hex.
@@ -97,4 +106,31 @@ export async function resolveToken(
   const token = generateToken()
   await writeTokenFile(token, file)
   return { token, file, generated: true }
+}
+
+/**
+ * Keep the installed extension's token copy in step with the bridge token, so
+ * a regenerated token (deleted file, fresh dsh home) still connects without
+ * any pasting. Only touches a directory the installer marked with
+ * `install-info.json`; the copy is written atomically with 0600 permissions.
+ * @param token - the token the bridge verifies.
+ * @param dir - installed extension directory.
+ * @returns what happened, for logging.
+ */
+export async function syncInstalledExtensionToken(
+  token: string,
+  dir: string = dshHomePath(INSTALLED_EXTENSION_DIR_NAME),
+): Promise<'absent' | 'unchanged' | 'written'> {
+  try {
+    await stat(join(dir, 'install-info.json'))
+  } catch {
+    return 'absent'
+  }
+  const target = join(dir, INSTALLED_TOKEN_FILE_NAME)
+  if (await readTokenFile(target) === token) {
+    await chmod(target, 0o600)
+    return 'unchanged'
+  }
+  await writeTokenFile(token, target)
+  return 'written'
 }

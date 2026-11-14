@@ -131,7 +131,7 @@ export interface BridgeServerDeps {
    * Session scope for the bridge's own session-targeted methods (snapshot
    * injection, purge). Absent means unrestricted (unit tests only).
    */
-  sessionScope?: { allows(sessionId: string, signal: AbortSignal): Promise<boolean> }
+  sessionScope?: { allowsSession(sessionId: string, signal: AbortSignal): Promise<boolean> }
   /** Active dsh Host adapter used for unary calls, events, and waterfalls. */
   api: BrowserHostApi
   /** Default per-tool-call timeout in ms. */
@@ -502,7 +502,7 @@ export class BridgeServer {
         ? purgeSessionPayload(frame.payload)
         : browserSnapshotPayload(frame.payload)?.sessionId
       if (sessionId !== undefined && this.deps.sessionScope !== undefined
-        && !await this.deps.sessionScope.allows(sessionId, conn.abort.signal).catch(() => false)) {
+        && !await this.deps.sessionScope.allowsSession(sessionId, conn.abort.signal).catch(() => false)) {
         sendFrame(conn.ws, {
           t: 'rpc.result',
           id: frame.id,

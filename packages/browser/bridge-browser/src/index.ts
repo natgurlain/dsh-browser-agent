@@ -3,10 +3,10 @@
  * the browser extension plus the text-only `browser_*` tool set.
  *
  * The bridge mounts its own upgrade route (`/ext/bridge`) on the host
- * webserver, OUTSIDE the /api trust fence — so it brings its own bearer-token
- * authentication (first frame `hello` within HELLO_TIMEOUT_MS). Extension
- * calls, Session streams, and Host waterfalls use dsh's Typert Gateway
- * and Connection services.
+ * webserver, OUTSIDE the /api trust fence — so it brings its own mutual
+ * challenge-response authentication over the shared token (see server.ts).
+ * Extension calls pass a least-privilege fence (bridge-policy.ts) before
+ * reaching dsh's Typert Gateway and Connection services.
  * Tools execute by dispatching
  * `tool.call` frames to the connected extension, which performs the action in
  * the tab explicitly controlled by the user.
@@ -41,12 +41,14 @@ import {
   DEFAULT_SNAPSHOT_MAX_CHARS,
   DEVTOOLS_CAPS_VERSION,
   MIN_SNAPSHOT_MAX_CHARS,
+  PINNED_CHROME_EXTENSION_ID,
 } from './protocol.ts'
 import { isLoopbackBindAddress, startDiscoveryBeacon, type DiscoveryBeacon } from './discovery-beacon.ts'
 import { withSessionDeferral } from './session-deferral.ts'
 import { withSessionWorkspace } from './session-workspace.ts'
 import { purgeSessionFiles, type SessionPurgeDeps } from './session-purge.ts'
-import { resolveToken } from './token.ts'
+import { resolveToken, syncInstalledExtensionToken } from './token.ts'
+import { FULL_ACCESS_PRESET_NAMES, withBridgePolicy } from './bridge-policy.ts'
 import {
   createRemoteHostApi,
   type HostConnectionLike,
@@ -108,6 +110,18 @@ export interface Config {
   beacon?: boolean
   /** Candidate beacon ports, tried in order. Defaults to {@link BEACON_PORTS}. */
   beaconPorts?: number[]
+  /**
+   * Chrome extension IDs allowed to connect (`chrome-extension://<id>` Origin).
+   * Defaults to the manifest-keyed ID; replace it for a differently keyed
+   * development build or a Web Store listing.
+   */
+  allowedChromeExtensionIds?: string[]
+  /**
+   * Let the extension switch a session to a full-access permission preset
+   * (`danger-full-access`, `auto`, or any preset whose sandbox is full access).
+   * Defaults to false: such switches are refused with an explanation.
+   */
+  allowDangerFullAccess?: boolean
 }
 
 /** The shape after schemastery applies its defaults to every field. */
@@ -123,6 +137,8 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   deferSessionCreate: z.boolean().default(DEFAULT_DEFER_SESSION_CREATE),
   beacon: z.boolean().default(DEFAULT_BEACON),
   beaconPorts: z.array(z.number().step(1).min(1).max(65535)).default([...BEACON_PORTS]),
+  allowedChromeExtensionIds: z.array(z.string().pattern(/^[a-p]{32}$/)).default([PINNED_CHROME_EXTENSION_ID]),
+  allowDangerFullAccess: z.boolean().default(false),
 })
 
 /**
@@ -146,6 +162,17 @@ export async function apply(ctx: Context, resolved: ResolvedConfig): Promise<voi
     throw new Error('bridge-browser: dsh 0.2.2-rc.2 is required (connection.createPeer unavailable)')
   }
   const tokenRes = await resolveToken(resolved.token)
+  // Zero-config Chrome: keep the installed extension's copy of the persisted
+  // token current. A token pinned in the plugin config is deliberately not
+  // copied (a second, differently configured host must not clobber it).
+  if (resolved.token === undefined || resolved.token === '') {
+    try {
+      const synced = await syncInstalledExtensionToken(tokenRes.token)
+      if (synced === 'written') ctx.logger.info('browser bridge: refreshed the token copy in the installed extension')
+    } catch (error: unknown) {
+      ctx.logger.warn(`browser bridge: could not refresh the installed extension token: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
   mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection))
 }
 
@@ -245,9 +272,16 @@ function mountBridge(
     await purgeSessionFiles(deps, sessionId)
   }
 
+  // Least privilege: the extension reaches only what its panel uses, in scope.
+  const fenced = withBridgePolicy(api, {
+    allowDangerFullAccess: resolved.allowDangerFullAccess,
+    isFullAccessPreset: (preset) => isFullAccessPreset(ctx, preset),
+  })
   const server = new BridgeServer({
     token: tokenRes.token,
-    api,
+    api: fenced,
+    sessionScope: fenced,
+    allowedChromeExtensionIds: resolved.allowedChromeExtensionIds,
     toolTimeoutMs: resolved.toolTimeoutMs,
     caps: {
       textOnly: true,
@@ -270,8 +304,8 @@ function mountBridge(
 
   // Zero-config discovery endpoint: the extension fetches this to learn the
   // bridge WebSocket URL without any manual configuration. The URL carries no
-  // secret (loopback connections skip the token); non-loopback deployments
-  // keep requiring the token on the WS itself. `pid`/`startedAt` let the
+  // secret: every client still has to complete the token handshake, and the
+  // extension refuses a bridge that cannot prove the token back. `pid`/`startedAt` let the
   // extension tell several local instances apart without any extra endpoint.
   const hostPort = (): number | undefined => {
     const port = ctx.webServer.port
@@ -369,7 +403,7 @@ function mountBridge(
 
   ctx.logger.info(
     tokenRes.generated
-      ? `browser bridge: new token generated and persisted at ${tokenRes.file} (chmod 0600); connect the extension and paste it in its settings`
+      ? `browser bridge: new token generated and persisted at ${tokenRes.file} (chmod 0600); installed Chrome extensions pick it up automatically, other clients must paste it in their settings`
       : `browser bridge: using token from ${tokenRes.file}`,
   )
   ctx.logger.info(`browser bridge: listening on ${BRIDGE_PATH}`)
@@ -427,6 +461,18 @@ function mountDiscoveryBeacon(
       return bound?.close()
     }
   }, 'bridge-browser: discovery beacon')
+}
+
+/**
+ * Whether a preset grants a full-access sandbox, read from the Host's own
+ * preset table when the permission plugin is composed. Known names always count.
+ */
+function isFullAccessPreset(ctx: Context, preset: string): boolean {
+  if (FULL_ACCESS_PRESET_NAMES.includes(preset)) return true
+  const service = (ctx.get as (name: string) => unknown)('permissionPresets') as
+    { presets?: Record<string, { sandbox?: unknown } | undefined> } | undefined
+  const presets = service?.presets
+  return presets !== undefined && Object.hasOwn(presets, preset) && presets[preset]?.sandbox === 'danger-full-access'
 }
 
 type GatewayCandidate = Pick<TypertGatewayLike, 'invoke'> & {

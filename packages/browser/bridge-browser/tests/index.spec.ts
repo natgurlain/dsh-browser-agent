@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
-import { BEACON_PORTS } from '../src/protocol.ts'
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { BEACON_PORTS, PINNED_CHROME_EXTENSION_ID } from '../src/protocol.ts'
 import { apply as applyPlugin, Config } from '../src/index.ts'
 
 async function apply(ctx: Context, config: Config): Promise<void> {
@@ -78,7 +79,16 @@ describe('config', () => {
       deferSessionCreate: true,
       beacon: true,
       beaconPorts: [...BEACON_PORTS],
+      allowedChromeExtensionIds: [PINNED_CHROME_EXTENSION_ID],
+      allowDangerFullAccess: false,
     })
+  })
+
+  it('only accepts well-formed Chrome extension IDs', () => {
+    expect(new Config({ allowedChromeExtensionIds: ['abcdefghijklmnopabcdefghijklmnop'] }).allowedChromeExtensionIds)
+      .toEqual(['abcdefghijklmnopabcdefghijklmnop'])
+    expect(() => new Config({ allowedChromeExtensionIds: ['*'] })).toThrow()
+    expect(() => new Config({ allowedChromeExtensionIds: ['chrome-extension://abcdefghijklmnopabcdefghijklmnop'] })).toThrow()
   })
 
   it('preserves explicit values and the empty-string workspace opt-out', () => {
@@ -100,6 +110,8 @@ describe('config', () => {
       deferSessionCreate: false,
       beacon: false,
       beaconPorts: [...BEACON_PORTS],
+      allowedChromeExtensionIds: [PINNED_CHROME_EXTENSION_ID],
+      allowDangerFullAccess: false,
     })
   })
 
@@ -154,6 +166,29 @@ describe('apply', () => {
     dirs.push(home)
     vi.stubEnv('DSH_HOME', home)
     await apply(stubContext(), VALID)
+  })
+
+  it('copies the persisted token into an installed extension so Chrome needs no pasting', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'dsh-bridge-home-'))
+    dirs.push(home)
+    vi.stubEnv('DSH_HOME', home)
+    await mkdir(join(home, 'browser-extension'), { recursive: true })
+    await writeFile(join(home, 'browser-extension', 'install-info.json'), '{}\n')
+    await apply(stubContext(), VALID)
+    const persisted = (await readFile(join(home, 'ext-bridge-token'), 'utf8')).trim()
+    const copy = join(home, 'browser-extension', 'bridge-token')
+    expect((await readFile(copy, 'utf8')).trim()).toBe(persisted)
+    if (process.platform !== 'win32') expect((await stat(copy)).mode & 0o777).toBe(0o600)
+  })
+
+  it('never copies a token pinned in the plugin config into the installed extension', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'dsh-bridge-home-'))
+    dirs.push(home)
+    vi.stubEnv('DSH_HOME', home)
+    await mkdir(join(home, 'browser-extension'), { recursive: true })
+    await writeFile(join(home, 'browser-extension', 'install-info.json'), '{}\n')
+    await apply(stubContext(), { token: 'fixed-token', ...VALID, sessionWorkspacePath: '' })
+    await expect(stat(join(home, 'browser-extension', 'bridge-token'))).rejects.toThrow()
   })
 
   it('rejects invalid budgets loudly', async () => {

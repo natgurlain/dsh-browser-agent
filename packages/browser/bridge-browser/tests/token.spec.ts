@@ -2,7 +2,8 @@ import { mkdtemp, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { generateToken, resolveToken, verifyToken, writeTokenFile } from '../src/token.ts'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { generateToken, resolveToken, syncInstalledExtensionToken, verifyToken, writeTokenFile } from '../src/token.ts'
 
 describe('token', () => {
   it('generates hex tokens of the requested entropy', () => {
@@ -57,5 +58,25 @@ describe('token', () => {
     const resolved = await resolveToken('fixed-token', file)
     expect(resolved).toEqual({ token: 'fixed-token', file, generated: false })
     await expect(readFile(file, 'utf8')).rejects.toThrow()
+  })
+})
+
+describe('syncInstalledExtensionToken', () => {
+  it('leaves directories the installer did not create alone', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-ext-'))
+    expect(await syncInstalledExtensionToken('t', dir)).toBe('absent')
+    await expect(stat(join(dir, 'bridge-token'))).rejects.toThrow()
+  })
+
+  it('writes the token once with owner-only permissions and then reports it unchanged', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-ext-'))
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'install-info.json'), '{}')
+    expect(await syncInstalledExtensionToken('first', dir)).toBe('written')
+    expect(await readFile(join(dir, 'bridge-token'), 'utf8')).toBe('first\n')
+    if (process.platform !== 'win32') expect((await stat(join(dir, 'bridge-token'))).mode & 0o777).toBe(0o600)
+    expect(await syncInstalledExtensionToken('first', dir)).toBe('unchanged')
+    expect(await syncInstalledExtensionToken('second', dir)).toBe('written')
+    expect(await readFile(join(dir, 'bridge-token'), 'utf8')).toBe('second\n')
   })
 })

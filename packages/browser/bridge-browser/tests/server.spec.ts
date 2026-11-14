@@ -424,6 +424,29 @@ describe('BridgeServer', () => {
     ws.close()
   })
 
+  it('refuses snapshot injection and purge for sessions outside the extension scope', async () => {
+    const purgeSession = vi.fn(async () => {})
+    const injectBrowserSnapshot = vi.fn()
+    const allowsSession = vi.fn(async (sessionId: string) => sessionId === 'mine')
+    const h = await startBridge({ purgeSession, injectBrowserSnapshot, sessionScope: { allowsSession } })
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url)
+    await sendHello(ws, TOKEN, CAPS)
+    await waitFor(() => frames.some((frame) => frame.t === 'hello.ok'))
+
+    send(ws, { t: 'rpc', id: 'purge-other', method: BRIDGE_SESSION_PURGE_METHOD, payload: { sessionId: 'desktop' } })
+    send(ws, { t: 'rpc', id: 'inject-other', method: BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, payload: { sessionId: 'desktop', snapshot: 'x' } })
+    send(ws, { t: 'rpc', id: 'purge-mine', method: BRIDGE_SESSION_PURGE_METHOD, payload: { sessionId: 'mine' } })
+    await waitFor(() => ['purge-other', 'inject-other', 'purge-mine'].every((id) => frames.some((frame) => frame.t === 'rpc.result' && frame.id === id)))
+
+    for (const id of ['purge-other', 'inject-other']) {
+      expect(frames.find((frame) => frame.t === 'rpc.result' && frame.id === id)).toMatchObject({ ok: false, error: { code: 'forbidden' } })
+    }
+    expect(purgeSession).toHaveBeenCalledExactlyOnceWith('mine')
+    expect(injectBrowserSnapshot).not.toHaveBeenCalled()
+    ws.close()
+  })
+
   it('purges sessions through the internal RPC without forwarding it to the gateway', async () => {
     const purgeSession = vi.fn(async () => {})
     const h = await startBridge({ purgeSession })
