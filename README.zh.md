@@ -1,4 +1,6 @@
-# dsh 浏览器操作 [![dshfind](https://dshfind.com/api/badge/Lum1104/dsh-browser?lang=zh)](https://dshfind.com/zh/plugins/Lum1104/dsh-browser?ref=badge)
+# dsh Browser Pro
+
+> 基于 Yuxiang Lin 及贡献者的 [dsh-browser](https://github.com/omdsh-dev/dsh-browser)（MIT 许可）。见 [NOTICE](NOTICE)。
 
 [English](README.md) | **中文**
 
