@@ -7,7 +7,7 @@ const PRODUCT_ROOTS = ['Atlas', 'Birch', 'Cedar', 'Delta', 'Ember', 'Flint', 'Gr
 export const TASK_IDS = taskCatalog.map((task) => task.id)
 export const TASK_CATALOG = taskCatalog
 // Bump whenever task prompts, generated data, or validation semantics change.
-export const BENCHMARK_SUITE_VERSION = 2
+export const BENCHMARK_SUITE_VERSION = 3
 
 function hashString(value) {
   let hash = 2166136261
@@ -38,6 +38,11 @@ function shuffled(values, random) {
 
 function money(cents) {
   return `¥${(cents / 100).toFixed(2)}`
+}
+
+function moneyWithSeparators(cents) {
+  const [whole, fraction] = (cents / 100).toFixed(2).split('.')
+  return `¥${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}.${fraction}`
 }
 
 function normalizeAnswer(value) {
@@ -151,6 +156,83 @@ export function makeTaskInstance(taskId, seed, runId, baseUrl) {
     }
   }
 
+  if (taskId === 'plan_select') {
+    const plans = shuffled([
+      { value: 'basic', label: '基础版' },
+      { value: 'pro', label: '专业版' },
+      { value: 'team', label: '团队版' },
+      { value: 'enterprise', label: '企业版' },
+    ], random)
+    const regions = shuffled(['华东', '华北', '华南', '西南', '海外'], random)
+    const plan = plans[seed % plans.length]
+    const region = regions[(seed * 3) % regions.length]
+    return {
+      ...common,
+      prompt: browserOnlyPrompt(`在当前订阅页把套餐选为“${plan.label}”，计费地区选为“${region}”，然后保存。`),
+      page: { title: '订阅设置', plans, regions },
+      expected: { kind: 'state', value: { subscriptionSaved: true, plan: plan.value, region } },
+    }
+  }
+
+  if (taskId === 'shadow_toggle') {
+    const account = `ops-${seed}@example.com`
+    return {
+      ...common,
+      prompt: browserOnlyPrompt(`在当前安全设置页为 ${account} 打开“两步验证”开关，然后保存。`),
+      page: { title: '安全设置', account },
+      expected: { kind: 'state', value: { securitySaved: true, twoFactor: true } },
+    }
+  }
+
+  if (taskId === 'delayed_report') {
+    const code = `RPT-${String(4100 + seed * 59)}`
+    return {
+      ...common,
+      prompt: browserOnlyPrompt('在当前报表页点击“生成报表”，等待报表生成完成，然后回答报表编号。最后只回答编号。'),
+      page: { title: '报表中心', code, delayMs: 1_500 + (seed % 5) * 300 },
+      expected: { kind: 'answer-and-state', value: code, state: { reportRequested: true } },
+    }
+  }
+
+  if (taskId === 'feed_scroll') {
+    const target = 48 + (seed % 17)
+    const code = `FEED-${String(seed).padStart(2, '0')}-${String(3000 + seed * 71)}`
+    return {
+      ...common,
+      prompt: browserOnlyPrompt(`当前动态页的“消息流”区域会在滚动到底部时加载更多条目。找到第 ${target} 条消息的代码。最后只回答代码。`),
+      page: { title: '消息流', target, code, batch: 15 },
+      expected: { kind: 'answer-and-state', value: code, state: { feedTargetLoaded: true } },
+    }
+  }
+
+  if (taskId === 'ledger_total') {
+    const pages = 4
+    const perPage = 5
+    const entries = Array.from({ length: pages * perPage }, (_, index) => ({
+      ref: `L-${seed}-${String(index + 1).padStart(2, '0')}`,
+      cents: 10_000 + Math.floor(random() * 900_000),
+    }))
+    const total = entries.reduce((sum, entry) => sum + entry.cents, 0)
+    return {
+      ...common,
+      prompt: browserOnlyPrompt(`当前账目页的表格分为 ${pages} 页（用“下一页”翻页）。计算所有页面中“金额”列的总和。最后只回答总金额，例如 ¥1,234.56 或 ¥1234.56。`),
+      page: { title: '账目明细', entries, perPage },
+      expected: { kind: 'answer', value: money(total), alternatives: [moneyWithSeparators(total)] },
+    }
+  }
+
+  if (taskId === 'signup_fix') {
+    const username = `${PRODUCT_ROOTS[seed % PRODUCT_ROOTS.length].toLowerCase()}${seed}`
+    const suggestion = `${username}_${100 + seed * 7}`
+    const email = `signup+${seed}@example.com`
+    return {
+      ...common,
+      prompt: browserOnlyPrompt(`在当前注册页用用户名“${username}”和邮箱“${email}”注册。提交后如果页面提示错误，按提示修正后重新提交，直到注册成功。`),
+      page: { title: '注册账号', username, suggestion },
+      expected: { kind: 'state', value: { signedUp: true, account: { username: suggestion, email } } },
+    }
+  }
+
   const code = `REC-${String(seed).padStart(2, '0')}-${String(7000 + seed * 43)}`
   return {
     ...common,
@@ -188,8 +270,8 @@ export function validateTask(instance, state, finalAnswer, toolNames = []) {
   }
   if (instance.expected.kind === 'answer' || instance.expected.kind === 'answer-and-state') {
     const actual = normalizeAnswer(finalAnswer)
-    const wanted = normalizeAnswer(instance.expected.value)
-    if (!actual.includes(wanted)) {
+    const accepted = [instance.expected.value, ...instance.expected.alternatives ?? []].map(normalizeAnswer)
+    if (!accepted.some((wanted) => actual.includes(wanted))) {
       return { success: false, reason: `answer did not contain ${JSON.stringify(instance.expected.value)}` }
     }
   }

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { chmod, cp, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { createConnection, createServer as createTcpServer } from 'node:net'
 import { createRequire } from 'node:module'
@@ -22,6 +22,9 @@ const artifacts = process.env.DSH_SMOKE_ARTIFACTS ?? join(root, '.artifacts/brow
 await mkdir(artifacts, { recursive: true })
 const directory = await mkdtemp(join(artifacts, 'run-'))
 const runtimeTmp = join(directory, 'tmp')
+// browser_extract saveTo writes here: the probe's tool calls have no Agent, so
+// the bridge falls back to the configured browser-session workspace.
+const workspace = join(directory, 'workspace')
 await mkdir(runtimeTmp)
 const token = randomUUID()
 // Install the extension the way the installers do: a copy of dist/ with the
@@ -85,9 +88,76 @@ childServer.listen(0, '127.0.0.1')
 await once(childServer, 'listening')
 const crossOrigin = `http://127.0.0.1:${childServer.address().port}`
 const crossSiteOrigin = `http://localhost:${childServer.address().port}`
+// Content-tool fixtures: widgets the inventory used to miss, selects, waits,
+// a scroll container that loads more, and a table paginated by full navigations.
+const contentToolsPage = `<!doctype html><title>Content tools</title><body>
+  <main>
+    <h2>Orders overview</h2>
+    <ul><li>Open orders<ul><li>Priority</li></ul></li></ul>
+    <table id="summary"><tr><th>Region</th><th>Total</th></tr><tr><td>North</td><td>12</td></tr></table>
+    <p>${'Long body text. '.repeat(700)}</p>
+  </main>
+  <label id="remember-label" style="display:inline-block;padding:4px"><input id="remember" type="checkbox" style="opacity:0;position:absolute">Remember me</label>
+  <shadow-card id="card"></shadow-card>
+  <span id="ln1">Billing</span><span id="ln2">country</span>
+  <select id="country" aria-labelledby="ln1 ln2"><option value="">Choose</option><option value="pl">Poland</option><option value="jp">Japan</option></select>
+  <select id="tags" multiple><option value="a">Alpha</option><option value="b">Beta</option><option value="c">Gamma</option></select>
+  <div id="fruit" role="combobox" tabindex="0" aria-expanded="false" aria-controls="fruit-list" style="display:inline-block;padding:4px;border:1px solid">Pick a fruit</div>
+  <ul id="fruit-list" role="listbox" hidden><li role="option">Apple</li><li role="option">Cherry</li></ul>
+  <form id="signup"><input id="email" aria-label="Email" aria-describedby="email-error"><span id="email-error"></span><div role="alert" id="form-alert"></div></form>
+  <button id="save" type="button">Save later</button><p id="status"></p>
+  <button id="step" type="button">Next step</button>
+  <button id="popup" type="button">Open help</button>
+  <button id="crash" type="button">Crash</button>
+  <div id="feed" style="height:120px;overflow-y:auto;border:1px solid">${Array.from({ length: 10 }, (_, i) => `<div class="item" style="height:30px">Item ${i + 1}</div>`).join('')}</div>
+  <nav>${Array.from({ length: 24 }, (_, i) => `<a href="/content-tools/archive/${i + 1}">Archive ${i + 1}</a>`).join(' ')}</nav>
+  <script>
+    window.shadowClicks = 0; window.selectEvents = [];
+    customElements.define('shadow-card', class extends HTMLElement {
+      connectedCallback() {
+        const root = this.attachShadow({ mode: 'open' });
+        root.innerHTML = '<button id="inside">Shadow action</button>';
+        root.querySelector('button').addEventListener('click', () => window.shadowClicks++);
+      }
+    });
+    for (const id of ['country', 'tags']) {
+      const select = document.getElementById(id);
+      for (const type of ['input', 'change']) select.addEventListener(type, () => window.selectEvents.push(id + ':' + type + ':' + [...select.selectedOptions].map(o => o.value).join('+')));
+    }
+    const fruit = document.getElementById('fruit'), list = document.getElementById('fruit-list');
+    fruit.addEventListener('click', () => { list.hidden = false; fruit.setAttribute('aria-expanded', 'true'); });
+    for (const option of list.children) option.addEventListener('click', () => { fruit.textContent = option.textContent; list.hidden = true; fruit.setAttribute('aria-expanded', 'false'); });
+    document.getElementById('email').addEventListener('change', (event) => {
+      if (event.target.value.includes('@')) return;
+      event.target.setAttribute('aria-invalid', 'true');
+      document.getElementById('email-error').textContent = 'Enter a valid email address';
+      document.getElementById('form-alert').textContent = 'Please fix the highlighted field';
+    });
+    document.getElementById('save').addEventListener('click', () => setTimeout(() => { document.getElementById('status').textContent = 'Saved at noon'; }, 400));
+    document.getElementById('step').addEventListener('click', () => setTimeout(() => history.pushState({}, '', '/content-tools?step=2'), 300));
+    document.getElementById('popup').addEventListener('click', () => window.open('/inner?popup', '_blank'));
+    document.getElementById('crash').addEventListener('click', () => console.error('content-tools crash marker'));
+    const feed = document.getElementById('feed');
+    feed.addEventListener('scroll', () => {
+      if (feed.dataset.loading || feed.children.length >= 40) return;
+      if (feed.scrollTop + feed.clientHeight < feed.scrollHeight - 5) return;
+      feed.dataset.loading = '1';
+      setTimeout(() => {
+        const start = feed.children.length;
+        for (let i = 1; i <= 10; i++) feed.insertAdjacentHTML('beforeend', '<div class="item" style="height:30px">Item ' + (start + i) + '</div>');
+        delete feed.dataset.loading;
+      }, 150);
+    });
+  </script></body>`
+const tablePage = page => `<!doctype html><title>Ledger ${page}</title><body><table id="ledger"><thead><tr><th>Ref</th><th>Amount</th></tr></thead><tbody>
+  ${[1, 2, 3].map(row => `<tr><td>L${page}-${row}</td><td>${page * 10 + row}</td></tr>`).join('')}</tbody></table>
+  ${page < 3 ? `<a class="next" href="/ledger?page=${page + 1}">Next page</a>` : '<span class="next-disabled">End</span>'}</body>`
+
 const server = createServer((request, response) => {
   response.setHeader('content-type', 'text/html')
   if (request.url.startsWith('/inner')) { response.end(inner); return }
+  if (request.url.startsWith('/content-tools')) { response.end(contentToolsPage); return }
+  if (request.url.startsWith('/ledger')) { response.end(tablePage(Number(new URL(request.url, 'http://x').searchParams.get('page') ?? 1))); return }
   response.end(`<!doctype html><style>#button { color: rgb(1, 2, 3); background-color: rgb(240, 240, 240); margin: 2px 3px 4px 5px; }
     #unrelated { color: rgb(4, 5, 6) }</style><body>
     <button id="button" style="position:absolute;left:20px;top:20px;width:100px;height:50px">Target</button>
@@ -129,7 +199,7 @@ try {
   const patch = join(directory, 'host.patch.yml')
   await writeFile(patch, [
     '- id: bridge-browser', '  config:', `    token: ${JSON.stringify(token)}`,
-    '    sessionWorkspacePath: ""',
+    `    sessionWorkspacePath: ${JSON.stringify(workspace)}`,
     '- id: tool-executor-native', '  disabled: false',
     '- id: tool-executor-ptc', '  disabled: true',
     '- id: agent-default-model', '  config:',
@@ -402,6 +472,95 @@ try {
   assert.ok(performance.now() - cancelStarted < 5_000, 'browser cancellation must settle before the requested wait')
   succeed(await tool('browser_get_text', { selector: '#unrelated' }))
   results.push('canceling an executing browser tool releases the next call')
+
+  // ---- Content tools (inventory coverage, select, wait, scroll, extract, verification) ----
+  succeed(await tool('browser_navigate', { url: `${origin}/content-tools` }))
+  await waitFor(() => page.evaluate(() => document.readyState === 'complete' && typeof window.shadowClicks === 'number'), 'content tools page')
+  const inventory = succeed(await tool('browser_snapshot', {}))
+  const indexOf = (pattern, label) => {
+    const match = inventory.match(pattern)
+    assert.ok(match, `${label} missing from snapshot:\n${inventory}`)
+    return Number(match[1])
+  }
+  const shadowIndex = indexOf(/\[(\d+)\] button "Shadow action"/, 'shadow button')
+  const rememberIndex = indexOf(/\[(\d+)\] checkbox "Remember me"/, 'opacity:0 checkbox')
+  indexOf(/\[(\d+)\] select "Billing country"/, 'aria-labelledby select')
+  indexOf(/\[(\d+)\] combobox "Pick a fruit"/, 'combobox')
+  assert.match(inventory, /\d+ more links like "Archive \d+"/)
+  assert.match(inventory, /## Orders overview\n- Open orders\n {2}- Priority\n\| Region \| Total \|\n\| North \| 12 \|/)
+  succeed(await tool('browser_click', { index: shadowIndex }))
+  succeed(await tool('browser_click', { selector: '#card >>> #inside' }))
+  assert.equal(await page.evaluate(() => window.shadowClicks), 2)
+  succeed(await tool('browser_click', { index: rememberIndex }))
+  assert.equal(await page.locator('#remember').isChecked(), true)
+  const textOnly = succeed(await tool('browser_snapshot', { mode: 'text' }))
+  assert.doesNotMatch(textOnly, /Interactive elements:/)
+  const interactiveOnly = succeed(await tool('browser_snapshot', { mode: 'interactive', collapse: false }))
+  assert.doesNotMatch(interactiveOnly, /Orders overview/)
+  assert.match(interactiveOnly, /link "Archive 24"/)
+  results.push('the inventory covers open shadow roots, opacity:0 checkboxes, ARIA comboboxes and joined aria-labelledby; snapshots keep structure, collapse repeats and honor modes')
+
+  succeed(await tool('browser_select', { selector: '#country', label: 'Japan' }))
+  assert.equal(await page.locator('#country').inputValue(), 'jp')
+  succeed(await tool('browser_select', { selector: '#tags', values: ['a', 'Gamma'] }))
+  assert.deepEqual(await page.evaluate(() => window.selectEvents), ['country:input:jp', 'country:change:jp', 'tags:input:a+c', 'tags:change:a+c'])
+  succeed(await tool('browser_select', { selector: '#fruit', label: 'Cherry' }))
+  assert.equal(await page.locator('#fruit').textContent(), 'Cherry')
+  results.push('browser_select drives native single and multi selects (input+change) and ARIA comboboxes')
+
+  succeed(await tool('browser_click', { selector: '#save' }))
+  assert.match(succeed(await tool('browser_wait', { text: 'Saved at noon', timeoutMs: 5_000 })), /Condition met after \d+ms/)
+  const timedOut = await tool('browser_wait', { selector: '#never-there', timeoutMs: 300 })
+  assert.equal(timedOut.isError, true, JSON.stringify(timedOut))
+  assert.match(text(timedOut), /timed out after \d+ms: selector #never-there did not become visible/)
+  succeed(await tool('browser_click', { selector: '#step' }))
+  assert.match(succeed(await tool('browser_wait', { urlMatches: 'step=2', timeoutMs: 5_000 })), /URL matched step=2/)
+  results.push('conditional browser_wait resolves on text and URL and reports what timed out')
+
+  assert.match(succeed(await tool('browser_scroll', { selector: '#feed', direction: 'down', amount: 60 })), /scroll position 60/)
+  assert.equal(await page.locator('#feed').evaluate(feed => feed.scrollTop), 60)
+  const feed = succeed(await tool('browser_scroll', { selector: '#feed', direction: 'down', untilItems: 30, itemSelector: '#feed .item' }))
+  assert.match(feed, /items 10 → (3|4)0 \(stopped: reached 30 items\)/)
+  assert.ok(await page.locator('#feed .item').count() >= 30)
+  results.push('browser_scroll scrolls an element container and loads an infinite list until the target count')
+
+  const fullText = succeed(await tool('browser_get_text', {}))
+  const total = Number(fullText.match(/Characters 0–8000 of (\d+)\. Call again with offset=8000/)?.[1])
+  assert.ok(total > 8_000, fullText.slice(-300))
+  assert.match(succeed(await tool('browser_get_text', { offset: 8_000 })), new RegExp(`Characters 8000–${total} of ${total}\\.`))
+  results.push('browser_get_text pages long text with offsets and reports the total length')
+
+  const typed = succeed(await tool('browser_type', { selector: '#email', text: 'not-an-email' }))
+  assert.match(typed, /The field holds 12 characters, including the typed text\./)
+  assert.match(typed, /2 new alert\/validation message\(s\) appeared/)
+  assert.match(typed, /New message: "Please fix the highlighted field"/)
+  assert.match(typed, /Invalid field .*"Email": "Enter a valid email address"/)
+  const popup = succeed(await tool('browser_click', { selector: '#popup' }))
+  assert.match(popup, /The page opened a new tab \(tabId \d+\); call browser_follow_tab/)
+  for (const opened of browser.pages().filter(candidate => candidate.url().includes('popup'))) await opened.close()
+  await page.bringToFront()
+  // Developer tools have been capturing this tab's console since browser_console_logs ran above.
+  succeed(await tool('browser_console_logs', {}))
+  const crashed = succeed(await tool('browser_click', { selector: '#crash' }))
+  assert.match(crashed, /1 console error\(s\) were logged during the action/)
+  assert.match(crashed, /\[error\] content-tools crash marker/)
+  results.push('action results verify typed values, new alert/validation text, opened tabs and console errors')
+
+  succeed(await tool('browser_navigate', { url: `${origin}/ledger?page=1` }))
+  await waitFor(() => page.evaluate(() => document.title === 'Ledger 1'), 'ledger page')
+  const inline = succeed(await tool('browser_extract', { table: '#ledger' }))
+  assert.match(inline, /Extracted 3 row\(s\)\. Columns: Ref, Amount\./)
+  assert.match(inline, /\{"Ref":"L1-1","Amount":"11"\}/)
+  const saved = succeed(await tool('browser_extract', {
+    schema: { rows: '#ledger tbody tr', fields: { ref: 'td:nth-child(1)', amount: { selector: 'td:nth-child(2)', type: 'number' } } },
+    paginate: { nextSelector: 'a.next', maxPages: 5 },
+    saveTo: 'exports/ledger.csv',
+  }))
+  assert.match(saved, /Saved 9 row\(s\) as CSV to exports\/ledger\.csv/)
+  assert.match(saved, /from 3 page\(s\) \(stopped: no next page/)
+  assert.equal(await readFile(join(workspace, 'exports/ledger.csv'), 'utf8'),
+    `ref,amount\r\n${[1, 2, 3].flatMap(p => [1, 2, 3].map(r => `L${p}-${r},${p * 10 + r}`)).join('\r\n')}\r\n`)
+  results.push('browser_extract reads tables inline and pages a schema across full navigations into a CSV in the session workspace')
 
   // 通过正式界面上传图片，并用真实连接失败验证继续生成。
   await worker.evaluate(async () => { await chrome.storage.local.set({ dshPanelUiLocale: 'en' }) })

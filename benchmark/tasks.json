@@ -34,5 +34,41 @@
     "name": "懒加载记录",
     "category": "dynamic",
     "description": "滚动到底部、加载更多记录并读取目标代码。"
+  },
+  {
+    "id": "plan_select",
+    "name": "套餐选择",
+    "category": "select",
+    "description": "在原生下拉框和 ARIA 组合框中各选一个选项并保存。"
+  },
+  {
+    "id": "shadow_toggle",
+    "name": "组件开关",
+    "category": "inventory",
+    "description": "打开 Shadow DOM 组件里的隐藏式自定义开关并保存。"
+  },
+  {
+    "id": "delayed_report",
+    "name": "延迟报表",
+    "category": "wait",
+    "description": "生成报表后等待异步结果出现并读取编号。"
+  },
+  {
+    "id": "feed_scroll",
+    "name": "滚动容器",
+    "category": "scroll",
+    "description": "在内部滚动容器中持续加载，找到深处条目的代码。"
+  },
+  {
+    "id": "ledger_total",
+    "name": "分页账目汇总",
+    "category": "extract",
+    "description": "跨多页表格提取金额并回答总和。"
+  },
+  {
+    "id": "signup_fix",
+    "name": "表单校验修正",
+    "category": "verify",
+    "description": "提交后根据出现的校验错误修正字段并重新提交。"
   }
 ]

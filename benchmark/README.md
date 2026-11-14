@@ -74,10 +74,16 @@ node benchmark/report.mjs benchmark/results/<file>.jsonl
 | `inventory_filter` | 筛选 + 读取 | 服务端确认筛选值，回答确认唯一商品 |
 | `cart_checkout` | 多步操作 | 服务端确认商品、数量和结算 |
 | `lazy_load` | 动态内容 | 服务端确认加载动作，回答确认新代码 |
+| `plan_select` | 原生下拉框 + ARIA 组合框 | 服务端确认套餐、地区和保存动作 |
+| `shadow_toggle` | Shadow DOM 中的隐藏式开关 | 服务端确认两步验证已开启并保存 |
+| `delayed_report` | 异步等待 | 服务端确认生成请求，回答确认延迟出现的编号 |
+| `feed_scroll` | 内部滚动容器 + 无限加载 | 服务端确认目标条目已加载，回答确认其代码 |
+| `ledger_total` | 跨页表格提取 | 回答确认四页金额总和（接受千分位格式） |
+| `signup_fix` | 动作后校验提示 | 服务端确认按错误提示修正后的用户名与邮箱注册成功 |
 
 每个任务的可见数据随 seed 确定性变化，降低模型记住固定答案的可能。网页状态通过独立 HTTP API 验证，不依据模型自报“已完成”。
 
-当前任务套件版本为 `2`。版本 `2` 修正了 `inventory_filter`：seed 继续改变商品根名称、SKU、价格和库存顺序，但不再把仅用于生成数据的 seed 数字拼进目标商品名。旧结果没有 `benchmarkSuiteVersion`，其成功率不能与版本 `2` 直接比较。以后只要任务提示、数据生成或 validator 语义变化，都必须递增该版本。
+当前任务套件版本为 `3`。版本 `3` 新增了 `plan_select`、`shadow_toggle`、`delayed_report`、`feed_scroll`、`ledger_total` 和 `signup_fix` 六个任务，旧结果不能与版本 `3` 的总成功率直接比较。版本 `2` 修正了 `inventory_filter`：seed 继续改变商品根名称、SKU、价格和库存顺序，但不再把仅用于生成数据的 seed 数字拼进目标商品名。旧结果没有 `benchmarkSuiteVersion`，其成功率不能与版本 `2` 直接比较。以后只要任务提示、数据生成或 validator 语义变化，都必须递增该版本。
 
 ## 公平性控制
 

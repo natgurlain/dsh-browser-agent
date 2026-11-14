@@ -142,6 +142,120 @@ function renderTask(instance) {
         document.querySelector('#complete').hidden = false;
       });`)
   }
+  if (id === 'plan_select') {
+    const options = page.plans.map((plan) => `<option value="${htmlEscape(plan.value)}">${htmlEscape(plan.label)}</option>`).join('')
+    const regions = page.regions.map((region) => `<li role="option" data-value="${htmlEscape(region)}">${htmlEscape(region)}</li>`).join('')
+    return layout(instance, `<h1>订阅设置</h1><form id="plan-form"><label for="plan">套餐</label><select id="plan"><option value="">请选择</option>${options}</select>
+      <label id="region-label">计费地区</label><div id="region" role="combobox" tabindex="0" aria-labelledby="region-label" aria-expanded="false" aria-controls="region-list" class="combo">请选择地区</div>
+      <ul id="region-list" role="listbox" hidden>${regions}</ul><button type="submit">保存订阅</button></form><p id="saved" class="notice" hidden>订阅已保存</p>`, `
+      const region = document.querySelector('#region');
+      const list = document.querySelector('#region-list');
+      let chosen = '';
+      region.addEventListener('click', () => { list.hidden = !list.hidden; region.setAttribute('aria-expanded', String(!list.hidden)); });
+      for (const option of list.querySelectorAll('[role="option"]')) {
+        option.addEventListener('click', () => {
+          chosen = option.dataset.value;
+          region.textContent = option.textContent;
+          for (const other of list.children) other.setAttribute('aria-selected', String(other === option));
+          list.hidden = true;
+          region.setAttribute('aria-expanded', 'false');
+        });
+      }
+      document.querySelector('#plan-form').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        await benchmarkAction('save-subscription', { plan: document.querySelector('#plan').value, region: chosen });
+        document.querySelector('#saved').hidden = false;
+      });`)
+  }
+  if (id === 'shadow_toggle') {
+    return layout(instance, `<h1>安全设置</h1><p>账户：<strong>${htmlEscape(page.account)}</strong></p><security-panel></security-panel><p id="saved" class="notice" hidden>安全设置已保存</p>`, `
+      customElements.define('security-panel', class extends HTMLElement {
+        connectedCallback() {
+          const root = this.attachShadow({ mode: 'open' });
+          root.innerHTML = '<style>.switch{display:inline-flex;gap:8px;align-items:center;padding:8px;cursor:pointer}.switch input{opacity:0;position:absolute;width:1px;height:1px}.track{width:36px;height:20px;border-radius:10px;background:#aeb9c4}.switch input:checked+.track{background:#1769aa}button{margin-top:12px}</style>'
+            + '<label class="switch"><input id="two-factor" type="checkbox"><span class="track"></span><span>两步验证</span></label><br><button id="save" type="button">保存安全设置</button>';
+          root.querySelector('#save').addEventListener('click', async () => {
+            await benchmarkAction('save-security', { twoFactor: root.querySelector('#two-factor').checked });
+            document.querySelector('#saved').hidden = false;
+          });
+        }
+      });`)
+  }
+  if (id === 'delayed_report') {
+    return layout(instance, `<h1>报表中心</h1><button id="generate" type="button">生成报表</button><p id="progress" role="status"></p><p id="result" hidden>报表编号：<strong id="code"></strong></p>`, `
+      document.querySelector('#generate').addEventListener('click', async () => {
+        document.querySelector('#progress').textContent = '报表生成中…';
+        await benchmarkAction('request-report');
+        setTimeout(() => {
+          document.querySelector('#progress').textContent = '报表已生成';
+          document.querySelector('#code').textContent = window.__BENCHMARK__.page.code;
+          document.querySelector('#result').hidden = false;
+        }, window.__BENCHMARK__.page.delayMs);
+      });`)
+  }
+  if (id === 'feed_scroll') {
+    return layout(instance, `<h1>消息流</h1><p>消息流区域滚动到底部会自动加载更多。</p><section id="feed" aria-label="消息流" style="height:320px;overflow-y:auto;border:1px solid #dce3e9;border-radius:8px;padding:0 12px"></section>`, `
+      const { target, code, batch } = window.__BENCHMARK__.page;
+      const feed = document.querySelector('#feed');
+      let count = 0, loading = false;
+      function append() {
+        for (let i = 0; i < batch; i++) {
+          count += 1;
+          const entry = document.createElement('article');
+          entry.className = 'record';
+          entry.textContent = '第 ' + count + ' 条消息 · 代码 ' + (count === target ? code : 'MSG-' + (1000 + count * 7));
+          feed.append(entry);
+        }
+      }
+      append();
+      feed.addEventListener('scroll', async () => {
+        if (loading || feed.scrollTop + feed.clientHeight < feed.scrollHeight - 10 || count >= target + batch) return;
+        loading = true;
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        append();
+        await benchmarkAction('load-feed', { count, targetLoaded: count >= target });
+        loading = false;
+      });`)
+  }
+  if (id === 'ledger_total') {
+    return layout(instance, `<h1>账目明细</h1><table id="ledger"><thead><tr><th>编号</th><th>金额</th></tr></thead><tbody></tbody></table>
+      <p><button id="prev" type="button">上一页</button> <span id="page-label"></span> <button id="next" type="button">下一页</button></p>`, `
+      const { entries, perPage } = window.__BENCHMARK__.page;
+      const pages = Math.ceil(entries.length / perPage);
+      let current = 0;
+      const format = (cents) => '¥' + (cents / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      function render() {
+        document.querySelector('#ledger tbody').innerHTML = entries.slice(current * perPage, (current + 1) * perPage)
+          .map((entry) => '<tr><td>' + entry.ref + '</td><td>' + format(entry.cents) + '</td></tr>').join('');
+        document.querySelector('#page-label').textContent = '第 ' + (current + 1) + ' / ' + pages + ' 页';
+        document.querySelector('#prev').disabled = current === 0;
+        document.querySelector('#next').disabled = current === pages - 1;
+      }
+      document.querySelector('#next').addEventListener('click', () => { if (current < pages - 1) { current += 1; render(); } });
+      document.querySelector('#prev').addEventListener('click', () => { if (current > 0) { current -= 1; render(); } });
+      render();`)
+  }
+  if (id === 'signup_fix') {
+    return layout(instance, `<h1>注册账号</h1><form id="signup" novalidate><label for="username">用户名</label><input id="username" autocomplete="off" aria-describedby="username-error"><p id="username-error"></p>
+      <label for="email">邮箱</label><input id="email" type="email" autocomplete="off"><div id="form-alert" role="alert"></div><button type="submit">注册</button></form><p id="done" class="notice" hidden>注册成功</p>`, `
+      const { username, suggestion } = window.__BENCHMARK__.page;
+      document.querySelector('#signup').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const field = document.querySelector('#username');
+        const email = document.querySelector('#email').value.trim();
+        if (field.value.trim() === username) {
+          field.setAttribute('aria-invalid', 'true');
+          document.querySelector('#username-error').textContent = '该用户名已被占用';
+          document.querySelector('#form-alert').textContent = '用户名 ' + username + ' 已被占用，请改用 ' + suggestion + ' 后重新提交。';
+          await benchmarkAction('signup-rejected', { username: field.value.trim() });
+          return;
+        }
+        field.removeAttribute('aria-invalid');
+        document.querySelector('#form-alert').textContent = '';
+        await benchmarkAction('signup', { username: field.value.trim(), email });
+        document.querySelector('#done').hidden = false;
+      });`)
+  }
   const filler = Array.from({ length: page.fillerCount }, (_, index) => `<article class="record"><strong>历史记录 ${index + 1}</strong><p>这是用于测试滚动和懒加载的归档内容。</p></article>`).join('')
   return layout(instance, `<h1>归档记录</h1><p>目标记录位于当前已加载内容之后。</p><section class="lazy-spacer">${filler}</section><button id="load-more" type="button">加载更多记录</button><article id="new-record" class="record notice" hidden><strong>新记录</strong><p>目标代码：<span id="target-code"></span></p></article>`, `
     document.querySelector('#load-more').addEventListener('click', async () => {
@@ -174,6 +288,24 @@ function applyAction(state, taskId, action, payload) {
   }
   if (taskId === 'lazy_load' && action === 'load-more') {
     return { ...state, loadedMore: true, updatedAt: Date.now() }
+  }
+  if (taskId === 'plan_select' && action === 'save-subscription') {
+    return { ...state, subscriptionSaved: true, plan: String(payload.plan ?? ''), region: String(payload.region ?? ''), updatedAt: Date.now() }
+  }
+  if (taskId === 'shadow_toggle' && action === 'save-security') {
+    return { ...state, securitySaved: true, twoFactor: payload.twoFactor === true, updatedAt: Date.now() }
+  }
+  if (taskId === 'delayed_report' && action === 'request-report') {
+    return { ...state, reportRequested: true, updatedAt: Date.now() }
+  }
+  if (taskId === 'feed_scroll' && action === 'load-feed') {
+    return { ...state, feedLoaded: Number(payload.count), feedTargetLoaded: state.feedTargetLoaded === true || payload.targetLoaded === true, updatedAt: Date.now() }
+  }
+  if (taskId === 'signup_fix' && action === 'signup-rejected') {
+    return { ...state, rejectedAttempts: (state.rejectedAttempts ?? 0) + 1, updatedAt: Date.now() }
+  }
+  if (taskId === 'signup_fix' && action === 'signup') {
+    return { ...state, signedUp: true, account: { username: String(payload.username ?? ''), email: String(payload.email ?? '') }, updatedAt: Date.now() }
   }
   throw new Error(`invalid action ${action} for ${taskId}`)
 }
