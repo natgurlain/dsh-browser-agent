@@ -69,6 +69,8 @@ export interface ToolCall {
   sessionId?: string
   /** The Host holds this session (or an ancestor agent) tainted (protocol `tool.call.tainted`). */
   tainted?: true
+  /** Set by the bridge's program runner: this call is one step of an approved `browser_run`. */
+  program?: { id: string; step: number }
 }
 
 /** The wire answer for one tool call. */

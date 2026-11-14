@@ -20,6 +20,7 @@ const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib
 const { PINNED_CHROME_EXTENSION_ID } = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
 const { startScriptedModel } = await import(pathToFileURL(join(root, 'scripts/fixtures/scripted-model.mjs')).href)
 const { runAgentUxSmoke, assertKillSwitchAudited } = await import(pathToFileURL(join(root, 'scripts/fixtures/agent-ux-smoke.mjs')).href)
+const { runPhase3Smoke } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-smoke.mjs')).href)
 const artifacts = process.env.DSH_SMOKE_ARTIFACTS ?? join(root, '.artifacts/browser-smoke')
 await mkdir(artifacts, { recursive: true })
 const directory = await mkdtemp(join(artifacts, 'run-'))
@@ -1177,6 +1178,10 @@ try {
     tool, succeed, settings, waitFor, hostRpc, bridgeRpc, scripted, results, delay,
     knownSessions: [conversation.sessionId, secondConversation.sessionId],
   })
+  // ---- Phase 3: browser_run programs, page watchers, tab fleets ----
+  screenshots.push(...await runPhase3Smoke({
+    browser, page, panel, extensionId, directory, origin, bridge, env, tool, succeed, settings, waitFor, results, delay,
+  }))
 
   // ---- Kill switch (last: it drops the bridge) ----
   const badge = tab => panel.evaluate(tab => chrome.action.getBadgeText(tab === undefined ? {} : { tabId: tab }), tab)

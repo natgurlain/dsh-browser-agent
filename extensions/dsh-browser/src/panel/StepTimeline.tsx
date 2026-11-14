@@ -30,6 +30,7 @@ function StepIcon({ name }: { name: string }): React.JSX.Element {
 const DECISION_TONE: Record<string, 'neutral' | 'good' | 'bad' | 'warn'> = {
   'not-required': 'neutral',
   'auto-allowed': 'neutral',
+  'program-approved': 'good',
   allowed: 'good',
   denied: 'bad',
   'timed-out': 'warn',

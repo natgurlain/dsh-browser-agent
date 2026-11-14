@@ -82,6 +82,8 @@ export interface AuditEntryInput {
   /** Error code and a short message for a failed call. */
   error?: { code: string; message: string }
   durationMs?: number
+  /** Step of a `browser_run` program: the program's approval call id and the 0-based step. */
+  program?: { id: string; step: number }
 }
 
 /** One persisted, chained entry. */
@@ -601,6 +603,8 @@ export interface DispatchedCall {
   toolCallId?: string
   /** Connection (install) the call was routed to. */
   connection?: string
+  /** This call is step `step` of the `browser_run` program approved by call `id`. */
+  program?: { id: string; step: number }
 }
 
 /** Hooks the bridge server calls around every tool call. */
@@ -623,7 +627,7 @@ interface TrackedCall {
   url?: string
 }
 
-const PROMPT_DECISIONS = new Set(['allowed', 'auto-allowed', 'denied', 'timed-out', 'unavailable', 'cancelled', 'held-expired'])
+const PROMPT_DECISIONS = new Set(['allowed', 'auto-allowed', 'denied', 'timed-out', 'unavailable', 'cancelled', 'held-expired', 'program-approved'])
 const MAX_ERROR_MESSAGE = 240
 
 /** Turns bridge tool traffic into audit entries. Write failures never reach a tool call. */
@@ -656,6 +660,7 @@ export class ToolCallAuditor implements BridgeAuditObserver {
       ...(toolCallId === undefined ? {} : { toolCallId }),
       ...(call.connection === undefined ? {} : { connection: call.connection }),
       tool: call.name,
+      ...(call.program === undefined ? {} : { program: { id: call.program.id, step: call.program.step } }),
       args,
       argsDigest: `sha256:${sha256(canonicalJson(args))}`,
       ...(url === undefined ? {} : { url, origin: auditOrigin(call.args.url as string) }),

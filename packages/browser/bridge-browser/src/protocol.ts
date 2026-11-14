@@ -736,13 +736,31 @@ export type ServerFrame =
    * for this session id (a subagent's first call). Absent means "no Host
    * taint known", never "untainted" (the extension's own record still counts).
    */
-  | { t: 'tool.call'; id: string; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string; tainted?: true }
+  | { t: 'tool.call'; id: string; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string; tainted?: true; program?: ProgramStepRef }
   /** Withdraw a tool call that timed out or whose caller was cancelled. */
   | { t: 'tool.cancel'; id: string }
   /** Liveness probe. */
   | { t: 'ping' }
   /** Fatal connection error; the client should re-authenticate. */
   | { t: 'error'; code: string; message: string }
+
+/**
+ * Marks a `tool.call` as step `step` (0-based) of the `browser_run` program
+ * whose approval call had id `id`. Set only by the bridge's program runner,
+ * never from model arguments; the extension checks it against the program
+ * the user approved before letting that approval stand in for the step's card.
+ */
+export interface ProgramStepRef {
+  id: string
+  step: number
+}
+
+/** Shape check for {@link ProgramStepRef}. */
+export function isProgramStepRef(value: unknown): value is ProgramStepRef {
+  return typeof value === 'object' && value !== null
+    && typeof (value as { id?: unknown }).id === 'string' && (value as { id: string }).id !== ''
+    && Number.isSafeInteger((value as { step?: unknown }).step) && (value as { step: number }).step >= 0
+}
 
 /** Any frame on the wire. */
 export type BridgeFrame = ClientFrame | ServerFrame
@@ -857,6 +875,7 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
             expiresAt: frame.expiresAt,
             ...(typeof frame.sessionId === 'string' ? { sessionId: frame.sessionId } : {}),
             ...(frame.tainted === true ? { tainted: true as const } : {}),
+            ...(isProgramStepRef(frame.program) ? { program: frame.program } : {}),
           }
         : undefined
     case 'tool.cancel':

@@ -972,6 +972,11 @@ export interface WaitConditions {
   gone: boolean
   networkIdle: boolean
   timeoutMs: number
+  /**
+   * browser_run value guard: the first field matching `selector` holds exactly
+   * this value. Only pass/fail leaves the page; sensitive fields are refused.
+   */
+  valueEquals?: string
 }
 
 export const DEFAULT_WAIT_TIMEOUT_MS = 10_000
@@ -985,6 +990,10 @@ export function parseWaitConditions(args: Record<string, unknown>): WaitConditio
   const text = typeof args.text === 'string' && args.text !== '' ? args.text : undefined
   const selector = typeof args.selector === 'string' && args.selector !== '' ? args.selector : undefined
   const networkIdle = args.networkIdle === true
+  const valueEquals = typeof args.valueEquals === 'string' ? args.valueEquals : undefined
+  if (valueEquals !== undefined && (selector === undefined || args.gone === true)) {
+    throw new ActionError('bad-args', 'valueEquals needs a selector and cannot be combined with gone.')
+  }
   if (text === undefined && selector === undefined && !networkIdle) {
     if (args.gone === true) throw new ActionError('bad-args', 'gone needs text or selector.')
     return undefined
@@ -999,7 +1008,33 @@ export function parseWaitConditions(args: Record<string, unknown>): WaitConditio
     gone: args.gone === true,
     networkIdle,
     timeoutMs: Math.min(timeoutRaw, MAX_WAIT_TIMEOUT_MS),
+    ...valueEquals === undefined ? {} : { valueEquals },
   }
+}
+
+/** Current value of a form field or editable element; undefined for anything else. */
+function fieldValue(el: Element): string | undefined {
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) return el.value
+  if (el instanceof HTMLElement && el.isContentEditable) return el.innerText
+  return undefined
+}
+
+/**
+ * Whether the first field matching the selector holds `expected`. A sensitive
+ * field (password, one-time code, payment data) is refused outright so a
+ * guard can never be used to test guesses against it.
+ */
+function valueMatches(selector: string, expected: string): boolean {
+  let matches: Element[]
+  try {
+    matches = resolveSelectorAll(selector)
+  } catch {
+    throw new ActionError('bad-args', `selector is not a valid CSS selector: ${selector}`)
+  }
+  const field = matches[0]
+  if (field === undefined) return false
+  if (isSensitiveField(field)) throw new ActionError('action-failed', 'A value guard cannot read a sensitive field.')
+  return fieldValue(field) === expected
 }
 
 /** Visible elements matching a selector (piercing open shadow roots). */
@@ -1030,7 +1065,7 @@ async function conditionalWait(conditions: WaitConditions, ctx: ActionContext): 
   const describe = (): string[] => {
     const parts: string[] = []
     if (conditions.text !== undefined) parts.push(`text "${conditions.text}" ${conditions.gone ? 'gone' : 'present'}`)
-    if (conditions.selector !== undefined) parts.push(`selector ${conditions.selector} ${conditions.gone ? 'gone' : 'visible'}`)
+    if (conditions.selector !== undefined) parts.push(conditions.valueEquals !== undefined ? `field ${conditions.selector} holds the expected value` : `selector ${conditions.selector} ${conditions.gone ? 'gone' : 'visible'}`)
     if (conditions.networkIdle) parts.push('network idle')
     return parts
   }
@@ -1040,7 +1075,9 @@ async function conditionalWait(conditions: WaitConditions, ctx: ActionContext): 
       const present = pageText().toLowerCase().includes(conditions.text.toLowerCase())
       if (present === conditions.gone) missing.push(`text "${conditions.text}" ${conditions.gone ? 'is still present' : 'did not appear'}`)
     }
-    if (conditions.selector !== undefined) {
+    if (conditions.selector !== undefined && conditions.valueEquals !== undefined) {
+      if (!valueMatches(conditions.selector, conditions.valueEquals)) missing.push(`field ${conditions.selector} does not hold the expected value`)
+    } else if (conditions.selector !== undefined) {
       const present = visibleMatches(conditions.selector).length > 0
       if (present === conditions.gone) missing.push(`selector ${conditions.selector} ${conditions.gone ? 'is still visible' : 'did not become visible'}`)
     }

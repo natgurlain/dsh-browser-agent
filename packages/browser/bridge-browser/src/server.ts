@@ -88,6 +88,7 @@ import {
   type BridgeCaps,
   type BridgeHmac,
   type ClientFrame,
+  type ProgramStepRef,
   type ToolErrorCode,
 } from './protocol.ts'
 import { SessionPurgeError } from './session-purge.ts'
@@ -248,6 +249,13 @@ export interface BridgeServerDeps {
   audit?: BridgeAuditObserver
   /** Read and verify one session's audit log (undefined: agentless calls). */
   exportAudit?: (sessionId: string | undefined) => Promise<unknown>
+  /**
+   * Bridge-internal RPCs owned by plugin modules (page watchers, tab fleets).
+   * Returns undefined for a method it does not own; checked after the audit
+   * RPCs and before anything reaches the Host API.
+   */
+  extraRpc?: (method: string, payload: unknown, context: { connection: string; signal: AbortSignal }) =>
+    Promise<{ ok: true; result: unknown } | { ok: false; error: { code: string; message: string } }> | undefined
   /**
    * Test seam: force the remote address seen by the privilege gate. The
    * sandbox cannot bind arbitrary loopback literals, so the non-loopback
@@ -420,6 +428,7 @@ export class BridgeServer {
    * @param timeoutMs - per-call budget; defaults to the plugin config value.
    * @param sessionId - optional owning Agent session for approval continuity.
    * @param callId - the model's tool call id (presented with forwarded approvals).
+   * @param program - marks the call as one step of an approved `browser_run` program.
    * @returns the extension's action result.
    * @throws BridgeToolError when no extension is connected, the call times
    *   out, is cancelled, or the extension reports a failure.
@@ -431,6 +440,7 @@ export class BridgeServer {
     timeoutMs: number = this.deps.toolTimeoutMs,
     sessionId?: string,
     callId?: string,
+    program?: ProgramStepRef,
   ): Promise<unknown> {
     const conn = this.pickConnection(name, sessionId)
     if (conn === undefined) {
@@ -452,6 +462,7 @@ export class BridgeServer {
         id, name, args, connection: conn.key,
         ...(sessionId === undefined ? {} : { sessionId }),
         ...(callId === undefined ? {} : { toolCallId: callId }),
+        ...(program === undefined ? {} : { program }),
       })
     })
     return new Promise<unknown>((resolve, reject) => {
@@ -507,6 +518,7 @@ export class BridgeServer {
         expiresAt,
         ...(sessionId === undefined ? {} : { sessionId }),
         ...(sessionId !== undefined && this.sessionTainted(sessionId) ? { tainted: true as const } : {}),
+        ...(program === undefined ? {} : { program }),
       } satisfies BridgeFrame), (error) => {
         /* v8 ignore next -- teardown race: when the write fails, the socket's
         close handler settles the same call with the same code; the callback
@@ -888,8 +900,9 @@ export class BridgeServer {
         ? {}
         : { allowsSession: (sessionId: string) => this.deps.sessionScope!.allowsSession(sessionId, conn.abort.signal, 'read') }),
     })
-    if (audited !== undefined) {
-      const answer = await audited
+    const internal = audited ?? this.deps.extraRpc?.(frame.method, frame.payload, { connection: conn.key, signal: conn.abort.signal })
+    if (internal !== undefined) {
+      const answer = await internal.catch((error: unknown) => ({ ok: false as const, error: { code: 'internal', message: error instanceof Error ? error.message : String(error) } }))
       sendFrame(conn, answer.ok
         ? { t: 'rpc.result', id: frame.id, ok: true, result: { type: 'server-response', rpcId: frame.id, result: { ok: true, value: answer.result } } }
         : { t: 'rpc.result', id: frame.id, ok: false, error: answer.error })

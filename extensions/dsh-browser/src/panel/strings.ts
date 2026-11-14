@@ -645,6 +645,7 @@ const EN: PanelCopy = {
     decisions: {
       'not-required': 'Auto',
       'auto-allowed': 'Trusted',
+      'program-approved': 'Program approved',
       allowed: 'Approved',
       denied: 'Denied',
       'timed-out': 'Timed out',
@@ -1061,6 +1062,7 @@ const ZH: PanelCopy = {
     decisions: {
       'not-required': '自动',
       'auto-allowed': '已信任',
+      'program-approved': '程序已批准',
       allowed: '已批准',
       denied: '已拒绝',
       'timed-out': '已超时',

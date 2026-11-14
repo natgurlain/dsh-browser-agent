@@ -36,6 +36,8 @@ import { createBrowserToolCall, registerBrowserTools } from './tools.ts'
 import { registerScreenshotTool } from './screenshot-tools.ts'
 import { registerPdfTool } from './pdf-tools.ts'
 import { registerBrowserDevTools } from './devtools-tools.ts'
+import { registerRunProgramTool } from './run-program.ts'
+import { BRIDGE_WATCH_FIRE_METHOD, fileWatchRecords, handleWatchFire, registerWatchTools, WakeLimiter, type WatchRecordStore } from './watchers.ts'
 import {
   BEACON_PORTS,
   BRIDGE_CONFIG_PATH,
@@ -87,6 +89,9 @@ const SESSIONS_ROOT = dshHomePath('sessions')
 
 /** File (under the dsh home) listing the sessions this bridge created: its ownership scope. */
 const SESSION_LEDGER_FILE_NAME = 'browser-bridge-sessions.json'
+
+/** File (under the dsh home) recording which session owns each page watcher. */
+const WATCH_RECORDS_FILE_NAME = 'browser-bridge-watchers.json'
 
 /** Default: sessions materialize only on the first message (open-and-close leaves no trace). */
 const DEFAULT_DEFER_SESSION_CREATE = true
@@ -226,7 +231,8 @@ export async function apply(ctx: Context, resolved: ResolvedConfig): Promise<voi
     }
   }
   const ledger = await fileSessionLedger(dshHomePath(SESSION_LEDGER_FILE_NAME), message => { ctx.logger.warn(message) })
-  mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection), ledger)
+  const watchRecords = await fileWatchRecords(dshHomePath(WATCH_RECORDS_FILE_NAME), message => { ctx.logger.warn(message) })
+  mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection), ledger, watchRecords)
 }
 
 function mountBridge(
@@ -235,6 +241,7 @@ function mountBridge(
   tokenRes: Awaited<ReturnType<typeof resolveToken>>,
   hostApi: BrowserHostApi,
   ledger: SessionLedger,
+  watchRecords: WatchRecordStore,
 ): void {
   // Workspace grouping wraps the gateway create; session deferral wraps the
   // result so materialization at first prompt still flows through grouping.
@@ -339,6 +346,22 @@ function mountBridge(
   })
   // Hash-chained per-session record of every browser action (0600 JSONL).
   const auditLog = resolved.auditLogPath === '' ? undefined : new AuditLog(resolved.auditLogPath)
+  // Page watchers wake only sessions this bridge owns, at a bounded rate (watchers.ts).
+  const wakeLimiter = new WakeLimiter()
+  const extraRpc = (method: string, payload: unknown, context: { signal: AbortSignal }) => method === BRIDGE_WATCH_FIRE_METHOD
+    ? handleWatchFire(payload, context.signal, {
+        records: watchRecords,
+        ownsSession: (sessionId, signal) => fenced.allowsSession(sessionId, signal, 'own'),
+        wake: (sessionId, message) => {
+          const agent = ctx.agents.get(sessionId as Parameters<typeof ctx.agents.get>[0])
+          if (agent === undefined) return false
+          agent.followup(message)
+          return true
+        },
+        taint: (sessionId) => { taint.mark(sessionId, 'browser_watch') },
+        limiter: wakeLimiter,
+      })
+    : undefined
   const server = new BridgeServer({
     token: tokenRes.token,
     api: withTaintMethods(fenced, taint, (sessionId, signal) => fenced.allowsSession(sessionId, signal, 'own')),
@@ -358,6 +381,7 @@ function mountBridge(
       taint.mark(sessionId, 'snapshot-injection')
     },
     purgeSession,
+    extraRpc,
     ...(auditLog === undefined ? {} : {
       audit: new ToolCallAuditor(auditLog, (error) => {
         ctx.logger.warn(`browser bridge: audit log write failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -432,7 +456,11 @@ function mountBridge(
       approvalHoldMs: DEFAULT_MAX_APPROVAL_HOLD_MS,
       workspacePath: resolved.sessionWorkspacePath,
     })
+    const disposeRun = registerRunProgramTool(ctx, server, { toolTimeoutMs: resolved.toolTimeoutMs })
+    const disposeWatch = registerWatchTools(ctx, server, watchRecords, { toolTimeoutMs: resolved.toolTimeoutMs })
     return () => {
+      disposeWatch()
+      disposeRun()
       disposePdf()
       disposeScreenshot()
       for (const dispose of disposers.values()) dispose()

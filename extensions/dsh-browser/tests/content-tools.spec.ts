@@ -171,6 +171,17 @@ describe('browser_wait conditions', () => {
     expect(gone.text).toContain('selector .spinner gone')
   })
 
+  it('checks a field value for browser_run guards without returning it, and refuses sensitive fields', async () => {
+    document.body.innerHTML = '<input id="q" value="hello"><input id="pw" type="password" value="hunter2">'
+    const met = await runAction('browser_wait', { selector: '#q', valueEquals: 'hello', timeoutMs: 500 }, ctx())
+    expect(met.text).toContain('field #q holds the expected value')
+    await expect(runAction('browser_wait', { selector: '#q', valueEquals: 'nope', timeoutMs: 150 }, ctx()))
+      .rejects.toThrow(/field #q does not hold the expected value/)
+    await expect(runAction('browser_wait', { selector: '#pw', valueEquals: 'hunter2', timeoutMs: 150 }, ctx()))
+      .rejects.toThrow(/sensitive field/)
+    expect(() => parseWaitConditions({ valueEquals: 'x' })).toThrow(/valueEquals needs a selector/)
+  })
+
   it('fails with a timeout that names the unmet condition', async () => {
     await expect(runAction('browser_wait', { selector: '#never', timeoutMs: 150 }, ctx()))
       .rejects.toThrow(/timed out after \d+ms: selector #never did not become visible/)

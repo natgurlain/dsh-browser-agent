@@ -86,6 +86,7 @@ import { HOLD_EXPIRED_MESSAGE, PauseGate, type PauseRequest } from './pause-gate
 import { capturePauseBaseline, prepareResume, type PauseBaseline, type ResumeFlowDeps } from './resume-flow.ts'
 import { AgentOverlayController } from './agent-overlay.ts'
 import { DialogController } from './dialogs.ts'
+import { approveProgram, coverByProgram, ProgramGrants } from './run-program.ts'
 import {
   isApprovalDecision,
   type ApprovalAuthorization,
@@ -619,6 +620,8 @@ const sessionTrustedActionOrigins = new Set<string>()
  * never implied by the origin allowlist or unrestricted access.
  */
 const devToolsGrants = new DevToolsGrants()
+/** Approved browser_run programs; each step claims its own grant (run-program.ts). */
+const programGrants = new ProgramGrants()
 /** Tool calls that are either withdrawable or completing an already-dispatched action. */
 interface ActiveToolCall {
   controller: AbortController
@@ -999,6 +1002,7 @@ async function engageKillSwitch(): Promise<void> {
   approvals.cancelAll()
   sessionTrustedActionOrigins.clear()
   devToolsGrants.clear()
+  programGrants.clear()
   for (const call of unsettledToolCalls) {
     call.revocationRequested = true
     call.controller.abort()
@@ -2210,6 +2214,13 @@ function routeToolCall(call: ToolCall): void {
     : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
   const sharePageContent = unrestrictedAccess ? 'auto' : settings.sharePageContent
   const policy = auditedPolicy(activeCall, policyRuntime.hook(call.id, call.sessionId, unrestrictedAccess))
+  // browser_run: an approved program stands in for this step's ordinary card only (run-program.ts).
+  const programCover = programGrants.claim(call)
+  const approve = (windowId: number): ((prompt: ApprovalPrompt) => Promise<ApprovalAuthorization>) => coverByProgram(
+    programCover,
+    auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(prompt, controller.signal, windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt)),
+    () => { activeCall.decision = 'program-approved' },
+  )
   let policyTabOrigin: string | undefined
   const managementDispatch = async (): Promise<ToolAnswer> => {
     await affinityReady
@@ -2227,7 +2238,7 @@ function routeToolCall(call: ToolCall): void {
       call,
       sharePageContent,
       budget,
-      auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(prompt, controller.signal, windowId ?? 0, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt)),
+      approve(windowId ?? 0),
       controller.signal,
       undefined,
       undefined,
@@ -2251,6 +2262,14 @@ function routeToolCall(call: ToolCall): void {
     ? managementDispatch()
     : isDevToolsTool(call.name)
     ? dispatchDevToolsTool(call, controller.signal)
+    : call.name === 'browser_run'
+    ? approveProgram(call, {
+        grants: programGrants,
+        resolveTab: () => resolveToolTab(call.sessionId),
+        listFrames: listTabFrames,
+        authorize: (prompt, windowId) => auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(shown, controller.signal, windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt))(prompt),
+        signal: controller.signal,
+      })
     : call.name === 'browser_open_tab'
     ? resolveOpenTabWindow(call.sessionId).then((target) => 'ok' in target
       ? target
@@ -2259,7 +2278,7 @@ function routeToolCall(call: ToolCall): void {
           target.windowId,
           sharePageContent,
           budget,
-          auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt)),
+          approve(target.windowId),
           controller.signal,
           (tab) => bindOpenedTab(tab, call.sessionId, { active: call.args.active !== false }),
           (tabId) => tabAffinity.allowsTarget(tabId, call.sessionId),
@@ -2272,7 +2291,7 @@ function routeToolCall(call: ToolCall): void {
           call,
           sharePageContent,
           budget,
-          auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt)),
+          approve(target.windowId),
           controller.signal,
           noteCallTarget(activeCall, target, call.sessionId),
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
