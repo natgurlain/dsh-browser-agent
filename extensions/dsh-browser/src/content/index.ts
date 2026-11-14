@@ -11,7 +11,7 @@
  */
 
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import { runAction, ActionError, typeTargetIsSensitive } from './actions.ts'
+import { abortRunningActions, runAction, ActionError, typeTargetIsSensitive } from './actions.ts'
 import { ElementIds } from './ids.ts'
 import { handleInputSetup } from './input-support.ts'
 import { SelectionWatcher } from './selection.ts'
@@ -87,6 +87,12 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
   if (msg.type === 'DSH_SELECTION_RESET') {
     // The panel dropped this frame's quote; let the same passage be re-reported.
     selectionWatcher.resetDedupe()
+    sendResponse({ ok: true })
+    return
+  }
+  if (msg.type === 'DSH_ABORT') {
+    // Kill switch: stop waits and scroll/select loops already running here.
+    abortRunningActions()
     sendResponse({ ok: true })
     return
   }

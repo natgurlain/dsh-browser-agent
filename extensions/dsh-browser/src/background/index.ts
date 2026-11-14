@@ -116,7 +116,7 @@ import {
 import { RUNTIME_LEASE_STORAGE_KEY, RuntimeKeeper, RuntimeLease } from './runtime-lifecycle.ts'
 import { loadClientIdentity } from './client-identity.ts'
 import type { BridgeClientIdentity } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import { devToolsSupported } from './debugger-session.ts'
+import { DevToolsError, devToolsSupported } from './debugger-session.ts'
 import { createDevToolsController } from './devtools-controller.ts'
 import {
   devToolsApprovalForCall,
@@ -398,10 +398,12 @@ const dialogs = new DialogController({
     arm: async (tabId) => {
       // Opt-in: pre-attaching shows Chrome's debugging bar on every action.
       if (!settingsLoaded || !settings.catchPageDialogs) return () => {}
+      await refuseWhileKilled()
       const lease = await debuggerBroker.acquire(tabId, 'input', { domains: ['Page'] })
       return () => { void lease.release().catch(() => undefined) }
     },
     send: async (tabId, method, params) => {
+      await refuseWhileKilled()
       const lease = await debuggerBroker.acquire(tabId, 'input')
       try {
         return await lease.session.send(method, params)
@@ -416,6 +418,7 @@ const dialogs = new DialogController({
 const inputRuntime: InputRuntime = {
   supported: devToolsCapability,
   async run(tabId, operation) {
+    await refuseWhileKilled()
     // Page lets a dialog opened by the trusted input be reported at once.
     const lease = await debuggerBroker.acquire(tabId, 'input', { domains: ['Page'] })
     try {
@@ -683,21 +686,44 @@ const KILL_SWITCH_COMMAND = 'kill-switch'
 /** While engaged, nothing reconnects the bridge until the user releases it. */
 let killSwitchEngaged = false
 let killSwitchLoaded = false
+/** Where the switch persists: local survives browser restarts and extension reloads; session is read for older state. */
+function killSwitchAreas(): chrome.storage.StorageArea[] {
+  const storage = chrome.storage as { local?: chrome.storage.StorageArea; session?: chrome.storage.StorageArea }
+  return [storage.local, storage.session].filter((area): area is chrome.storage.StorageArea => area !== undefined)
+}
 const killSwitchReady = (async (): Promise<void> => {
-  const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
-  try {
-    const stored = area === undefined ? undefined : await area.get(KILL_SWITCH_KEY)
-    // A worker restart must not silently reconnect a stopped agent.
-    if (stored?.[KILL_SWITCH_KEY] === true) killSwitchEngaged = true
-  } catch { /* unreadable: not engaged */ }
+  for (const area of killSwitchAreas()) {
+    try {
+      const stored = await area.get(KILL_SWITCH_KEY)
+      // A worker restart, browser restart, or extension reload must not
+      // silently reconnect a stopped agent: only the user's Reconnect clears it.
+      if (stored?.[KILL_SWITCH_KEY] === true) killSwitchEngaged = true
+    } catch { /* unreadable area: keep looking */ }
+  }
   killSwitchLoaded = true
   if (killSwitchEngaged) refreshActionBadges()
 })()
 
 function persistKillSwitch(): void {
-  const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
-  if (area === undefined) return
-  void Promise.resolve(area.set({ [KILL_SWITCH_KEY]: killSwitchEngaged })).catch(() => {})
+  for (const area of killSwitchAreas()) {
+    void Promise.resolve(area.set({ [KILL_SWITCH_KEY]: killSwitchEngaged })).catch(() => {})
+  }
+}
+
+/** Debugger-backed input and dialog answers stop with the switch, even for calls already past their checks. */
+async function refuseWhileKilled(): Promise<void> {
+  if (!killSwitchLoaded) await killSwitchReady
+  if (killSwitchEngaged) throw new DevToolsError('devtools-detached', 'The user stopped the agent (kill switch); nothing more is sent to the page.')
+}
+
+/** Tell every content script to stop loops already running (waits, scrolling, selects). */
+function abortContentActions(): void {
+  void Promise.resolve(chrome.tabs?.query?.({})).then((tabs) => {
+    for (const tab of tabs ?? []) {
+      if (tab.id === undefined) continue
+      void Promise.resolve(chrome.tabs.sendMessage(tab.id, { type: 'DSH_ABORT' })).catch(() => undefined)
+    }
+  }).catch(() => undefined)
 }
 
 function broadcastKillSwitch(): void {
@@ -784,6 +810,7 @@ async function engageKillSwitch(): Promise<void> {
   }
   for (const refresh of activeFollowRefreshes.values()) refresh.controller.abort()
   cancelAllToolCalls()
+  abortContentActions()
   interactionResponses.failAll(responseMessages().disconnected)
   transientEvents.clear()
   dialogs.clearAll()

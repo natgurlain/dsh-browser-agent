@@ -127,8 +127,35 @@ export function waitForPageSettled(policy: PageSettlePolicy = ACTION_SETTLE): Pr
   })
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => { setTimeout(resolve, ms) })
+/** Bumped by the background's kill switch (`DSH_ABORT`); actions started earlier stop. */
+let abortGeneration = 0
+const abortWakers = new Set<() => void>()
+
+/** Stop every action already running in this frame (waits, scroll and select loops). */
+export function abortRunningActions(): void {
+  abortGeneration += 1
+  for (const wake of [...abortWakers]) wake()
+}
+
+function stopIfAborted(ctx: ActionContext): void {
+  if (ctx.generation !== undefined && ctx.generation !== abortGeneration) {
+    throw new ActionError('action-failed', 'The action was stopped by the user (kill switch).')
+  }
+}
+
+/** Sleep that ends early, and throws, once the kill switch fires. */
+async function pause(ms: number, ctx: ActionContext): Promise<void> {
+  stopIfAborted(ctx)
+  await new Promise<void>((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer)
+      abortWakers.delete(done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    abortWakers.add(done)
+  })
+  stopIfAborted(ctx)
 }
 
 function elementOrThrow(ids: ElementIds, index: number): Element {
@@ -260,13 +287,16 @@ export interface ActionContext {
    * snapshot baseline (post-action verification details).
    */
   shareContent?: boolean
+  /** Abort generation the action started in (set by {@link runAction}). */
+  generation?: number
 }
 
 /** Actions whose result carries a post-action verification report. */
 const VERIFIED_ACTIONS = new Set(['browser_click', 'browser_type', 'browser_press', 'browser_scroll', 'browser_select', 'browser_clipboard'])
 
 /** Run one named action with its args. */
-export async function runAction(action: string, args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+export async function runAction(action: string, args: Record<string, unknown>, context: ActionContext): Promise<ActionResult> {
+  const ctx: ActionContext = context.generation === undefined ? { ...context, generation: abortGeneration } : context
   if (!VERIFIED_ACTIONS.has(action)) return runUnverified(action, args, ctx)
   const probe = beginVerification()
   const result = await runUnverified(action, args, ctx)
@@ -833,13 +863,14 @@ async function infiniteScroll(args: Record<string, unknown>, target: ScrollTarge
     const deadline = performance.now() + SCROLL_ROUND_GROWTH_WAIT_MS
     let grew = false
     while (performance.now() < deadline) {
-      await sleep(100)
+      await pause(100, ctx)
       if (countItems() > items || target.height() > heightBefore) {
         grew = true
         break
       }
     }
     await waitForPageSettled(SCROLL_SETTLE)
+    stopIfAborted(ctx)
     const now = countItems()
     if (!grew && now <= items) {
       reason = 'no new items appeared'
@@ -929,7 +960,7 @@ async function waitAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   if (conditions !== undefined) return conditionalWait(conditions, ctx)
   const ms = typeof args.ms === 'number' && args.ms > 0 ? args.ms : 0
   await waitForPageSettled(EXPLICIT_WAIT_SETTLE)
-  if (ms > 0) await sleep(ms)
+  if (ms > 0) await pause(ms, ctx)
   return withPageDelta(`The page is stable${ms > 0 ? ` after an additional ${ms}ms wait` : ''}.`, ctx)
 }
 
@@ -1024,7 +1055,7 @@ async function conditionalWait(conditions: WaitConditions, ctx: ActionContext): 
     if (elapsed >= conditions.timeoutMs) {
       throw new ActionError('action-failed', `browser_wait timed out after ${Math.round(elapsed)}ms: ${missing.join('; ')}.`)
     }
-    await sleep(Math.min(WAIT_POLL_MS, conditions.timeoutMs - elapsed))
+    await pause(Math.min(WAIT_POLL_MS, conditions.timeoutMs - elapsed), ctx)
     missing = unmet()
   }
   const elapsed = Math.round(performance.now() - startedAt)
@@ -1048,7 +1079,10 @@ async function selectAction(args: Record<string, unknown>, ctx: ActionContext): 
         target.scrollIntoView({ block: 'center', behavior: 'instant' })
         dispatchPointerClick(target, 1, 0, [])
       },
-      settle: async () => { await waitForPageSettled(ACTION_SETTLE) },
+      settle: async () => {
+        await waitForPageSettled(ACTION_SETTLE)
+        stopIfAborted(ctx)
+      },
       type: (field, text) => {
         field.focus()
         setNativeValue(field, text)

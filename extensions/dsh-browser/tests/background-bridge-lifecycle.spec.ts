@@ -1138,6 +1138,34 @@ describe('background bridge lifecycle', () => {
       expect(chromeMock.sessionStore.dshKillSwitch).toBe(true)
     })
 
+    it('persists the switch in local storage and stops in-page loops (#8)', async () => {
+      const chromeMock = mockChrome({
+        localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }),
+      })
+      const { panel, socket } = await connected(chromeMock)
+      panel.onMessage.emit({ type: 'kill-switch.engage' })
+      await vi.waitFor(() => { expect(socket.readyState).toBe(FakeWebSocket.CLOSED) })
+      // Local storage survives a browser restart and an extension reload.
+      expect(chrome.storage.local.set).toHaveBeenCalledWith({ dshKillSwitch: true })
+      await vi.waitFor(() => { expect(chromeMock.tabs.sendMessage).toHaveBeenCalledWith(1, { type: 'DSH_ABORT' }) })
+      panel.onMessage.emit({ type: 'kill-switch.release' })
+      await vi.waitFor(() => { expect(chrome.storage.local.set).toHaveBeenCalledWith({ dshKillSwitch: false }) })
+    })
+
+    it('does not connect after a browser restart or extension reload while the switch is engaged (#8)', async () => {
+      const chromeMock = mockChrome({
+        // Session storage is empty after a reload; local storage still holds the switch.
+        localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' }, dshKillSwitch: true }),
+      })
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+      await import('../src/background/index.ts')
+      const panel = panelPort()
+      chromeMock.onConnect.emit(panel.port)
+      await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'kill-switch', engaged: true }) })
+      await new Promise((resolve) => { setTimeout(resolve, 20) })
+      expect(FakeWebSocket.instances).toHaveLength(0)
+    })
+
     it('does not connect after a worker restart while the switch is engaged', async () => {
       const chromeMock = mockChrome({
         localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }),
