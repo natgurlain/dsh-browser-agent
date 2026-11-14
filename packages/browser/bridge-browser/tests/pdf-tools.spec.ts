@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -9,18 +9,20 @@ import { registerPdfTool, safePdfName } from '../src/pdf-tools.ts'
 const PDF = Buffer.from('%PDF-1.7\n%test\n').toString('base64')
 const roots: string[] = []
 
-function harness(result: unknown) {
+function harness(result: unknown, mode: string | null = 'workspace-write') {
   const registered: Record<string, unknown>[] = []
+  const sandboxPolicy = { resolve: vi.fn(() => ({ mode })) }
   const ctx = {
     tools: { register: vi.fn((definition: Record<string, unknown>) => { registered.push(definition); return () => {} }) },
+    get: (name: string) => (name === 'sandboxPolicy' && mode !== null ? sandboxPolicy : undefined),
   } as unknown as Context
   const requestTool = vi.fn(async () => result)
   const root = mkdtempSync(join(tmpdir(), 'dsh-pdf-'))
   roots.push(root)
-  const directory = join(root, 'pdf')
-  registerPdfTool(ctx, { requestTool } as unknown as BridgeServer, { toolTimeoutMs: 1_000, directory })
+  const workspace = join(root, 'workspace')
+  registerPdfTool(ctx, { requestTool } as unknown as BridgeServer, { toolTimeoutMs: 1_000, workspacePath: workspace })
   const execute = registered[0]!.execute as (args: unknown, exec: unknown) => Promise<{ text: string; path: string; bytes: number }>
-  return { execute, requestTool, directory }
+  return { execute, requestTool, workspace, sandboxPolicy }
 }
 
 afterEach(() => {
@@ -28,27 +30,37 @@ afterEach(() => {
 })
 
 describe('browser_save_pdf', () => {
-  it('writes the rendered PDF into the workspace and reports its path', async () => {
-    const { execute, requestTool, directory } = harness({ pdf: { data: PDF, title: 'Quarterly: report?', url: 'https://example.com/q' } })
-    const exec = { signal: new AbortController().signal, agent: { id: 'session-1' } }
+  it('writes the rendered PDF into the session workspace through the shared writer', async () => {
+    const { execute, requestTool, workspace } = harness({ pdf: { data: PDF, title: 'Quarterly: report?', url: 'https://example.com/q' } })
+    const cwd = mkdtempSync(join(tmpdir(), 'dsh-pdf-cwd-'))
+    roots.push(cwd)
+    const exec = { signal: new AbortController().signal, agent: { id: 'session-1', session: { header: { cwd } } } }
     const result = await execute({ landscape: true }, exec)
     expect(requestTool).toHaveBeenCalledWith('browser_save_pdf', { landscape: true }, exec.signal, 1_000, 'session-1')
-    expect(result.path).toBe(join(directory, 'Quarterly report.pdf'))
+    // A session with a cwd writes there, never into the bridge workspace.
+    expect(result.path).toBe(join(cwd, 'pdf', 'Quarterly report.pdf'))
     expect(readFileSync(result.path, 'latin1')).toMatch(/^%PDF-/)
-    expect(statSync(result.path).mode & 0o777).toBe(0o600)
+    expect(result.text).toContain('pdf/Quarterly report.pdf')
     expect(result.text).toContain('from https://example.com/q')
+    expect(() => readdirSync(workspace)).toThrow()
     // A second save never overwrites the first.
-    const again = await execute({}, { signal: new AbortController().signal })
-    expect(again.path).toBe(join(directory, 'Quarterly report-2.pdf'))
-    expect(readdirSync(directory).sort()).toEqual(['Quarterly report-2.pdf', 'Quarterly report.pdf'])
+    const again = await execute({}, exec)
+    expect(again.path).toBe(join(cwd, 'pdf', 'Quarterly report-2.pdf'))
   })
 
-  it('keeps model-chosen names inside the workspace', async () => {
-    const { execute, directory } = harness({ pdf: { data: PDF } })
+  it('falls back to the bridge workspace for agentless calls and keeps names inside it', async () => {
+    const { execute, workspace } = harness({ pdf: { data: PDF } })
     const result = await execute({ filename: '../../etc/passwd' }, { signal: new AbortController().signal })
-    expect(result.path).toBe(join(directory, 'passwd.pdf'))
+    expect(result.path).toBe(join(workspace, 'pdf', 'passwd.pdf'))
     expect(safePdfName('..', 'fallback')).toBe('fallback.pdf')
     expect(safePdfName('a/b\\c.PDF', 'x')).toBe('c.pdf')
+    expect(safePdfName('.hidden', 'x')).toBe('hidden.pdf')
+  })
+
+  it('refuses read-only sessions before touching the page', async () => {
+    const { execute, requestTool } = harness({ pdf: { data: PDF } }, 'read-only')
+    await expect(execute({}, { signal: new AbortController().signal })).rejects.toThrow(/read-only/)
+    expect(requestTool).not.toHaveBeenCalled()
   })
 
   it('refuses data that is not a PDF', async () => {

@@ -1,26 +1,26 @@
 /**
  * `browser_save_pdf`: the extension renders the controlled tab with
  * `Page.printToPDF` and returns the bytes; this side writes them into the
- * browser-session workspace (the same directory extension-created sessions
- * use, see `session-workspace.ts`) and answers the model with the path.
+ * calling session's workspace through the shared, sandbox-checked
+ * {@link writeWorkspaceFile} (never a plain fs write) and answers with the path.
  *
  * File names are derived from the model's `filename` (base name only) or the
- * page title, sanitized, and never overwrite an existing file.
+ * page title, sanitized, and placed under `pdf/`; an existing file is never
+ * overwritten (a numbered sibling is chosen instead).
  *
  * @module
  */
 
-import { mkdir, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { BridgeServer } from './server.ts'
+import { WorkspaceWriteError, workspaceWriteTarget, writeWorkspaceFile, type WorkspaceWriteResult } from './workspace-write.ts'
 
 /** Options for the PDF tool. */
 export interface PdfToolOptions {
   toolTimeoutMs: number
-  /** Directory the PDFs go into (`<session workspace>/pdf`). */
-  directory: string
+  /** The bridge's configured browser-session workspace ('' for none). */
+  workspacePath?: string
 }
 
 interface PdfWireResult {
@@ -29,9 +29,12 @@ interface PdfWireResult {
 }
 
 const MAX_NAME_CHARS = 80
+/** Workspace folder the PDFs go into. */
+const PDF_FOLDER = 'pdf'
 
 /**
- * Turn a model- or page-supplied name into a safe file name ending in `.pdf`.
+ * Turn a model- or page-supplied name into a safe file name ending in `.pdf`
+ * (no directories, no leading dots, no control or reserved characters).
  * @param value - requested name or page title.
  * @param fallback - used when nothing usable remains.
  */
@@ -49,20 +52,22 @@ export function safePdfName(value: string | undefined, fallback: string): string
   return `${cleaned === '' ? fallback : cleaned}.pdf`
 }
 
-/** Write without overwriting: `name.pdf`, `name-2.pdf`, … */
-async function writeUnique(directory: string, name: string, data: Buffer): Promise<string> {
-  await mkdir(directory, { recursive: true })
+/** Write without overwriting: `pdf/name.pdf`, `pdf/name-2.pdf`, … */
+async function writeUnique(
+  target: ReturnType<typeof workspaceWriteTarget>,
+  name: string,
+  bytes: Uint8Array,
+): Promise<WorkspaceWriteResult> {
   const stem = name.slice(0, -'.pdf'.length)
   for (let attempt = 1; attempt <= 100; attempt += 1) {
-    const path = join(directory, attempt === 1 ? name : `${stem}-${attempt}.pdf`)
+    const relPath = `${PDF_FOLDER}/${attempt === 1 ? name : `${stem}-${attempt}.pdf`}`
     try {
-      await writeFile(path, data, { flag: 'wx', mode: 0o600 })
-      return path
+      return await writeWorkspaceFile(target, relPath, bytes, { allowedExt: ['.pdf'], defaultExt: '.pdf' })
     } catch (error: unknown) {
-      if ((error as { code?: unknown }).code !== 'EEXIST') throw error
+      if (!(error instanceof WorkspaceWriteError) || !/already exists/.test(error.message)) throw error
     }
   }
-  throw new Error(`Could not find a free file name for ${name} in ${directory}.`)
+  throw new WorkspaceWriteError(`could not find a free file name for ${name} in ${PDF_FOLDER}/.`)
 }
 
 /**
@@ -72,7 +77,7 @@ async function writeUnique(directory: string, name: string, data: Buffer): Promi
 export function registerPdfTool(ctx: Context, bridge: BridgeServer, options: PdfToolOptions): () => void {
   const tool = defineTool({
     name: 'browser_save_pdf',
-    description: 'Save the controlled tab as a PDF file in the agent workspace and return its local path. Chrome only; requires approval.',
+    description: 'Save the controlled tab as a PDF under pdf/ in the session workspace and return its path. Chrome only; requires approval.',
     parameters: {
       filename: { type: 'string', description: 'File name (no directories); defaults to the page title.' },
       landscape: { type: 'boolean', description: 'Landscape orientation. Defaults to false.' },
@@ -93,6 +98,8 @@ export function registerPdfTool(ctx: Context, bridge: BridgeServer, options: Pdf
     },
     execute: async (args, exec) => {
       const a = args as { filename?: string; landscape?: boolean; background?: boolean }
+      // Ask the sandbox before the page is touched: a read-only session fails here.
+      workspaceWriteTarget(ctx, exec.agent, options.workspacePath ?? '')
       const wireArgs = {
         ...a.landscape !== undefined ? { landscape: a.landscape } : {},
         ...a.background !== undefined ? { background: a.background } : {},
@@ -112,11 +119,13 @@ export function registerPdfTool(ctx: Context, bridge: BridgeServer, options: Pdf
       const title = typeof result.pdf?.title === 'string' ? result.pdf.title : undefined
       const stamp = new Date().toISOString().replace(/[:.]/g, '-')
       const name = safePdfName(a.filename ?? title, `page-${stamp}`)
-      const path = await writeUnique(options.directory, name, bytes)
+      // Re-resolved after the page work: the session's mode may have changed.
+      const target = workspaceWriteTarget(ctx, exec.agent, options.workspacePath ?? '')
+      const saved = await writeUnique(target, name, new Uint8Array(bytes))
       const source = typeof result.pdf?.url === 'string' ? ` from ${result.pdf.url}` : ''
       return {
-        text: `Saved the page${source} as a PDF: ${path} (${bytes.length} bytes).`,
-        path,
+        text: `Saved the page${source} as a PDF to ${saved.relativePath} (${saved.path}, ${bytes.length} bytes).`,
+        path: saved.path,
         bytes: bytes.length,
       }
     },

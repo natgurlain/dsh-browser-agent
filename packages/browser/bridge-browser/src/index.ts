@@ -18,7 +18,6 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
@@ -391,11 +390,11 @@ function mountBridge(
     const disposeScreenshot = registerScreenshotTool(ctx, server, {
       toolTimeoutMs: resolved.toolTimeoutMs,
     })
-    // PDFs land in the browser-session workspace; with grouping disabled
-    // (empty path) they still go to its default location.
+    // PDFs go into the calling session's workspace through the shared,
+    // sandbox-checked writer (the bridge's workspace for agentless calls).
     const disposePdf = registerPdfTool(ctx, server, {
       toolTimeoutMs: resolved.toolTimeoutMs,
-      directory: join(resolved.sessionWorkspacePath === '' ? DEFAULT_SESSION_WORKSPACE_PATH : resolved.sessionWorkspacePath, 'pdf'),
+      workspacePath: resolved.sessionWorkspacePath,
     })
     return () => {
       disposePdf()

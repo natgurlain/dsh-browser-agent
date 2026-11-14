@@ -758,7 +758,7 @@ try {
 
   const savedPdf = await tool('browser_save_pdf', { filename: 'reliability fixture' })
   const savedText = succeed(savedPdf)
-  savedPdfPath = join(env.DSH_HOME, 'browser-sessions', 'pdf', 'reliability fixture.pdf')
+  savedPdfPath = join(workspace, 'pdf', 'reliability fixture.pdf')
   assert.ok(savedText.includes(savedPdfPath), savedText)
   assert.equal((await readFile(savedPdfPath)).subarray(0, 5).toString('latin1'), '%PDF-')
   results.push('browser_save_pdf renders the tab with Page.printToPDF into the session workspace')
