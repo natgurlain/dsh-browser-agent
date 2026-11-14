@@ -101,7 +101,7 @@ async function start(reopen) {
     '- id: bridge-browser',
     '  config:',
     `    token: ${JSON.stringify(token)}`,
-    '    sessionWorkspacePath: ""',
+    `    sessionWorkspacePath: ${JSON.stringify(join(temp, 'browser-sessions'))}`,
     '    deferSessionCreate: false',
     '- id: llm-pi-ai',
     '  config:',
@@ -279,6 +279,7 @@ async function start(reopen) {
   // Business failures are part of the contract, so the smoke also reads raw envelopes.
   rpc.raw = (method, payload) => send(method, payload)
   rpc.request = request
+  rpc.base = base
   rpc.event = (method, sessionId, accept = () => true) => frame(value => value.t === 'event'
     && value.frame.method === method && value.frame.payload.sessionId === sessionId && accept(value.frame.payload))
   return rpc
@@ -315,14 +316,55 @@ try {
   await writeFile(legacyFile, legacyBytes)
   await command(['plugin', '--profile', 'web', 'add', '-w', `@natgurlain/dsh-bridge-browser@link:${bridge}`])
   await command(['plugin', '--profile', 'web', 'add', `@deepseek-ai/dsh-experimental-tool-worktree@${expectedVersion}`])
+  // The fixture sessions need a fixed id and directory, which the bridge no
+  // longer lets its client choose. They are placed as the owner through the
+  // probe, and recorded in the bridge's session ledger as an earlier bridge
+  // run would have left them; `foreignSessionId` is not in the ledger.
+  const foreignSessionId = `session-${randomUUID()}`
+  await writeFile(join(home, 'browser-bridge-sessions.json'),
+    JSON.stringify([sessionId, ...worktreeSessions.map(entry => entry.sessionId)]), { mode: 0o600 })
   let rpc = await start(false)
-  const created = await rpc('session.create', { sessionId, cwd: temp })
-  assert.equal(created.sessionId, sessionId)
+  const place = async (id, cwd) => {
+    const response = await fetch(`${rpc.base}/smoke/create-session`, {
+      method: 'POST', body: JSON.stringify({ sessionId: id, cwd }), signal: AbortSignal.timeout(30_000),
+    })
+    assert.equal(response.status, 200, await response.clone().text())
+    assert.equal((await response.json()).sessionId, id)
+  }
+  await place(sessionId, temp)
   const initial = await observation()
   assert.equal(initial.sessionId, sessionId)
   for (const entry of worktreeSessions) {
-    await rpc('session.create', { sessionId: entry.sessionId, cwd: worktreeRepository })
+    await place(entry.sessionId, worktreeRepository)
     await observation(`${marker}.${entry.sessionId}`)
+  }
+  await place(foreignSessionId, temp)
+  // The bridge mints its own sessions: a requested id or directory is dropped.
+  const minted = await rpc('session.create', { sessionId: foreignSessionId, cwd: worktreeRepository })
+  assert.notEqual(minted.sessionId, foreignSessionId)
+  // A session the bridge did not create stays readable but cannot be driven.
+  await rpc('session.history', { sessionId: foreignSessionId })
+  for (const [method, payload] of [
+    ['session.prompt', { sessionId: foreignSessionId, mode: 'queue', content: [{ type: 'text', text: 'hi' }] }],
+    ['commands.execute', { sessionId: foreignSessionId, line: '/plan' }],
+    [BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId: foreignSessionId, snapshot: 'Page: x' }],
+    [BRIDGE_SESSION_PURGE_METHOD, { sessionId: foreignSessionId }],
+  ]) {
+    const refused = await rpc.request(method, payload)
+    const error = refused.ok ? refused.result?.result?.error : refused.error
+    assert.equal(error?.code, 'forbidden', `${method}: ${JSON.stringify(refused)}`)
+  }
+  assert.equal((await rpc('session.list', {})).items.some(item => item.sessionId === foreignSessionId), false,
+    'the panel lists only the bridge\'s own sessions')
+  // Snapshot injection and prompts need a restricted preset; under a
+  // full-access Host default, switching back to one is the allowed way out.
+  const startingPreset = (await rpc('session.permissions', { sessionId })).current
+  const switchedFromFullAccess = !['read-only', 'workspace-write'].includes(startingPreset)
+  if (switchedFromFullAccess) {
+    const refused = await rpc.request(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId, snapshot: 'Page: refused' })
+    assert.equal(refused.ok, false, JSON.stringify(refused))
+    assert.equal(refused.error.code, 'forbidden')
+    await rpc('commands.execute', { sessionId, line: '/permission workspace-write' })
   }
   const image = await rpc('session.attachment', { sessionId, attachment: initial.attachment })
   assert.deepEqual(image.attachment, initial.attachment)
@@ -407,7 +449,8 @@ try {
   const splice = shutdown[0]?.event
   assert.equal(splice?.type, 'agent/inbox/spliced')
   assert.equal(splice.data.outcome, 'canceled')
-  assert.equal(splice.data.removedCount, 1)
+  // A preset switch on a live Agent also queues its own context notice.
+  assert.equal(splice.data.removedCount, switchedFromFullAccess ? 2 : 1, JSON.stringify(splice))
   const reopenedLegacy = await rpc('session.history', { sessionId: legacySessionId })
   // 历史订阅保持被动读取，迁移后的历史前缀保持一致。
   assert.deepEqual(reopenedLegacy.events.slice(0, migrated.events.length), migrated.events)
@@ -426,7 +469,7 @@ try {
   const initialPermissions = await rpc('session.permissions', { sessionId })
   assert.equal(initialPermissions.routable, true)
   assert.equal(initialPermissions.provisional, false)
-  assert.equal(initialPermissions.current, presetCatalog.defaultPreset)
+  assert.ok(['read-only', 'workspace-write'].includes(initialPermissions.current), initialPermissions.current)
   assert.deepEqual(initialPermissions.options, presetCatalog.options)
 
   const commandNames = (await rpc('commands.list', { sessionId })).commands.map(command => command.name)
@@ -469,9 +512,10 @@ try {
   const unknownCommand = await rpc.raw('commands.execute', { sessionId, line: '/definitely-not-a-command' })
   assert.equal(unknownCommand.ok, false, JSON.stringify(unknownCommand))
   assert.equal(unknownCommand.error.code, 'bad-request')
+  // A preset the Host table cannot vouch for is refused as possibly full access.
   const unknownPreset = await rpc.raw('session.setPermission', { sessionId, preset: 'custom' })
   assert.equal(unknownPreset.ok, false, JSON.stringify(unknownPreset))
-  assert.equal(unknownPreset.error.code, 'bad-request')
+  assert.equal(unknownPreset.error.code, 'forbidden')
 
   const skillDirectory = await rpc('skills.list', { sessionId })
   assert.ok(Array.isArray(skillDirectory.skills))

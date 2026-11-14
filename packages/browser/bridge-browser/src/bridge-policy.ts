@@ -63,6 +63,8 @@ export const BRIDGE_ALLOWED_METHODS: ReadonlySet<string> = new Set([
 /** Session-targeted methods that only read (or stop) a listable session. */
 const SESSION_READ_METHODS = new Set([
   'session.history',
+  // Reads one stored image of the session's history (message previews).
+  'session.attachment',
   'session.models',
   'session.permissions',
   'session.state',
@@ -75,7 +77,6 @@ const SESSION_READ_METHODS = new Set([
 const SESSION_WRITE_METHODS = new Set([
   'session.setPermission',
   'session.selectModel',
-  'session.attachment',
   'session.prompt',
   'commands.execute',
 ])

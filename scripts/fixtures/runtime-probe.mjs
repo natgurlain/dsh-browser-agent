@@ -6,9 +6,37 @@ import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 
 export const name = 'runtime-smoke-probe'
-export const inject = ['sessions', 'sessionPersistence', 'sessionQuery', 'sessionProjectionCache', 'attachments', 'worktrees']
+export const inject = [
+  'sessions', 'sessionPersistence', 'sessionQuery', 'sessionProjectionCache', 'attachments', 'worktrees',
+  'webServer', 'typertGateway', 'connection',
+]
 
 export async function apply(ctx, config) {
+  // The browser bridge no longer lets its client name a session id or a
+  // directory, so the smoke creates its placed fixture sessions the way a
+  // Desktop client would: as the owner, through the Host gateway.
+  const peer = ctx.connection.createPeer({ principal: { kind: 'owner' } })
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/smoke/create-session',
+    handler: (req, res) => {
+      let body = ''
+      req.on('data', chunk => { body += chunk })
+      req.on('end', async () => {
+        try {
+          const { sessionId, cwd } = JSON.parse(body)
+          const value = await ctx.typertGateway.invoke({
+            namespace: 'session', method: 'create', args: { request: { sessionId, cwd } }, peer,
+          })
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(value))
+        } catch (error) {
+          res.writeHead(500)
+          res.end(String(error))
+        }
+      })
+    },
+  }), 'runtime-smoke-probe: session placement route')
   ctx.on('worktree/cleanup', info => {
     if (info.cleanup.status !== 'scheduled') {
       writeFileSync(`${config.marker}.cleanup-${info.sessionId}`, JSON.stringify(info))
