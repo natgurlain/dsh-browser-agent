@@ -121,7 +121,7 @@ const nodeHmac: BridgeHmac = (key, message) => createHmac('sha256', key).update(
 /** Largest message an unauthenticated socket may send (a `hello` is < 1 KiB). */
 export const PRE_AUTH_MAX_PAYLOAD = 64 * 1024
 
-/** Sockets allowed to sit in the handshake at once; more are refused as busy. */
+/** Sockets allowed to sit in the handshake at once; the oldest is evicted as busy. */
 export const MAX_PENDING_SOCKETS = 16
 
 /**
@@ -267,7 +267,8 @@ export class BridgeServer {
   private readonly pendingTools = new Map<string, PendingTool>()
   private readonly orderedSessionRpcs = new Map<string, Promise<void>>()
   private closed = false
-  private pendingSockets = 0
+  /** Sockets still in the handshake, oldest first. */
+  private readonly pendingSockets = new Set<WebSocket>()
   private readonly chromeExtensionIds: ReadonlySet<string>
 
   constructor(private readonly deps: BridgeServerDeps) {
@@ -411,17 +412,16 @@ export class BridgeServer {
       ws.close(BRIDGE_CLOSE_CODES.originRejected, 'origin not allowed')
       return
     }
-    if (this.pendingSockets >= MAX_PENDING_SOCKETS) {
-      ws.close(BRIDGE_CLOSE_CODES.busy, 'too many unauthenticated connections')
-      return
+    // Evict the oldest waiting socket rather than refusing the newest, so a
+    // local process holding the pool full cannot lock the extension out: a
+    // real handshake completes in milliseconds.
+    if (this.pendingSockets.size >= MAX_PENDING_SOCKETS) {
+      const oldest = this.pendingSockets.values().next().value as WebSocket
+      this.pendingSockets.delete(oldest)
+      oldest.close(BRIDGE_CLOSE_CODES.busy, 'too many unauthenticated connections')
     }
-    this.pendingSockets += 1
-    let pending = true
-    const leavePending = (): void => {
-      if (!pending) return
-      pending = false
-      this.pendingSockets -= 1
-    }
+    this.pendingSockets.add(ws)
+    const leavePending = (): void => { this.pendingSockets.delete(ws) }
     // Pre-auth bound: a hello is tiny; the server limit returns once proven.
     const limited = setSocketMaxPayload(ws, PRE_AUTH_MAX_PAYLOAD)
     let helloTimer: NodeJS.Timeout | undefined = setTimeout(() => {

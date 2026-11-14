@@ -871,20 +871,24 @@ describe('BridgeServer', () => {
     big.ws.send('x'.repeat(PRE_AUTH_MAX_PAYLOAD + 1))
     await big.done
     expect(socketClose.get(big.ws)?.code).toBe(1009)
-    // At most MAX_PENDING_SOCKETS may wait in the handshake at once.
-    const waiting = await Promise.all(Array.from({ length: MAX_PENDING_SOCKETS }, () => connect(h.url)))
+    // At most MAX_PENDING_SOCKETS wait in the handshake; a newcomer evicts the
+    // oldest, so a squatter holding the pool cannot lock the extension out.
+    const waiting = []
+    for (let index = 0; index < MAX_PENDING_SOCKETS; index += 1) {
+      const socket = await connect(h.url)
+      await waitFor(() => socket.frames.some((f) => f.t === 'challenge'))
+      waiting.push(socket)
+    }
     const extra = await connect(h.url)
-    await extra.done
-    expect(socketClose.get(extra.ws)?.code).toBe(BRIDGE_CLOSE_CODES.busy)
-    // An authenticated socket leaves the pending pool and regains the server limit.
-    await sendHello(waiting[0]!.ws, TOKEN, CAPS)
-    await waitFor(() => waiting[0]!.frames.some((f) => f.t === 'hello.ok'))
-    send(waiting[0]!.ws, { t: 'rpc', id: 'big', method: 'session.list', payload: { pad: 'x'.repeat(PRE_AUTH_MAX_PAYLOAD * 2) } })
-    await waitFor(() => waiting[0]!.frames.some((f) => f.t === 'rpc.result' && f.id === 'big'))
-    const next = await connect(h.url)
-    await waitFor(() => next.frames.some((f) => f.t === 'challenge'))
-    expect(next.ws.readyState).toBe(WebSocket.OPEN)
-    for (const socket of [...waiting, next]) socket.ws.close()
+    await waiting[0]!.done
+    expect(socketClose.get(waiting[0]!.ws)?.code).toBe(BRIDGE_CLOSE_CODES.busy)
+    // The newcomer authenticates, leaves the pool, and regains the server limit.
+    await sendHello(extra.ws, TOKEN, CAPS)
+    await waitFor(() => extra.frames.some((f) => f.t === 'hello.ok'))
+    send(extra.ws, { t: 'rpc', id: 'big', method: 'session.list', payload: { pad: 'x'.repeat(PRE_AUTH_MAX_PAYLOAD * 2) } })
+    await waitFor(() => extra.frames.some((f) => f.t === 'rpc.result' && f.id === 'big'))
+    expect(waiting[1]!.ws.readyState).toBe(WebSocket.OPEN)
+    for (const socket of [...waiting, extra]) socket.ws.close()
   })
 
   it('closes sockets on unparseable frames and ignores client-only frames when ready', async () => {
