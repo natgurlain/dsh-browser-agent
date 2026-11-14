@@ -2,8 +2,19 @@ import { mkdtemp, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { mkdir, writeFile } from 'node:fs/promises'
-import { generateToken, resolveToken, syncInstalledExtensionToken, verifyToken, writeTokenFile } from '../src/token.ts'
+import { chmod, mkdir, readdir, symlink, writeFile } from 'node:fs/promises'
+import {
+  configuredTokenProblem,
+  generateToken,
+  installedTokenMismatch,
+  readTokenFile,
+  resolveToken,
+  syncInstalledExtensionToken,
+  verifyToken,
+  writeTokenFile,
+} from '../src/token.ts'
+
+const STRONG = 'Zq7-kP2x_Lm9vB4nRw6Yc1Hd5Je0uTa8sF3g'
 
 describe('token', () => {
   it('generates hex tokens of the requested entropy', () => {
@@ -55,9 +66,43 @@ describe('token', () => {
   it('prefers the configured token without touching the file', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-bridge-token-'))
     const file = join(dir, 'token')
-    const resolved = await resolveToken('fixed-token', file)
-    expect(resolved).toEqual({ token: 'fixed-token', file, generated: false })
+    const resolved = await resolveToken(STRONG, file)
+    expect(resolved).toEqual({ token: STRONG, file, generated: false })
     await expect(readFile(file, 'utf8')).rejects.toThrow()
+  })
+
+  it('refuses weak configured tokens with an error naming the config key', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-bridge-token-'))
+    for (const weak of ['fixed-token', 'a'.repeat(64), 'ab'.repeat(32), 'password'.repeat(4), `${STRONG} `]) {
+      expect(configuredTokenProblem(weak)).toBeTypeOf('string')
+      await expect(resolveToken(weak, join(dir, 'token'))).rejects.toThrow(/`token`/)
+    }
+    expect(configuredTokenProblem(generateToken())).toBeUndefined()
+    expect(configuredTokenProblem(generateToken(16))).toBeUndefined()
+    expect(configuredTokenProblem(STRONG)).toBeUndefined()
+  })
+
+  it.skipIf(process.platform === 'win32')('refuses to write a token through a symlink', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-bridge-token-'))
+    const victim = join(dir, 'victim')
+    await writeFile(victim, 'keep\n')
+    const file = join(dir, 'token')
+    await symlink(victim, file)
+    await expect(writeTokenFile(generateToken(), file)).rejects.toThrow(/symlink/)
+    expect(await readFile(victim, 'utf8')).toBe('keep\n')
+    expect(await readTokenFile(file)).toBeUndefined()
+    expect((await readdir(dir)).sort()).toEqual(['token', 'victim'])
+  })
+
+  it.skipIf(process.platform === 'win32')('leaves no temp files and tightens a loose persisted token to 0600', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-bridge-token-'))
+    const file = join(dir, 'token')
+    const token = generateToken()
+    await writeTokenFile(token, file)
+    expect(await readdir(dir)).toEqual(['token'])
+    await chmod(file, 0o644)
+    expect((await resolveToken(undefined, file)).token).toBe(token)
+    expect((await stat(file)).mode & 0o777).toBe(0o600)
   })
 })
 
@@ -78,5 +123,42 @@ describe('syncInstalledExtensionToken', () => {
     expect(await syncInstalledExtensionToken('first', dir)).toBe('unchanged')
     expect(await syncInstalledExtensionToken('second', dir)).toBe('written')
     expect(await readFile(join(dir, 'bridge-token'), 'utf8')).toBe('second\n')
+  })
+})
+
+describe('syncInstalledExtensionToken hardening', () => {
+  async function installed(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'dsh-ext-'))
+    await writeFile(join(dir, 'install-info.json'), '{}')
+    return dir
+  }
+
+  it.skipIf(process.platform === 'win32')('refuses a symlinked installed copy instead of writing through it', async () => {
+    const dir = await installed()
+    const victim = join(dir, 'victim')
+    await writeFile(victim, 'keep\n')
+    await symlink(victim, join(dir, 'bridge-token'))
+    await expect(syncInstalledExtensionToken('next', dir)).rejects.toThrow(/symlink/)
+    expect(await readFile(victim, 'utf8')).toBe('keep\n')
+  })
+
+  it.skipIf(process.platform === 'win32')('tightens a loose unchanged copy', async () => {
+    const dir = await installed()
+    await writeFile(join(dir, 'bridge-token'), 'same\n', { mode: 0o644 })
+    await chmod(join(dir, 'bridge-token'), 0o644)
+    expect(await syncInstalledExtensionToken('same', dir)).toBe('unchanged')
+    expect((await stat(join(dir, 'bridge-token'))).mode & 0o777).toBe(0o600)
+  })
+})
+
+describe('installedTokenMismatch', () => {
+  it('reports only an installed copy that differs from the active token', async () => {
+    const plain = await mkdtemp(join(tmpdir(), 'dsh-ext-'))
+    expect(await installedTokenMismatch('t', plain)).toBe(false)
+    await writeFile(join(plain, 'install-info.json'), '{}')
+    expect(await installedTokenMismatch('t', plain)).toBe(false)
+    await writeFile(join(plain, 'bridge-token'), 't\n')
+    expect(await installedTokenMismatch('t', plain)).toBe(false)
+    expect(await installedTokenMismatch('other', plain)).toBe(true)
   })
 })

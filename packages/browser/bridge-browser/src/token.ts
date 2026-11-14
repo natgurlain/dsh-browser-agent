@@ -10,7 +10,8 @@
  */
 
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { chmod, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { lstat, mkdir, open, rename, stat, unlink } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 
@@ -25,6 +26,48 @@ export const INSTALLED_EXTENSION_DIR_NAME = 'browser-extension'
  * `chrome.runtime.getURL` (it is not a web-accessible resource).
  */
 export const INSTALLED_TOKEN_FILE_NAME = 'bridge-token'
+
+/** Minimum length of a token pinned in the plugin config. */
+export const MIN_CONFIGURED_TOKEN_LENGTH = 32
+
+/** Minimum estimated entropy (bits) of a token pinned in the plugin config. */
+const MIN_CONFIGURED_TOKEN_BITS = 96
+
+/** Minimum number of distinct characters in a configured token. */
+const MIN_CONFIGURED_TOKEN_DISTINCT = 10
+
+/** `O_NOFOLLOW` where the platform has it (not on Windows; the lstat check covers that case). */
+const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0
+
+/**
+ * Why a token pinned in the plugin config is too weak, or `undefined` when it
+ * is acceptable. Handshake transcripts let anyone who observes the loopback
+ * traffic test token guesses offline, so a configured token must carry real
+ * entropy: at least {@link MIN_CONFIGURED_TOKEN_LENGTH} printable ASCII
+ * characters, {@link MIN_CONFIGURED_TOKEN_DISTINCT} distinct ones, and an
+ * estimated {@link MIN_CONFIGURED_TOKEN_BITS} bits (per-character Shannon
+ * entropy × length). `openssl rand -hex 32` (or 16) always passes.
+ * @param token - the configured token.
+ * @returns a human-readable problem, or undefined.
+ */
+export function configuredTokenProblem(token: string): string | undefined {
+  if (!/^[\x21-\x7e]*$/u.test(token)) return 'it must be printable ASCII without spaces'
+  if (token.length < MIN_CONFIGURED_TOKEN_LENGTH) {
+    return `it must be at least ${String(MIN_CONFIGURED_TOKEN_LENGTH)} characters long`
+  }
+  const counts = new Map<string, number>()
+  for (const char of token) counts.set(char, (counts.get(char) ?? 0) + 1)
+  if (counts.size < MIN_CONFIGURED_TOKEN_DISTINCT) {
+    return `it must use at least ${String(MIN_CONFIGURED_TOKEN_DISTINCT)} distinct characters`
+  }
+  let perChar = 0
+  for (const count of counts.values()) {
+    const p = count / token.length
+    perChar -= p * Math.log2(p)
+  }
+  if (perChar * token.length < MIN_CONFIGURED_TOKEN_BITS) return 'it is too predictable (low entropy)'
+  return undefined
+}
 
 /**
  * Generate a fresh token as lowercase hex.
@@ -61,29 +104,79 @@ export function tokenFilePath(): string {
 }
 
 /**
- * Read the persisted token; returns undefined when absent or unreadable.
+ * Read the persisted token; returns undefined when absent, unreadable, or a
+ * symlink (never followed: a planted link would let another local user choose
+ * the token). A file readable by group/others is tightened to 0600 on POSIX;
+ * when that fails the token is treated as absent so the caller regenerates it.
  * @param file - token file path.
- * @returns the stored hex token, trimmed.
+ * @returns the stored token, trimmed.
  */
 export async function readTokenFile(file: string = tokenFilePath()): Promise<string | undefined> {
   try {
-    return (await readFile(file, 'utf8')).trim()
+    if ((await lstat(file)).isSymbolicLink()) return undefined
+    const handle = await open(file, constants.O_RDONLY | O_NOFOLLOW)
+    try {
+      if (process.platform !== 'win32' && ((await handle.stat()).mode & 0o077) !== 0) {
+        await handle.chmod(0o600)
+      }
+      return (await handle.readFile('utf8')).trim()
+    } finally {
+      await handle.close()
+    }
   } catch {
     return undefined
   }
 }
 
 /**
- * Persist a token atomically (temp file + rename) with 0600 permissions.
- * @param token - hex token to persist.
+ * Persist a token with 0600 permissions. A symlink at the target is refused.
+ *
+ * POSIX: the temp file is created exclusively (`O_CREAT|O_EXCL|O_NOFOLLOW`,
+ * random name, mode 0600) and renamed over the target, so the token is never
+ * visible with looser permissions and never written through a planted link.
+ *
+ * Windows: there are no POSIX mode bits, and a rename would replace the
+ * target's ACL with the directory's inherited one. An existing file is
+ * therefore rewritten in place (keeping any ACL the user tightened); only a
+ * missing file goes through the exclusive temp + rename path. This branch is
+ * not exercised by the Linux CI.
+ * @param token - token to persist.
  * @param file - token file path.
  */
 export async function writeTokenFile(token: string, file: string = tokenFilePath()): Promise<void> {
   await mkdir(dirname(file), { recursive: true })
-  const temp = `${file}.tmp-${process.pid}`
-  await writeFile(temp, `${token}\n`, { mode: 0o600 })
-  await chmod(temp, 0o600)
-  await rename(temp, file)
+  let existing = false
+  try {
+    const info = await lstat(file)
+    if (info.isSymbolicLink()) throw new Error(`refusing to write the bridge token through a symlink: ${file}`)
+    existing = true
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  const contents = `${token}\n`
+  if (process.platform === 'win32' && existing) {
+    const handle = await open(file, constants.O_WRONLY | constants.O_TRUNC)
+    try {
+      await handle.writeFile(contents)
+    } finally {
+      await handle.close()
+    }
+    return
+  }
+  const temp = `${file}.tmp-${randomBytes(8).toString('hex')}`
+  const handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | O_NOFOLLOW, 0o600)
+  try {
+    try {
+      await handle.writeFile(contents)
+      if (process.platform !== 'win32') await handle.chmod(0o600)
+    } finally {
+      await handle.close()
+    }
+    await rename(temp, file)
+  } catch (error: unknown) {
+    await unlink(temp).catch(() => undefined)
+    throw error
+  }
 }
 
 /**
@@ -99,6 +192,13 @@ export async function resolveToken(
   file: string = tokenFilePath(),
 ): Promise<{ token: string; file: string; generated: boolean }> {
   if (configured !== undefined && configured.length > 0) {
+    const problem = configuredTokenProblem(configured)
+    if (problem !== undefined) {
+      throw new Error(
+        `bridge-browser: the configured \`token\` is too weak (${problem}). Remove it to use the generated token, `
+        + `or set at least ${String(MIN_CONFIGURED_TOKEN_LENGTH)} random characters (for example \`openssl rand -hex 32\`).`,
+      )
+    }
     return { token: configured, file, generated: false }
   }
   const persisted = await readTokenFile(file)
@@ -127,10 +227,32 @@ export async function syncInstalledExtensionToken(
     return 'absent'
   }
   const target = join(dir, INSTALLED_TOKEN_FILE_NAME)
-  if (await readTokenFile(target) === token) {
-    await chmod(target, 0o600)
-    return 'unchanged'
-  }
+  // readTokenFile tightens a loose copy and never follows a symlink; a link
+  // reads as absent and writeTokenFile then refuses it.
+  if (await readTokenFile(target) === token) return 'unchanged'
   await writeTokenFile(token, target)
   return 'written'
+}
+
+/**
+ * Whether the installed Chrome extension carries a token copy that differs
+ * from the active one. With a token pinned in the plugin config the copy is
+ * deliberately not synced, so a stale installer copy makes the extension fail
+ * the handshake; callers log this so the user knows to paste the token or
+ * remove the pin.
+ * @param token - the token the bridge verifies.
+ * @param dir - installed extension directory.
+ * @returns true only for an installer-marked directory whose copy exists and differs.
+ */
+export async function installedTokenMismatch(
+  token: string,
+  dir: string = dshHomePath(INSTALLED_EXTENSION_DIR_NAME),
+): Promise<boolean> {
+  try {
+    await stat(join(dir, 'install-info.json'))
+  } catch {
+    return false
+  }
+  const copy = await readTokenFile(join(dir, INSTALLED_TOKEN_FILE_NAME))
+  return copy !== undefined && copy !== '' && copy !== token
 }

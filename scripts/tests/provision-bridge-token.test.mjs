@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -53,6 +53,39 @@ test('tightens a copy left with looser permissions', { skip: !posix }, () => {
   provision(home, extension)
   assert.equal(mode(join(extension, 'bridge-token')), 0o600)
   assert.notEqual(readFileSync(join(extension, 'bridge-token'), 'utf8'), 'stale\n')
+})
+
+test('tightens a loose dsh-home token to 0600 and leaves no temp files', { skip: !posix }, () => {
+  const { home, extension } = fixture()
+  writeFileSync(join(home, 'ext-bridge-token'), 'kept\n')
+  chmodSync(join(home, 'ext-bridge-token'), 0o644)
+  provision(home, extension)
+  assert.equal(mode(join(home, 'ext-bridge-token')), 0o600)
+  assert.equal(readFileSync(join(extension, 'bridge-token'), 'utf8'), 'kept\n')
+  assert.deepEqual(readdirSync(extension).filter(name => name.includes('.tmp-')), [])
+  assert.deepEqual(readdirSync(home).filter(name => name.includes('.tmp-')), [])
+})
+
+test('refuses to write the token through a symlink', { skip: !posix }, () => {
+  const { home, extension } = fixture()
+  const victim = join(home, 'victim')
+  writeFileSync(victim, 'keep\n')
+  symlinkSync(victim, join(extension, 'bridge-token'))
+  const result = spawnSync(process.execPath, [script, home, extension], { encoding: 'utf8' })
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /symlink/)
+  assert.equal(readFileSync(victim, 'utf8'), 'keep\n')
+})
+
+test('does not read a symlinked dsh-home token', { skip: !posix }, () => {
+  const { home, extension } = fixture()
+  const planted = join(home, 'planted')
+  writeFileSync(planted, 'attacker-chosen\n')
+  symlinkSync(planted, join(home, 'ext-bridge-token'))
+  const result = spawnSync(process.execPath, [script, home, extension], { encoding: 'utf8' })
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /symlink/)
+  assert.equal(readdirSync(extension).includes('bridge-token'), false)
 })
 
 test('refuses to run without both directories', () => {
