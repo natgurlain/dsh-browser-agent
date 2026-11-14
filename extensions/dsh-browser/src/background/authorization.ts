@@ -5,6 +5,7 @@ import { frameDocumentKey, type TabFrame } from './frames.ts'
 import type { ApprovalAuthorization, ApprovalDecision, ApprovalDetail, ApprovalPrompt } from '../security/approval.ts'
 import { approvalBinding } from '../security/payload-binding.ts'
 import { analyzeUrl } from '../security/url-risk.ts'
+import { attributeRisk } from '../security/attribute-risk.ts'
 import type { DevToolsGrantKind } from './devtools-grants.ts'
 import { getUiLocale, type UiLocale } from '../i18n.ts'
 
@@ -75,6 +76,7 @@ export function devToolsApprovalForCall(
   const origins = uniqueOrigins(target === undefined ? top : [...top, target], frames)
   const grantOrigin = target === undefined ? undefined : effectiveFrameOrigin(target, frames)
   const optOuts = SENSITIVE_OPT_OUTS.filter((name) => call.args[name] === true)
+  const perCallOnly = optOuts.length > 0 || scriptAttributeChange(call)
   const details: ApprovalDetail[] = []
   if (call.name === 'browser_console_eval') {
     details.push({ kind: 'code', value: typeof call.args.expression === 'string' ? call.args.expression : '' })
@@ -91,7 +93,7 @@ export function devToolsApprovalForCall(
     devTools: true,
     ...details.length === 0 ? {} : { details },
     ...grantOrigin === undefined ? {} : { grantOrigin },
-    ...optOuts.length === 0 ? {} : { perCallOnly: true as const },
+    ...perCallOnly ? { perCallOnly: true as const } : {},
     binding: approvalBinding({
       action: call.name,
       args: call.args,
@@ -100,6 +102,17 @@ export function devToolsApprovalForCall(
       ...target === undefined ? {} : { documentKey: frameDocumentKey(target) },
     }),
   }
+}
+
+/**
+ * Whether a devtools call writes or removes a script-class attribute (handlers,
+ * URLs, form targets, field identity): such changes always need their own card.
+ */
+function scriptAttributeChange(call: ToolCall): boolean {
+  if (call.name !== 'browser_devtools_set_element_attribute') return false
+  const value = typeof call.args.value === 'string' ? call.args.value : undefined
+  if (call.args.remove !== true && value === undefined) return false
+  return attributeRisk(typeof call.args.name === 'string' ? call.args.name : '', value) !== 'normal'
 }
 
 /**

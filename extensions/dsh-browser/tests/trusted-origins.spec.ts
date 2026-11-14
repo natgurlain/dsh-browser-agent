@@ -106,6 +106,28 @@ describe('actionCoveredByTrustedOrigins', () => {
     }
   })
 
+  it('still prompts on a trusted origin for data smuggled outside a single query value', () => {
+    const secret = 'sk-live-9fA3kQ7xLm2ZpT8vBn4Rw6Yc1Hd5Je0u'
+    const hex = Buffer.from(secret).toString('hex')
+    const cases: Record<string, string> = {
+      baseline_query: `https://docs.example.com/c?d=${secret}`,
+      path: `https://docs.example.com/c/${hex}/x`,
+      param_name: `https://docs.example.com/c?${hex}=1`,
+      userinfo: `https://${hex.slice(0, 60)}:x@docs.example.com/`,
+      short_userinfo: 'https://a@docs.example.com/',
+      chunked: 'https://docs.example.com/c?' + (hex.match(/.{1,15}/g) as string[]).map((c, i) => `p${String(i)}=${c}`).join('&'),
+      dashed: 'https://docs.example.com/c?d=' + (hex.slice(0, 40).match(/.{1,8}/g) as string[]).join('-'),
+      letters_only: 'https://docs.example.com/c?d=' + hex.replace(/\d/g, (d) => 'ghijklmnop'[Number(d)]!).slice(0, 47),
+      oversized: `https://docs.example.com/search?q=${'word '.repeat(120)}`,
+    }
+    const frames = [{ frameId: 0, parentFrameId: -1, url: 'https://docs.example.com/' }]
+    for (const [label, url] of Object.entries(cases)) {
+      const prompt = approvalPromptForCall({ id: 'c', name: 'browser_navigate', args: { url } }, 'auto', frames, 'en')!
+      expect(prompt.urlRisk, label).toBe(true)
+      expect(actionCoveredByTrustedOrigins(prompt, trusted), label).toBe(false)
+    }
+  })
+
   it('requires every known navigation origin to be trusted', () => {
     expect(actionCoveredByTrustedOrigins(action({
       action: 'browser_navigate',

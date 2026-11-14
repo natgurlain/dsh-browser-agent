@@ -529,14 +529,15 @@ export function createDevToolsController(options: DevToolsControllerOptions): De
     const client = context.client ?? context.session
     const name = typeof args.name === 'string' ? args.name.trim() : ''
     if (name === '') throw new Error('name is required.')
-    const risk = attributeRisk(name)
-    if (risk === 'forbidden') throw new Error(`The attribute name "${name}" cannot be written through developer tools.`)
     const remove = args.remove === true
     const value = typeof args.value === 'string' ? args.value : undefined
+    const risk = attributeRisk(name, value)
+    if (risk === 'forbidden') throw new Error(`The attribute name "${name}" cannot be written through developer tools.`)
     if (risk === 'script' && !remove) {
       throw new Error(
         `Refusing to write the script-capable attribute "${name}". `
-        + 'Inline handler and resource URL attributes change what the page executes; use browser_console_eval for that.',
+        + 'Inline handlers, resource/navigation URLs, form targets, and field identity (type, name, autocomplete) '
+        + 'change what the page executes, where it submits, or which values stay masked; use browser_console_eval for that.',
       )
     }
     const nodeId = await resolveNodeId(client, locatorOf(args), context.frames, context.executionContext)

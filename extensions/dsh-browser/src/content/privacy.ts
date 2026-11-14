@@ -20,6 +20,12 @@ const SENSITIVE_PATTERNS = [
   /cvc/i,
   /secret/i,
   /pwd/i,
+  /passwort/i,
+  /contrase(?:ñ|n)a/iu,
+  /mot\s+de\s+passe/iu,
+  /пароль/iu,
+  /密码|密碼|验证码|驗證碼|口令|校验码|动态码/u,
+  /パスワード|비밀번호/u,
 ]
 
 /**
@@ -39,6 +45,13 @@ const SENSITIVE_WORDS = new Set([
   'apikey',
   'mfa',
   '2fa',
+  'pass',
+  'pw',
+  'passphrase',
+  'privatekey',
+  'seed',
+  'mnemonic',
+  'recovery',
 ])
 
 /** Adjacent word pairs that mark a field as sensitive. */
@@ -49,6 +62,10 @@ const SENSITIVE_WORD_PAIRS = [
   ['social', 'security'],
   ['security', 'code'],
   ['verification', 'code'],
+  ['private', 'key'],
+  ['security', 'answer'],
+  ['question', 'answer'],
+  ['secret', 'answer'],
 ] as const
 
 /** Autocomplete tokens that always mark a field as sensitive. */
@@ -64,13 +81,28 @@ const SENSITIVE_AUTOCOMPLETE = new Set(['one-time-code', 'current-password', 'ne
  *   judged by the host as well.
  */
 export function isSensitiveField(el: Element): boolean {
+  // Latched: a page (or the model through developer tools) can flip `type`,
+  // `name`, or `autocomplete` after a secret was typed; the value stays masked.
+  if (latched.has(el)) return true
+  const host = editingHost(el)
+  if (host !== undefined && latched.has(host)) return true
+  const sensitive = judgeSensitive(el, host)
+  if (sensitive) latched.add(el)
+  return sensitive
+}
+
+/** Elements once judged sensitive; they stay masked for their lifetime. */
+const latched = new WeakSet<Element>()
+
+function judgeSensitive(el: Element, host: Element | undefined): boolean {
   if (el instanceof HTMLInputElement) {
     if (el.type === 'password') return true
     if (autocompleteIsSensitive(String(el.autocomplete))) return true
   }
   if (describesSensitive(el)) return true
-  const host = editingHost(el)
-  return host !== undefined && host !== el && describesSensitive(host)
+  if (host === undefined || host === el || !describesSensitive(host)) return false
+  latched.add(host)
+  return true
 }
 
 function describesSensitive(el: Element): boolean {

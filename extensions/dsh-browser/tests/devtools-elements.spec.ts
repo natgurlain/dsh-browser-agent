@@ -336,6 +336,20 @@ describe('mutations', () => {
     expect(attributeRisk('')).toBe('forbidden')
   })
 
+  it('treats form targets, field identity, and navigation attributes as script-class', () => {
+    for (const name of ['action', 'formaction', 'type', 'name', 'autocomplete', 'onclick', 'ONLOAD', 'http-equiv', 'href', 'src', 'xlink:href', 'srcset', 'data', 'ping', 'formtarget']) {
+      expect(attributeRisk(name), name).toBe('script')
+    }
+    expect(attributeRisk('srcdoc')).toBe('forbidden')
+    for (const name of ['data-x', 'class', 'title', 'aria-label', 'style', 'hidden']) {
+      expect(attributeRisk(name), name).toBe('normal')
+    }
+    // Any attribute value that is a javascript: or data: URL is script-class.
+    expect(attributeRisk('data-href', 'javascript:alert(1)')).toBe('script')
+    expect(attributeRisk('data-x', ' DATA:text/html,<script>')).toBe('script')
+    expect(attributeRisk('data-x', 'plain')).toBe('normal')
+  })
+
   it('sets and removes attributes through the DOM domain', async () => {
     const { client, calls } = scripted({ 'DOM.setAttributeValue': [{}], 'DOM.removeAttribute': [{}] })
     await setAttribute(client, 2, 'data-x', '1', false)

@@ -18,6 +18,33 @@ describe('typeTargetIsSensitive', () => {
   })
 })
 
+describe('browser_type target binding', () => {
+  const budget = { maxItems: 20, maxForms: 10, maxChars: 2_000 }
+
+  it('refuses to type into a different element than the approval probe judged', async () => {
+    document.body.innerHTML = '<input id="comment" class="t"><input id="pin" type="password">'
+    const ids = { elementByIndex: vi.fn(() => null) } as unknown as ElementIds
+    expect(typeTargetIsSensitive({ selector: '.t' }, ids)).toBe(false)
+    // The page moves the selector onto the password field while the card is open.
+    document.getElementById('comment')!.classList.remove('t')
+    document.getElementById('pin')!.classList.add('t')
+    document.getElementById('pin')!.setAttribute('type', 'text')
+    await expect(runAction('browser_type', { selector: '.t', text: 'hunter2' }, { ids, budget }))
+      .rejects.toThrow(/changed after approval/)
+    expect((document.getElementById('pin') as HTMLInputElement).value).toBe('')
+    document.body.innerHTML = ''
+  })
+
+  it('types into the probed element when it is unchanged', async () => {
+    document.body.innerHTML = '<input id="comment" class="t">'
+    const ids = { elementByIndex: vi.fn(() => null) } as unknown as ElementIds
+    expect(typeTargetIsSensitive({ selector: '.t' }, ids)).toBe(false)
+    await runAction('browser_type', { selector: '.t', text: 'hello' }, { ids, budget })
+    expect((document.getElementById('comment') as HTMLInputElement).value).toBe('hello')
+    document.body.innerHTML = ''
+  })
+})
+
 describe('page action result trust boundary', () => {
   it('does not echo a page-authored accessible name through action errors', async () => {
     const button = document.createElement('button')

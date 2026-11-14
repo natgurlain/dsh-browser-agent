@@ -78,3 +78,40 @@ describe('maskValue', () => {
     expect(maskValue('')).toBe('')
   })
 })
+
+describe('sensitivity latch and extended vocabulary', () => {
+  it('keeps a field masked after it stops looking sensitive', () => {
+    const input = document.createElement('input')
+    input.type = 'password'
+    expect(isSensitiveField(input)).toBe(true)
+    input.type = 'text'
+    input.removeAttribute('name')
+    expect(isSensitiveField(input)).toBe(true)
+    const named = document.createElement('input')
+    named.name = 'otp'
+    expect(isSensitiveField(named)).toBe(true)
+    named.name = 'comment'
+    named.autocomplete = 'off'
+    expect(isSensitiveField(named)).toBe(true)
+  })
+
+  it('flags short credential names, recovery material, and non-English labels', () => {
+    for (const label of [
+      'pass', 'user_pass', 'pw', 'newPw', 'passphrase', 'privateKey', 'private_key', 'wallet seed', 'seed phrase',
+      'mnemonic', 'recovery code', 'recoveryPhrase', 'security answer', 'securityQuestionAnswer',
+      '密码', '请输入验证码', '口令', 'Contraseña', 'mot de passe', 'Passwort', 'Пароль',
+    ]) {
+      const input = document.createElement('input')
+      input.setAttribute('aria-label', label)
+      expect(isSensitiveField(input), label).toBe(true)
+    }
+  })
+
+  it('does not flag look-alike words', () => {
+    for (const label of ['passenger', 'compass', 'pwa install', 'seedling', 'bypass mode', 'search', 'email']) {
+      const input = document.createElement('input')
+      input.setAttribute('aria-label', label)
+      expect(isSensitiveField(input), label).toBe(false)
+    }
+  })
+})

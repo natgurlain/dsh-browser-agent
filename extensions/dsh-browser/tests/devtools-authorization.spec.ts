@@ -84,6 +84,23 @@ describe('developer-tools tool group', () => {
       .toContain('remove "onclick"')
   })
 
+  it('never lets a grant cover script-class attribute changes', () => {
+    for (const args of [
+      { selector: 'form', name: 'action', value: 'https://x.example/' },
+      { selector: 'input', name: 'type', remove: true },
+      { selector: 'input', name: 'autocomplete', value: 'off' },
+      { selector: 'a', name: 'data-x', value: 'javascript:alert(1)' },
+    ]) {
+      const prompt = devToolsApprovalForCall(call('browser_devtools_set_element_attribute', args), FRAMES, 'en')
+      expect(prompt.perCallOnly, JSON.stringify(args)).toBe(true)
+      expect(devToolsGrantKind(prompt)).toBeUndefined()
+    }
+    const plain = devToolsApprovalForCall(call('browser_devtools_set_element_attribute', { selector: 'a', name: 'data-x', value: '1' }), FRAMES, 'en')
+    expect(plain.perCallOnly).toBeUndefined()
+    const read = devToolsApprovalForCall(call('browser_devtools_set_element_attribute', { selector: 'input', name: 'type' }), FRAMES, 'en')
+    expect(read.perCallOnly).toBeUndefined()
+  })
+
   it('scopes the grant origin to the frame a call targets', () => {
     const top = devToolsApprovalForCall(call('browser_console_eval', { expression: '1' }), FRAMES, 'en')
     expect(top.grantOrigin).toBe('https://example.com')

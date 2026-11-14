@@ -198,7 +198,40 @@ export function typeTargetIsSensitive(args: Record<string, unknown>, ids: Elemen
   } catch {
     return true
   }
-  return !(el instanceof Element) || isSensitiveField(el)
+  if (!(el instanceof Element)) return true
+  // Bind the verdict to this exact element: the type action refuses to write
+  // into anything else the same locator resolves to by execution time.
+  typeProbes.set(typeTargetKey(args), { target: new WeakRef(el), at: Date.now() })
+  return isSensitiveField(el)
+}
+
+/** How long an approval-time probe binds its locator (covers a slow approval). */
+const TYPE_PROBE_TTL_MS = 15 * 60_000
+
+/** Elements the approval probe judged, by locator; consumed by the type action. */
+const typeProbes = new Map<string, { target: WeakRef<Element>; at: number }>()
+
+function typeTargetKey(args: Record<string, unknown>): string {
+  return JSON.stringify([args.index ?? null, typeof args.selector === 'string' ? args.selector : null])
+}
+
+/**
+ * Refuse a browser_type whose locator now resolves to another element than the
+ * one its approval card was built for (and masked or unmasked accordingly).
+ * @param args - the browser_type arguments.
+ * @param el - the element the action is about to write into.
+ */
+export function assertTypeTargetBound(args: Record<string, unknown>, el: Element): void {
+  const key = typeTargetKey(args)
+  const probe = typeProbes.get(key)
+  typeProbes.delete(key)
+  if (probe === undefined || Date.now() - probe.at > TYPE_PROBE_TTL_MS) return
+  if (probe.target.deref() !== el) {
+    throw new ActionError(
+      'action-failed',
+      'The browser_type target changed after approval. Call browser_snapshot again before retrying.',
+    )
+  }
 }
 
 /** React-compatible value write: native setter + input/change events. */
@@ -574,6 +607,7 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   if (!(el instanceof Element)) {
     throw new ActionError('action-failed', 'No element has focus; click the target first or pass index or selector.')
   }
+  assertTypeTargetBound(args, el)
   const label = focusedOnly ? 'the focused element' : targetLabel(args, el)
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
     if (mode === 'insert' && !replace) {

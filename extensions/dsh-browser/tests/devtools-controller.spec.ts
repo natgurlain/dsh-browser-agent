@@ -254,6 +254,16 @@ describe('developer-tools controller', () => {
     expect(h.commands.some((command) => command[0] === 'DOM.setAttributeValue')).toBe(false)
   })
 
+  it('refuses writes to form-target and field-identity attributes and javascript: values', async () => {
+    const h = harness()
+    defaultDebuggerHandlers(h)
+    for (const [name, value] of [['action', 'https://x.example/'], ['formaction', '/steal'], ['type', 'text'], ['name', 'q'], ['autocomplete', 'off'], ['http-equiv', 'refresh'], ['data-x', 'javascript:alert(1)']]) {
+      await expect(h.controller.handle('browser_devtools_set_element_attribute', { selector: '#main', name, value }), name)
+        .rejects.toThrow(/Refusing to write the script-capable attribute/)
+    }
+    expect(h.commands.some((command) => command[0] === 'DOM.setAttributeValue')).toBe(false)
+  })
+
   it('captures network traffic, filters it, and reads bodies', async () => {
     const h = harness()
     defaultDebuggerHandlers(h)

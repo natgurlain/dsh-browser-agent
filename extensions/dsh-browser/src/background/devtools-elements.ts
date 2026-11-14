@@ -38,12 +38,6 @@ export const DEFAULT_COMPUTED_PROPERTIES = [
   'transform',
 ] as const
 
-/** Attribute names the model must never write through the debugger. */
-const FORBIDDEN_ATTRIBUTES = new Set(['srcdoc'])
-
-/** Attribute names that carry inline event handlers or resource URLs. */
-const SCRIPT_ATTRIBUTES = /^on[a-z]|^(src|href|xlink:href)$/i
-
 /** A locator: exactly one of selector/index is used. */
 export interface ElementLocator {
   selector?: string
@@ -664,14 +658,8 @@ export function mergeDeclarations(
   return canonicalizeDeclarations(declarations, new Set(edits.keys()))
 }
 
-/** Attribute names that require extra scrutiny before a write. */
-export function attributeRisk(name: string): 'forbidden' | 'script' | 'normal' {
-  const normalized = name.trim().toLowerCase()
-  if (normalized === '' || /[\s<>]/.test(normalized)) return 'forbidden'
-  if (FORBIDDEN_ATTRIBUTES.has(normalized)) return 'forbidden'
-  if (SCRIPT_ATTRIBUTES.test(normalized)) return 'script'
-  return 'normal'
-}
+/** Attribute write risk classes (shared with the approval builder). */
+export { attributeRisk } from '../security/attribute-risk.ts'
 
 /** Set or remove one attribute. */
 export async function setAttribute(
