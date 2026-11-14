@@ -51,7 +51,8 @@ import {
   finishWatch,
   hover as dispatchHover,
   precheckClick,
-  shouldRetryTrusted,
+  shouldSuggestTrusted,
+  TRUSTED_HINT,
   trustedClick,
   type PointerContext,
 } from './pointer-tools.ts'
@@ -1159,10 +1160,21 @@ async function dispatchOnceArmed(
     const restText = answerText(rest)
     return restText === undefined ? rest : { ok: true, result: { text: `${waited.status} ${restText}` } }
   }
+  // The effect watch (a MutationObserver in the page) must end on every exit path.
+  const pendingWatch = clickCheck?.kind === 'proceed' ? clickCheck.watch : undefined
+  const endPendingWatch = (): void => {
+    if (pendingWatch !== undefined) void finishWatch(pointer, pendingWatch, 0)
+  }
   // No await occurs between this guard and tabs.sendMessage, so an expired
   // approval cannot cross the final state-changing dispatch boundary.
-  if (isCancelled(call, signal)) return cancelled()
-  if (targetStillAllowed?.() === false) return targetChanged()
+  if (isCancelled(call, signal)) {
+    endPendingWatch()
+    return cancelled()
+  }
+  if (targetStillAllowed?.() === false) {
+    endPendingWatch()
+    return targetChanged()
+  }
   const requestPageDelta = includeActionDelta && hasSnapshotBaseline && ACTION_DELTA_TOOLS.has(call.name)
   const tabWatch = stateChangingAction ? watchOpenedTabs(tabId) : undefined
   const consoleMark = stateChangingAction ? consoleErrorMark(tabId) : undefined
@@ -1185,6 +1197,7 @@ async function dispatchOnceArmed(
     if (!guarded.ok) {
       navigationWait?.cancel()
       tabWatch?.stop()
+      endPendingWatch()
       return guarded.answer
     }
     response = guarded.value
@@ -1193,46 +1206,38 @@ async function dispatchOnceArmed(
     if (stateChanging && contentScriptReceiverMissing(error)) rollbackActionCommit?.()
     navigationWait?.cancel()
     tabWatch?.stop()
+    endPendingWatch()
     throw error
   }
   const openedTabs = tabWatch?.stop() ?? []
   if (isCancelled(call, signal)) {
     navigationWait?.cancel()
+    endPendingWatch()
     return cancelled()
   }
   if (!isToolAnswer(response)) {
     navigationWait?.cancel()
+    endPendingWatch()
     return unavailable('The page content script returned an invalid response.')
   }
   const rawText = answerText(response)
   if (rawText === undefined) {
     navigationWait?.cancel()
-    if (clickCheck?.kind === 'proceed' && clickCheck.watch !== undefined) await finishWatch(pointer, clickCheck.watch, 0)
+    if (pendingWatch !== undefined) await finishWatch(pointer, pendingWatch, 0)
     return response
   }
-  if (clickCheck?.kind === 'proceed' && clickCheck.watch !== undefined && !answerNavigationPending(response)) {
-    // A synthetic click that changed nothing observable (handlers that only
-    // accept trusted events) is retried once with real mouse input. Toggles,
-    // submits, links, and fields are never retried: a second activation
-    // would undo or repeat the first.
-    const report = await finishWatch(pointer, clickCheck.watch)
-    if (shouldRetryTrusted(clickCheck.measured, report) && !isCancelled(call, signal) && targetStillAllowed?.() !== false) {
-      navigationWait?.cancel()
-      try {
-        const retried = await guardPage(dialogs, tabId, frame, trustedClick(pointer, ' (the synthetic click had no visible effect; retried with real mouse input)') as Promise<ToolAnswer>, signal)
-        if (!retried.ok) return retried.answer
-        return withDialogNote(retried.value, retried.dialog, dialogs)
-      } catch (error: unknown) {
-        const mapped = trustedFailure(error) ?? devToolsFailure(error)
-        if (mapped !== undefined) return { ok: true, result: { text: `${rawText} The page showed no visible change, and a real-input retry failed: ${mapped.error?.message ?? 'unknown error'}` } }
-        throw error
-      }
-    }
-  } else if (clickCheck?.kind === 'proceed' && clickCheck.watch !== undefined) {
-    await finishWatch(pointer, clickCheck.watch, 0)
+  // A synthetic click that changed nothing observable is never re-sent
+  // automatically (its handler may have run invisibly; a second activation
+  // would repeat it): the result says how to ask for real input instead.
+  let effectHint = ''
+  if (clickCheck?.kind === 'proceed' && pendingWatch !== undefined && !answerNavigationPending(response)) {
+    const report = await finishWatch(pointer, pendingWatch)
+    if (shouldSuggestTrusted(clickCheck.measured, report)) effectHint = TRUSTED_HINT
+  } else if (pendingWatch !== undefined) {
+    await finishWatch(pointer, pendingWatch, 0)
   }
   const consoleErrors = consoleMark === undefined ? [] : consoleErrorsSince(tabId, consoleMark)
-  const text = `${syntheticFallback ? `${rawText} (synthetic)` : rawText}${describeSideEffects(openedTabs, consoleErrors, shareContent)}`
+  const text = `${syntheticFallback ? `${rawText} (synthetic)` : rawText}${effectHint}${describeSideEffects(openedTabs, consoleErrors, shareContent)}`
   if (answerNavigationPending(response) && navigationWait !== undefined) {
     // A "leave site?" dialog stops the navigation: report it at once instead
     // of waiting for a document that cannot arrive.
@@ -1490,11 +1495,31 @@ async function dispatchExtract(
     ...call.args.limit === undefined ? {} : { limit: call.args.limit },
   }
   let current = frame
+  let lastReadUrl = frame.url
   const columns: string[] = []
   const rows: Record<string, unknown>[] = []
   let previousSignature: string | undefined
   let pages = 0
   let stopReason = maxPages === 1 ? '' : `reached maxPages=${maxPages}`
+  // One approval covers one origin: the frame's (and, for a subframe, the
+  // top document's) origin when the call was approved.
+  const approvedOrigin = originFromUrl(frame.url)
+  const approvedTopOrigin = paginate === undefined || frame.frameId === 0
+    ? undefined
+    : originFromUrl((await listTabFrames(tabId, undefined)).find((candidate) => candidate.frameId === 0)?.url ?? '')
+  /** Re-read the frame after a next-page click; a reason to stop, or the current frame. */
+  const recheckFrame = async (): Promise<TabFrame | string> => {
+    const frames = await listTabFrames(tabId, undefined)
+    const refreshed = frames.find((candidate) => candidate.frameId === current.frameId)
+    if (refreshed === undefined) return 'the frame disappeared after navigation'
+    const top = frames.find((candidate) => candidate.frameId === 0)
+    const landed = originFromUrl(refreshed.url)
+    if (approvedOrigin === undefined || landed !== approvedOrigin
+      || (approvedTopOrigin !== undefined && originFromUrl(top?.url ?? '') !== approvedTopOrigin)) {
+      return 'the next page is on another origin; nothing was read there (call browser_extract again on that page if needed)'
+    }
+    return refreshed
+  }
   while (pages < maxPages) {
     if (isCancelled(call, signal)) return cancelled()
     if (targetStillAllowed?.() === false) return targetChanged()
@@ -1521,6 +1546,7 @@ async function dispatchExtract(
     }
     if (page === undefined) break
     pages += 1
+    lastReadUrl = current.url
     for (const column of page.columns) if (!columns.includes(column)) columns.push(column)
     rows.push(...page.rows.slice(0, MAX_EXTRACT_ROWS - rows.length))
     if (rows.length >= MAX_EXTRACT_ROWS) {
@@ -1545,16 +1571,20 @@ async function dispatchExtract(
         stopReason = 'the next page did not finish loading'
         break
       }
-      const refreshed = (await listTabFrames(tabId, undefined)).find((candidate) => candidate.frameId === current.frameId)
-      if (refreshed === undefined) {
-        stopReason = 'the frame disappeared after navigation'
-        break
-      }
-      current = refreshed
-      previousSignature = undefined
     } else {
       navigation.cancel()
     }
+    // Every page is re-bound to the approval, whether or not the click
+    // reported a navigation (a script may navigate later, or silently).
+    const rechecked = await recheckFrame()
+    if (typeof rechecked === 'string') {
+      stopReason = rechecked
+      break
+    }
+    if (rechecked.documentId !== current.documentId) previousSignature = undefined
+    current = rechecked
+    if (isCancelled(call, signal)) return cancelled()
+    if (targetStillAllowed?.() === false) return targetChanged()
   }
   const pagesText = paginate === undefined ? '' : ` from ${pages} page(s)`
   const stopped = stopReason === '' ? '' : ` (stopped: ${stopReason})`
@@ -1569,7 +1599,7 @@ async function dispatchExtract(
       ? `Showing ${shown.length} of ${rows.length} rows; pass saveTo to write all rows to a file.`
       : 'Rows (one JSON object per line):'
   const text = `${summary}\n${note}\n${wrapUntrustedContent(shown.length === 0 ? `${body}\n(no rows)` : body, Math.max(500, budget.maxChars - summary.length - note.length - 2))}`
-  return { ok: true, result: { text, data: { columns, rows, pages, url: current.url } } }
+  return { ok: true, result: { text, data: { columns, rows, pages, url: lastReadUrl } } }
 }
 
 function requestedTabId(args: Record<string, unknown>): number | undefined {

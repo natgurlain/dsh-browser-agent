@@ -144,7 +144,9 @@ export async function waitForDownload(
           return
         }
         if (item.state === 'interrupted' && id !== undefined) {
-          finish({ error: new DownloadsError('action-failed', `The download ${item.filename || item.url} was interrupted (${item.error ?? 'unknown reason'}).`) })
+          // The file name and URL are server/page-controlled: name the download by id only.
+          const reason = typeof item.error === 'string' && /^[A-Z_]{1,40}$/.test(item.error) ? item.error : 'unknown reason'
+          finish({ error: new DownloadsError('action-failed', `The matching download ${item.id} was interrupted (${reason}). Use browser_downloads with action list to see it.`) })
           return
         }
       }

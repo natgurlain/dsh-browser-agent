@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 /**
- * Pointer tools in dispatch: covered-element refusal, trusted clicks, the
- * conservative real-input retry, hover, and drag.
+ * Pointer tools in dispatch: covered-element refusal, trusted clicks with a
+ * CDP re-hit-test before every press, the no-effect hint, hover, and drag.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { dispatchToolCall, type InputRuntime, type ToolAnswer, type ToolCall } from '../src/background/tools.ts'
-import { resolvePointerTarget, quadCenter } from '../src/background/pointer-actions.ts'
+import { mouseDrag, resolvePointerTarget, quadCenter } from '../src/background/pointer-actions.ts'
 import type { MeasuredTarget, WatchReport } from '../src/shared/input-setup.ts'
 
 const TAB = { id: 42, windowId: 3, url: 'https://example.com/page', title: 'Example' }
@@ -73,16 +73,27 @@ function stubChrome(options: {
   return harness
 }
 
-function runtime(harness: Harness, supported = true): InputRuntime {
-  return {
-    supported,
-    run: async (_tabId, operation) => operation({
-      send: async (method: string, params: Record<string, unknown> = {}) => {
-        harness.methods.push([method, params])
-        return {}
-      },
-    }),
+/**
+ * What the CDP hit-test at the press point finds: the target (`true`), another
+ * node in the same frame (`false`), or a node in another frame (`'frame'`).
+ */
+type HitOutcome = boolean | 'frame'
+
+function runtime(harness: Harness, supported = true, hit: () => HitOutcome = () => true): InputRuntime {
+  const client = {
+    send: async (method: string, params: Record<string, unknown> = {}) => {
+      harness.methods.push([method, params])
+      if (method === 'Runtime.evaluate') return String(params.expression).includes('.has(') ? { result: { value: true } } : { result: { objectId: 'target' } }
+      if (method === 'Page.getLayoutMetrics') return { cssLayoutViewport: { pageX: 0, pageY: 100 } }
+      if (method === 'DOM.getNodeForLocation') return { backendNodeId: 9, frameId: hit() === 'frame' ? 'other-frame' : 'main-frame' }
+      if (method === 'DOM.resolveNode') return { object: { objectId: 'hit' } }
+      if (method === 'Runtime.callFunctionOn') return { result: { value: hit() === true } }
+      if (method === 'DOM.describeNode') return { node: { nodeName: hit() === 'frame' ? 'IFRAME' : 'DIV' } }
+      return {}
+    },
+    isolatedContexts: async () => [{ frameId: 'main-frame', uniqueId: 'iso-main', id: 5, isolated: true, client }],
   }
+  return { supported, run: async (_tabId, operation) => operation(client) }
 }
 
 async function run(call: ToolCall, input?: InputRuntime): Promise<ToolAnswer> {
@@ -147,35 +158,118 @@ describe('trusted clicks', () => {
   })
 })
 
-describe('real-input retry of a synthetic click', () => {
-  it('retries a plain click that changed nothing', async () => {
+describe('CDP re-hit-test before trusted input (#2, pointer-poc)', () => {
+  it('re-hit-tests after the move and before every press', async () => {
+    const harness = stubChrome()
+    await run({ id: '30', name: 'browser_click', args: { selector: '#target', trusted: true, action: 'dblclick' } }, runtime(harness))
+    const sequence = harness.methods
+      .map(([method, params]) => method === 'Input.dispatchMouseEvent' ? String(params.type) : method)
+      .filter((step) => step === 'DOM.getNodeForLocation' || step.startsWith('mouse'))
+    expect(sequence).toEqual(['mouseMoved', 'DOM.getNodeForLocation', 'mousePressed', 'mouseReleased', 'DOM.getNodeForLocation', 'mousePressed', 'mouseReleased'])
+    const located = harness.methods.find(([method]) => method === 'DOM.getNodeForLocation')![1]
+    // Document coordinates: the viewport point plus the page's scroll offset.
+    expect(located).toMatchObject({ x: 60, y: 140, ignorePointerEventsNone: false })
+  })
+
+  it('refuses the press when the point now lands on a cross-origin iframe', async () => {
+    const harness = stubChrome()
+    const answer = await run({ id: '31', name: 'browser_click', args: { selector: '#next', trusted: true } }, runtime(harness, true, () => 'frame'))
+    expect(answer.ok).toBe(false)
+    expect(answer.error?.message).toMatch(/occupied by <iframe>, so the click was not delivered/)
+    expect(mouseEvents(harness).map(([type]) => type)).toEqual(['mouseMoved'])
+    const mark = harness.setups.find((setup) => setup.op === 'measure' && typeof setup.mark === 'string')!.mark
+    expect(harness.setups).toContainEqual({ op: 'pointer-clear', token: mark })
+  })
+
+  it('refuses when the page made the target transparent to the pointer at the last moment', async () => {
+    // The content-script hit-test passed; by the press, the point reaches another node of the same frame.
+    const second = stubChrome()
+    const refused = await run({ id: '33', name: 'browser_click', args: { selector: '#next', trusted: true } }, runtime(second, true, () => false))
+    expect(refused.ok).toBe(false)
+    expect(mouseEvents(second).some(([type]) => type === 'mousePressed')).toBe(false)
+  })
+
+  it('never writes a DOM marker the page could observe', async () => {
+    const harness = stubChrome()
+    await run({ id: '34', name: 'browser_click', args: { selector: '#target', trusted: true } }, runtime(harness))
+    expect(JSON.stringify(harness.methods)).not.toMatch(/data-dsh-pointer|data-dsh-frame|querySelector/)
+    expect(vi.mocked(chrome.scripting.executeScript)).not.toHaveBeenCalled()
+  })
+
+  it('verifies a hover before moving and a drag source before pressing', async () => {
+    const hover = stubChrome()
+    const answer = await run({ id: '35', name: 'browser_hover', args: { selector: '#menu' } }, runtime(hover, true, () => 'frame'))
+    expect(answer.ok).toBe(false)
+    expect(mouseEvents(hover)).toEqual([])
+    const drag = stubChrome()
+    const dragged = await run({ id: '36', name: 'browser_drag', args: { from: { selector: '#card' }, toOffset: { x: 10, y: 0 } } }, runtime(drag, true, () => false))
+    expect(dragged.ok).toBe(false)
+    expect(mouseEvents(drag).map(([type]) => type)).toEqual(['mouseMoved'])
+  })
+
+  it('fails closed when the debugger cannot reach the isolated world', async () => {
+    const harness = stubChrome()
+    const input: InputRuntime = { supported: true, run: async (_tabId, operation) => operation({ send: async () => ({}) }) }
+    const answer = await run({ id: '37', name: 'browser_click', args: { selector: '#target', trusted: true } }, input)
+    expect(answer.ok).toBe(false)
+    expect(harness.methods).toEqual([])
+  })
+})
+
+describe('mouseDrag', () => {
+  it('always releases the button once the press went out (#11)', async () => {
+    const sent: string[] = []
+    let moves = 0
+    const client = {
+      send: async (_method: string, params: Record<string, unknown> = {}) => {
+        sent.push(String(params.type))
+        if (params.type === 'mouseMoved' && ++moves === 3) throw new Error('detached')
+        return {}
+      },
+    }
+    await expect(mouseDrag(client, { x: 0, y: 0 }, { x: 100, y: 0 }, 4)).rejects.toThrow(/detached/)
+    expect(sent).toEqual(['mouseMoved', 'mousePressed', 'mouseMoved', 'mouseMoved', 'mouseReleased'])
+  })
+})
+
+describe('synthetic click with no visible effect (#6)', () => {
+  it('suggests trusted: true instead of re-sending the click', async () => {
     const harness = stubChrome({ watch: { changed: false, reasons: [] } })
     const answer = await run({ id: '7', name: 'browser_click', args: { selector: '#target' } }, runtime(harness))
-    expect(harness.actions).toEqual(['browser_click', 'browser_wait'])
-    expect(mouseEvents(harness).map(([type]) => type)).toEqual(['mouseMoved', 'mousePressed', 'mouseReleased'])
-    expect(JSON.stringify(answer.result)).toContain('retried with real mouse input')
+    expect(harness.actions).toEqual(['browser_click'])
+    expect(mouseEvents(harness)).toEqual([])
+    expect(JSON.stringify(answer.result)).toContain('no visible effect — if the control needs real input, retry with trusted: true')
   })
 
-  it('never retries a toggle, even when nothing visibly changed', async () => {
-    const harness = stubChrome({ watch: { changed: false, reasons: [] }, measure: () => measured({ activation: 'toggle', tag: 'label' }) })
-    await run({ id: '8', name: 'browser_click', args: { selector: '#check' } }, runtime(harness))
-    expect(harness.methods).toEqual([])
-  })
-
-  it('never retries a native button whose handler showed nothing', async () => {
-    const harness = stubChrome({ watch: { changed: false, reasons: [] }, measure: () => measured({ activation: 'control', tag: 'button' }) })
-    await run({ id: '18', name: 'browser_click', args: { selector: '#silent' } }, runtime(harness))
-    expect(harness.methods).toEqual([])
-  })
-
-  it('does not retry when the page changed or the caller chose the synthetic path', async () => {
+  it('gives no hint for toggles, native buttons, or a click that changed something', async () => {
+    const toggle = stubChrome({ watch: { changed: false, reasons: [] }, measure: () => measured({ activation: 'toggle', tag: 'label' }) })
+    expect(JSON.stringify((await run({ id: '8', name: 'browser_click', args: { selector: '#check' } }, runtime(toggle))).result)).not.toContain('trusted: true')
+    expect(toggle.methods).toEqual([])
+    const button = stubChrome({ watch: { changed: false, reasons: [] }, measure: () => measured({ activation: 'control', tag: 'button' }) })
+    expect(JSON.stringify((await run({ id: '18', name: 'browser_click', args: { selector: '#silent' } }, runtime(button))).result)).not.toContain('trusted: true')
     const changed = stubChrome({ watch: { changed: true, reasons: ['dom'] } })
-    await run({ id: '9', name: 'browser_click', args: { selector: '#target' } }, runtime(changed))
+    expect(JSON.stringify((await run({ id: '9', name: 'browser_click', args: { selector: '#target' } }, runtime(changed))).result)).not.toContain('trusted: true')
     expect(changed.methods).toEqual([])
     const explicit = stubChrome({ watch: { changed: false, reasons: [] } })
     await run({ id: '10', name: 'browser_click', args: { selector: '#target', trusted: false } }, runtime(explicit))
     expect(explicit.methods).toEqual([])
     expect(explicit.setups.some((setup) => setup.watch !== undefined)).toBe(false)
+  })
+
+  it('ends the effect watch when the click fails or is cancelled (#11)', async () => {
+    const harness = stubChrome({ watch: { changed: false, reasons: [] } })
+    vi.mocked(chrome.tabs.sendMessage).mockImplementation((async (_tabId: number, message: { type?: string; request?: Record<string, unknown> }) => {
+      if (message.type === 'DSH_INPUT_SETUP') {
+        harness.setups.push(message.request ?? {})
+        if (message.request?.op === 'measure') return { ok: true, result: { op: 'measure', measure: measured() } }
+        return { ok: true, result: { op: 'watch-end', report: { changed: false, reasons: [] } } }
+      }
+      throw new Error('receiving end vanished')
+    }) as never)
+    await run({ id: '19', name: 'browser_click', args: { selector: '#target' } }, runtime(harness))
+    const watch = harness.setups.find((setup) => setup.op === 'measure')!.watch
+    expect(typeof watch).toBe('string')
+    await vi.waitFor(() => { expect(harness.setups).toContainEqual({ op: 'watch-end', token: watch }) })
   })
 })
 
@@ -228,33 +322,40 @@ describe('hover and drag', () => {
 })
 
 describe('frame-aware pointer targets', () => {
-  it('measures a subframe element in its own context and sends input to that session', async () => {
+  it('finds the subframe by its isolated-world registry and sends input to that session', async () => {
     stubChrome()
     const childCalls: Array<[string, Record<string, unknown>]> = []
     const child = {
       send: async (method: string, params: Record<string, unknown> = {}) => {
         childCalls.push([method, params])
-        if (method === 'Runtime.evaluate' && String(params.expression).startsWith('document.documentElement.hasAttribute')) return { result: { value: true } }
+        if (method === 'Runtime.evaluate' && String(params.expression).includes('.has(')) return { result: { value: true } }
         if (method === 'Runtime.evaluate') return { result: { objectId: 'obj-1' } }
         if (method === 'DOM.getContentQuads') return { quads: [[100, 200, 140, 200, 140, 220, 100, 220]] }
         return {}
       },
     }
+    const other = { send: async () => ({ result: { value: false } }) }
     const root = {
       send: async () => ({}),
-      executionContexts: async () => [{ frameId: 'cdp-frame', uniqueId: 'ctx-1', client: child }],
+      isolatedContexts: async () => [
+        { frameId: 'main', uniqueId: 'iso-main', id: 1, isolated: true, client: other },
+        { frameId: 'cdp-frame', uniqueId: 'iso-child', id: 3, isolated: true, client: child },
+      ],
     }
     const target = await resolvePointerTarget(root, 42, FRAMES[1]!, 'tok-1', { x: 1, y: 1 })
     expect(target.client).toBe(child)
     expect(target.point).toEqual({ x: 120, y: 210 })
-    expect(childCalls.some(([method, params]) => method === 'Runtime.evaluate' && String(params.expression).includes('[data-dsh-pointer=\\"tok-1\\"]'))).toBe(true)
+    const expressions = childCalls.filter(([method]) => method === 'Runtime.evaluate').map(([, params]) => String(params.expression))
+    expect(expressions.every((expression) => expression.includes('__dshPointerRegistry') && expression.includes('"tok-1"'))).toBe(true)
+    expect(childCalls.every(([, params]) => params.uniqueContextId === undefined || params.uniqueContextId === 'iso-child')).toBe(true)
   })
 
   it('uses the content measurement for the main frame', async () => {
-    const root = { send: vi.fn(async () => ({})) }
+    const main = { send: vi.fn(async () => ({ result: { value: true } })) }
+    const root = { send: vi.fn(async () => ({})), isolatedContexts: async () => [{ frameId: 'main', uniqueId: 'iso-main', id: 1, isolated: true, client: main }] }
     const target = await resolvePointerTarget(root, 42, FRAMES[0]!, 'tok', { x: 5, y: 6 })
-    expect(target).toEqual({ client: root, point: { x: 5, y: 6 } })
-    expect(root.send).not.toHaveBeenCalled()
+    expect(target.client).toBe(main)
+    expect(target.point).toEqual({ x: 5, y: 6 })
     expect(quadCenter([0, 0, 10, 0, 10, 10, 0, 10])).toEqual({ x: 5, y: 5 })
   })
 })

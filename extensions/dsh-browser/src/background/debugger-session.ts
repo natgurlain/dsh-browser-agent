@@ -40,12 +40,18 @@ export type SendCommand = (target: { tabId: number; sessionId?: string }, method
 export interface CdpClient {
   send(method: string, params?: Record<string, unknown>): Promise<unknown>
   executionContexts?(): Promise<readonly FrameExecutionContext[]>
+  /** Isolated-world contexts (content scripts) across the tab's sessions. */
+  isolatedContexts?(): Promise<readonly FrameExecutionContext[]>
 }
 
 export interface FrameExecutionContext {
   frameId: string
   uniqueId: string
   client: CdpClient
+  /** Session-local numeric context id (for `DOM.resolveNode`). */
+  id?: number
+  /** True for an isolated world (a content script), absent for the page's main world. */
+  isolated?: boolean
 }
 
 /** The subset of `chrome.debugger` this module uses. */
@@ -216,6 +222,15 @@ export class DebuggerSession {
 
   // Runtime 的 uniqueId 在导航和进程切换后不会复用。
   async executionContexts(): Promise<readonly FrameExecutionContext[]> {
+    return (await this.allContexts()).filter((context) => context.isolated !== true)
+  }
+
+  /** Isolated worlds (the extension's content scripts) in every frame of the tab. */
+  async isolatedContexts(): Promise<readonly FrameExecutionContext[]> {
+    return (await this.allContexts()).filter((context) => context.isolated === true)
+  }
+
+  private async allContexts(): Promise<readonly FrameExecutionContext[]> {
     await this.enableDomains(['Runtime'])
     this.autoAttach ??= this.send('Target.setAutoAttach', {
       autoAttach: true, waitForDebuggerOnStart: false, flatten: true,
@@ -295,11 +310,13 @@ export class DebuggerSession {
       if (source.tabId !== this.tabId) return
       const prefix = `${source.sessionId ?? ''}:`
       if (method === 'Runtime.executionContextCreated') {
-        const context = (params as { context: { id: number; uniqueId: string; auxData?: { frameId?: string; isDefault?: boolean } } }).context
-        if (context.auxData?.isDefault && context.auxData.frameId !== undefined) {
+        const context = (params as { context: { id: number; uniqueId: string; auxData?: { frameId?: string; isDefault?: boolean; type?: string } } }).context
+        const isolated = context.auxData?.isDefault !== true && context.auxData?.type === 'isolated'
+        if ((context.auxData?.isDefault === true || isolated) && context.auxData?.frameId !== undefined) {
           this.frameContexts.set(`${prefix}${context.id}`, {
-            frameId: context.auxData.frameId, uniqueId: context.uniqueId,
+            frameId: context.auxData.frameId, uniqueId: context.uniqueId, id: context.id,
             client: { send: (name, args) => this.sendToSession(source.sessionId, name, args) },
+            ...(isolated ? { isolated: true } : {}),
           })
         }
       } else if (method === 'Runtime.executionContextDestroyed') {

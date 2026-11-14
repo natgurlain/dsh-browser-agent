@@ -1,7 +1,8 @@
 /**
  * Content-script half of pointer input: measuring and hit-testing a target,
- * marking it for the debugger, watching whether a click had any effect, and
- * the synthetic hover/drag fallbacks for browsers without the debugger.
+ * handing it to the debugger (through an isolated-world registry, never a DOM
+ * marker the page could observe), watching whether a click had any effect,
+ * and the synthetic hover/drag fallbacks for browsers without the debugger.
  *
  * Internal plumbing only: results are structured data for the background,
  * never model-facing text (descriptions of covering elements are built from
@@ -10,18 +11,26 @@
  * @module
  */
 
-import type {
-  ElementPoint,
-  MeasuredTarget,
-  PointerEnd,
-  SyntheticDragRequest,
-  WatchReport,
+import {
+  POINTER_REGISTRY_GLOBAL,
+  type ElementPoint,
+  type MeasuredTarget,
+  type PointerEnd,
+  type PointerRegistry,
+  type SyntheticDragRequest,
+  type WatchReport,
 } from '../shared/input-setup.ts'
 import { ActionError, resolveActionTarget } from './actions.ts'
 import type { ElementIds } from './ids.ts'
 
-/** Attribute that hands one element to the debugger without ambiguity. */
-export const POINTER_ATTRIBUTE = 'data-dsh-pointer'
+/**
+ * Elements handed to the debugger, by one-time token. Kept in the content
+ * script's isolated world only: a DOM attribute would tell the page exactly
+ * when (and on which element) trusted input is about to land.
+ */
+const pointerTargets = new Map<string, Element>()
+/** Bound on outstanding tokens (each is cleared after its gesture). */
+const MAX_POINTER_TARGETS = 32
 
 /** Activation semantics that make a blind retry unsafe (double toggle/submit). */
 function activationOf(el: Element): MeasuredTarget['activation'] {
@@ -52,7 +61,8 @@ function inert(value: string, max: number): string {
 
 /** `<div id="overlay" class="modal backdrop" role="dialog">`, clipped. */
 export function describeElement(el: Element): string {
-  const parts = [el.tagName.toLowerCase()]
+  // Custom element names are page-controlled and unbounded.
+  const parts = [inert(el.tagName.toLowerCase(), 40)]
   if (el.id !== '') parts.push(`id="${inert(el.id, 40)}"`)
   const classes = [...el.classList].slice(0, 3).map((name) => inert(name, 30)).filter((name) => name !== '')
   if (classes.length > 0) parts.push(`class="${classes.join(' ')}"`)
@@ -61,15 +71,27 @@ export function describeElement(el: Element): string {
   return `<${parts.join(' ')}>`
 }
 
+/** Whether `node` is `ancestor` or inside it, across shadow roots. */
+function composedWithin(ancestor: Node, node: Node): boolean {
+  let current: Node | null = node
+  while (current !== null) {
+    if (current === ancestor) return true
+    current = current instanceof ShadowRoot ? current.host : current.parentNode
+  }
+  return false
+}
+
 /**
- * Whether a hit at the target's center still reaches the target: the element
- * itself, something inside it, an ancestor (pointer-events passthrough), or a
- * label bound to it.
+ * Whether a hit at the aim point reaches the target: the element itself,
+ * something inside it, or a label bound to it. An ancestor does not count: a
+ * click there (pointer-events passthrough) never reaches the target.
  */
-function hitReaches(target: Element, hit: Element): boolean {
-  if (hit === target || target.contains(hit) || hit.contains(target)) return true
-  if (hit instanceof HTMLLabelElement && hit.control === target) return true
-  if (target instanceof HTMLLabelElement && target.control !== null && (target.control === hit || target.control.contains(hit))) return true
+function hitReaches(target: Element, hit: Node): boolean {
+  if (composedWithin(target, hit)) return true
+  const hitElement = hit instanceof Element ? hit : hit.parentElement
+  const label = hitElement?.closest('label')
+  if (label instanceof HTMLLabelElement && label.control === target) return true
+  if (target instanceof HTMLLabelElement && target.control !== null && composedWithin(target.control, hit)) return true
   // Shadow DOM: a hit retargeted to a host that contains the target.
   let node: Node | null = target
   while (node !== null) {
@@ -81,6 +103,17 @@ function hitReaches(target: Element, hit: Element): boolean {
   return false
 }
 
+const registry: PointerRegistry = Object.freeze({
+  has: (token: string): boolean => pointerTargets.has(token),
+  get: (token: string): Element | undefined => pointerTargets.get(token),
+  reaches: (token: string, node: Node): boolean => {
+    const target = pointerTargets.get(token)
+    return target !== undefined && target.isConnected && node instanceof Node && hitReaches(target, node)
+  },
+})
+// Isolated-world global for the debugger's re-hit-test (invisible to the page).
+Object.defineProperty(globalThis, POINTER_REGISTRY_GLOBAL, { value: registry, configurable: true, enumerable: false, writable: false })
+
 /** Hit-test the center of `el`; returns a description of the covering element. */
 function coveringElement(el: Element, center: ElementPoint): string | undefined {
   const root = el.getRootNode()
@@ -91,11 +124,34 @@ function coveringElement(el: Element, center: ElementPoint): string | undefined 
   return describeElement(hit)
 }
 
+/**
+ * Where to aim: the center of the largest client rect still inside the
+ * viewport. A wrapped inline element's bounding-box center can lie on a
+ * sibling; its line boxes cannot.
+ */
+function aimPoint(el: Element, rect: DOMRect): ElementPoint {
+  let best: ElementPoint | undefined
+  let bestArea = 0
+  const rects = typeof el.getClientRects === 'function' ? el.getClientRects() : []
+  for (const box of Array.from(rects)) {
+    const left = Math.max(box.left, 0)
+    const top = Math.max(box.top, 0)
+    const right = Math.min(box.right, window.innerWidth)
+    const bottom = Math.min(box.bottom, window.innerHeight)
+    const area = right > left && bottom > top ? (right - left) * (bottom - top) : 0
+    if (area > bestArea) {
+      bestArea = area
+      best = { x: (left + right) / 2, y: (top + bottom) / 2 }
+    }
+  }
+  return best ?? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
+}
+
 function measureElement(el: Element, hitTest: boolean, scroll = true): MeasuredTarget {
   if (scroll) el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' })
   const rect = el.getBoundingClientRect()
-  const center = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
   const visible = rect.width > 0 && rect.height > 0
+  const center = visible ? aimPoint(el, rect) : { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
   const covered = hitTest && visible ? coveringElement(el, center) : undefined
   return {
     rect: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
@@ -118,21 +174,16 @@ export function measureTarget(
   if (args.mark !== undefined) {
     const token = args.mark.replace(/[^a-zA-Z0-9-]/g, '')
     if (token === '') throw new ActionError('bad-args', 'pointer token must not be empty.')
-    el.setAttribute(POINTER_ATTRIBUTE, token)
+    if (pointerTargets.size >= MAX_POINTER_TARGETS) pointerTargets.delete(pointerTargets.keys().next().value!)
+    pointerTargets.set(token, el)
   }
   if (args.watch !== undefined) startWatch(args.watch)
   return measured
 }
 
-/** Remove a pointer marker. */
+/** Forget an element handed to the debugger. */
 export function clearPointerMark(token: string): boolean {
-  const safe = token.replace(/[^a-zA-Z0-9-]/g, '')
-  let cleared = false
-  for (const element of document.querySelectorAll(`[${POINTER_ATTRIBUTE}="${safe}"]`)) {
-    element.removeAttribute(POINTER_ATTRIBUTE)
-    cleared = true
-  }
-  return cleared
+  return pointerTargets.delete(token.replace(/[^a-zA-Z0-9-]/g, ''))
 }
 
 // ---- Effect watch: did a click change anything at all? ----

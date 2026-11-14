@@ -71,7 +71,8 @@ function csvCell(value: unknown): string {
   if (value === null || value === undefined) return ''
   const text = typeof value === 'string' ? value : typeof value === 'number' || typeof value === 'boolean' ? String(value) : JSON.stringify(value)
   // Leading formula characters are neutralized so a spreadsheet never executes page-authored text.
-  const safe = /^[=+\-@\t\r]/.test(text) && !/^-?\d/.test(text) ? `'${text}` : text
+  // Only a whole-cell plain number (e.g. -5, -5.25) is exempt.
+  const safe = /^[=+\-@\t\r]/.test(text) && !/^-?\d+(\.\d+)?$/.test(text) ? `'${text}` : text
   return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe
 }
 

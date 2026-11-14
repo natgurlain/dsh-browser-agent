@@ -40,6 +40,24 @@ export interface WatchReport {
   reasons: string[]
 }
 
+/**
+ * Isolated-world global through which the debugger reaches an element the
+ * content script measured for trusted pointer input. It lives only in the
+ * extension's isolated world (never on the page's DOM or window), so the page
+ * cannot observe which element is about to receive real input.
+ */
+export const POINTER_REGISTRY_GLOBAL = '__dshPointerRegistry'
+
+/** What the debugger may call in the isolated world. */
+export interface PointerRegistry {
+  /** Whether this frame holds the element for `token`. */
+  has(token: string): boolean
+  /** The element held for `token`. */
+  get(token: string): Element | undefined
+  /** Whether a hit-tested node is the element for `token` or inside it (composed tree, bound label/control). */
+  reaches(token: string, node: Node): boolean
+}
+
 /** Synthetic drag (no debugger, or an HTML5 drag source). */
 export interface SyntheticDragRequest {
   from: PointerEnd

@@ -1,7 +1,7 @@
 /**
  * Pointer tools: the covered-element check before clicks, trusted clicks
- * (explicit, or as a conservative retry of a synthetic click that changed
- * nothing), `browser_hover`, and `browser_drag`.
+ * (explicit only: a synthetic click that changed nothing is reported with a
+ * hint, never re-sent automatically), `browser_hover`, and `browser_drag`.
  *
  * Measuring, hit-testing, marking, and the synthetic fallbacks run in the
  * frame that owns the element (content `pointer-support.ts`); real input runs
@@ -15,7 +15,7 @@ import type { CdpClient } from './debugger-session.ts'
 import type { TabFrame } from './frames.ts'
 import { InputError } from './input-actions.ts'
 import { isModifierName, type ModifierName } from './keys.ts'
-import { mouseClick, mouseDrag, mouseMove, resolvePointerTarget, type MouseButton } from './pointer-actions.ts'
+import { mouseClick, mouseDrag, mouseMove, PointerRedirectedError, resolvePointerTarget, type MouseButton } from './pointer-actions.ts'
 import type {
   ElementPoint,
   InputSetupRequest,
@@ -130,8 +130,8 @@ export type ClickPrecheck =
   | { kind: 'proceed'; measured?: MeasuredTarget; watch?: string }
 
 /**
- * Hit-test before any click; start an effect watch when a synthetic click may
- * later be retried with real input.
+ * Hit-test before any click; start an effect watch when a synthetic click
+ * that changes nothing should earn a "retry with trusted: true" hint.
  * A target the page cannot measure (stale index, missing selector) proceeds:
  * the click itself reports that error in its usual words.
  */
@@ -153,9 +153,8 @@ export async function precheckClick(ctx: PointerContext, mayRetry: boolean): Pro
 }
 
 /**
- * Whether a synthetic click qualifies for a real-input retry: a plain left
- * click on a visible, non-toggling, non-submitting element, with no explicit
- * `trusted` choice and a debugger available.
+ * Whether a synthetic click is watched for the real-input hint: a plain left
+ * click with no explicit `trusted` choice and a debugger available.
  */
 export function clickMayRetry(args: Record<string, unknown>, input: PointerInput | undefined): boolean {
   if (!usable(input) || args.trusted !== undefined) return false
@@ -180,12 +179,31 @@ export async function finishWatch(ctx: PointerContext, watch: string, graceMs = 
   }
 }
 
-/** Retry rule applied to a measured target after a synthetic click. */
-export function shouldRetryTrusted(measured: MeasuredTarget | undefined, report: WatchReport): boolean {
+/**
+ * Whether a synthetic click that changed nothing earns the "retry with
+ * trusted: true" hint (it is never retried automatically: the handler may
+ * have run without a visible effect, and a second activation would repeat it).
+ */
+export function shouldSuggestTrusted(measured: MeasuredTarget | undefined, report: WatchReport): boolean {
   return measured !== undefined
     && measured.visible
     && measured.activation === 'other'
     && !report.changed
+}
+
+/** The hint appended to a synthetic click that changed nothing observable. */
+export const TRUSTED_HINT = ' (no visible effect — if the control needs real input, retry with trusted: true)'
+
+/** The refusal when the CDP re-hit-test finds another node at the point. */
+function redirectedAnswer(end: PointerEnd, error: PointerRedirectedError, gesture: string): PointerAnswer {
+  return {
+    ok: false,
+    error: {
+      code: 'action-failed',
+      message: `Just before the ${gesture}, the point over the ${describePointerEnd(end)} was occupied by ${error.hit}, so the ${gesture} was not delivered. `
+        + 'The page may have moved another element or frame over it; call browser_snapshot and retry.',
+    },
+  }
 }
 
 /** A real mouse click at the element's center. */
@@ -205,10 +223,11 @@ export async function trustedClick(ctx: PointerContext, suffix = ' (trusted)'): 
       if (measured.covered !== undefined) throw new CoveredError(measured.covered)
       if (!measured.visible) throw new InputError('action-failed', `The ${describePointerEnd(end)} has no visible area to click.`)
       const target = await resolvePointerTarget(client, ctx.tabId, ctx.frame, mark, measured.center)
-      await mouseClick(target.client, target.point, options)
+      await mouseClick(target.client, target.point, { ...options, verify: () => target.verify() })
     })
   } catch (error: unknown) {
     if (error instanceof CoveredError) return coveredAnswer(end, error.covered, 'click')
+    if (error instanceof PointerRedirectedError) return redirectedAnswer(end, error, 'click')
     throw error
   } finally {
     await clearMark(ctx, mark)
@@ -242,10 +261,12 @@ export async function hover(ctx: PointerContext): Promise<PointerAnswer> {
       const measured = await measure(ctx, end, { mark, hitTest: true })
       if (measured.covered !== undefined) throw new CoveredError(measured.covered)
       const target = await resolvePointerTarget(client, ctx.tabId, ctx.frame, mark, measured.center)
+      await target.verify()
       await mouseMove(target.client, target.point)
     })
   } catch (error: unknown) {
     if (error instanceof CoveredError) return coveredAnswer(end, error.covered, 'hover')
+    if (error instanceof PointerRedirectedError) return redirectedAnswer(end, error, 'hover')
     throw error
   } finally {
     await clearMark(ctx, mark)
@@ -351,8 +372,11 @@ export async function drag(ctx: PointerContext): Promise<PointerAnswer> {
       } else {
         end = { x: start.point.x + parsed.offset!.x, y: start.point.y + parsed.offset!.y }
       }
-      await mouseDrag(start.client, start.point, end, parsed.steps)
+      await mouseDrag(start.client, start.point, end, parsed.steps, () => start.verify())
     })
+  } catch (error: unknown) {
+    if (error instanceof PointerRedirectedError) return redirectedAnswer(parsed.from, error, 'drag')
+    throw error
   } finally {
     await clearMark(ctx, fromMark)
     await clearMark(ctx, toMark)

@@ -141,6 +141,23 @@ const reliabilityPage = `<!doctype html><style>
       document.addEventListener('mousemove', (event) => { if (grab !== undefined && event.buttons === 1) { window.knobX = Math.max(0, Math.min(380, event.clientX - grab)); knob.style.left = window.knobX + 'px' } });
       document.addEventListener('mouseup', () => { grab = undefined });
     </script></body>`
+// Hostile page (review PoCs): a "Next" button over a cross-site iframe whose own
+// button sits exactly under Next's center. The page makes Next transparent to
+// the pointer the moment it sees any marker attribute or the trusted mousemove.
+const clickjackPage = `<!doctype html><title>Clickjack</title><body style="margin:0">
+    <iframe id="victim" src="CROSS_SITE/inner?victim" style="position:absolute;left:120px;top:315px;width:200px;height:100px;border:0"></iframe>
+    <button id="next" style="position:absolute;left:40px;top:300px;width:300px;height:120px;z-index:2">Next page</button>
+    <p style="position:absolute;top:20px;left:10px;width:240px;font:16px monospace;margin:0">Read the <a id="w1" href="#one">long-agreement-x of</a> <a id="s1" href="#other">privacy policy and cookie notice</a></p>
+    <p style="position:absolute;top:120px;left:10px;width:240px;font:16px monospace;margin:0">Read the <a id="w2" href="#two">long-agreement-x of</a> before you continue with checkout today</p>
+    <script>
+      window.nextClicks = 0; window.armed = true; window.hits = [];
+      const next = document.getElementById('next');
+      next.addEventListener('click', () => { window.nextClicks++ });
+      const dodge = () => { if (window.armed && next.style.pointerEvents !== 'none') next.style.pointerEvents = 'none' };
+      new MutationObserver(dodge).observe(document, { subtree: true, attributes: true, attributeFilter: undefined });
+      next.addEventListener('mousemove', dodge);
+      document.addEventListener('click', (event) => { if (event.target.tagName === 'A') { window.hits.push(event.target.id); event.preventDefault() } }, true);
+    </script></body>`
 // Content-tool fixtures: widgets the inventory used to miss, selects, waits,
 // a scroll container that loads more, and a table paginated by full navigations.
 const contentToolsPage = `<!doctype html><title>Content tools</title><body>
@@ -212,6 +229,7 @@ const server = createServer((request, response) => {
   if (request.url.startsWith('/content-tools')) { response.end(contentToolsPage); return }
   if (request.url.startsWith('/ledger')) { response.end(tablePage(Number(new URL(request.url, 'http://x').searchParams.get('page') ?? 1))); return }
   if (request.url.startsWith('/reliability')) { response.end(reliabilityPage); return }
+  if (request.url.startsWith('/clickjack')) { response.end(clickjackPage.replace('CROSS_SITE', crossSiteOrigin)); return }
   if (request.url.startsWith('/files/quarterly-report.csv')) {
     response.setHeader('content-type', 'text/csv')
     response.setHeader('content-disposition', 'attachment; filename="quarterly-report.csv"')
@@ -743,7 +761,10 @@ try {
   assert.equal(await page.evaluate(() => window.coveredClicks), 1)
   results.push('a click on a covered element is refused with the covering element instead of clicking it')
 
-  assert.match(succeed(await tool('browser_click', { selector: '#trustedOnly' })), /retried with real mouse input/)
+  // No automatic real-input retry: one requested click is one activation, with a hint.
+  assert.match(succeed(await tool('browser_click', { selector: '#trustedOnly' })), /no visible effect — if the control needs real input, retry with trusted: true/)
+  assert.deepEqual(await page.evaluate(() => [window.untrustedClicks, window.trustedClicks]), [1, 0])
+  succeed(await tool('browser_click', { selector: '#trustedOnly', trusted: true }))
   assert.deepEqual(await page.evaluate(() => [window.untrustedClicks, window.trustedClicks]), [1, 1])
   // A native button is never retried, even when its handler shows nothing.
   await page.locator('#trustedOnly').evaluate(element => {
@@ -751,9 +772,31 @@ try {
     button.addEventListener('click', () => { window.silentClicks = (window.silentClicks ?? 0) + 1 })
     element.after(button)
   })
-  assert.doesNotMatch(succeed(await tool('browser_click', { selector: '#silent' })), /retried/)
+  assert.doesNotMatch(succeed(await tool('browser_click', { selector: '#silent' })), /trusted: true/)
   assert.equal(await page.evaluate(() => window.silentClicks), 1)
-  results.push('a synthetic click with no visible effect is retried once with real mouse input')
+  results.push('a synthetic click with no visible effect is never re-sent; it suggests trusted: true')
+
+  // Review PoCs: trusted input cannot be redirected into a cross-site iframe,
+  // and wrapped inline links are aimed at their own line box.
+  await page.goto(`${origin}/clickjack`)
+  succeed(await tool('browser_snapshot', {}))
+  const victimFrame = await waitFor(() => page.frames().find(frame => frame.url().includes('/inner?victim')), 'victim frame')
+  const hijack = await tool('browser_click', { selector: '#next', trusted: true })
+  assert.equal(hijack.isError, true, JSON.stringify(hijack))
+  assert.match(text(hijack), /<iframe>|covered by/)
+  assert.equal(await victimFrame.evaluate(() => window.innerClicks), 0, 'no trusted click may reach the cross-site iframe')
+  assert.equal(await page.evaluate(() => document.querySelector('#next').hasAttribute('data-dsh-pointer')), false)
+  // Unarmed, the same trusted click lands on Next and nothing else.
+  await page.evaluate(() => { window.armed = false; document.querySelector('#next').style.pointerEvents = '' })
+  succeed(await tool('browser_click', { selector: '#next', trusted: true }))
+  assert.equal(await page.evaluate(() => window.nextClicks), 1)
+  assert.equal(await victimFrame.evaluate(() => window.innerClicks), 0)
+  succeed(await tool('browser_click', { selector: '#w1' }))
+  succeed(await tool('browser_click', { selector: '#w2', trusted: true }))
+  assert.deepEqual(await page.evaluate(() => window.hits), ['w1', 'w2'])
+  await page.goto(`${origin}/reliability`)
+  succeed(await tool('browser_snapshot', {}))
+  results.push('trusted clicks are re-hit-tested over CDP before the press: a page cannot slide a cross-site iframe under them, and wrapped links are aimed at a line box')
 
   assert.match(succeed(await tool('browser_hover', { selector: '#hoverTarget' })), /Hovered over element \(#hoverTarget\) \(trusted\)/)
   assert.equal(await page.evaluate(() => window.hovered), true)
