@@ -136,9 +136,17 @@ export interface Config {
    * Loopback ports that forward to this host's port (Docker `-p`, SSH
    * tunnels). The handshake binds the port the extension dialed, so a bridge
    * reached through a forward on a different port is refused unless that port
-   * is listed here. List only ports you control.
+   * is listed here. List only ports you control. Ignored unless
+   * `allowForwardedPorts` is also true.
    */
   forwardedPorts?: number[]
+  /**
+   * Explicit acknowledgment that `forwardedPorts` are trusted: whatever
+   * listens on a forwarded port sits between the extension and the bridge and
+   * can read every frame (frames are authenticated, not encrypted), including
+   * session transcripts and page content. Defaults to false.
+   */
+  allowForwardedPorts?: boolean
 }
 
 /** The shape after schemastery applies its defaults to every field. */
@@ -158,6 +166,7 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   allowDangerFullAccess: z.boolean().default(false),
   safePermissionPresets: z.array(z.string()).default([]),
   forwardedPorts: z.array(z.number().step(1).min(1).max(65535)).default([]),
+  allowForwardedPorts: z.boolean().default(false),
 })
 
 /**
@@ -316,7 +325,7 @@ function mountBridge(
     api: fenced,
     sessionScope: fenced,
     allowedChromeExtensionIds: resolved.allowedChromeExtensionIds,
-    forwardedPorts: resolved.forwardedPorts,
+    forwardedPorts: trustedForwardedPorts(resolved, message => { ctx.logger.warn(message) }),
     toolTimeoutMs: resolved.toolTimeoutMs,
     caps: {
       textOnly: true,
@@ -497,6 +506,20 @@ function mountDiscoveryBeacon(
       return bound?.close()
     }
   }, 'bridge-browser: discovery beacon')
+}
+
+/**
+ * The forwarded ports the bridge honors: none unless the operator also set
+ * `allowForwardedPorts`, since a forward can read every (plaintext) frame.
+ */
+export function trustedForwardedPorts(
+  resolved: Pick<ResolvedConfig, 'forwardedPorts' | 'allowForwardedPorts'>,
+  warn: (message: string) => void,
+): number[] {
+  if (resolved.forwardedPorts.length === 0 || resolved.allowForwardedPorts) return resolved.forwardedPorts
+  warn('bridge-browser: ignoring `forwardedPorts` because `allowForwardedPorts` is not true. Whatever listens on a forwarded port '
+    + 'can read every bridge frame (transcripts, page content); set `allowForwardedPorts: true` only for forwards you control.')
+  return []
 }
 
 /**

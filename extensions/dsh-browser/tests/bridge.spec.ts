@@ -208,8 +208,8 @@ describe('bridge mutual authentication', () => {
   }
 
   /** Send the challenge until the client answers; return the client's hello. */
-  async function challenge(socket: FakeWebSocket, nonce: string): Promise<{ nonce: string; mac: string }> {
-    let hello: { t: string; nonce: string; mac: string } | undefined
+  async function challenge(socket: FakeWebSocket, nonce: string): Promise<{ nonce: string; mac: string; caps: unknown }> {
+    let hello: { t: string; nonce: string; mac: string; caps: unknown } | undefined
     await vi.waitFor(() => {
       hello = socket.sent.find((frame) => (frame as { t: string }).t === 'hello') as typeof hello
       if (hello === undefined) socket.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce })
@@ -225,7 +225,7 @@ describe('bridge mutual authentication', () => {
     expect(socket.sent).toEqual([])
     const serverNonce = createBridgeNonce()
     const hello = await challenge(socket, serverNonce)
-    expect(hello.mac).toBe(await computeBridgeProof(TEST_BRIDGE_TOKEN, 'client', serverNonce, hello.nonce, ENDPOINT))
+    expect(hello.mac).toBe(await computeBridgeProof(TEST_BRIDGE_TOKEN, 'client', serverNonce, hello.nonce, ENDPOINT, { client: hello.caps }))
     expect(JSON.stringify(socket.sent)).not.toContain(TEST_BRIDGE_TOKEN)
     client.stop()
   })
@@ -236,7 +236,7 @@ describe('bridge mutual authentication', () => {
     const serverNonce = createBridgeNonce()
     const hello = await challenge(socket, serverNonce)
     // An impostor that does not know the token can only guess the proof.
-    socket.receive({ t: 'hello.ok', caps: CAPS, mac: await computeBridgeProof('wrong-token', 'server', hello.nonce, serverNonce, ENDPOINT) })
+    socket.receive({ t: 'hello.ok', caps: CAPS, mac: await computeBridgeProof('wrong-token', 'server', hello.nonce, serverNonce, ENDPOINT, { client: hello.caps, server: CAPS }) })
     socket.receive({ t: 'tool.call', id: 'evil', name: 'browser_navigate', args: { url: 'https://evil.example' }, expiresAt: Date.now() + 10_000 })
     await vi.waitFor(() => { expect(socket.closedWith?.code).toBe(BRIDGE_CLOSE_CODES.authFailed) })
     expect(helloOk).not.toHaveBeenCalled()
@@ -267,7 +267,7 @@ describe('bridge mutual authentication', () => {
     const hello = await challenge(socket, serverNonce)
     socket.receive({ t: 'rpc.result', id: 'r', ok: true, result: {} })
     const channel = BridgeFrameChannel.derive(TEST_BRIDGE_TOKEN, 'server', serverNonce, hello.nonce, ENDPOINT)
-    socket.receive({ t: 'hello.ok', caps: CAPS, mac: await computeBridgeProof(TEST_BRIDGE_TOKEN, 'server', hello.nonce, serverNonce, ENDPOINT) })
+    socket.receive({ t: 'hello.ok', caps: CAPS, mac: await computeBridgeProof(TEST_BRIDGE_TOKEN, 'server', hello.nonce, serverNonce, ENDPOINT, { client: hello.caps, server: CAPS }) })
     // Sent by the real bridge right after hello.ok, before the loop released the socket.
     socket.receiveRaw(channel.seal({ t: 'event', frame: { rpcId: 'e1', method: 'session/subscribed', payload: {} } }))
     socket.receiveRaw(channel.seal({ t: 'ping' }))
@@ -291,7 +291,7 @@ describe('bridge mutual authentication', () => {
       const serverNonce = createBridgeNonce()
       const hello = await challenge(socket, serverNonce)
       const channel = BridgeFrameChannel.derive(TEST_BRIDGE_TOKEN, 'server', serverNonce, hello.nonce, ENDPOINT)
-      socket.receive({ t: 'hello.ok', caps: CAPS, mac: await computeBridgeProof(TEST_BRIDGE_TOKEN, 'server', hello.nonce, serverNonce, ENDPOINT) })
+      socket.receive({ t: 'hello.ok', caps: CAPS, mac: await computeBridgeProof(TEST_BRIDGE_TOKEN, 'server', hello.nonce, serverNonce, ENDPOINT, { client: hello.caps, server: CAPS }) })
       const first = channel.seal({ t: 'event', frame: { rpcId: 'e1', method: 'session/queue', payload: {} } })
       socket.receiveRaw(first)
       if (attack === 'unsealed') {

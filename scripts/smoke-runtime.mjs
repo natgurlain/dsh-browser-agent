@@ -205,7 +205,7 @@ async function start(reopen) {
     const elsewhere = { host: '127.0.0.1', port: BEACON_PORTS[0] === endpoint.port ? BEACON_PORTS[1] : BEACON_PORTS[0] }
     probe.send(JSON.stringify({
       t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, endpoint: elsewhere, caps,
-      mac: await computeBridgeProof(token, 'client', relayed.nonce, nonce, elsewhere),
+      mac: await computeBridgeProof(token, 'client', relayed.nonce, nonce, elsewhere, { client: caps }),
     }))
     const [code] = await closed
     assert.equal(code, BRIDGE_CLOSE_CODES.authFailed, 'a handshake relayed from another port must be refused')
@@ -246,12 +246,12 @@ async function start(reopen) {
   const sealed = BridgeFrameChannel.derive(token, 'client', challenge.nonce, clientNonce, endpoint)
   socket.send(JSON.stringify({
     t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: clientNonce, endpoint, caps,
-    mac: await computeBridgeProof(token, 'client', challenge.nonce, clientNonce, endpoint),
+    mac: await computeBridgeProof(token, 'client', challenge.nonce, clientNonce, endpoint, { client: caps }),
   }))
   // hello.ok is the last unsealed frame; everything after it is sealed.
   channel = sealed
   const accepted = await frame(value => value.t === 'hello.ok')
-  assert.equal(accepted.mac, await computeBridgeProof(token, 'server', clientNonce, challenge.nonce, endpoint),
+  assert.equal(accepted.mac, await computeBridgeProof(token, 'server', clientNonce, challenge.nonce, endpoint, { client: caps, server: accepted.caps }),
     'the bridge must prove knowledge of the token back')
   async function request(method, payload) {
     const id = randomUUID()

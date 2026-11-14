@@ -8,9 +8,9 @@
  * its own authentication, required from every client including loopback ones:
  *
  *   1. server → `challenge { v, nonce: Ns }` as soon as the socket opens;
- *   2. client → `hello { v, nonce: Nc, endpoint: E, mac: HMAC(token, client|Ns|Nc|E), caps }`
+ *   2. client → `hello { v, nonce: Nc, endpoint: E, mac: HMAC(token, client|Ns|Nc|E|Cc), caps: Cc }`
  *      within HELLO_TIMEOUT_MS, where E is the host and port the client dialed;
- *   3. server → `hello.ok { caps, mac: HMAC(token, server|Nc|Ns|E) }` after
+ *   3. server → `hello.ok { caps: Cs, mac: HMAC(token, server|Nc|Ns|E|Cc|Cs) }` after
  *      checking E against the local address and port this socket was accepted
  *      on, which the extension verifies before trusting anything else;
  *   4. every later frame, both directions, is sealed with a per-connection,
@@ -19,7 +19,12 @@
  *      reordered or forged frame closes the connection.
  *
  * A local process that relays the handshake from another port therefore
- * fails step 3, and one that rides an authenticated socket fails step 4.
+ * fails step 3, and one that rides an authenticated socket fails step 4; the
+ * caps (Cc, Cs as canonical JSON) are bound too, so a relay cannot toggle the
+ * developer-tools group. Configured `forwardedPorts` are the exception: a
+ * forward listening there is trusted (`allowForwardedPorts`) and can read
+ * every frame. Unauthenticated sockets that time out or are evicted are
+ * terminated, not closed politely.
  * Frames are authenticated, not encrypted. The token never crosses the wire. A `chrome-extension://` Origin is accepted
  * only for the pinned extension ID (defense in depth on top of the token; any
  * local process can forge an Origin header). Host calls terminate at the
@@ -418,14 +423,17 @@ export class BridgeServer {
     if (this.pendingSockets.size >= MAX_PENDING_SOCKETS) {
       const oldest = this.pendingSockets.values().next().value as WebSocket
       this.pendingSockets.delete(oldest)
-      oldest.close(BRIDGE_CLOSE_CODES.busy, 'too many unauthenticated connections')
+      // terminate(), not close(): a client that never answers the close
+      // handshake would otherwise keep its TCP connection (and memory).
+      oldest.terminate()
     }
     this.pendingSockets.add(ws)
     const leavePending = (): void => { this.pendingSockets.delete(ws) }
     // Pre-auth bound: a hello is tiny; the server limit returns once proven.
     const limited = setSocketMaxPayload(ws, PRE_AUTH_MAX_PAYLOAD)
     let helloTimer: NodeJS.Timeout | undefined = setTimeout(() => {
-      ws.close(BRIDGE_CLOSE_CODES.helloTimeout, 'hello timeout')
+      leavePending()
+      ws.terminate()
     }, this.deps.helloTimeoutMs ?? HELLO_TIMEOUT_MS)
     const serverNonce = createBridgeNonce()
     let channel: BridgeFrameChannel | undefined
@@ -433,6 +441,8 @@ export class BridgeServer {
     const onMessage = (data: Buffer | ArrayBuffer | Buffer[]): void => {
       const text = messageToText(data)
       if (helloTimer !== undefined) {
+        // A hello racing an eviction or close is ignored, never promoted.
+        if (ws.readyState !== WebSocket.OPEN) return
         // Pending state: only a v2 `hello` answering this socket's challenge
         // is legal. Every client authenticates, loopback included — an Origin
         // header is forgeable by any local process and proves nothing alone.
@@ -459,7 +469,7 @@ export class BridgeServer {
           ws.close(BRIDGE_CLOSE_CODES.authFailed, 'authentication failed: endpoint mismatch')
           return
         }
-        const expected = bridgeProof(this.deps.token, 'client', serverNonce, frame.nonce, frame.endpoint, nodeHmac)
+        const expected = bridgeProof(this.deps.token, 'client', serverNonce, frame.nonce, frame.endpoint, { client: frame.caps }, nodeHmac)
         if (frame.nonce === serverNonce || !verifyToken(expected, frame.mac)) {
           ws.close(BRIDGE_CLOSE_CODES.authFailed, 'authentication failed')
           return
@@ -470,7 +480,7 @@ export class BridgeServer {
         if (limited) setSocketMaxPayload(ws, this.wss.options.maxPayload ?? 100 * 1024 * 1024)
         channel = BridgeFrameChannel.derive(this.deps.token, 'server', serverNonce, frame.nonce, frame.endpoint, nodeHmac)
         this.promote(ws, remoteAddress, frame.caps, channel,
-          bridgeProof(this.deps.token, 'server', frame.nonce, serverNonce, frame.endpoint, nodeHmac))
+          bridgeProof(this.deps.token, 'server', frame.nonce, serverNonce, frame.endpoint, { client: frame.caps, server: this.deps.caps }, nodeHmac))
         return
       }
       const frame = channel?.open(text)

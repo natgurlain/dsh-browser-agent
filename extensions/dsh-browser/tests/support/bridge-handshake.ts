@@ -1,5 +1,5 @@
 /**
- * Test-side bridge for FakeWebSocket suites: plays the server half of the v3
+ * Test-side bridge for FakeWebSocket suites: plays the server half of the v4
  * handshake (challenge → verify the client proof → hello.ok with a server
  * proof) so background tests exercise the real client authentication. After
  * the handshake the socket is switched to the sealed channel: `receive(frame)`
@@ -36,6 +36,7 @@ interface HelloFrame {
   nonce: string
   mac: string
   endpoint: BridgeEndpoint
+  caps: unknown
 }
 
 /**
@@ -62,14 +63,14 @@ export async function completeHandshake(
     expect(hello).toBeDefined()
   }, { interval: 5 })
   expect(hello!.endpoint).toEqual(bridgeEndpointOfUrl(socket.url))
-  expect(hello!.mac).toBe(await computeBridgeProof(token, 'client', serverNonce, hello!.nonce, hello!.endpoint))
+  expect(hello!.mac).toBe(await computeBridgeProof(token, 'client', serverNonce, hello!.nonce, hello!.endpoint, { client: hello!.caps }))
   const channel = BridgeFrameChannel.derive(token, 'server', serverNonce, hello!.nonce, hello!.endpoint)
   sealSocket(socket, channel)
   socket.dispatchEvent(new MessageEvent('message', {
     data: JSON.stringify({
       t: 'hello.ok',
       caps: options.caps ?? DEFAULT_CAPS,
-      mac: await computeBridgeProof(token, 'server', hello!.nonce, serverNonce, hello!.endpoint),
+      mac: await computeBridgeProof(token, 'server', hello!.nonce, serverNonce, hello!.endpoint, { client: hello!.caps, server: options.caps ?? DEFAULT_CAPS }),
     }),
   }))
   if (options.until !== undefined) await vi.waitFor(options.until)

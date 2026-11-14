@@ -55,9 +55,12 @@ export const HELLO_TIMEOUT_MS = 3_000
  * local relay could forward unchanged. Version 3 binds the dialed endpoint
  * into both proofs and authenticates every later frame with a per-connection
  * key and a strict per-direction sequence number (see {@link BridgeFrameChannel}).
+ * Version 4 also binds the advertised capabilities into the proofs (the client
+ * proof covers the client caps, the server proof both), so a relay cannot add
+ * or strip `devTools` or change snapshot limits without failing the handshake.
  * Both halves reject any other version with {@link BRIDGE_CLOSE_CODES.versionMismatch}.
  */
-export const BRIDGE_PROTOCOL_VERSION = 3
+export const BRIDGE_PROTOCOL_VERSION = 4
 
 /** WebSocket close codes the bridge uses; the reason string carries human text. */
 export const BRIDGE_CLOSE_CODES = {
@@ -182,9 +185,11 @@ export function bridgeEndpointOfUrl(url: string): BridgeEndpoint | undefined {
 /**
  * Server-side check of the endpoint a client claims to have dialed against
  * the local address and port the socket was accepted on. Address literals
- * must match exactly; a DNS name (a remote deployment the user configured
- * by hand) is accepted only on a non-loopback local address, because no
- * discovery path ever hands the extension a name.
+ * must match exactly. A DNS name is accepted only when the socket is on a
+ * loopback address (a hosts-file alias of this machine): on a LAN or public
+ * address a name proves nothing, since anyone controlling its resolution can
+ * relay the handshake from another machine. Remote deployments dial an
+ * address literal.
  * @param claimed - the endpoint from `hello`.
  * @param local - the server socket's local address and port.
  * @returns true when the claim describes this socket.
@@ -194,21 +199,55 @@ export function bridgeEndpointMatches(claimed: BridgeEndpoint, local: BridgeEndp
   const localHost = canonicalBridgeHost(local.host)
   if (localHost === undefined) return false
   if (isAddressLiteral(claimed.host)) return claimed.host === localHost
-  return !isLoopbackHost(localHost)
+  return isLoopbackHost(localHost)
+}
+
+/**
+ * Deterministic JSON: object keys sorted at every level, `undefined` members
+ * dropped as `JSON.stringify` drops them. Both halves serialize the caps they
+ * sent or received this way before binding them into a proof.
+ * @param value - a JSON-compatible value.
+ * @returns its canonical serialization.
+ */
+export function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => item === undefined ? 'null' : canonicalJson(item)).join(',')}]`
+  if (typeof value === 'object' && value !== null) {
+    const entries = Object.keys(value).sort()
+      .filter((key) => (value as Record<string, unknown>)[key] !== undefined)
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`)
+    return `{${entries.join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+/** The capabilities a proof binds: the client's own for its proof, both for the server's. */
+export interface BridgeProofCaps {
+  client: unknown
+  server?: unknown
+}
+
+/** One length-prefixed field, so caps text (which may contain `|`) cannot bleed into another field. */
+function lengthPrefixed(text: string): string {
+  return `${String(text.length)}:${text}`
 }
 
 /**
  * Exact bytes one side authenticates. The role label keeps a client proof from
- * being reflected as a server proof; both nonces are fixed-length hex and the
- * endpoint fields cannot contain `|`, so no field can be smuggled into another.
+ * being reflected as a server proof; both nonces are fixed-length hex, the
+ * endpoint fields cannot contain `|`, and the caps are length-prefixed
+ * canonical JSON, so no field can be smuggled into another.
  * @param role - which side produces the proof.
  * @param first - for the client, the server nonce; for the server, the client nonce.
  * @param second - the other nonce.
  * @param endpoint - the endpoint the client dialed.
+ * @param caps - the client's hello caps, plus the server's hello.ok caps for the server proof.
  * @returns the message to MAC.
  */
-export function bridgeProofMessage(role: 'client' | 'server', first: string, second: string, endpoint: BridgeEndpoint): string {
-  return `dsh-bridge/v${String(BRIDGE_PROTOCOL_VERSION)}|${role}|${first}|${second}|${endpoint.host}|${String(endpoint.port)}`
+export function bridgeProofMessage(role: 'client' | 'server', first: string, second: string, endpoint: BridgeEndpoint, caps: BridgeProofCaps): string {
+  const bound = role === 'client'
+    ? lengthPrefixed(canonicalJson(caps.client))
+    : `${lengthPrefixed(canonicalJson(caps.client))}|${lengthPrefixed(canonicalJson(caps.server))}`
+  return `dsh-bridge/v${String(BRIDGE_PROTOCOL_VERSION)}|${role}|${first}|${second}|${endpoint.host}|${String(endpoint.port)}|${bound}`
 }
 
 /**
@@ -235,6 +274,7 @@ const utf8 = new TextEncoder()
  * @param first - see {@link bridgeProofMessage}.
  * @param second - see {@link bridgeProofMessage}.
  * @param endpoint - see {@link bridgeProofMessage}.
+ * @param caps - see {@link bridgeProofMessage}.
  * @param hmac - HMAC implementation (defaults to the portable one).
  * @returns the proof as 64 lowercase hex digits.
  */
@@ -244,10 +284,11 @@ export function bridgeProof(
   first: string,
   second: string,
   endpoint: BridgeEndpoint,
+  caps: BridgeProofCaps,
   hmac: BridgeHmac = hmacSha256,
 ): string {
   if (token === '') throw new Error('bridge token is empty')
-  return toHex(hmac(utf8.encode(token), utf8.encode(bridgeProofMessage(role, first, second, endpoint))))
+  return toHex(hmac(utf8.encode(token), utf8.encode(bridgeProofMessage(role, first, second, endpoint, caps))))
 }
 
 /**
@@ -260,8 +301,9 @@ export async function computeBridgeProof(
   first: string,
   second: string,
   endpoint: BridgeEndpoint,
+  caps: BridgeProofCaps,
 ): Promise<string> {
-  return bridgeProof(token, role, first, second, endpoint)
+  return bridgeProof(token, role, first, second, endpoint, caps)
 }
 
 /**
@@ -547,7 +589,7 @@ export const DEVTOOLS_TOOL_NAMES = [
 export type ClientFrame =
   /**
    * Answer to `challenge`, within HELLO_TIMEOUT_MS of socket open. `mac` is
-   * {@link bridgeProof}(token, 'client', serverNonce, nonce, endpoint); the
+   * {@link bridgeProof}(token, 'client', serverNonce, nonce, endpoint, { client: caps }); the
    * token itself never crosses the wire. `endpoint` is what the client dialed.
    */
   | { t: 'hello'; v: typeof BRIDGE_PROTOCOL_VERSION; nonce: string; mac: string; endpoint: BridgeEndpoint; caps: BridgeCaps }
@@ -567,7 +609,7 @@ export type ServerFrame =
   | { t: 'challenge'; v: number; nonce: string }
   /**
    * Accepted after a valid `hello`. `mac` is
-   * {@link bridgeProof}(token, 'server', clientNonce, serverNonce, endpoint); the
+   * {@link bridgeProof}(token, 'server', clientNonce, serverNonce, endpoint, { client: helloCaps, server: caps }); the
    * extension must verify it before trusting any other frame. Every later
    * frame in both directions travels sealed by a {@link BridgeFrameChannel}.
    */

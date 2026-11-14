@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import { connect as connectTcp, type AddressInfo, type Socket } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
 import {
@@ -137,7 +137,7 @@ async function sendHello(ws: WebSocket, token: string, caps: Record<string, unkn
   const nonce = createBridgeNonce()
   if (challenge === undefined || ws.readyState !== WebSocket.OPEN) return nonce
   const endpoint = endpointOf(ws)
-  const mac = token === '' ? createBridgeNonce() : await computeBridgeProof(token, 'client', challenge.nonce, nonce, endpoint)
+  const mac = token === '' ? createBridgeNonce() : await computeBridgeProof(token, 'client', challenge.nonce, nonce, endpoint, { client: caps })
   if (token !== '') socketChannels.set(ws, BridgeFrameChannel.derive(token, 'client', challenge.nonce, nonce, endpoint))
   ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, mac, endpoint, caps }))
   return nonce
@@ -198,7 +198,10 @@ describe('BridgeServer', () => {
     expect(frames.find((f) => f.t === 'hello.ok')).toEqual({
       t: 'hello.ok',
       caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 },
-      mac: await computeBridgeProof(TOKEN, 'server', clientNonce, challenge.nonce, endpointOf(ws)),
+      mac: await computeBridgeProof(TOKEN, 'server', clientNonce, challenge.nonce, endpointOf(ws), {
+        client: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 },
+        server: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 },
+      }),
     })
     ws.close()
   })
@@ -220,7 +223,7 @@ describe('BridgeServer', () => {
     await waitFor(() => first.frames.some((f) => f.t === 'challenge'))
     const firstChallenge = first.frames[0] as Extract<BridgeFrame, { t: 'challenge' }>
     const nonce = createBridgeNonce()
-    const capturedMac = await computeBridgeProof(TOKEN, 'client', firstChallenge.nonce, nonce, endpointOf(first.ws))
+    const capturedMac = await computeBridgeProof(TOKEN, 'client', firstChallenge.nonce, nonce, endpointOf(first.ws), { client: CAPS })
     first.ws.close()
     // Replay the exact hello a valid client sent on an earlier socket.
     const replay = await connect(h.url, EXT_ORIGIN)
@@ -311,7 +314,7 @@ describe('BridgeServer', () => {
     const { ws, frames, done } = await connect(h.url)
     await waitFor(() => frames.some((f) => f.t === 'challenge'))
     const challenge = frames[0] as Extract<BridgeFrame, { t: 'challenge' }>
-    const mac = await computeBridgeProof(TOKEN, 'client', challenge.nonce, challenge.nonce, endpointOf(ws))
+    const mac = await computeBridgeProof(TOKEN, 'client', challenge.nonce, challenge.nonce, endpointOf(ws), { client: CAPS })
     ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: challenge.nonce, mac, endpoint: endpointOf(ws), caps: CAPS }))
     await done
     expect(socketClose.get(ws)?.code).toBe(BRIDGE_CLOSE_CODES.authFailed)
@@ -361,6 +364,26 @@ describe('BridgeServer', () => {
     await sendHello(ws, '', CAPS)
     await done
     expect(ws.readyState).toBe(WebSocket.CLOSED)
+  })
+
+  it('terminates unauthenticated TCP connections that never answer the close handshake (relay3 pre-auth)', async () => {
+    const h = await startBridge({ helloTimeoutMs: 200 })
+    harnesses.push(h)
+    const { port } = new URL(h.url)
+    const sockets: Socket[] = []
+    const closed = new Set<Socket>()
+    for (let index = 0; index < MAX_PENDING_SOCKETS + 8; index += 1) {
+      const socket = connectTcp(Number(port), '127.0.0.1')
+      socket.on('error', () => {})
+      socket.on('close', () => { closed.add(socket) })
+      socket.resume()
+      socket.write('GET /ext/bridge HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+        + 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n')
+      sockets.push(socket)
+    }
+    // Neither the evicted nor the timed-out sockets linger waiting for a close reply.
+    await vi.waitFor(() => { expect(closed.size).toBe(sockets.length) }, { timeout: 3_000 })
+    for (const socket of sockets) socket.destroy()
   })
 
   it('closes sockets that never present hello', async () => {
@@ -881,7 +904,8 @@ describe('BridgeServer', () => {
     }
     const extra = await connect(h.url)
     await waiting[0]!.done
-    expect(socketClose.get(waiting[0]!.ws)?.code).toBe(BRIDGE_CLOSE_CODES.busy)
+    // Evicted with terminate(): no close handshake a squatter could stall.
+    expect(socketClose.get(waiting[0]!.ws)?.code).toBe(1006)
     // The newcomer authenticates, leaves the pool, and regains the server limit.
     await sendHello(extra.ws, TOKEN, CAPS)
     await waitFor(() => extra.frames.some((f) => f.t === 'hello.ok'))

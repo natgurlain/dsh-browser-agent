@@ -216,6 +216,7 @@ try {
     '- id: bridge-browser', '  config:', `    token: ${JSON.stringify(token)}`,
     `    sessionWorkspacePath: ${JSON.stringify(workspace)}`,
     `    forwardedPorts: [${String(bridgeProxy.address().port)}]`,
+    '    allowForwardedPorts: true',
     '- id: tool-executor-native', '  disabled: false',
     '- id: tool-executor-ptc', '  disabled: true',
     '- id: agent-default-model', '  config:',

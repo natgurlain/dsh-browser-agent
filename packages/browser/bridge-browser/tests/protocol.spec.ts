@@ -8,6 +8,7 @@ import {
   bridgeEndpointOfUrl,
   bridgeProof,
   bridgeProofMessage,
+  canonicalJson,
   canonicalBridgeHost,
   hmacSha256,
   sha256,
@@ -27,6 +28,8 @@ const NONCE = 'a'.repeat(64)
 const MAC = 'b'.repeat(64)
 const ENDPOINT = { host: '127.0.0.1', port: 3080 }
 /** A well-formed v3 hello; `token` is gone from the wire. */
+const CAPS = { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 }
+
 const hello = (caps: unknown, extra: Record<string, unknown> = {}): string =>
   JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: NONCE, mac: MAC, endpoint: ENDPOINT, caps, ...extra })
 
@@ -37,8 +40,8 @@ describe('bridge handshake primitives', () => {
     expect(isBridgeHex256(server)).toBe(true)
     expect(server).not.toBe(client)
     const expected = createHmac('sha256', Buffer.from('a token', 'utf8'))
-      .update(bridgeProofMessage('client', server, client, ENDPOINT)).digest('hex')
-    expect(await computeBridgeProof('a token', 'client', server, client, ENDPOINT)).toBe(expected)
+      .update(bridgeProofMessage('client', server, client, ENDPOINT, { client: CAPS })).digest('hex')
+    expect(await computeBridgeProof('a token', 'client', server, client, ENDPOINT, { client: CAPS })).toBe(expected)
   })
 
   it('implements SHA-256 and HMAC-SHA256 byte-identically to node crypto', () => {
@@ -53,17 +56,27 @@ describe('bridge handshake primitives', () => {
     }
   })
 
-  it('binds the role and the dialed endpoint into every proof', async () => {
+  it('binds the role, the dialed endpoint, and the caps into every proof (relay3: caps outside the MAC)', async () => {
     const [a, b] = [createBridgeNonce(), createBridgeNonce()]
-    expect(await computeBridgeProof('t', 'client', a, b, ENDPOINT)).not.toBe(await computeBridgeProof('t', 'server', a, b, ENDPOINT))
-    expect(bridgeProof('t', 'client', a, b, ENDPOINT)).not.toBe(bridgeProof('t', 'client', a, b, { ...ENDPOINT, port: 3081 }))
-    expect(bridgeProof('t', 'client', a, b, ENDPOINT)).not.toBe(bridgeProof('t', 'client', a, b, { ...ENDPOINT, host: '::1' }))
-    expect(bridgeProofMessage('client', a, b, ENDPOINT))
-      .toBe(`dsh-bridge/v${String(BRIDGE_PROTOCOL_VERSION)}|client|${a}|${b}|127.0.0.1|3080`)
+    const c = { client: CAPS }
+    const both = { client: CAPS, server: CAPS }
+    expect(await computeBridgeProof('t', 'client', a, b, ENDPOINT, c)).not.toBe(await computeBridgeProof('t', 'server', a, b, ENDPOINT, both))
+    expect(bridgeProof('t', 'client', a, b, ENDPOINT, c)).not.toBe(bridgeProof('t', 'client', a, b, { ...ENDPOINT, port: 3081 }, c))
+    expect(bridgeProof('t', 'client', a, b, ENDPOINT, c)).not.toBe(bridgeProof('t', 'client', a, b, { ...ENDPOINT, host: '::1' }, c))
+    // A relay adding devTools to the hello, or editing hello.ok caps, breaks the proof.
+    expect(bridgeProof('t', 'client', a, b, ENDPOINT, c)).not.toBe(bridgeProof('t', 'client', a, b, ENDPOINT, { client: { ...CAPS, devTools: { version: 1 } } }))
+    expect(bridgeProof('t', 'server', a, b, ENDPOINT, both)).not.toBe(bridgeProof('t', 'server', a, b, ENDPOINT, { client: CAPS, server: { ...CAPS, snapshotMaxChars: 999 } }))
+    // Key order does not matter; the caps are canonical JSON.
+    expect(bridgeProof('t', 'client', a, b, ENDPOINT, { client: { maxInteractiveItems: 60, snapshotMaxChars: 12000, textOnly: true } }))
+      .toBe(bridgeProof('t', 'client', a, b, ENDPOINT, { client: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }))
+    expect(canonicalJson({ b: [1, { d: undefined, c: 'x|y' }], a: null })).toBe('{"a":null,"b":[1,{"c":"x|y"}]}')
+    const caps = canonicalJson(CAPS)
+    expect(bridgeProofMessage('client', a, b, ENDPOINT, c))
+      .toBe(`dsh-bridge/v${String(BRIDGE_PROTOCOL_VERSION)}|client|${a}|${b}|127.0.0.1|3080|${String(caps.length)}:${caps}`)
   })
 
   it('refuses to compute a proof with an empty token', async () => {
-    await expect(computeBridgeProof('', 'client', NONCE, NONCE, ENDPOINT)).rejects.toThrow(/empty/)
+    await expect(computeBridgeProof('', 'client', NONCE, NONCE, ENDPOINT, { client: CAPS })).rejects.toThrow(/empty/)
   })
 
   it('derives the endpoint a client dials and matches it against the accepted socket', () => {
@@ -80,9 +93,12 @@ describe('bridge handshake primitives', () => {
     // A relay on [::1] cannot stand in for a bridge on 127.0.0.1 (or vice versa).
     expect(bridgeEndpointMatches({ host: '::1', port: 3080 }, { host: '127.0.0.1', port: 3080 })).toBe(false)
     expect(bridgeEndpointMatches(ENDPOINT, { host: '::1', port: 3080 })).toBe(false)
-    // A hand-configured DNS name is accepted only on a non-loopback socket.
-    expect(bridgeEndpointMatches({ host: 'box.lan', port: 3080 }, { host: '192.168.1.5', port: 3080 })).toBe(true)
-    expect(bridgeEndpointMatches({ host: 'box.lan', port: 3080 }, { host: '127.0.0.1', port: 3080 })).toBe(false)
+    // A DNS name is accepted only on a loopback socket (relay3: any name matched a LAN address,
+    // so whoever controls its resolution could relay from another machine).
+    expect(bridgeEndpointMatches({ host: 'box.lan', port: 3080 }, { host: '192.168.1.5', port: 3080 })).toBe(false)
+    expect(bridgeEndpointMatches({ host: 'anything.example', port: 3080 }, { host: '10.0.0.2', port: 3080 })).toBe(false)
+    expect(bridgeEndpointMatches({ host: 'devbox.local', port: 3080 }, { host: '127.0.0.1', port: 3080 })).toBe(true)
+    expect(bridgeEndpointMatches({ host: '192.168.1.5', port: 3080 }, { host: '192.168.1.5', port: 3080 })).toBe(true)
   })
 
   it('seals frames per direction and rejects tampering, replay, reordering, and reflection', () => {

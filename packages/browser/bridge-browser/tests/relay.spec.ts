@@ -1,8 +1,8 @@
 /**
  * Handshake relay: a local process without the token binds a probed port,
  * forwards the handshake to the real bridge, and tries to ride the
- * authenticated socket. Protocol v3 binds the dialed endpoint into both
- * proofs and seals every later frame, so neither step works.
+ * authenticated socket. Protocol v4 binds the dialed endpoint and the caps
+ * into both proofs and seals every later frame, so neither step works.
  */
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -57,7 +57,7 @@ async function realBridge(
   return { bridge, port: (http.address() as AddressInfo).port, calls }
 }
 
-/** Honest v3 client: binds the URL it dials and verifies the server proof. */
+/** Honest v4 client: binds the URL it dials and verifies the server proof. */
 function honestClient(url: string): { ws: WebSocket; outcome: Promise<{ verified: boolean; code?: number }> } {
   const ws = new WebSocket(url)
   const endpoint = bridgeEndpointOfUrl(url) as BridgeEndpoint
@@ -71,10 +71,10 @@ function honestClient(url: string): { ws: WebSocket; outcome: Promise<{ verified
         clientNonce = createBridgeNonce()
         ws.send(JSON.stringify({
           t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: clientNonce, endpoint, caps: CAPS,
-          mac: bridgeProof(TOKEN, 'client', serverNonce, clientNonce, endpoint),
+          mac: bridgeProof(TOKEN, 'client', serverNonce, clientNonce, endpoint, { client: CAPS }),
         }))
       } else if (frame?.t === 'hello.ok') {
-        resolve({ verified: constantTimeEqual(bridgeProof(TOKEN, 'server', clientNonce, serverNonce, endpoint), frame.mac) })
+        resolve({ verified: constantTimeEqual(bridgeProof(TOKEN, 'server', clientNonce, serverNonce, endpoint, { client: CAPS, server: frame.caps }), frame.mac) })
       }
     })
     ws.on('close', (code) => { resolve({ verified: false, code }) })
@@ -85,6 +85,39 @@ function honestClient(url: string): { ws: WebSocket; outcome: Promise<{ verified
 }
 
 describe('handshake relay', () => {
+  it('refuses caps a trusted forward rewrote in hello, so it cannot switch on devtools (relay3)', async () => {
+    // The relay listens on a port the operator configured as a forward.
+    const probe = new WebSocketServer({ port: 0, host: '127.0.0.1' })
+    await new Promise((resolve) => { probe.on('listening', resolve) })
+    const forward = (probe.address() as AddressInfo).port
+    await new Promise<void>((resolve) => { probe.close(() => { resolve() }) })
+    const { bridge, port } = await realBridge([forward])
+    const evil = new WebSocketServer({ port: forward, host: '127.0.0.1' })
+    await new Promise((resolve) => { evil.on('listening', resolve) })
+    cleanups.push(() => new Promise<void>((resolve) => { evil.close(() => { resolve() }) }))
+    let upstreamClose: number | undefined
+    evil.on('connection', (victim: WebSocket) => {
+      const upstream = new WebSocket(`ws://127.0.0.1:${String(port)}/ext/bridge`)
+      cleanups.push(() => { upstream.terminate() })
+      upstream.on('close', (code) => { upstreamClose = code; victim.close() })
+      upstream.on('message', (data: Buffer) => { victim.send(data.toString()) })
+      victim.on('message', (data: Buffer) => {
+        let text = data.toString()
+        if (text.includes('"hello"')) {
+          const frame = JSON.parse(text) as { caps: Record<string, unknown> }
+          frame.caps.devTools = { version: 1 }
+          text = JSON.stringify(frame)
+        }
+        upstream.send(text)
+      })
+    })
+    const victim = honestClient(`ws://127.0.0.1:${String(forward)}/ext/bridge`)
+    expect((await victim.outcome).verified).toBe(false)
+    await vi.waitFor(() => { expect(upstreamClose).toBe(BRIDGE_CLOSE_CODES.authFailed) })
+    expect(bridge.hasConnection()).toBe(false)
+    expect(bridge.devToolsSupported()).toBe(false)
+  })
+
   it('refuses a handshake relayed through another port, so the relay never gets an authenticated socket', async () => {
     const { bridge, port: realPort, calls } = await realBridge()
     const evil = new WebSocketServer({ port: 0, host: '127.0.0.1' })
@@ -128,7 +161,7 @@ describe('handshake relay', () => {
           const nonce = createBridgeNonce()
           ws.send(JSON.stringify({
             t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, endpoint, caps: CAPS,
-            mac: bridgeProof(TOKEN, 'client', frame.nonce, nonce, endpoint),
+            mac: bridgeProof(TOKEN, 'client', frame.nonce, nonce, endpoint, { client: CAPS }),
           }))
         })
       })
@@ -153,7 +186,7 @@ describe('handshake relay', () => {
         const endpoint = { host: '127.0.0.1', port: forward }
         ws.send(JSON.stringify({
           t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, endpoint, caps: CAPS,
-          mac: bridgeProof(TOKEN, 'client', frame.nonce, nonce, endpoint),
+          mac: bridgeProof(TOKEN, 'client', frame.nonce, nonce, endpoint, { client: CAPS }),
         }))
       })
     })
@@ -173,7 +206,7 @@ describe('handshake relay', () => {
       const endpoint = { host: '127.0.0.1', port: port + 1 }
       ws.send(JSON.stringify({
         t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, endpoint, caps: CAPS,
-        mac: bridgeProof(TOKEN, 'client', frame.nonce, nonce, endpoint),
+        mac: bridgeProof(TOKEN, 'client', frame.nonce, nonce, endpoint, { client: CAPS }),
       }))
     })
     expect(await closed).toBe(BRIDGE_CLOSE_CODES.authFailed)
@@ -196,7 +229,7 @@ describe('handshake relay', () => {
           serverNonce = frame.nonce
           ws.send(JSON.stringify({
             t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: clientNonce, endpoint, caps: CAPS,
-            mac: bridgeProof(TOKEN, 'client', serverNonce, clientNonce, endpoint),
+            mac: bridgeProof(TOKEN, 'client', serverNonce, clientNonce, endpoint, { client: CAPS }),
           }))
         } else if (frame?.t === 'hello.ok') {
           const channel = BridgeFrameChannel.derive(TOKEN, 'client', serverNonce, clientNonce, endpoint)

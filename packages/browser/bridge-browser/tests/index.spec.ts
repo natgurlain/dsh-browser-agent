@@ -6,7 +6,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { BEACON_PORTS, PINNED_CHROME_EXTENSION_ID } from '../src/protocol.ts'
-import { apply as applyPlugin, Config } from '../src/index.ts'
+import { apply as applyPlugin, Config, trustedForwardedPorts } from '../src/index.ts'
 
 /** A configured token that passes the strength rule. */
 const STRONG_TOKEN = '9e4b1f7c03a2d58e6b0c4f19a7d3e2b5'
@@ -86,6 +86,7 @@ describe('config', () => {
       allowDangerFullAccess: false,
       safePermissionPresets: [],
       forwardedPorts: [],
+      allowForwardedPorts: false,
     })
   })
 
@@ -119,6 +120,7 @@ describe('config', () => {
       allowDangerFullAccess: false,
       safePermissionPresets: [],
       forwardedPorts: [],
+      allowForwardedPorts: false,
     })
   })
 
@@ -269,5 +271,16 @@ describe('apply', () => {
     await dispose?.()
 
     expect(close).toHaveBeenCalledOnce()
+  })
+})
+
+describe('forwarded ports', () => {
+  it('honors forwardedPorts only with the explicit allowForwardedPorts acknowledgment', () => {
+    const warn = vi.fn()
+    expect(trustedForwardedPorts({ forwardedPorts: [4000], allowForwardedPorts: false }, warn)).toEqual([])
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('allowForwardedPorts'))
+    expect(trustedForwardedPorts({ forwardedPorts: [4000], allowForwardedPorts: true }, warn)).toEqual([4000])
+    expect(trustedForwardedPorts({ forwardedPorts: [], allowForwardedPorts: false }, warn)).toEqual([])
+    expect(warn).toHaveBeenCalledTimes(1)
   })
 })

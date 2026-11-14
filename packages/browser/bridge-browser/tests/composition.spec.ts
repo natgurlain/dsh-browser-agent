@@ -292,7 +292,7 @@ async function sendHello(client: Awaited<ReturnType<typeof connect>>, caps: Reco
   const challenge = client.frames.find((f) => f.t === 'challenge') as Extract<BridgeFrame, { t: 'challenge' }>
   const nonce = createBridgeNonce()
   const endpoint = bridgeEndpointOfUrl(client.ws.url)!
-  const mac = await computeBridgeProof(TOKEN, 'client', challenge.nonce, nonce, endpoint)
+  const mac = await computeBridgeProof(TOKEN, 'client', challenge.nonce, nonce, endpoint, { client: caps })
   channels.set(client.ws, BridgeFrameChannel.derive(TOKEN, 'client', challenge.nonce, nonce, endpoint))
   client.ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, mac, endpoint, caps }))
 }

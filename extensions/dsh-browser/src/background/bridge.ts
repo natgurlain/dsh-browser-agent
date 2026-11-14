@@ -3,7 +3,7 @@
  * runs the mutual challenge-response handshake, keeps the connection alive
  * with exponential-backoff reconnects, and answers protocol pings.
  *
- * Handshake (protocol v3): the bridge opens with `challenge { nonce: Ns }`;
+ * Handshake (protocol v4): the bridge opens with `challenge { nonce: Ns }`;
  * the client answers `hello { nonce: Nc, endpoint: E, mac: HMAC(token, client|Ns|Nc|E) }`
  * where E is the address and port it dialed; the bridge checks E against the
  * socket it accepted and answers `hello.ok { mac: HMAC(token, server|Nc|Ns|E) }`.
@@ -310,6 +310,7 @@ export class BridgeClient {
     let stage: Stage = 'challenge'
     let serverNonce = ''
     let clientNonce = ''
+    let helloCaps: BridgeCaps | undefined
     let channel: BridgeFrameChannel | undefined
     const queued: ServerFrame[] = []
     let settle!: (accepted: boolean) => void
@@ -361,9 +362,15 @@ export class BridgeClient {
           }
           serverNonce = frame.nonce
           clientNonce = createBridgeNonce()
+          helloCaps = {
+            textOnly: true,
+            snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS,
+            maxInteractiveItems: 60,
+            ...this.capabilities,
+          }
           let mac: string
           try {
-            mac = bridgeProof(token, 'client', serverNonce, clientNonce, endpoint)
+            mac = bridgeProof(token, 'client', serverNonce, clientNonce, endpoint, { client: helloCaps })
           } catch {
             reject(BRIDGE_CLOSE_CODES.authFailed, 'could not compute the handshake proof')
             return
@@ -374,19 +381,14 @@ export class BridgeClient {
             nonce: clientNonce,
             mac,
             endpoint,
-            caps: {
-              textOnly: true,
-              snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS,
-              maxInteractiveItems: 60,
-              ...this.capabilities,
-            },
+            caps: helloCaps,
           } satisfies ClientFrame))
           stage = 'awaiting-ok'
           return
         }
         case 'awaiting-ok': {
           if (frame.t !== 'hello.ok') return
-          const expected = bridgeProof(token, 'server', clientNonce, serverNonce, endpoint)
+          const expected = bridgeProof(token, 'server', clientNonce, serverNonce, endpoint, { client: helloCaps, server: frame.caps })
           if (!constantTimeEqual(expected, frame.mac)) {
             reject(BRIDGE_CLOSE_CODES.authFailed,
               'the bridge did not prove knowledge of the token for this address; refusing to trust it', 'token-mismatch')
