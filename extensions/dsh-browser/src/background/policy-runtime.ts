@@ -48,6 +48,14 @@ interface CallRecord {
   targets?: CallPolicyTargets
 }
 
+/** Whether a port comes from one of this extension's own pages (never a content script). */
+export function isExtensionPageSender(sender: chrome.runtime.MessageSender | undefined): boolean {
+  if (sender === undefined) return false
+  if (sender.id !== undefined && sender.id !== chrome.runtime.id) return false
+  const base = chrome.runtime.getURL('')
+  return typeof sender.url === 'string' && sender.url.startsWith(base)
+}
+
 export class PolicyRuntime {
   managed: ManagedPolicy = EMPTY_MANAGED_POLICY
   readonly taint: TaintTracker
@@ -164,8 +172,9 @@ export class PolicyRuntime {
   /** Accept a panel policy port (extension pages only). */
   connect(port: chrome.runtime.Port): boolean {
     if (port.name !== POLICY_PORT_NAME) return false
-    // Content scripts run beside untrusted pages: only extension pages may clear taint.
-    if (port.sender?.tab !== undefined || (port.sender?.id !== undefined && port.sender.id !== chrome.runtime.id)) {
+    // Content scripts run beside untrusted pages: only extension pages (the
+    // side panel, or the panel opened in a tab) may clear taint.
+    if (!isExtensionPageSender(port.sender)) {
       port.disconnect()
       return true
     }

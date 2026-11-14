@@ -392,6 +392,33 @@ try {
     assert.equal(answer.ok, true, JSON.stringify(answer))
   }
   const settings = async value => settingsDone(await panel.evaluate(value => sendSettings(value), value))
+  // Session taint (security/taint.ts) over the panel's dedicated policy port.
+  const policyPort = () => panel.evaluate(() => {
+    if (globalThis.policyPort !== undefined) return
+    globalThis.policyMessages = []
+    globalThis.policyPort = chrome.runtime.connect({ name: 'dsh-policy' })
+    policyPort.onMessage.addListener(message => policyMessages.push(message))
+    policyPort.postMessage({ type: 'taint.subscribe' })
+  })
+  const taintRecords = async () => {
+    await policyPort()
+    return waitFor(() => panel.evaluate(() => policyMessages.filter(message => message.type === 'taint.state').at(-1)?.records), 'taint state')
+  }
+  // Probe calls carry no agent session: they share the no-session key.
+  const clearTaint = async () => {
+    await policyPort()
+    const id = await panel.evaluate(() => { const id = crypto.randomUUID(); policyPort.postMessage({ type: 'taint.clear', id }); return id })
+    await waitFor(() => panel.evaluate(id => policyMessages.some(message => message.type === 'taint.clear.result' && message.id === id), id), 'taint clear')
+  }
+  /** Wait for the next approval card, answer it, and return [request, tool result]. */
+  const answerApproval = async (pending, decision) => {
+    const request = await waitFor(() => panel.evaluate(() => messages.find(message => message.type === 'approval.request')?.request), 'policy approval')
+    await panel.evaluate(({ id, decision }) => {
+      messages = messages.filter(message => message.type !== 'approval.request')
+      panelPort.postMessage({ type: 'approval.response', id, decision })
+    }, { id: request.id, decision })
+    return [request, await pending]
+  }
   await settingsDone(await openPanel())
   await waitFor(() => panel.evaluate(() => messages.some(message => message.type === 'status' && message.state === 'connected')), 'extension connection')
   await waitFor(async () => (await (await fetch(probe, { headers })).json()).includes('browser_console_eval'), 'developer tools registration')
@@ -471,6 +498,8 @@ try {
   }
   results.push('caret insertion preserves selections in native and contenteditable fields')
 
+  // A tainted session asks before clipboard writes; the taint rules have their own steps below.
+  await clearTaint()
   succeed(await tool('browser_clipboard', { action: 'write', text: 'Plain clipboard text', html: '<b>Rich clipboard text</b>' }))
   await page.locator('#text').evaluate(input => { input.value = '' })
   succeed(await tool('browser_clipboard', { action: 'paste', method: 'system', selector: '#text' }))
@@ -478,6 +507,7 @@ try {
   await page.locator('#editor').evaluate(editor => { editor.textContent = '' })
   succeed(await tool('browser_clipboard', { action: 'paste', method: 'system', selector: '#editor' }))
   assert.equal(await page.locator('#editor b').textContent(), 'Rich clipboard text')
+  await clearTaint()
   succeed(await tool('browser_clipboard', { action: 'write', html: '<b>HTML &amp; &#20013;&#25991;</b>' }))
   await page.locator('#text').evaluate(input => { input.value = '' })
   succeed(await tool('browser_clipboard', { action: 'paste', method: 'system', selector: '#text' }))
@@ -561,6 +591,7 @@ try {
   const upload = join(directory, 'upload.txt')
   await writeFile(upload, 'Browser upload regression fixture')
   for (const [kind, frame] of Object.entries(frameIds)) {
+    await clearTaint()
     succeed(await tool('browser_upload', { frame, selector: '#upload', paths: [upload] }))
     const url = frameUrls[kind]
     assert.equal(await page.frame({ url }).locator('#upload').evaluate(input => input.files[0].name), 'upload.txt')
@@ -667,6 +698,7 @@ try {
   const inline = succeed(await tool('browser_extract', { table: '#ledger' }))
   assert.match(inline, /Extracted 3 row\(s\); 2 column\(s\)\./)
   assert.match(inline, /<UNTRUSTED_PAGE_CONTENT[^>]*>\nColumns: \["Ref","Amount"\]\n\{"Ref":"L1-1","Amount":"11"\}/)
+  await clearTaint()
   const saved = succeed(await tool('browser_extract', {
     schema: { rows: '#ledger tbody tr', fields: { ref: 'td:nth-child(1)', amount: { selector: 'td:nth-child(2)', type: 'number' } } },
     paginate: { nextSelector: 'a.next', maxPages: 5 },
@@ -845,6 +877,7 @@ try {
   assert.match(succeed(await tool('browser_downloads', { action: 'list', limit: 5 })), /quarterly-report\.csv/)
   results.push('browser_downloads waits for a finished download and reports a local path the host can read')
 
+  await clearTaint()
   const savedPdf = await tool('browser_save_pdf', { filename: 'reliability fixture' })
   const savedText = succeed(savedPdf)
   savedPdfPath = join(workspace, 'pdf', 'reliability fixture.pdf')
@@ -860,6 +893,83 @@ try {
   assert.match(pdfText, /Trusted only|Activated/)
   results.push('browser_pdf_text extracts the text layer of the PDF shown in the controlled tab')
   await page.goto(`${origin}/reliability`)
+
+  // ---- Phase 2 policy: session taint, per-site rules (unrestricted access is on here) ----
+  await settings({ unrestrictedBrowserAccess: true, siteRules: [] })
+  await clearTaint()
+  await waitFor(async () => Object.keys(await taintRecords()).length === 0, 'cleared taint')
+  succeed(await tool('browser_get_text', { selector: 'h1' }))
+  await waitFor(async () => (await taintRecords())['(no-session)']?.sources.includes(origin), 'taint after a page read')
+  // Clipboard write after a read: a forced card, even under unrestricted access.
+  await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request') })
+  let [policyRequest, policyResult] = await answerApproval(tool('browser_clipboard', { action: 'write', text: 'canary-123' }), 'deny')
+  assert.equal(policyRequest.forced, true)
+  assert.equal(policyRequest.canTrust, false)
+  assert.match(policyRequest.details[0].value, /clipboard/)
+  assert.equal(policyResult.isError, true)
+  // A data-carrying URL on another origin than the page read.
+  const sinkUrl = `${crossSiteOrigin}/inner?d=${Buffer.from('canary-secret-value-1234567890').toString('base64url')}`;
+  [policyRequest, policyResult] = await answerApproval(tool('browser_navigate', { url: sinkUrl }), 'deny')
+  assert.equal(policyRequest.forced, true)
+  assert.equal(policyRequest.details.find(detail => detail.kind === 'url')?.url.risky, true)
+  assert.equal(policyResult.isError, true)
+  assert.equal(await page.evaluate(() => location.pathname), '/reliability')
+  // Opening the panel follows the page and injects its snapshot into the
+  // panel's own session, which taints that session too: the panel shows the
+  // banner for it, and its Clear lifts exactly that session's taint.
+  const policyPanel = await browser.newPage()
+  await policyPanel.goto(`chrome-extension://${extensionId}/panel/index.html`)
+  const banner = policyPanel.getByTestId('taint-banner')
+  await banner.waitFor({ timeout: 15_000 })
+  assert.match(await banner.textContent(), /untrusted page content/)
+  // The banner tracks the panel's current session. Let the panel settle on
+  // it (its follow snapshot taints it), then Clear exactly that record.
+  await delay(2_000)
+  const keysAtClick = Object.keys(await taintRecords())
+  const shownKey = keysAtClick.find(key => key !== '(no-session)') ?? '(no-session)'
+  await banner.waitFor({ timeout: 15_000 })
+  const statesBefore = await panel.evaluate(() => policyMessages.length)
+  await banner.getByRole('button', { name: 'Clear', exact: true }).click()
+  await waitFor(() => panel.evaluate(({ statesBefore, shownKey }) => policyMessages.slice(statesBefore)
+    .some(message => message.type === 'taint.state' && !(shownKey in message.records)), { statesBefore, shownKey }),
+  'banner Clear lifted the shown session taint')
+  await clearTaint()
+  await waitFor(async () => !('(no-session)' in await taintRecords()), 'cleared probe taint')
+  await policyPanel.close()
+  await page.bringToFront()
+  // The panel page opened in a tab took the controlled tab with it: follow the fixture again.
+  succeed(await tool('browser_follow_tab', { tabId }))
+  succeed(await tool('browser_clipboard', { action: 'write', text: 'after-clear' }))
+  results.push('a page read taints the session: clipboard writes and data-carrying cross-origin navigation ask even under unrestricted access until the panel banner\'s Clear')
+
+  await settings({ siteRules: [{ pattern: '127.0.0.1', rule: 'read-only' }] })
+  succeed(await tool('browser_get_text', { selector: 'h1' }))
+  const readOnlyClick = await tool('browser_click', { selector: '#coveredBtn' })
+  assert.equal(readOnlyClick.isError, true)
+  assert.match(text(readOnlyClick), /read-only by 127\.0\.0\.1 \(your site policy\)/)
+  await settings({ siteRules: [{ pattern: '127.0.0.1', rule: 'blocked' }] })
+  const blockedRead = await tool('browser_get_text', { selector: 'h1' })
+  assert.equal(blockedRead.isError, true)
+  assert.match(text(blockedRead), /blocked/)
+  assert.equal((await tool('browser_screenshot', {})).isError, true)
+  await settings({ siteRules: [{ pattern: '127.0.0.1', rule: 'ask' }] })
+  await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request') });
+  [policyRequest, policyResult] = await answerApproval(tool('browser_get_text', { selector: 'h1' }), 'allow-once')
+  assert.equal(policyRequest.forced, true)
+  assert.match(text(policyResult), /Reliability fixture/)
+  // Built-in defaults: a "*bank*" host is read-only even under unrestricted access.
+  await settings({ siteRules: [] })
+  const bankUrl = `http://mybank.localhost:${childServer.address().port}/inner`
+  succeed(await tool('browser_navigate', { url: bankUrl }))
+  await waitFor(() => page.evaluate(() => location.hostname === 'mybank.localhost'), 'bank-like page')
+  succeed(await tool('browser_get_text', { selector: '#inner' }))
+  const bankClick = await tool('browser_click', { selector: '#inner' })
+  assert.equal(bankClick.isError, true)
+  assert.match(text(bankClick), /read-only by \*bank\* \(built-in default\)/)
+  succeed(await tool('browser_navigate', { url: `${origin}/reliability` }))
+  await waitFor(() => page.evaluate(() => location.pathname === '/reliability'), 'back from the bank-like page')
+  await clearTaint()
+  results.push('per-site policy: read-only refuses actions, blocked refuses reads and screenshots, ask prompts under unrestricted access, and the built-in *bank* default is read-only')
 
   // 通过正式界面上传图片，并用真实连接失败验证继续生成。
   await worker.evaluate(async () => { await chrome.storage.local.set({ dshPanelUiLocale: 'en' }) })
