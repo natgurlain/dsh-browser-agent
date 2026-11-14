@@ -15,7 +15,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
@@ -54,6 +54,7 @@ let context: Context | undefined
 afterEach(async () => {
   await context?.fiber.dispose()
   context = undefined
+  vi.unstubAllEnvs()
   if (root !== undefined) await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
   root = undefined
 })
@@ -104,6 +105,14 @@ const RemoteApiHost = {
           )
           return { sessionId: session.id }
         }
+        // A restricted permission catalog, as the Host's preset service serves it.
+        if (request.namespace === 'permissionPresets' && request.method === 'catalog') {
+          const options = [{ value: 'workspace-write', name: 'workspace-write' }]
+          return { options, defaultOptions: options, defaultPreset: 'workspace-write' }
+        }
+        if (request.namespace === 'session' && request.method === 'projections') {
+          return { values: { permissions: { currentValue: 'workspace-write' } } }
+        }
         if (request.namespace === 'session' && request.method === 'list') {
           return {
             items: ctx.sessions.list().map(session => ({
@@ -140,6 +149,13 @@ const RemoteApiHost = {
       },
     }
     ctx.provide('typertGateway' as never, gateway as never)
+    // The public permission-presets surface the bridge reads preset sandboxes from.
+    ctx.provide('permissionPresets' as never, {
+      resolve: (name: string) => {
+        if (name === 'workspace-write') return { sandbox: 'workspace-write', approval: 'ask' }
+        throw new Error(`unknown preset ${name}`)
+      },
+    } as never)
     ctx.provide('connection' as never, connection as never)
   },
 }
@@ -147,6 +163,8 @@ const RemoteApiHost = {
 /** Write a dist fixture and the composition cordis.yml, then boot it through the real Loader. */
 async function loadComposition(options: { deferSessionCreate?: boolean } = {}): Promise<{ ctx: Context; configPath: string; port: number }> {
   root = await mkdtemp(join(tmpdir(), 'dsh-bridge-browser-'))
+  // The bridge keeps its session ledger under the dsh home: never the real one.
+  vi.stubEnv('DSH_HOME', join(root, 'dsh-home'))
   const configPath = join(root, 'cordis.yml')
   const apiHostName = 'test:remote-api-host'
   await writeFile(configPath, [
@@ -292,10 +310,13 @@ describe('real Loader composition', () => {
     // sessions it created (or that the panel can list).
     const { ctx, port } = await loadComposition({ deferSessionCreate: true })
     const client = await connectReady(port)
-    const sessionId = SessionId('followed-page-lifecycle')
-    send(client.ws, { t: 'rpc', id: 'create', method: 'session.create', payload: { sessionId } })
+    // A caller-named id is ignored: the bridge always mints its own.
+    send(client.ws, { t: 'rpc', id: 'create', method: 'session.create', payload: { sessionId: 'followed-page-lifecycle' } })
     await waitFor(() => client.frames.some(frame => frame.t === 'rpc.result' && frame.id === 'create'))
-    expect(client.frames.find(frame => frame.t === 'rpc.result' && frame.id === 'create')).toMatchObject({ ok: true })
+    const createdFrame = client.frames.find(frame => frame.t === 'rpc.result' && frame.id === 'create')
+    expect(createdFrame).toMatchObject({ ok: true })
+    const sessionId = SessionId((createdFrame as { result: { result: { value: { sessionId: string } } } }).result.result.value.sessionId)
+    expect(sessionId).not.toBe('followed-page-lifecycle')
     const requests: GenerateOptions[] = []
     ctx.on('llm/stream', async function* (request) {
       requests.push(request)

@@ -1152,13 +1152,15 @@ export function permissionSwitchLine(preset: string): string {
 }
 
 /**
- * Host command syntax: byte 0 is `/`, then a lowercase name, then the end of
- * input or whitespace. Anything else is a prompt, never a command.
+ * Host command syntax, mirrored from dsh-commands `parseCommand`: byte 0 is
+ * `/`, then a lowercase name starting with a letter, then the end of input or
+ * one of tab, LF, CR, space. Anything else is a prompt, never a command; the
+ * bridge policy separately refuses every line that could read as `/permission`.
  * @param line - the exact composer line.
  * @returns true when the line claims the Host command grammar.
  */
 export function isCommandLine(line: string): boolean {
-  return /^\/[a-z0-9_-]+(?:[ \t]|$)/u.test(line)
+  return /^\/[a-z][a-z0-9_-]*(?=$|[\t\n\r ])/u.test(line)
 }
 
 function adaptPermissionCatalog(value: unknown): PermissionCatalog {

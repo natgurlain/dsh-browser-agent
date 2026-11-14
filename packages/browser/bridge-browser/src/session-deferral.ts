@@ -75,8 +75,9 @@ export function withSessionDeferral(
     }
   }
 
-  const mintedId = (payload: Record<string, unknown>): string =>
-    typeof payload.sessionId === 'string' ? payload.sessionId : `session-${crypto.randomUUID()}`
+  // Always mint: a caller-named id could adopt (and later prompt) a session
+  // the bridge never created, such as a subagent or a Desktop conversation.
+  const mintedId = (): string => `session-${crypto.randomUUID()}`
 
   async function materialize(sessionId: string, entry: ProvisionalEntry, signal: AbortSignal): Promise<HostRpcResult> {
     if (!entry.materialized) {
@@ -126,8 +127,10 @@ export function withSessionDeferral(
           return { ok: false, error: { code: 'bad-request', message: 'session.create payload must be an object', details: {} } }
         }
         prune()
-        const sessionId = mintedId(call.payload)
-        provisional.set(sessionId, { payload: { ...call.payload }, createdAt: Date.now() })
+        const sessionId = mintedId()
+        const payload: Record<string, unknown> = { ...call.payload }
+        delete payload.sessionId
+        provisional.set(sessionId, { payload, createdAt: Date.now() })
         return { ok: true, value: { sessionId } }
       }
       if (call.method === 'session.history') {

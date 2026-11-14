@@ -84,6 +84,7 @@ describe('config', () => {
       beaconPorts: [...BEACON_PORTS],
       allowedChromeExtensionIds: [PINNED_CHROME_EXTENSION_ID],
       allowDangerFullAccess: false,
+      safePermissionPresets: [],
     })
   })
 
@@ -115,6 +116,7 @@ describe('config', () => {
       beaconPorts: [...BEACON_PORTS],
       allowedChromeExtensionIds: [PINNED_CHROME_EXTENSION_ID],
       allowDangerFullAccess: false,
+      safePermissionPresets: [],
     })
   })
 

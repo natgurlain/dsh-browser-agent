@@ -53,12 +53,13 @@ describe('withSessionDeferral', () => {
     expect(call).not.toHaveBeenCalled()
   })
 
-  it('honors an explicit session id', async () => {
+  it('mints its own id even when the caller names one, so creation never adopts an existing session', async () => {
     const { api } = apiHarness()
     const wrapped = withSessionDeferral(api, true)
 
-    await expect(wrapped.call(request('session.create', { sessionId: 'session-fixed' })))
-      .resolves.toEqual({ ok: true, value: { sessionId: 'session-fixed' } })
+    const created = await wrapped.call(request('session.create', { sessionId: 'session-fixed' }))
+    expect(created).toMatchObject({ ok: true, value: { sessionId: expect.stringMatching(/^session-[0-9a-f-]{36}$/u) } })
+    expect((created as { value: { sessionId: string } }).value.sessionId).not.toBe('session-fixed')
   })
 
   it('serves provisional history locally and passes real history through', async () => {

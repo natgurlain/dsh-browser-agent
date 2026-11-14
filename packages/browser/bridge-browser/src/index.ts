@@ -47,8 +47,9 @@ import { isLoopbackBindAddress, startDiscoveryBeacon, type DiscoveryBeacon } fro
 import { withSessionDeferral } from './session-deferral.ts'
 import { withSessionWorkspace } from './session-workspace.ts'
 import { purgeSessionFiles, type SessionPurgeDeps } from './session-purge.ts'
-import { resolveToken, syncInstalledExtensionToken } from './token.ts'
-import { FULL_ACCESS_PRESET_NAMES, withBridgePolicy } from './bridge-policy.ts'
+import { installedTokenMismatch, resolveToken, syncInstalledExtensionToken } from './token.ts'
+import { withBridgePolicy } from './bridge-policy.ts'
+import { fileSessionLedger, type SessionLedger } from './session-ledger.ts'
 import {
   createRemoteHostApi,
   type HostConnectionLike,
@@ -76,6 +77,9 @@ const DEFAULT_SESSION_WORKSPACE_PATH = dshHomePath('browser-sessions')
 
 /** Durable session storage root written by the JSONL persistence plugin. */
 const SESSIONS_ROOT = dshHomePath('sessions')
+
+/** File (under the dsh home) listing the sessions this bridge created: its ownership scope. */
+const SESSION_LEDGER_FILE_NAME = 'browser-bridge-sessions.json'
 
 /** Default: sessions materialize only on the first message (open-and-close leaves no trace). */
 const DEFAULT_DEFER_SESSION_CREATE = true
@@ -117,11 +121,17 @@ export interface Config {
    */
   allowedChromeExtensionIds?: string[]
   /**
-   * Let the extension switch a session to a full-access permission preset
-   * (`danger-full-access`, `auto`, or any preset whose sandbox is full access).
-   * Defaults to false: such switches are refused with an explanation.
+   * Let the extension use full-access permission presets: switch a session to
+   * one, and prompt or inject into a session running one. Defaults to false:
+   * only presets known to be restricted are usable from the browser.
    */
   allowDangerFullAccess?: boolean
+  /**
+   * Additional preset names to treat as restricted when the Host's preset
+   * table cannot vouch for them (presets whose sandbox is `read-only` or
+   * `workspace-write` are recognized automatically).
+   */
+  safePermissionPresets?: string[]
 }
 
 /** The shape after schemastery applies its defaults to every field. */
@@ -139,6 +149,7 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   beaconPorts: z.array(z.number().step(1).min(1).max(65535)).default([...BEACON_PORTS]),
   allowedChromeExtensionIds: z.array(z.string().pattern(/^[a-p]{32}$/)).default([PINNED_CHROME_EXTENSION_ID]),
   allowDangerFullAccess: z.boolean().default(false),
+  safePermissionPresets: z.array(z.string()).default([]),
 })
 
 /**
@@ -172,8 +183,20 @@ export async function apply(ctx: Context, resolved: ResolvedConfig): Promise<voi
     } catch (error: unknown) {
       ctx.logger.warn(`browser bridge: could not refresh the installed extension token: ${error instanceof Error ? error.message : String(error)}`)
     }
+  } else {
+    // A pinned token is never copied into the installed extension; say so
+    // when the copy there cannot authenticate, instead of a silent 4002 loop.
+    try {
+      if (await installedTokenMismatch(tokenRes.token)) {
+        ctx.logger.warn('browser bridge: the plugin config pins a token that differs from the installed extension\'s copy; '
+          + 'the extension will be refused (token mismatch) until the same token is pasted into its settings')
+      }
+    } catch {
+      // Advisory only.
+    }
   }
-  mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection))
+  const ledger = await fileSessionLedger(dshHomePath(SESSION_LEDGER_FILE_NAME), message => { ctx.logger.warn(message) })
+  mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection), ledger)
 }
 
 function mountBridge(
@@ -181,6 +204,7 @@ function mountBridge(
   resolved: ResolvedConfig,
   tokenRes: Awaited<ReturnType<typeof resolveToken>>,
   hostApi: BrowserHostApi,
+  ledger: SessionLedger,
 ): void {
   // Workspace grouping wraps the gateway create; session deferral wraps the
   // result so materialization at first prompt still flows through grouping.
@@ -275,7 +299,10 @@ function mountBridge(
   // Least privilege: the extension reaches only what its panel uses, in scope.
   const fenced = withBridgePolicy(api, {
     allowDangerFullAccess: resolved.allowDangerFullAccess,
-    isFullAccessPreset: (preset) => isFullAccessPreset(ctx, preset),
+    presetSandbox: (preset) => presetSandbox(ctx, preset),
+    safePresetNames: resolved.safePermissionPresets,
+    ledger,
+    bridgeSessionCwd: resolved.sessionWorkspacePath,
   })
   const server = new BridgeServer({
     token: tokenRes.token,
@@ -465,15 +492,21 @@ function mountDiscoveryBeacon(
 }
 
 /**
- * Whether a preset grants a full-access sandbox, read from the Host's own
- * preset table when the permission plugin is composed. Known names always count.
+ * The sandbox mode a preset bundles, read through the permission-presets
+ * service's public `resolve()` (which throws for unknown names). Undefined
+ * when the service is absent or cannot resolve the name; the policy then
+ * treats the preset as unsafe.
  */
-function isFullAccessPreset(ctx: Context, preset: string): boolean {
-  if (FULL_ACCESS_PRESET_NAMES.includes(preset)) return true
+export function presetSandbox(ctx: Pick<Context, 'get'>, preset: string): string | undefined {
   const service = (ctx.get as (name: string) => unknown)('permissionPresets') as
-    { presets?: Record<string, { sandbox?: unknown } | undefined> } | undefined
-  const presets = service?.presets
-  return presets !== undefined && Object.hasOwn(presets, preset) && presets[preset]?.sandbox === 'danger-full-access'
+    { resolve?: (name: string) => { sandbox?: unknown } } | undefined
+  if (typeof service?.resolve !== 'function') return undefined
+  try {
+    const sandbox = service.resolve(preset).sandbox
+    return typeof sandbox === 'string' ? sandbox : undefined
+  } catch {
+    return undefined
+  }
 }
 
 type GatewayCandidate = Pick<TypertGatewayLike, 'invoke'> & {

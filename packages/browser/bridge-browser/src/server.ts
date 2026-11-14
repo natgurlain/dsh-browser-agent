@@ -160,7 +160,9 @@ export interface BridgeServerDeps {
    * Session scope for the bridge's own session-targeted methods (snapshot
    * injection, purge). Absent means unrestricted (unit tests only).
    */
-  sessionScope?: { allowsSession(sessionId: string, signal: AbortSignal): Promise<boolean> }
+  sessionScope?: {
+    allowsSession(sessionId: string, signal: AbortSignal, access?: 'read' | 'own' | 'write'): Promise<boolean>
+  }
   /** Active dsh Host adapter used for unary calls, events, and waterfalls. */
   api: BrowserHostApi
   /** Default per-tool-call timeout in ms. */
@@ -587,7 +589,13 @@ export class BridgeServer {
         ? purgeSessionPayload(frame.payload)
         : browserSnapshotPayload(frame.payload)?.sessionId
       if (sessionId !== undefined && this.deps.sessionScope !== undefined
-        && !await this.deps.sessionScope.allowsSession(sessionId, conn.abort.signal).catch(() => false)) {
+        // Injection acts in the session (bridge-created, not full access);
+        // purge needs ownership only.
+        && !await this.deps.sessionScope.allowsSession(
+          sessionId,
+          conn.abort.signal,
+          frame.method === BRIDGE_SESSION_PURGE_METHOD ? 'own' : 'write',
+        ).catch(() => false)) {
         sendFrame(conn, {
           t: 'rpc.result',
           id: frame.id,

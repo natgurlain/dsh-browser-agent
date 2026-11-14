@@ -7,10 +7,21 @@
  *
  * - an explicit method allowlist (no `host.*`, no workspace mutation, no
  *   settings/credential writes outside the panel's relay-profile editor);
- * - session-targeted calls only for sessions this bridge created or that the
- *   panel can list (`session.list`, subagents excluded, as the panel does);
- * - no switch to a full-access permission preset (`session.setPermission` or
- *   `/permission <preset>`) unless the plugin config enables it;
+ * - session ownership: `session.create` is stripped to `{}` so the bridge
+ *   always mints a fresh id, and only sessions the bridge created (this run,
+ *   the durable ledger, or the bridge workspace directory) can be prompted,
+ *   steered, injected into, or purged. Other listable non-subagent sessions
+ *   (Desktop, CLI) stay readable — history, state, cancel — so an approval
+ *   raised by such a session can still be shown; `session.list` answers only
+ *   the bridge's own sessions;
+ * - no full access: bridge sessions start on a safe preset even when the Host
+ *   default is full access, no switch to a full-access preset, and no prompt,
+ *   snapshot injection, or command for a session currently running one —
+ *   unless the plugin config sets `allowDangerFullAccess`. A preset counts as
+ *   safe only when the Host's preset table (public API) bundles a
+ *   `read-only` or `workspace-write` sandbox, or the operator names it in
+ *   `safePermissionPresets`; unknown presets (including `custom`) are refused;
+ * - relay credentials stay bound to the route they were entered for;
  * - `settings.describe` projected down to the fields the panel reads, so other
  *   plugins' configuration (including secrets) never reaches the extension.
  *
@@ -19,6 +30,7 @@
 
 import type { BrowserHostApi, HostRpcCall, HostRpcFailure, HostRpcResult } from './host-api.ts'
 import { isRecord } from './host-api.ts'
+import { memorySessionLedger, type SessionLedger } from './session-ledger.ts'
 
 /** Host methods the extension may call through the bridge. */
 export const BRIDGE_ALLOWED_METHODS: ReadonlySet<string> = new Set([
@@ -48,24 +60,37 @@ export const BRIDGE_ALLOWED_METHODS: ReadonlySet<string> = new Set([
   'llm.discoverModels',
 ])
 
-/** Methods whose `sessionId` must be in scope. `session.models` only when it names one. */
-const SESSION_SCOPED_METHODS = new Set([
+/** Session-targeted methods that only read (or stop) a listable session. */
+const SESSION_READ_METHODS = new Set([
   'session.history',
   'session.models',
   'session.permissions',
-  'session.setPermission',
-  'session.selectModel',
-  'session.attachment',
   'session.state',
   'session.cancel',
-  'session.prompt',
   'commands.list',
-  'commands.execute',
   'skills.list',
 ])
 
-/** Preset names whose sandbox is full access in dsh's own tables. */
+/** Session-targeted methods that act in a session: bridge-created sessions only. */
+const SESSION_WRITE_METHODS = new Set([
+  'session.setPermission',
+  'session.selectModel',
+  'session.attachment',
+  'session.prompt',
+  'commands.execute',
+])
+
+/** Write methods that also refuse a session currently running a full-access preset. */
+const FULL_ACCESS_GATED_METHODS = new Set(['session.prompt', 'commands.execute'])
+
+/** Preset names that are full access whatever the Host table says. */
 export const FULL_ACCESS_PRESET_NAMES: readonly string[] = ['danger-full-access', 'auto']
+
+/** Sandbox modes a safe preset may bundle. */
+const SAFE_SANDBOXES = new Set(['read-only', 'workspace-write'])
+
+/** Fields `llm.discoverModels` may carry from the panel. */
+const DISCOVER_FIELDS = new Set(['settingsNs', 'provider', 'api', 'baseURL', 'apiKey'])
 
 /** Relay route keys the panel mints (`relay-<slug>`, `relay-n<hash>`, `-x` dedupe suffixes). */
 const RELAY_ROUTE_KEY = /^relay-[a-z0-9-]{1,128}$/u
@@ -101,21 +126,51 @@ export const DANGER_FULL_ACCESS_REFUSAL = (preset: string): string =>
   `The browser extension cannot switch a session to the full-access permission preset "${preset}". `
   + 'Change it in DSH itself, or set `allowDangerFullAccess: true` in the bridge-browser plugin config to allow it from the browser.'
 
+/**
+ * User-facing refusal for a session currently running a full-access preset.
+ * @param preset - the session's current preset.
+ * @returns the message the panel shows.
+ */
+export const FULL_ACCESS_SESSION_REFUSAL = (preset: string): string =>
+  `This session runs the permission preset "${preset}", which the browser extension treats as full access (or cannot verify). `
+  + 'Switch it to a restricted preset such as workspace-write first, or set `allowDangerFullAccess: true` in the bridge-browser plugin config.'
+
+/** Refusal for a session the bridge did not create. */
+const NOT_BRIDGE_SESSION = (sessionId: string): string =>
+  `session ${JSON.stringify(sessionId)} was not created by the browser extension; it can be viewed but not prompted, changed, or deleted from the browser`
+
 /** Options for {@link withBridgePolicy}. */
 export interface BridgePolicyOptions {
-  /** Allow switching sessions to a full-access preset from the extension. */
+  /** Allow full-access presets from the extension (switching to and prompting in them). */
   allowDangerFullAccess: boolean
   /**
-   * Resolve whether a preset grants a full-access sandbox (the Host's preset
-   * table). Names in {@link FULL_ACCESS_PRESET_NAMES} always count.
+   * The sandbox mode the Host's preset table bundles for a preset (public
+   * permission-presets API), or undefined when the Host cannot say.
    */
-  isFullAccessPreset?: (preset: string) => boolean
+  presetSandbox?: (preset: string) => string | undefined
+  /** Preset names the operator vouches for as restricted (plugin config). */
+  safePresetNames?: readonly string[]
+  /** Durable record of bridge-created sessions; defaults to memory only. */
+  ledger?: SessionLedger
+  /**
+   * Directory every bridge-created session runs in (the bridge workspace);
+   * a listed session with exactly this `cwd` is the bridge's. Empty disables
+   * the marker.
+   */
+  bridgeSessionCwd?: string
 }
+
+/** How a server-owned method touches a session. */
+export type SessionAccess = 'read' | 'own' | 'write'
 
 /** The fenced Host API plus the session scope the server reuses for its own methods. */
 export interface BridgePolicyApi extends BrowserHostApi {
-  /** Whether a session is in the extension's scope (created here or listable by the panel). */
-  allowsSession(sessionId: string, signal: AbortSignal): Promise<boolean>
+  /**
+   * Whether a session is reachable for an access level: `read` for any
+   * listable non-subagent session, `own` for bridge-created sessions, `write`
+   * for bridge-created sessions not running a full-access preset.
+   */
+  allowsSession(sessionId: string, signal: AbortSignal, access?: SessionAccess): Promise<boolean>
 }
 
 function forbidden(message: string): HostRpcResult {
@@ -129,6 +184,39 @@ function sessionIdOf(payload: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value : undefined
 }
 
+function normalizeDirectory(path: string): string {
+  return path.replace(/[\\/]+$/u, '')
+}
+
+function normalizeBaseUrl(value: unknown): string | undefined {
+  return typeof value === 'string' ? value.trim().replace(/\/+$/u, '') : undefined
+}
+
+/**
+ * Host command grammar (dsh-commands `parseCommand`): byte 0 is `/`, a name,
+ * then the end of input or one of tab, LF, CR, space. The fence must refuse
+ * everything the Host would run as `/permission`, and anything that merely
+ * looks like it once Unicode spaces and compatibility forms are normalized.
+ */
+const HOST_COMMAND = /^\/([a-z][a-z0-9_-]*)(?=$|[\t\n\r ])/u
+/** The one `/permission` form the bridge forwards: a single preset name. */
+const EXACT_PERMISSION = /^\/permission[ \t]+([a-z0-9_-]+)[ \t]*$/u
+const LOOKS_LIKE_PERMISSION = /^[\s\p{Z}\p{Cf}]*\/[\s\p{Z}\p{Cf}]*permission(?![a-z0-9_])/iu
+
+/**
+ * Classify a command line for the `/permission` fence.
+ * @param line - the exact composer line.
+ * @returns `none` for other commands or text, the preset for an exact switch,
+ *   or `malformed` for anything else that could be read as `/permission`.
+ */
+export function permissionCommandOf(line: string): { kind: 'none' } | { kind: 'switch'; preset: string } | { kind: 'malformed' } {
+  const host = HOST_COMMAND.exec(line)
+  const looksLike = LOOKS_LIKE_PERMISSION.test(line.normalize('NFKC'))
+  if (host?.[1] !== 'permission' && !looksLike) return { kind: 'none' }
+  const exact = EXACT_PERMISSION.exec(line)
+  return exact === null ? { kind: 'malformed' } : { kind: 'switch', preset: exact[1]! }
+}
+
 /**
  * Wrap the Host API with the bridge's least-privilege policy.
  * @param api - the composed Host API (deferral, workspace grouping, adapter).
@@ -136,81 +224,256 @@ function sessionIdOf(payload: unknown): string | undefined {
  * @returns the fenced API.
  */
 export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptions): BridgePolicyApi {
-  const known = new Set<string>()
-  const isFullAccess = (preset: string): boolean => FULL_ACCESS_PRESET_NAMES.includes(preset)
-    || (options.isFullAccessPreset?.(preset) ?? false)
+  const ledger = options.ledger ?? memorySessionLedger()
+  const bridgeCwd = normalizeDirectory(options.bridgeSessionCwd ?? '')
+  /** Non-subagent sessions the Host listed (read tier). */
+  const listable = new Set<string>()
+  /** Listed sessions whose cwd is the bridge workspace (durable ownership marker). */
+  const inBridgeWorkspace = new Set<string>()
+  /** Relay route keys whose baseURL changed this run without a fresh key. */
+  const reroutedWithoutKey = new Set<string>()
+  /** Relay credential references set since their route was last written. */
+  const freshCredentials = new Set<string>()
+
+  const isSafePreset = (preset: string): boolean => {
+    const name = preset.trim()
+    if (FULL_ACCESS_PRESET_NAMES.includes(name)) return false
+    if (options.safePresetNames?.includes(name) === true) return true
+    let sandbox: string | undefined
+    try {
+      sandbox = options.presetSandbox?.(name)
+    } catch {
+      return false
+    }
+    return sandbox !== undefined && SAFE_SANDBOXES.has(sandbox)
+  }
+
+  const inner = (method: string, payload: unknown, signal: AbortSignal): Promise<HostRpcResult> =>
+    api.call({ rpcId: crypto.randomUUID(), method, payload, signal })
 
   const noteListed = (value: unknown): void => {
     if (!isRecord(value) || !Array.isArray(value.items)) return
     for (const item of value.items) {
-      // The panel hides subagent sessions; they stay out of the bridge's reach.
-      if (isRecord(item) && typeof item.sessionId === 'string' && item.origin !== 'subagent') known.add(item.sessionId)
+      if (!isRecord(item) || typeof item.sessionId !== 'string' || item.origin === 'subagent') continue
+      listable.add(item.sessionId)
+      if (bridgeCwd !== '' && typeof item.cwd === 'string' && normalizeDirectory(item.cwd) === bridgeCwd) {
+        inBridgeWorkspace.add(item.sessionId)
+      }
     }
   }
 
-  const allowsSession = async (sessionId: string, signal: AbortSignal): Promise<boolean> => {
-    if (known.has(sessionId)) return true
-    const listed = await api.call({ rpcId: crypto.randomUUID(), method: 'session.list', payload: {}, signal })
+  const owned = (sessionId: string): boolean => ledger.has(sessionId) || inBridgeWorkspace.has(sessionId)
+
+  const refreshList = async (signal: AbortSignal): Promise<void> => {
+    const listed = await inner('session.list', {}, signal)
     if (listed.ok) noteListed(listed.value)
-    return known.has(sessionId)
   }
 
-  const refuseFullAccess = (preset: string): HostRpcResult | undefined =>
-    !options.allowDangerFullAccess && isFullAccess(preset.trim()) ? forbidden(DANGER_FULL_ACCESS_REFUSAL(preset.trim())) : undefined
+  /** The session's current preset when it is not safe, else undefined. */
+  const unsafePresetOf = async (sessionId: string, signal: AbortSignal): Promise<string | undefined> => {
+    if (options.allowDangerFullAccess) return undefined
+    const permissions = await inner('session.permissions', { sessionId }, signal)
+    const current = permissions.ok && isRecord(permissions.value) && typeof permissions.value.current === 'string'
+      ? permissions.value.current
+      : 'unknown'
+    return isSafePreset(current) ? undefined : current
+  }
+
+  const allowsSession = async (sessionId: string, signal: AbortSignal, access: SessionAccess = 'read'): Promise<boolean> => {
+    if (access === 'read' ? !(owned(sessionId) || listable.has(sessionId)) : !owned(sessionId)) {
+      await refreshList(signal)
+    }
+    const inScope = access === 'read' ? owned(sessionId) || listable.has(sessionId) : owned(sessionId)
+    if (!inScope) return false
+    if (access !== 'write') return true
+    return await unsafePresetOf(sessionId, signal) === undefined
+  }
+
+  /** Put a freshly created session on a safe preset when the Host default is not. */
+  const ensureSafePreset = async (sessionId: string, signal: AbortSignal): Promise<HostRpcResult | undefined> => {
+    if (await unsafePresetOf(sessionId, signal) === undefined) return undefined
+    const catalog = await inner('permission.catalog', {}, signal)
+    const presets = catalog.ok && isRecord(catalog.value) && Array.isArray(catalog.value.options)
+      ? catalog.value.options.flatMap((option) => isRecord(option) && typeof option.value === 'string' ? [option.value] : [])
+      : []
+    const safe = presets.filter(isSafePreset)
+    const preset = safe.includes('workspace-write') ? 'workspace-write' : safe[0]
+    if (preset === undefined) {
+      return forbidden('The Host offers no restricted permission preset for browser sessions; '
+        + 'add one (or name it in `safePermissionPresets`), or set `allowDangerFullAccess: true` in the bridge-browser plugin config.')
+    }
+    const applied = await inner('session.setPermission', { sessionId, preset }, signal)
+    return applied.ok ? undefined : applied
+  }
+
+  const refuseFullAccessSwitch = (preset: string): HostRpcResult | undefined =>
+    !options.allowDangerFullAccess && !isSafePreset(preset) ? forbidden(DANGER_FULL_ACCESS_REFUSAL(preset.trim())) : undefined
+
+  /** The stored baseURL of a relay route, or undefined when it has none. */
+  const storedBaseUrl = async (routeKey: string, signal: AbortSignal): Promise<string | undefined> => {
+    const described = await inner('settings.describe', {}, signal)
+    if (!described.ok || !isRecord(described.value) || !Array.isArray(described.value.namespaces)) return undefined
+    const ns = described.value.namespaces.find((entry) => isRecord(entry) && entry.ns === 'llm-pi-ai')
+    const providers = isRecord(ns) && isRecord(ns.value) && isRecord(ns.value.providers) ? ns.value.providers : undefined
+    const route = providers?.[routeKey]
+    return isRecord(route) ? normalizeBaseUrl(route.baseURL) : undefined
+  }
+
+  const refuseDiscovery = async (payload: Record<string, unknown>, signal: AbortSignal): Promise<HostRpcResult | undefined> => {
+    if (payload.settingsNs !== 'llm-pi-ai' || typeof payload.provider !== 'string' || !RELAY_ROUTE_KEY.test(payload.provider)
+      || !Object.keys(payload).every((field) => DISCOVER_FIELDS.has(field))) {
+      return forbidden('model discovery from the browser extension is limited to relay routes')
+    }
+    if (typeof payload.apiKey === 'string' && payload.apiKey.trim() !== '') return undefined
+    // Without a draft key the Host spends the stored one: only on its own route.
+    const stored = await storedBaseUrl(payload.provider, signal)
+    if (stored === undefined || reroutedWithoutKey.has(payload.provider)
+      || (payload.baseURL !== undefined && normalizeBaseUrl(payload.baseURL) !== stored)) {
+      return forbidden('Enter the relay API key to test a new or changed relay address; the stored key is only used with the address it was saved for.')
+    }
+    return undefined
+  }
+
+  /** Relay routes in a settings.mutate whose baseURL changes without a fresh key. */
+  const reroutesOf = async (payload: Record<string, unknown>, signal: AbortSignal): Promise<string[]> => {
+    if (payload.ns !== 'llm-pi-ai' || !Array.isArray(payload.ops)) return []
+    const keys: string[] = []
+    for (const raw of payload.ops) {
+      const op = opShape(raw)
+      if (op?.op !== 'set' || !isRecord(op.value)) continue
+      const key = op.path[1]!
+      if (freshCredentials.has(relayTokenRef(key))) continue
+      const stored = await storedBaseUrl(key, signal)
+      if (stored !== normalizeBaseUrl(op.value.baseURL)) keys.push(key)
+    }
+    return keys
+  }
+
+  const call = async (call: HostRpcCall): Promise<HostRpcResult> => {
+    if (!BRIDGE_ALLOWED_METHODS.has(call.method)) {
+      return forbidden(`method ${JSON.stringify(call.method)} is not available to the browser extension`)
+    }
+    const payload = isRecord(call.payload) ? call.payload : {}
+    const refusal = refuseCall(call, payload, refuseFullAccessSwitch)
+    if (refusal !== undefined) return refusal
+
+    const sessionId = sessionIdOf(call.payload)
+    const readMethod = SESSION_READ_METHODS.has(call.method)
+    const writeMethod = SESSION_WRITE_METHODS.has(call.method)
+    if ((readMethod || writeMethod) && sessionId === undefined && call.method !== 'session.models') {
+      // Refuse rather than forward: a Host request that also accepted another
+      // addressing form would otherwise bypass the scope check below.
+      return { ok: false, error: { code: 'bad-request', message: `${call.method} requires a non-empty sessionId`, details: {} } }
+    }
+    if (sessionId !== undefined && readMethod && !await allowsSession(sessionId, call.signal, 'read')) {
+      return forbidden(`session ${JSON.stringify(sessionId)} is not available to the browser extension`)
+    }
+    if (sessionId !== undefined && writeMethod && !await allowsSession(sessionId, call.signal, 'own')) {
+      return forbidden(NOT_BRIDGE_SESSION(sessionId))
+    }
+    if (sessionId !== undefined && FULL_ACCESS_GATED_METHODS.has(call.method)) {
+      const permission = call.method === 'commands.execute' && typeof payload.line === 'string'
+        ? permissionCommandOf(payload.line)
+        : undefined
+      // Switching a full-access session back to a restricted preset stays possible.
+      if (permission?.kind !== 'switch') {
+        const unsafe = await unsafePresetOf(sessionId, call.signal)
+        if (unsafe !== undefined) return forbidden(FULL_ACCESS_SESSION_REFUSAL(unsafe))
+      }
+    }
+
+    if (call.method === 'session.create') {
+      // The bridge always mints a fresh id in its own workspace: no adopting
+      // an existing session, no choosing a directory or workspace.
+      const created = await api.call({ ...call, payload: {} })
+      if (!created.ok) return created
+      const createdId = sessionIdOf(created.value)
+      if (createdId === undefined) return created
+      await ledger.add(createdId)
+      const unsafe = await ensureSafePreset(createdId, call.signal)
+      return unsafe ?? created
+    }
+    if (call.method === 'llm.discoverModels') {
+      const refused = await refuseDiscovery(payload, call.signal)
+      if (refused !== undefined) return refused
+    }
+    let rerouted: string[] = []
+    if (call.method === 'settings.mutate') {
+      if (payload.ns === 'agent-default-model' && Array.isArray(payload.ops) && payload.ops.some((raw) => {
+        const op = opShape(raw)
+        return op?.op === 'set' && op.path[0] === 'provider' && typeof op.value === 'string' && reroutedWithoutKey.has(op.value)
+      })) {
+        return forbidden('Re-enter the API key of a relay whose address changed before making it the default model.')
+      }
+      rerouted = await reroutesOf(payload, call.signal)
+    }
+
+    const result = await api.call(call)
+    if (!result.ok) return result
+    if (call.method === 'credentials.set' && typeof payload.ref === 'string') {
+      freshCredentials.add(payload.ref)
+      for (const key of [...reroutedWithoutKey]) if (relayTokenRef(key) === payload.ref) reroutedWithoutKey.delete(key)
+    }
+    if (call.method === 'settings.mutate' && payload.ns === 'llm-pi-ai' && Array.isArray(payload.ops)) {
+      for (const raw of payload.ops) {
+        const key = opShape(raw)?.path[1]
+        if (key !== undefined) freshCredentials.delete(relayTokenRef(key))
+      }
+      // A stored key never follows its route to a new address.
+      for (const key of rerouted) {
+        reroutedWithoutKey.add(key)
+        const cleared = await inner('credentials.unset', { ref: relayTokenRef(key) }, call.signal)
+        if (!cleared.ok) {
+          return forbidden(`The relay address changed but its stored key could not be cleared (${cleared.error.message}); re-enter the key.`)
+        }
+      }
+    }
+    if (call.method === 'session.list') {
+      noteListed(result.value)
+      return { ok: true, value: ownedListing(result.value, owned) }
+    }
+    if (call.method === 'settings.describe') return { ok: true, value: describedSettings(result.value) }
+    return result
+  }
 
   return {
     allowsSession,
     events: (signal) => api.events(signal),
     respond: (rpcId, result, signal) => api.respond(rpcId, result, signal),
-    async call(call: HostRpcCall): Promise<HostRpcResult> {
-      if (!BRIDGE_ALLOWED_METHODS.has(call.method)) {
-        return forbidden(`method ${JSON.stringify(call.method)} is not available to the browser extension`)
-      }
-      const refusal = refuseCall(call, refuseFullAccess)
-      if (refusal !== undefined) return refusal
+    call,
+  }
+}
 
-      const sessionId = sessionIdOf(call.payload)
-      if (SESSION_SCOPED_METHODS.has(call.method) && sessionId !== undefined
-        && !await allowsSession(sessionId, call.signal)) {
-        return forbidden(`session ${JSON.stringify(sessionId)} is not available to the browser extension`)
-      }
-      if (SESSION_SCOPED_METHODS.has(call.method) && sessionId === undefined && call.method !== 'session.models') {
-        // Refuse rather than forward: a Host request that also accepted another
-        // addressing form would otherwise bypass the scope check above.
-        return { ok: false, error: { code: 'bad-request', message: `${call.method} requires a non-empty sessionId`, details: {} } }
-      }
-
-      const result = await api.call(call)
-      if (!result.ok) return result
-      if (call.method === 'session.create') {
-        const created = sessionIdOf(result.value)
-        if (created !== undefined) known.add(created)
-      }
-      if (call.method === 'session.list') noteListed(result.value)
-      if (call.method === 'settings.describe') return { ok: true, value: describedSettings(result.value) }
-      return result
-    },
+/** Keep only the bridge's own, non-subagent sessions in a listing. */
+function ownedListing(value: unknown, owned: (sessionId: string) => boolean): unknown {
+  if (!isRecord(value) || !Array.isArray(value.items)) return value
+  return {
+    ...value,
+    items: value.items.filter((item) => isRecord(item) && typeof item.sessionId === 'string'
+      && item.origin !== 'subagent' && owned(item.sessionId)),
   }
 }
 
 /** Payload-level refusals that do not depend on session scope. */
 function refuseCall(
   call: HostRpcCall,
-  refuseFullAccess: (preset: string) => HostRpcResult | undefined,
+  payload: Record<string, unknown>,
+  refuseFullAccessSwitch: (preset: string) => HostRpcResult | undefined,
 ): HostRpcResult | undefined {
-  const payload = isRecord(call.payload) ? call.payload : {}
   switch (call.method) {
     case 'session.create':
       return payload.agentPreset === undefined
         ? undefined
         : forbidden('session.create may not choose an agent preset from the browser extension')
     case 'session.setPermission':
-      return typeof payload.preset === 'string' ? refuseFullAccess(payload.preset) : undefined
+      return typeof payload.preset === 'string' ? refuseFullAccessSwitch(payload.preset) : undefined
     case 'commands.execute': {
       if (typeof payload.line !== 'string') return undefined
-      const command = /^\/([a-z0-9_-]+)(?:[ \t]+([\s\S]*))?$/u.exec(payload.line)
-      if (command === null || command[1] !== 'permission') return undefined
-      return refuseFullAccess(command[2] ?? '')
+      const permission = permissionCommandOf(payload.line)
+      if (permission.kind === 'malformed') {
+        return forbidden('Only `/permission <preset>` with a plain preset name can be sent from the browser extension.')
+      }
+      return permission.kind === 'switch' ? refuseFullAccessSwitch(permission.preset) : undefined
     }
     case 'settings.mutate':
       return settingsMutationAllowed(payload) ? undefined : forbidden(
@@ -226,10 +489,6 @@ function refuseCall(
         && payload.refs.every((ref) => typeof ref === 'string' && RELAY_CREDENTIAL_REF.test(ref))
         ? undefined
         : forbidden('credentials.describe from the browser extension is limited to relay credentials')
-    case 'llm.discoverModels':
-      return payload.settingsNs === 'llm-pi-ai' && typeof payload.provider === 'string' && RELAY_ROUTE_KEY.test(payload.provider)
-        ? undefined
-        : forbidden('model discovery from the browser extension is limited to relay routes')
     default:
       return undefined
   }
