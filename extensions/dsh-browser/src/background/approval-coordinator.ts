@@ -110,6 +110,9 @@ export class ApprovalCoordinator {
     const pending = this.pending.get(id)
     if (pending === undefined || pending.request.binding !== binding) return false
     if (decision !== 'allow-once' && decision !== 'deny') return false
+    // A policy-forced card (site policy, taint, strict mode) is never allowed
+    // from outside the browser; denying it stays possible.
+    if (decision === 'allow-once' && pending.request.forced === true) return false
     this.settle(id, { status: 'decision', decision })
     return true
   }

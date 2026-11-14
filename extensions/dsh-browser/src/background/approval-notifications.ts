@@ -20,7 +20,7 @@ export type ApprovalNotificationClass = 'quick' | 'review'
 
 /** Classify one approval for the notification surface. */
 export function approvalNotificationClass(request: ApprovalRequest): ApprovalNotificationClass {
-  if (request.devTools === true || request.perCallOnly === true || request.urlRisk === true
+  if (request.devTools === true || request.perCallOnly === true || request.forced === true || request.urlRisk === true
     || request.permission !== undefined) return 'review'
   for (const detail of request.details ?? []) {
     // A plain, non-risky destination is fully described by the summary.
@@ -115,6 +115,10 @@ function renderDetail(detail: ApprovalDetail): string | undefined {
  */
 export function hostApprovalReason(request: ApprovalRequest): string | undefined {
   if (request.permission !== undefined) return undefined
+  // Site policy / taint / strict-mode cards are decided in the browser only:
+  // the Host-side answerer sits in the agent's own harness, which is exactly
+  // what a tainted session must not be able to approve through.
+  if (request.forced === true) return undefined
   const sections: string[] = [
     `Browser ${request.kind === 'read' ? 'page read' : 'action'} awaiting approval (dsh browser assistant; the side panel is closed).`,
     `Tool: ${request.action}`,
