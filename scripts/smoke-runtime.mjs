@@ -19,9 +19,10 @@ const expectedVersion = JSON.parse(await readFile(join(root, 'package.json'), 'u
 const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
 const bridgeRequire = createRequire(join(bridge, 'package.json'))
 const { default: WebSocket } = await import(pathToFileURL(bridgeRequire.resolve('ws')).href)
-const { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BEACON_PORTS, BRIDGE_CONFIG_PATH } = await import(
-  pathToFileURL(join(bridge, 'lib/protocol.js')).href
-)
+const {
+  BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BEACON_PORTS, BRIDGE_CONFIG_PATH,
+  BRIDGE_CLOSE_CODES, BRIDGE_PROTOCOL_VERSION, PINNED_CHROME_EXTENSION_ID, computeBridgeProof, createBridgeNonce,
+} = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
 const temp = await mkdtemp(join(tmpdir(), 'dsh-runtime-smoke-'))
 const home = join(temp, 'home')
 const marker = join(temp, 'observation.json')
@@ -168,7 +169,32 @@ async function start(reopen) {
   assert.equal(beacon.wsUrl, config.wsUrl, 'beacon advertises the only real bridge URL')
   assert.ok(Number.isInteger(beacon.pid) && beacon.pid > 0, 'beacon reports the host process id')
   assert.equal(typeof beacon.startedAt, 'string')
-  // Firefox-style origin requires a valid token even on loopback.
+  // Every client must prove the token, loopback included: a forged
+  // chrome-extension Origin with a guessed proof, and a v1 (raw-token) hello,
+  // are both closed before anything is forwarded.
+  const rejected = async (origin, helloFrame) => {
+    const probe = new WebSocket(config.wsUrl, { origin, handshakeTimeout: 10_000 })
+    const seen = []
+    probe.on('message', data => { seen.push(JSON.parse(data.toString())) })
+    const closed = once(probe, 'close')
+    await once(probe, 'open')
+    if (helloFrame !== undefined) {
+      await waitFor(() => seen.some(value => value.t === 'challenge'), 'bridge challenge', 10_000)
+      probe.send(JSON.stringify(helloFrame))
+    }
+    const [code] = await closed
+    assert.equal(seen.some(value => value.t === 'hello.ok'), false)
+    return code
+  }
+  const caps = { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }
+  assert.equal(await rejected(`chrome-extension://${PINNED_CHROME_EXTENSION_ID}`, {
+    t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: createBridgeNonce(), mac: createBridgeNonce(), caps,
+  }), BRIDGE_CLOSE_CODES.authFailed, 'a forged extension Origin without the token must be refused')
+  assert.equal(await rejected(`chrome-extension://${PINNED_CHROME_EXTENSION_ID}`, { t: 'hello', token: '', caps }),
+    BRIDGE_CLOSE_CODES.versionMismatch, 'a v1 hello must be refused with a version mismatch')
+  assert.equal(await rejected('chrome-extension://abcdefghijklmnopabcdefghijklmnop'),
+    BRIDGE_CLOSE_CODES.originRejected, 'a foreign extension must be refused')
+  // Firefox-style origin with the real token completes the mutual handshake.
   socket = new WebSocket(config.wsUrl, { origin: 'moz-extension://runtime-smoke', handshakeTimeout: 10_000 })
   const frames = []
   let socketError
@@ -183,8 +209,16 @@ async function start(reopen) {
       if (socket.readyState === WebSocket.CLOSED) throw new Error(`Bridge closed: ${JSON.stringify(frames)}`)
     }, 'bridge response', 15_000)
   }
-  socket.send(JSON.stringify({ t: 'hello', token, caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } }))
-  await frame(value => value.t === 'hello.ok')
+  const challenge = await frame(value => value.t === 'challenge')
+  assert.equal(challenge.v, BRIDGE_PROTOCOL_VERSION)
+  const clientNonce = createBridgeNonce()
+  socket.send(JSON.stringify({
+    t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: clientNonce, caps,
+    mac: await computeBridgeProof(token, 'client', challenge.nonce, clientNonce),
+  }))
+  const accepted = await frame(value => value.t === 'hello.ok')
+  assert.equal(accepted.mac, await computeBridgeProof(token, 'server', clientNonce, challenge.nonce),
+    'the bridge must prove knowledge of the token back')
   async function request(method, payload) {
     const id = randomUUID()
     socket.send(JSON.stringify({ t: 'rpc', id, method, payload }))
@@ -369,13 +403,34 @@ try {
   assert.equal(permissionCommand.result.kind, 'success')
   assert.equal((await rpc('session.permissions', { sessionId })).current, 'read-only')
   await rpc('session.history', { sessionId })
-  await rpc('session.setPermission', { sessionId, preset: 'danger-full-access' })
+  // Full access is refused over the bridge unless the plugin config allows it,
+  // through both the permission control and the /permission command.
+  for (const [method, payload] of [
+    ['session.setPermission', { sessionId, preset: 'danger-full-access' }],
+    ['commands.execute', { sessionId, line: '/permission danger-full-access' }],
+  ]) {
+    const refused = await rpc.raw(method, payload)
+    assert.equal(refused.ok, false, JSON.stringify(refused))
+    assert.equal(refused.error.code, 'forbidden')
+    assert.match(refused.error.message, /allowDangerFullAccess/)
+  }
+  assert.equal((await rpc('session.permissions', { sessionId })).current, 'read-only')
+  await rpc('session.setPermission', { sessionId, preset: 'workspace-write' })
   await rpc.event('session/projection', sessionId, projection => projection.changes.some(change => (
-    change.key === 'permissions' && change.val.currentValue === 'danger-full-access'
+    change.key === 'permissions' && change.val.currentValue === 'workspace-write'
   )))
-  assert.equal((await rpc('session.permissions', { sessionId })).current, 'danger-full-access')
-  await rpc('session.setPermission', { sessionId, preset: presetCatalog.defaultPreset })
-  assert.equal((await rpc('session.permissions', { sessionId })).current, presetCatalog.defaultPreset)
+  assert.equal((await rpc('session.permissions', { sessionId })).current, 'workspace-write')
+
+  // Least privilege: methods outside the extension's needs, and sessions
+  // outside its scope, never reach the Host.
+  for (const method of ['host.openPath', 'settings.update', 'workspace.create']) {
+    const refused = await rpc.raw(method, {})
+    assert.equal(refused.ok, false, JSON.stringify(refused))
+    assert.equal(refused.error.code, 'forbidden')
+  }
+  const foreign = await rpc.raw('session.history', { sessionId: `session-${randomUUID()}` })
+  assert.equal(foreign.ok, false, JSON.stringify(foreign))
+  assert.equal(foreign.error.code, 'forbidden')
 
   const unknownCommand = await rpc.raw('commands.execute', { sessionId, line: '/definitely-not-a-command' })
   assert.equal(unknownCommand.ok, false, JSON.stringify(unknownCommand))
@@ -419,7 +474,7 @@ try {
   assert.equal(endings.length, 2)
   assert.ok(endings.every(({ event }) => event.data.reason.kind === 'error' && event.data.reason.error.code === 'TRANSPORT'))
 
-  console.log('Real DSH smoke passed: discovery, authentication, image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, browser context, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
+  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, browser context, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
   succeeded = true
 } catch (error) {
   console.error(hostLog)
