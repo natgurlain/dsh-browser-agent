@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. v0.1.4)'
+        required: true
+      draft:
+        description: 'Create the GitHub Release as a draft'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # create the release and upload assets
+      id-token: write # sign build provenance (Sigstore)
+      attestations: write # store attestations
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      # No dependency cache in the release job: build from a clean store.
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check:runtime
+      - run: pnpm run typecheck
+      - run: pnpm run test
+      - name: Build and package release assets
+        run: node scripts/package-release.mjs --tag "$TAG" --out release
+      - name: Verify checksums
+        working-directory: release
+        run: sha256sum -c SHA256SUMS
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/*.zip
+            release/*.tgz
+            release/SHA256SUMS
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRAFT: ${{ github.event_name == 'workflow_dispatch' && inputs.draft }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+            exit 0
+          fi
+          flags=(--verify-tag --title "$TAG" --generate-notes)
+          if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
+          if [[ "$DRAFT" == "true" ]]; then flags+=(--draft); fi
+          gh release create "$TAG" release/* "${flags[@]}"

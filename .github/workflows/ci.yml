@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      # pnpm must be on PATH before setup-node so `cache: pnpm` can find the store.
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check:runtime
+      - run: pnpm run typecheck
+      - run: pnpm run test
+      - name: Build bridge and Chrome extension
+        run: pnpm run build
+      - name: Build Firefox extension
+        run: pnpm --filter dsh-browser-extension run build:firefox
+      - name: Script tests
+        run: node --test scripts/tests/*.test.mjs
+      - name: Runtime smoke (real DSH host)
+        run: node scripts/smoke-runtime.mjs
+      - name: Install Chromium for the browser smoke
+        # Use the workspace's own playwright-core so the browser revision
+        # matches chromium.executablePath() in scripts/smoke-browser.mjs.
+        run: pnpm --filter @natgurlain/dsh-bridge-browser exec playwright-core install --with-deps chromium
+      - name: Headless browser smoke
+        env:
+          # Chromium aborts when its profile socket path is too long.
+          DSH_SMOKE_ARTIFACTS: /tmp/dshb
+        run: pnpm run test:browser
+      - name: Upload browser smoke artifacts
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-smoke-artifacts
+          path: /tmp/dshb
+          retention-days: 7
+          if-no-files-found: ignore
