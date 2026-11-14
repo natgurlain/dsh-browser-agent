@@ -15,6 +15,7 @@ import { abortRunningActions, runAction, ActionError, resolveActionTarget, typeT
 import { AgentOverlay, type OverlayCopy, type PointKind } from './overlay.ts'
 import { ElementIds } from './ids.ts'
 import { handleInputSetup } from './input-support.ts'
+import { handleLearningMessage } from './learning.ts'
 import { SelectionWatcher } from './selection.ts'
 import { armPageWatch } from './watch.ts'
 import type { InputSetupRequest } from '../shared/input-setup.ts'
@@ -115,6 +116,10 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
     abortRunningActions()
     sendResponse({ ok: true })
     return
+  }
+  if (typeof msg.type === 'string' && /^DSH_(?:LEARN_|WATCH|SITE_DRIVER_)/u.test(msg.type)) {
+    // Phase 3 learning features (default off; the background gates every message).
+    return handleLearningMessage(message as { type?: string } & Record<string, unknown>, ids, sendResponse) === true ? true : undefined
   }
   if (msg.type !== 'DSH_ACTION') return
   const actionMsg = message as {

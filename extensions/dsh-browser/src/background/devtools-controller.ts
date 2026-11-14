@@ -122,6 +122,11 @@ export interface DevToolsController {
    * page issues traffic. Only called once the user has enabled the allowance.
    */
   prewarm(tabId: number): Promise<void>
+  /**
+   * Requests captured for a tab while it is attached (read-only view of the
+   * network store), for site-driver learning. Undefined when not capturing.
+   */
+  capturedRequests?(tabId: number): readonly NetworkEntry[] | undefined
 }
 
 interface TabContext {
@@ -396,6 +401,10 @@ export function createDevToolsController(options: DevToolsControllerOptions): De
   return {
     supported,
     state,
+    capturedRequests: (tabId) => {
+      const context = contexts.get(tabId)
+      return context === undefined || context.capture.state().attached !== true ? undefined : context.capture.list()
+    },
     releaseTab: (tabId) => {
       const context = contexts.get(tabId)
       if (context === undefined) return

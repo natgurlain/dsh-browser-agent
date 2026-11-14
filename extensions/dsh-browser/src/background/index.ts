@@ -152,6 +152,7 @@ import { splitSelectionMessage } from '../panel/selection.ts'
 import { callPolicyTargets, forcedApprovalPrompt, originFromUrl } from './authorization.ts'
 import { normalizeSitePattern, normalizeSiteRules, type SiteRuleEntry } from '../security/site-policy.ts'
 import { CommitGate, STRICT_MODE_UNAVAILABLE } from './commit-gate.ts'
+import { LearningRuntime } from './learning.ts'
 import { applyManagedOverrides, loadManagedPolicy } from '../security/managed-policy.ts'
 import {
   LEGACY_RECENT_SESSION_STORAGE_KEY,
@@ -2253,6 +2254,24 @@ function devLoopPanelRpc(method: string, payload: unknown): Promise<unknown> | u
 }
 
 /** Route one tool.call frame to the user-approved controlled tab. */
+/** Phase 3 learning features (workflows, site drivers, Watch me, failure fixtures); all default off. */
+const learning = new LearningRuntime({
+  rpc: () => rpc,
+  bridgeConnected: () => bridge?.state === 'connected',
+  agentActiveOnTab: (tabId) => [...unsettledToolCalls].some((active) => active.tabId === tabId),
+  halted: () => killSwitchEngaged || pauseGate.state().mode !== 'running',
+  authorize: (prompt, sessionId, windowId, signal) => authorizeToolCall(prompt, signal, windowId, sessionId),
+  capturedRequests: (tabId) => devTools.capturedRequests?.(tabId),
+  siteDriversSupported: devToolsCapability,
+  activeTab: async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0],
+})
+chrome.runtime.onMessage.addListener((message: unknown, sender) => {
+  if (sender.id !== chrome.runtime.id || sender.tab?.id === undefined) return undefined
+  const msg = message as { type?: unknown; event?: unknown } | null
+  if (msg?.type === 'DSH_WATCH_EVENT') void learning.onWatchEvent(sender.tab.id, sender.frameId ?? 0, msg.event)
+  return undefined
+})
+
 function routeToolCall(call: ToolCall): void {
   if (bridge === null) return
   activeToolCalls.get(call.id)?.controller.abort()
@@ -2403,6 +2422,16 @@ function routeToolCall(call: ToolCall): void {
           commitAction,
           policy,
         ))
+    : call.name === 'browser_site_driver'
+    ? resolveToolTab(call.sessionId).then((target) => 'ok' in target
+      ? target
+      : (policyTabOrigin = originFromUrl(target.url ?? ''), withCommitGate(target, call.sessionId, () => learning.dispatchSiteDriver(
+          call,
+          noteCallTarget(activeCall, target, call.sessionId),
+          policy,
+          approve(target.windowId),
+          controller.signal,
+        ))))
     : resolveToolTab(call.sessionId).then((target) => 'ok' in target
       ? target
       : (policyTabOrigin = originFromUrl(target.url ?? ''), withCommitGate(target, call.sessionId, () => dispatchToolCall(
@@ -2413,7 +2442,7 @@ function routeToolCall(call: ToolCall): void {
           controller.signal,
           noteCallTarget(activeCall, target, call.sessionId),
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
-          { unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit, policy, overlay: agentOverlay },
+          { unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit, policy: learning.wrapPolicy(call, target, policy), overlay: agentOverlay },
         ))))
   )
   // Paused or taken over: the call waits here, before any tab resolution,
@@ -2422,6 +2451,12 @@ function routeToolCall(call: ToolCall): void {
     async (answer) => {
       // Untrusted page content entered the session: taint it (security/taint.ts).
       policyRuntime.recordResult(call, answer.ok, policyTabOrigin)
+      learning.recordResult(call, answer, {
+        ...(activeCall.tabId === undefined ? {} : { tabId: activeCall.tabId }),
+        ...(activeCall.url === undefined ? {} : { url: activeCall.url }),
+        ...(activeCall.decision === undefined ? {} : { decision: activeCall.decision }),
+        ...(activeCall.policy === undefined ? {} : { policy: activeCall.policy }),
+      })
       if (activeToolCalls.get(call.id) !== activeCall) return
       // A committed browser_open_tab already rebound affinity; prefer that
       // factual success over a generic cancel that would leave the model wrong.
@@ -2819,6 +2854,7 @@ async function startBridge(): Promise<void> {
           transientEvents.clear()
         }
         broadcastStatus()
+        learning.onBridgeState(state)
         if (state === 'stopped') refreshPanelResumeHints()
         if (state === 'stopped' && !runtimeWantsBridge()) disarmBridgeKeepalive()
       },
@@ -2988,6 +3024,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
 chrome.runtime.onConnect.addListener((port) => {
   if (policyRuntime.connect(port)) return
   if (pageWatchers.connect(port)) return
+  if (learning.connect(port)) return
   if (port.name !== 'dsh-panel') return
   const wasIdle = panelPorts.size === 0
   const tabAffinityRebinds = new Map<string, {

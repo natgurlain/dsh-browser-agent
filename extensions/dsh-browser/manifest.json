@@ -24,7 +24,8 @@
   },
   "optional_permissions": [
     "downloads",
-    "tabGroups"
+    "tabGroups",
+    "pageCapture"
   ],
   "host_permissions": [
     "<all_urls>"
