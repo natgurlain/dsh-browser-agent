@@ -52,6 +52,17 @@ describe('planDiscovery', () => {
     expect(plan.groups.flatMap((group) => group.ports)).toHaveLength(14)
   })
 
+  it('skips every address whose peer failed the server proof', () => {
+    const plan = planDiscovery({
+      rememberedUrl: 'ws://127.0.0.1:51000/ext/bridge',
+      excludeUrls: ['ws://127.0.0.1:51000/ext/bridge', 'ws://127.0.0.1:43189/ext/bridge'],
+    })
+    const ports = plan.groups.flatMap((group) => group.ports)
+    expect(ports).not.toContain(51000)
+    expect(ports).not.toContain(43189)
+    expect(ports).toContain(43190)
+  })
+
   it('never re-probes the address that just failed', () => {
     const plan = planDiscovery({ excludeUrl: 'ws://127.0.0.1:3080/ext/bridge' })
 

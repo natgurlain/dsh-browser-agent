@@ -26,6 +26,9 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         '--disable-component-update',
       ],
     })
+    // Playwright dismisses dialogs nobody listens for; leave them open so the
+    // extension (browser_dialog) answers them as in a user's browser.
+    context.on('page', (page) => { page.on('dialog', () => {}) })
     stage = 'waiting for extension service worker'
     let worker = context.serviceWorkers()[0]
     if (worker === undefined) worker = await context.waitForEvent('serviceworker', { timeout: 30_000 })

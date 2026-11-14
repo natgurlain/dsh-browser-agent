@@ -151,6 +151,12 @@ interface DevToolsStatusMessage extends DevToolsStatus {
   type: 'devtools.status'
 }
 
+/** Kill-switch state: engaged means every agent capability is cut off. */
+interface KillSwitchMessage {
+  type: 'kill-switch'
+  engaged: boolean
+}
+
 interface DevToolsDetachResultMessage {
   type: 'devtools.detach.result'
   id: string
@@ -158,7 +164,7 @@ interface DevToolsDetachResultMessage {
   error?: { message?: unknown }
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | TabAffinityReturnResultMessage | SelectionMessage | SessionResumeHintMessage | DevToolsStatusMessage | DevToolsDetachResultMessage | DiscoveryProgressMessage | DiscoveryResultMessage
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | TabAffinityReturnResultMessage | SelectionMessage | SessionResumeHintMessage | DevToolsStatusMessage | DevToolsDetachResultMessage | DiscoveryProgressMessage | DiscoveryResultMessage | KillSwitchMessage
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -217,6 +223,15 @@ export interface PanelApi {
   setActiveSession(sessionId: string, isNew?: boolean): Promise<void>
   updateSettings(settings: Partial<PanelSettings>): Promise<void>
   requestStatus(): Promise<void>
+  /**
+   * Stop the agent now: cancel approvals and in-flight tool calls, revoke
+   * session trust and developer-tools grants, detach the debugger, and drop
+   * the bridge until {@link releaseKillSwitch}.
+   */
+  engageKillSwitch(): Promise<void>
+  /** Clear an engaged kill switch and reconnect. */
+  releaseKillSwitch(): Promise<void>
+  onKillSwitch(callback: (engaged: boolean) => void): () => void
 }
 
 /** Connect to the background service worker and return the panel API. */
@@ -249,6 +264,7 @@ export function connectPanel(): PanelApi {
   const selectionListeners = new Set<(selection: PageSelection | null) => void>()
   const sessionResumeHintListeners = new Set<(sessionId: string | null) => void>()
   const devToolsStatusListeners = new Set<(status: DevToolsStatus) => void>()
+  const killSwitchListeners = new Set<(engaged: boolean) => void>()
   const pendingDetaches = new Map<string, { resolve: () => void; reject: (error: Error) => void }>()
 
   let port: chrome.runtime.Port | null = null
@@ -364,6 +380,9 @@ export function connectPanel(): PanelApi {
       }
       case 'session.resume-hint':
         for (const listener of sessionResumeHintListeners) listener(msg.sessionId)
+        break
+      case 'kill-switch':
+        for (const listener of killSwitchListeners) listener(msg.engaged === true)
         break
       case 'devtools.status':
         for (const listener of devToolsStatusListeners) listener({
@@ -652,6 +671,16 @@ export function connectPanel(): PanelApi {
     },
     requestStatus() {
       return send({ type: 'request-status' })
+    },
+    engageKillSwitch() {
+      return send({ type: 'kill-switch.engage' })
+    },
+    releaseKillSwitch() {
+      return send({ type: 'kill-switch.release' })
+    },
+    onKillSwitch(callback) {
+      killSwitchListeners.add(callback)
+      return () => { killSwitchListeners.delete(callback) }
     },
     startDiscovery() {
       const id = crypto.randomUUID()

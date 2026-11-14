@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { BRIDGE_PROTOCOL_VERSION, createBridgeNonce } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
 
 class FakeWebSocket extends EventTarget {
@@ -70,6 +71,9 @@ function mockChrome(options: {
 } = {}) {
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const onAlarm = chromeEvent<[chrome.alarms.Alarm]>()
+  const onCommand = chromeEvent<[string]>()
+  const action = { setBadgeText: vi.fn(), setBadgeBackgroundColor: vi.fn() }
+  const sessionStore: Record<string, unknown> = {}
   const alarms = {
     create: vi.fn(),
     clear: vi.fn(async () => true),
@@ -77,6 +81,8 @@ function mockChrome(options: {
   }
   vi.stubGlobal('chrome', {
     alarms,
+    action,
+    commands: { onCommand },
     notifications: {
       create: vi.fn(async () => ''),
       clear: vi.fn(async () => true),
@@ -102,10 +108,11 @@ function mockChrome(options: {
           return { ...stored, dshSettings: { token: TEST_BRIDGE_TOKEN, ...settings } }
         }),
         set: vi.fn(options.localSet ?? (async () => {})),
+        remove: vi.fn(async () => {}),
       },
       session: {
-        get: vi.fn(options.sessionGet ?? (async () => ({}))),
-        set: vi.fn(async () => {}),
+        get: vi.fn(options.sessionGet ?? (async () => ({ ...sessionStore }))),
+        set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(sessionStore, items) }),
         remove: vi.fn(async () => {}),
       },
     },
@@ -138,7 +145,7 @@ function mockChrome(options: {
       onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
-  return { alarms, onConnect, tabs: chrome.tabs }
+  return { alarms, onConnect, onCommand, action, sessionStore, tabs: chrome.tabs }
 }
 
 afterEach(() => {
@@ -966,9 +973,60 @@ describe('background bridge lifecycle', () => {
     // The dead address is probed once, never again by the pass.
     expect(probed.filter((url) => url.includes(':51801/'))).toHaveLength(1)
     expect(probed.some((url) => url.includes(':43189/'))).toBe(true)
+    // A discovery answer is not remembered until the peer proves the token.
+    expect(chrome.storage.local.set).not.toHaveBeenCalledWith({ dshLastBridgeUrl: 'ws://127.0.0.1:60222/ext/bridge' })
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
     // The user's saved address stays as typed; only the remembered URL moves.
     expect(chrome.storage.local.set).not.toHaveBeenCalledWith(expect.objectContaining({ dshSettings: expect.anything() }))
     expect(chrome.storage.local.set).toHaveBeenCalledWith({ dshLastBridgeUrl: 'ws://127.0.0.1:60222/ext/bridge' })
+  })
+
+  it('forgets a remembered squatter whose server proof fails and continues discovery', async () => {
+    const chromeMock = mockChrome({
+      // A previous run remembered port 51000; now another process listens there.
+      localGet: async () => ({ dshLastBridgeUrl: 'ws://127.0.0.1:51000/ext/bridge' }),
+    })
+    const probed: string[] = []
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      probed.push(url)
+      if (url.includes(':51000/')) return new Response(JSON.stringify({ wsUrl: 'ws://127.0.0.1:51000/ext/bridge' }), { status: 200 })
+      if (url.includes(':43189/')) return new Response(JSON.stringify({ wsUrl: 'ws://127.0.0.1:60222/ext/bridge' }), { status: 200 })
+      if (url.includes(':60222/')) return new Response(JSON.stringify({ wsUrl: 'ws://127.0.0.1:60222/ext/bridge' }), { status: 200 })
+      return new Response(null, { status: 503 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    const squatter = FakeWebSocket.instances[0]!
+    expect(squatter.url).toBe('ws://127.0.0.1:51000/ext/bridge')
+    squatter.open()
+    // The squatter does not know the token, so its server proof is wrong.
+    const squatterNonce = createBridgeNonce()
+    await vi.waitFor(() => {
+      if (!squatter.sent.some((frame) => (frame as { t?: unknown }).t === 'hello')) {
+        squatter.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: squatterNonce })
+      }
+      expect(squatter.sent.some((frame) => (frame as { t?: unknown }).t === 'hello')).toBe(true)
+    }, { interval: 5 })
+    squatter.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }, mac: 'f'.repeat(64) })
+    await vi.waitFor(() => { expect(chrome.storage.local.remove).toHaveBeenCalledWith('dshLastBridgeUrl') })
+
+    // Discovery continues without the squatter and finds the real bridge.
+    await vi.waitFor(() => { expect(FakeWebSocket.instances.length).toBeGreaterThanOrEqual(2) })
+    const real = FakeWebSocket.instances.at(-1)!
+    expect(real.url).toBe('ws://127.0.0.1:60222/ext/bridge')
+    expect(FakeWebSocket.instances.every((socket) => socket === squatter || !socket.url.includes(':51000/'))).toBe(true)
+    real.open()
+    await completeHandshake(real, { until: panelSawConnected(panel.postMessage) })
+    expect(chrome.storage.local.set).toHaveBeenCalledWith({ dshLastBridgeUrl: 'ws://127.0.0.1:60222/ext/bridge' })
+    expect(chrome.storage.local.set).not.toHaveBeenCalledWith({ dshLastBridgeUrl: 'ws://127.0.0.1:51000/ext/bridge' })
   })
 
   it('keeps a failing remote address local instead of probing this machine', async () => {
@@ -1008,5 +1066,99 @@ describe('background bridge lifecycle', () => {
 
     expect(fetchMock).not.toHaveBeenCalled()
     expect(FakeWebSocket.instances).toHaveLength(0)
+  })
+
+  describe('kill switch', () => {
+    async function connected(chromeMock: ReturnType<typeof mockChrome>) {
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+      await import('../src/background/index.ts')
+      const panel = panelPort()
+      chromeMock.onConnect.emit(panel.port)
+      await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+      const socket = FakeWebSocket.instances[0]!
+      socket.open()
+      await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
+      return { panel, socket }
+    }
+
+    it('stops everything from the panel button and stays down until the user reconnects', async () => {
+      let finishLookup!: (tab: chrome.tabs.Tab) => void
+      const lookup = new Promise<chrome.tabs.Tab>((resolve) => { finishLookup = resolve })
+      const chromeMock = mockChrome({
+        localGet: async () => ({
+          dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge', unrestrictedBrowserAccess: true },
+        }),
+        tabGet: async () => await lookup,
+      })
+      const { panel, socket } = await connected(chromeMock)
+      socket.receive({ t: 'tool.call', id: 'in-flight', name: 'browser_close_tab', args: { tabId: 1 }, expiresAt: Date.now() + 10_000 })
+      await vi.waitFor(() => { expect(chromeMock.tabs.get).toHaveBeenCalledWith(1) })
+
+      panel.onMessage.emit({ type: 'kill-switch.engage' })
+      await vi.waitFor(() => {
+        expect(panel.postMessage).toHaveBeenCalledWith({ type: 'kill-switch', engaged: true })
+        expect(socket.readyState).toBe(FakeWebSocket.CLOSED)
+      })
+      expect(chromeMock.sessionStore.dshKillSwitch).toBe(true)
+      expect(chromeMock.action.setBadgeText).toHaveBeenCalledWith({ text: 'OFF' })
+      // The in-flight call was abandoned: it never closes the tab.
+      finishLookup({ id: 1, windowId: 1, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab)
+      await new Promise((resolve) => { setTimeout(resolve, 10) })
+      expect(chromeMock.tabs.remove).not.toHaveBeenCalled()
+      // Unrestricted access is turned off (persisted once the abandoned call settled).
+      await vi.waitFor(() => {
+        expect(chrome.storage.local.set).toHaveBeenCalledWith(expect.objectContaining({
+          dshSettings: expect.objectContaining({ unrestrictedBrowserAccess: false }),
+        }))
+      })
+
+      // Neither the keepalive nor a new panel reconnects.
+      chromeMock.alarms.onAlarm.emit({ name: 'bridge-keepalive', scheduledTime: Date.now() })
+      const second = panelPort()
+      chromeMock.onConnect.emit(second.port)
+      await new Promise((resolve) => { setTimeout(resolve, 20) })
+      expect(FakeWebSocket.instances).toHaveLength(1)
+      expect(second.postMessage).toHaveBeenCalledWith({ type: 'kill-switch', engaged: true })
+
+      panel.onMessage.emit({ type: 'kill-switch.release' })
+      await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })
+      expect(chromeMock.sessionStore.dshKillSwitch).toBe(false)
+      expect(panel.postMessage).toHaveBeenCalledWith({ type: 'kill-switch', engaged: false })
+    })
+
+    it('engages from the keyboard command and survives a worker restart', async () => {
+      const chromeMock = mockChrome({
+        localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }),
+      })
+      const { socket } = await connected(chromeMock)
+      chromeMock.onCommand.emit('kill-switch')
+      await vi.waitFor(() => { expect(socket.readyState).toBe(FakeWebSocket.CLOSED) })
+      expect(chromeMock.sessionStore.dshKillSwitch).toBe(true)
+    })
+
+    it('does not connect after a worker restart while the switch is engaged', async () => {
+      const chromeMock = mockChrome({
+        localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }),
+        sessionGet: async () => ({ dshKillSwitch: true }),
+      })
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+      await import('../src/background/index.ts')
+      const panel = panelPort()
+      chromeMock.onConnect.emit(panel.port)
+      await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'kill-switch', engaged: true }) })
+      await new Promise((resolve) => { setTimeout(resolve, 20) })
+      expect(FakeWebSocket.instances).toHaveLength(0)
+    })
+
+    it('badges the controlled tab while connected', async () => {
+      const chromeMock = mockChrome({
+        localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }),
+      })
+      const { panel } = await connected(chromeMock)
+      panel.onMessage.emit({ type: 'session.active', sessionId: 'session-1', isNew: true })
+      await vi.waitFor(() => {
+        expect(chromeMock.action.setBadgeText).toHaveBeenCalledWith({ text: 'AI', tabId: 1 })
+      })
+    })
   })
 })

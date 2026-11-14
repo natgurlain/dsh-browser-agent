@@ -21,6 +21,10 @@ dsh 的**浏览器操作端**：让模型直接读取并操作你在浏览器里
 | 列出标签页 | `browser_list_tabs` | 列出可访问标签页的稳定 ID、标题、URL 和活动/受控状态 |
 | 跟随标签页 | `browser_follow_tab` | 将后续浏览器工具绑定到已列出的标签页；默认后台，`activate: true` 才切前台 |
 | 关闭标签页 | `browser_close_tab` | 关闭已列出的标签页 |
+| 悬停 / 拖拽 | `browser_hover` / `browser_drag` | 用真实指针悬停元素；拖到另一元素或按偏移拖动，可拖拽源使用 HTML5 拖放事件 |
+| 对话框 | `browser_dialog` | 回应 alert/confirm/prompt/离开页面对话框；被对话框阻塞的调用立即以 `dialog open: …` 失败（Chrome） |
+| 下载 | `browser_downloads` | 列出或等待下载，返回本地文件路径；首次使用时请求可选的 `downloads` 权限 |
+| PDF | `browser_save_pdf` / `browser_pdf_text` | 把标签页保存为 PDF 到代理工作区（Chrome）；提取标签页中 PDF 的文本 |
 | 读区域 | `browser_get_text` | 懒加载内容 / 局部文本 |
 | 等待 | `browser_wait` | 页面加载与渲染稳定检测 |
 | 查看元素与 CSS | `browser_devtools_elements` / `browser_devtools_set_element_style` / `browser_devtools_set_element_attribute` | 高权限：计算样式、盒模型、命中规则，并可现场修改 CSS 与属性来调试 |

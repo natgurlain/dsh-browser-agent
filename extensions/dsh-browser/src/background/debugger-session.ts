@@ -73,7 +73,14 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 10_000
 const NETWORK_BUFFERS = { maxTotalBufferSize: 20_000_000, maxResourceBufferSize: 5_000_000, maxPostDataSize: 1_000_000 }
 
 /** CDP domains this extension can enable on an attachment. */
-export type CdpDomain = 'DOM' | 'CSS' | 'Runtime' | 'Network'
+export type CdpDomain = 'DOM' | 'CSS' | 'Runtime' | 'Network' | 'Page'
+
+/**
+ * `Page.enable` needs the renderer, which a JavaScript dialog that is already
+ * open blocks. Enabling it is best-effort and bounded so that a blocked page
+ * never stalls an attachment; dialog reporting simply stays off then.
+ */
+const PAGE_ENABLE_BUDGET_MS = 1_500
 
 /** Domains the developer-tools group needs. */
 export const DEVTOOLS_DOMAINS: readonly CdpDomain[] = ['DOM', 'CSS', 'Runtime', 'Network']
@@ -177,6 +184,14 @@ export class DebuggerSession {
   async enableDomains(domains: readonly CdpDomain[]): Promise<void> {
     for (const domain of domains) {
       if (this.enabled.includes(domain)) continue
+      if (domain === 'Page') {
+        const enabled = await Promise.race([
+          this.send('Page.enable', {}).then(() => true, () => false),
+          new Promise<boolean>((resolve) => { setTimeout(() => { resolve(false) }, PAGE_ENABLE_BUDGET_MS) }),
+        ])
+        if (enabled) this.enabled.push(domain)
+        continue
+      }
       if (domain === 'Network') await this.send('Network.enable', NETWORK_BUFFERS)
       else await this.send(`${domain}.enable`, {})
       this.enabled.push(domain)

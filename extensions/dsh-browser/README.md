@@ -21,6 +21,10 @@ Browser pages are rendered as structured text with a numbered interactive-elemen
 | List tabs | `browser_list_tabs` | List accessible tabs with stable IDs, titles, URLs, and active/controlled state |
 | Follow tab | `browser_follow_tab` | Bind later browser tools to a listed tab; stays in the background unless `activate: true` |
 | Close tab | `browser_close_tab` | Close a listed tab |
+| Hover / drag | `browser_hover` / `browser_drag` | Move the real pointer over an element (hover menus); drag to an element or by an offset, with HTML5 drag-and-drop for draggable sources |
+| Dialogs | `browser_dialog` | Answer an alert/confirm/prompt/leave-site dialog; calls blocked by an open dialog fail fast with `dialog open: …` (Chrome) |
+| Downloads | `browser_downloads` | List recent downloads or wait for one; returns local file paths. Asks for the optional `downloads` permission on first use |
+| PDF | `browser_save_pdf` / `browser_pdf_text` | Save the tab as a PDF in the agent workspace (Chrome); extract the text of a PDF open in the tab |
 | Read region | `browser_get_text` | Lazy-loaded content / partial text |
 | Wait | `browser_wait` | Page load and render-settle detection |
 | Inspect elements / CSS | `browser_devtools_elements` / `browser_devtools_set_element_style` / `browser_devtools_set_element_attribute` | High privilege: computed styles, box model, matched rules, live CSS and attribute edits for debugging |

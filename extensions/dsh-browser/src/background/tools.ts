@@ -41,6 +41,20 @@ import type { ClipboardWriteOutcome } from '../shared/clipboard.ts'
 import { resolveDebuggerFrame } from './debugger-frame.ts'
 import { capturedConsoleEntries } from './devtools-controller.ts'
 import type { ConsoleEntry } from './devtools-network.ts'
+import { dialogOpenMessage, unresponsiveMessage, type DialogRuntime, type OpenDialog } from './dialogs.ts'
+import { DownloadsError, downloadsApi, hasDownloadsPermission, runDownloadsTool } from './downloads.ts'
+import { readTabPdfText, savePagePdf } from './page-documents.ts'
+import {
+  clickMayRetry,
+  dragIndices,
+  drag as dispatchDrag,
+  finishWatch,
+  hover as dispatchHover,
+  precheckClick,
+  shouldRetryTrusted,
+  trustedClick,
+  type PointerContext,
+} from './pointer-tools.ts'
 
 /** A tool call from the bridge. */
 export interface ToolCall {
@@ -69,6 +83,8 @@ export interface ContentBudget {
 const CONTENT_SCRIPT_FILE = 'content.js'
 const ACTION_DELTA_TOOLS = new Set([
   'browser_click',
+  'browser_hover',
+  'browser_drag',
   'browser_type',
   'browser_press',
   'browser_scroll',
@@ -98,6 +114,8 @@ const TAB_NATIVE_TOOLS = new Set([
 const STATE_CHANGING_PAGE_TOOLS = new Set([
   'browser_click',
   'browser_select',
+  'browser_hover',
+  'browser_drag',
   'browser_type',
   'browser_press',
   'browser_scroll',
@@ -113,6 +131,8 @@ export const TAB_MANAGEMENT_TOOL_NAMES = new Set([
   'browser_list_tabs',
   'browser_follow_tab',
   'browser_close_tab',
+  // Browser-level, not page-level: reads the download list, not a document.
+  'browser_downloads',
 ])
 const NAVIGATION_SNAPSHOT_GUIDANCE = 'Navigation completed and the current page snapshot is included below. Use it directly instead of taking an immediate duplicate snapshot.'
 const pendingInjections = new Map<number, Promise<void>>()
@@ -160,6 +180,127 @@ export interface TabManagementContext {
   commitAction?: () => void
   /** Restore withdrawability when a content-script action was not delivered. */
   rollbackActionCommit?: () => void
+  /** JavaScript dialog tracking and the page-call watchdog. */
+  dialogs?: DialogRuntime
+}
+
+// ---- JavaScript dialogs (see dialogs.ts) ----
+
+/**
+ * Actions that commonly open a dialog: the debugger is armed around them.
+ * Leaving a page can raise "leave site?" (beforeunload); the attachment
+ * outlives the call for the broker's idle window, so it is still reported.
+ */
+const DIALOG_ARMED_TOOLS = new Set([
+  'browser_click',
+  'browser_press',
+  'browser_hover',
+  'browser_drag',
+  'browser_navigate',
+  'browser_back',
+  'browser_forward',
+  'browser_reload',
+])
+/** Calls that still run while a dialog blocks the page. */
+const DIALOG_EXEMPT_TOOLS = new Set([
+  'browser_dialog',
+  'browser_screenshot',
+  'browser_navigate',
+  'browser_back',
+  'browser_forward',
+  'browser_reload',
+  'browser_downloads',
+])
+
+/** A guarded page call: its value, or the answer that replaces it. */
+type Guarded<T> = { ok: true; value: T; dialog?: OpenDialog } | { ok: false; answer: ToolAnswer }
+
+/**
+ * Run one page call under the dialog watchdog: a dialog that opens meanwhile,
+ * or a page that stops answering, ends the call early with a clear error
+ * instead of the bridge's tool timeout.
+ */
+async function guardPage<T>(
+  dialogs: DialogRuntime | undefined,
+  tabId: number,
+  frame: TabFrame,
+  operation: Promise<T>,
+  signal?: AbortSignal,
+): Promise<Guarded<T>> {
+  if (dialogs === undefined) return { ok: true, value: await operation }
+  const outcome = await dialogs.guard(tabId, frame, operation, signal)
+  switch (outcome.kind) {
+    case 'answer':
+      return { ok: true, value: outcome.value, ...(outcome.dialog === undefined ? {} : { dialog: outcome.dialog }) }
+    case 'dialog':
+      return {
+        ok: false,
+        answer: {
+          ok: false,
+          error: {
+            code: 'action-failed',
+            message: dialogOpenMessage(outcome.dialog, dialogs.canAnswer, 'The action was delivered and the page opened a JavaScript dialog before it finished.'),
+          },
+        },
+      }
+    case 'unresponsive':
+      return { ok: false, answer: { ok: false, error: { code: 'timeout', message: unresponsiveMessage(outcome.waitedMs) } } }
+  }
+}
+
+/** Append a dialog that opened while (or right after) an action answered. */
+function withDialogNote(answer: ToolAnswer, dialog: OpenDialog | undefined, dialogs: DialogRuntime | undefined): ToolAnswer {
+  const text = answerText(answer)
+  if (dialog === undefined || dialogs === undefined || text === undefined) return answer
+  const note = dialogOpenMessage(dialog, dialogs.canAnswer, 'The page opened a JavaScript dialog during the action.')
+  return { ...answer, result: { ...(answer.result as Record<string, unknown>), text: `${text}\n\n${note}` } }
+}
+
+/** The dialog an approval for browser_dialog is bound to. */
+function dialogApprovalContext(dialog: OpenDialog): ApprovalContext {
+  return {
+    dialog: {
+      type: dialog.type,
+      message: dialog.message,
+      ...(dialog.defaultPrompt === undefined ? {} : { defaultPrompt: dialog.defaultPrompt }),
+    },
+  }
+}
+
+/** Validate `browser_dialog` arguments. */
+function dialogArgsError(args: Record<string, unknown>): ToolAnswer | undefined {
+  if (typeof args.accept !== 'boolean') {
+    return { ok: false, error: { code: 'bad-args', message: 'accept must be true (OK / leave) or false (Cancel / stay).' } }
+  }
+  if (args.promptText !== undefined && typeof args.promptText !== 'string') {
+    return { ok: false, error: { code: 'bad-args', message: 'promptText must be a string.' } }
+  }
+  return undefined
+}
+
+/** Answer the open dialog after approval. */
+async function answerDialog(
+  tabId: number,
+  call: ToolCall,
+  dialogs: DialogRuntime,
+  dialog: OpenDialog,
+  commitAction?: () => void,
+): Promise<ToolAnswer> {
+  const accept = call.args.accept === true
+  const promptText = typeof call.args.promptText === 'string' ? call.args.promptText : undefined
+  commitAction?.()
+  try {
+    await dialogs.answer(tabId, accept, promptText)
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return { ok: false, error: { code: 'action-failed', message: `The dialog could not be answered: ${detail}` } }
+  }
+  const kind = dialog.type === 'unknown' ? 'dialog' : `${dialog.type} dialog`
+  const how = accept ? (promptText === undefined ? 'OK' : `OK and ${promptText.length} character(s) of prompt text`) : 'Cancel'
+  return {
+    ok: true,
+    result: { text: `Answered the ${kind} with ${how}. The page continues; call browser_snapshot to read the resulting state.` },
+  }
 }
 
 function isToolAnswer(value: unknown): value is ToolAnswer {
@@ -474,6 +615,7 @@ async function settleAfterInput(
   status: string,
   budget: ContentBudget,
   includePageDelta: boolean,
+  suffix = ' (trusted)',
 ): Promise<ToolAnswer> {
   try {
     const response = await chrome.tabs.sendMessage(
@@ -484,13 +626,32 @@ async function settleAfterInput(
     if (isToolAnswer(response)) {
       const pageContent = answerPageContent(response)
       if (includePageDelta && pageContent !== undefined) {
-        return { ok: true, result: { text: wrapActionDelta(`${status} (trusted)`, pageContent, frame, budget.maxChars) } }
+        return { ok: true, result: { text: wrapActionDelta(`${status}${suffix}`, pageContent, frame, budget.maxChars) } }
       }
     }
   } catch {
     // The page may be navigating; the trusted action itself already succeeded.
   }
-  return { ok: true, result: { text: `${status} (trusted)` } }
+  return { ok: true, result: { text: `${status}${suffix}` } }
+}
+
+/** Pointer helpers bound to one frame of one call (see pointer-tools.ts). */
+function pointerContext(
+  tabId: number,
+  frame: TabFrame,
+  call: ToolCall,
+  budget: ContentBudget,
+  runtime: InputRuntime | undefined,
+  includePageDelta: boolean,
+): PointerContext {
+  return {
+    tabId,
+    frame,
+    call,
+    setup: (request) => sendInputSetup(tabId, frame, request),
+    settle: (status, suffix) => settleAfterInput(tabId, frame, status, budget, includePageDelta, suffix),
+    ...(runtime === undefined ? {} : { input: runtime }),
+  }
 }
 
 /**
@@ -517,6 +678,8 @@ function inputRoute(call: ToolCall): 'content' | 'trusted' | 'required' | 'host'
       return call.args.method === 'system' ? 'required' : 'content'
     case 'browser_upload':
       return 'required'
+    case 'browser_click':
+      return call.args.trusted === true ? 'required' : 'content'
     default:
       return 'content'
   }
@@ -861,6 +1024,8 @@ async function dispatchTrustedInput(
         return await trustedPress(tabId, frame, call, budget, runtime, includePageDelta)
       case 'browser_type':
         return await trustedType(tabId, frame, call, budget, runtime, includePageDelta)
+      case 'browser_click':
+        return await trustedClick(pointerContext(tabId, frame, call, budget, runtime, includePageDelta)) as ToolAnswer
       default:
         return undefined
     }
@@ -882,6 +1047,35 @@ async function dispatchOnce(
   commitAction?: () => void,
   rollbackActionCommit?: () => void,
   inputRuntime?: InputRuntime,
+  dialogs?: DialogRuntime,
+): Promise<ToolAnswer> {
+  // Chrome hands a dialog only to debugger clients that had the Page domain
+  // enabled when it opened, so arm before actions that commonly open one.
+  const release = dialogs !== undefined && DIALOG_ARMED_TOOLS.has(call.name) && !isCancelled(call, signal)
+    ? await dialogs.arm(tabId)
+    : undefined
+  try {
+    return await dispatchOnceArmed(
+      tabId, frames, call, budget, signal, targetStillAllowed, includeActionDelta,
+      commitAction, rollbackActionCommit, inputRuntime, dialogs,
+    )
+  } finally {
+    release?.()
+  }
+}
+
+async function dispatchOnceArmed(
+  tabId: number,
+  frames: TabFrame[],
+  call: ToolCall,
+  budget: ContentBudget,
+  signal: AbortSignal | undefined,
+  targetStillAllowed: (() => boolean) | undefined,
+  includeActionDelta: boolean,
+  commitAction: (() => void) | undefined,
+  rollbackActionCommit: (() => void) | undefined,
+  inputRuntime: InputRuntime | undefined,
+  dialogs: DialogRuntime | undefined,
 ): Promise<ToolAnswer> {
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
@@ -899,21 +1093,50 @@ async function dispatchOnce(
   // Sharing allows page-authored verification details even without a baseline.
   const shareContent = includeActionDelta && ACTION_DELTA_TOOLS.has(call.name)
   const stateChangingAction = STATE_CHANGING_PAGE_TOOLS.has(call.name)
+  const pointer = pointerContext(tabId, frame, call, budget, inputRuntime, includeActionDelta && hasSnapshotBaseline)
+  if (call.name === 'browser_hover' || call.name === 'browser_drag') {
+    if (isCancelled(call, signal)) return cancelled()
+    commitAction?.()
+    const run = async (): Promise<ToolAnswer> => {
+      try {
+        return (call.name === 'browser_hover' ? await dispatchHover(pointer) : await dispatchDrag(pointer)) as ToolAnswer
+      } catch (error: unknown) {
+        const mapped = trustedFailure(error)
+        if (mapped !== undefined) return mapped
+        throw error
+      }
+    }
+    const guarded = await guardPage(dialogs, tabId, frame, run(), signal)
+    return guarded.ok ? withDialogNote(guarded.value, guarded.dialog, dialogs) : guarded.answer
+  }
+  // Every click is hit-tested first: a covered target is refused instead of
+  // clicking whatever lies on top of it.
+  let clickCheck: Awaited<ReturnType<typeof precheckClick>> | undefined
+  if (call.name === 'browser_click' && route === 'content') {
+    clickCheck = await precheckClick(pointer, clickMayRetry(call.args, inputRuntime))
+    if (clickCheck.kind === 'refuse') return clickCheck.answer as ToolAnswer
+  }
   if (route !== 'content') {
     // Commit before dispatching: a trusted gesture cannot be withdrawn once the
     // browser has delivered it, so the deadline must not abort it mid-flight.
     if (stateChangingAction) commitAction?.()
     const trustedWatch = stateChangingAction ? watchOpenedTabs(tabId) : undefined
     const trustedConsoleMark = stateChangingAction ? consoleErrorMark(tabId) : undefined
-    let trusted: ToolAnswer | undefined
+    let guarded: Guarded<ToolAnswer | undefined>
     try {
-      trusted = await dispatchTrustedInput(tabId, frame, call, budget, inputRuntime, includeActionDelta && hasSnapshotBaseline)
+      guarded = await guardPage(
+        dialogs, tabId, frame,
+        dispatchTrustedInput(tabId, frame, call, budget, inputRuntime, includeActionDelta && hasSnapshotBaseline),
+        signal,
+      )
     } finally {
       trustedWatch?.stop()
     }
+    if (!guarded.ok) return guarded.answer
+    const trusted = guarded.value
     if (trusted !== undefined) {
       const errors = trustedConsoleMark === undefined ? [] : consoleErrorsSince(tabId, trustedConsoleMark)
-      return withSideEffects(trusted, trustedWatch?.stop() ?? [], errors, shareContent, budget.maxChars)
+      return withDialogNote(withSideEffects(trusted, trustedWatch?.stop() ?? [], errors, shareContent, budget.maxChars), guarded.dialog, dialogs)
     }
     if (!syntheticFallback) {
       return inputUnavailable('This browser has no trusted input channel for this action.')
@@ -947,17 +1170,25 @@ async function dispatchOnce(
     ? waitForNextDocumentReady(tabId, frameId, frame.documentId, signal)
     : undefined
   let response: unknown
+  let dialogDuringAction: OpenDialog | undefined
   const stateChanging = STATE_CHANGING_PAGE_TOOLS.has(call.name)
   try {
     if (stateChanging) commitAction?.()
-    response = await sendAction(
+    const guarded = await guardPage(dialogs, tabId, frame, sendAction(
       tabId,
       call,
       frame,
       requestPageDelta ? budget : undefined,
       requestPageDelta,
       shareContent,
-    )
+    ), signal)
+    if (!guarded.ok) {
+      navigationWait?.cancel()
+      tabWatch?.stop()
+      return guarded.answer
+    }
+    response = guarded.value
+    dialogDuringAction = guarded.dialog
   } catch (error: unknown) {
     if (stateChanging && contentScriptReceiverMissing(error)) rollbackActionCommit?.()
     navigationWait?.cancel()
@@ -976,12 +1207,40 @@ async function dispatchOnce(
   const rawText = answerText(response)
   if (rawText === undefined) {
     navigationWait?.cancel()
+    if (clickCheck?.kind === 'proceed' && clickCheck.watch !== undefined) await finishWatch(pointer, clickCheck.watch, 0)
     return response
+  }
+  if (clickCheck?.kind === 'proceed' && clickCheck.watch !== undefined && !answerNavigationPending(response)) {
+    // A synthetic click that changed nothing observable (handlers that only
+    // accept trusted events) is retried once with real mouse input. Toggles,
+    // submits, links, and fields are never retried: a second activation
+    // would undo or repeat the first.
+    const report = await finishWatch(pointer, clickCheck.watch)
+    if (shouldRetryTrusted(clickCheck.measured, report) && !isCancelled(call, signal) && targetStillAllowed?.() !== false) {
+      navigationWait?.cancel()
+      try {
+        const retried = await guardPage(dialogs, tabId, frame, trustedClick(pointer, ' (the synthetic click had no visible effect; retried with real mouse input)') as Promise<ToolAnswer>, signal)
+        if (!retried.ok) return retried.answer
+        return withDialogNote(retried.value, retried.dialog, dialogs)
+      } catch (error: unknown) {
+        const mapped = trustedFailure(error) ?? devToolsFailure(error)
+        if (mapped !== undefined) return { ok: true, result: { text: `${rawText} The page showed no visible change, and a real-input retry failed: ${mapped.error?.message ?? 'unknown error'}` } }
+        throw error
+      }
+    }
+  } else if (clickCheck?.kind === 'proceed' && clickCheck.watch !== undefined) {
+    await finishWatch(pointer, clickCheck.watch, 0)
   }
   const consoleErrors = consoleMark === undefined ? [] : consoleErrorsSince(tabId, consoleMark)
   const text = `${syntheticFallback ? `${rawText} (synthetic)` : rawText}${describeSideEffects(openedTabs, consoleErrors, shareContent)}`
   if (answerNavigationPending(response) && navigationWait !== undefined) {
-    const ready = await navigationWait.ready
+    // A "leave site?" dialog stops the navigation: report it at once instead
+    // of waiting for a document that cannot arrive.
+    const leaving = dialogs?.watch(tabId)
+    const ready = await (leaving === undefined
+      ? navigationWait.ready
+      : Promise.race([navigationWait.ready, leaving.opened.then((dialog) => { dialogDuringAction = dialog; navigationWait.cancel(); return false })]))
+    leaving?.cancel()
     if (isCancelled(call, signal)) return cancelled()
     if (targetStillAllowed?.() === false) return targetChanged()
     if (ready) {
@@ -1004,12 +1263,12 @@ async function dispatchOnce(
     shareContent && consoleErrors.length > 0 ? renderConsoleErrors(consoleErrors) : undefined,
   ].filter((part): part is string => part !== undefined && part !== '')
   const pageContent = contentParts.length === 0 ? undefined : contentParts.join('\n\n')
-  return {
+  return withDialogNote({
     ok: true,
     result: {
       text: pageContent === undefined ? text : wrapActionDelta(text, pageContent, frame, budget.maxChars),
     },
-  }
+  }, dialogDuringAction, dialogs)
 }
 
 // ---- Content tools: extraction, conditional waits, action side effects ----
@@ -1391,6 +1650,7 @@ async function dispatchTabManagementTool(
   signal: AbortSignal | undefined,
   context: TabManagementContext,
 ): Promise<ToolAnswer> {
+  if (call.name === 'browser_downloads') return dispatchDownloadsTool(call, budget, authorize, signal, context)
   if (call.name === 'browser_list_tabs') {
     const approval = tabManagementApproval(call)
     const rejected = await authorizeTabManagement(approval, context.unrestrictedAccess, authorize, call, signal)
@@ -1480,6 +1740,36 @@ async function dispatchTabManagementTool(
     }
   }
   return unavailable(`Unsupported tab-management tool: ${call.name}`)
+}
+
+/**
+ * `browser_downloads`: always asks (download paths and URLs reveal browsing);
+ * the first use also asks the browser for the optional downloads permission.
+ */
+async function dispatchDownloadsTool(
+  call: ToolCall,
+  budget: ContentBudget,
+  authorize: ((prompt: ApprovalPrompt) => Promise<ApprovalAuthorization>) | undefined,
+  signal: AbortSignal | undefined,
+  context: TabManagementContext,
+): Promise<ToolAnswer> {
+  const needsPermission = !(await hasDownloadsPermission())
+  if (isCancelled(call, signal)) return cancelled()
+  const approval = approvalPromptForCall(call, 'auto', [], undefined, { needsDownloadsPermission: needsPermission })
+  if (approval !== undefined && (!context.unrestrictedAccess || needsPermission)) {
+    const authorization = authorize === undefined ? 'unavailable' : await authorize(approval)
+    if (isCancelled(call, signal)) return cancelled()
+    if (authorization !== 'approved') return approvalFailure(approval, authorization)
+  }
+  try {
+    if (needsPermission) context.commitAction?.()
+    const text = await runDownloadsTool(call.args, (await hasDownloadsPermission()) ? downloadsApi() : undefined, signal)
+    if (isCancelled(call, signal)) return cancelled()
+    return { ok: true, result: { text: wrapUntrustedContent(text, budget.maxChars) } }
+  } catch (error: unknown) {
+    if (error instanceof DownloadsError) return { ok: false, error: { code: error.code, message: error.message } }
+    throw error
+  }
 }
 
 /** Parse the model-supplied screenshot capture options. */
@@ -1631,7 +1921,8 @@ export async function dispatchToolCall(
   if (!tabManagement.unrestrictedAccess
     && sharePageContent === 'off'
     && (call.name === 'browser_snapshot' || call.name === 'browser_get_text' || call.name === 'browser_screenshot'
-      || call.name === 'browser_extract' || (call.name === 'browser_wait' && isConditionalPageWait(call.args)))) {
+      || call.name === 'browser_extract' || (call.name === 'browser_wait' && isConditionalPageWait(call.args))
+      || call.name === 'browser_save_pdf' || call.name === 'browser_pdf_text')) {
     return { ok: false, error: { code: 'action-failed', message: 'Page content sharing is disabled in Settings > Page content sharing.' } }
   }
   const tab = targetTab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]
@@ -1650,9 +1941,32 @@ export async function dispatchToolCall(
   }
   const targetError = validateElementTarget(call, tab.id, frames)
   if (targetError !== undefined) return targetError
-  const approvalContext: ApprovalContext = tabManagement.unrestrictedAccess || call.name !== 'browser_type'
-    ? {}
-    : { typedTargetSensitive: await probeTypeTarget(tab.id, call, frames) }
+  const dialogs = tabManagement.dialogs
+  const topFrame = frames.find((frame) => frame.frameId === 0)
+  let openDialog: OpenDialog | undefined
+  if (call.name === 'browser_dialog') {
+    const argsError = dialogArgsError(call.args)
+    if (argsError !== undefined) return argsError
+    if (dialogs === undefined || !dialogs.canAnswer) {
+      return inputUnavailable('This browser cannot answer native JavaScript dialogs from the extension (it needs the Chrome debugger). Ask the user to answer or close the dialog, then retry.')
+    }
+    openDialog = await dialogs.current(tab.id, topFrame)
+    if (openDialog === undefined) {
+      return { ok: false, error: { code: 'action-failed', message: 'No JavaScript dialog is open in the controlled tab.' } }
+    }
+  } else if (dialogs !== undefined && !DIALOG_EXEMPT_TOOLS.has(call.name)) {
+    // Fail fast: a page blocked by a dialog cannot answer anything else.
+    const blocking = await dialogs.current(tab.id, topFrame)
+    if (blocking !== undefined) {
+      return { ok: false, error: { code: 'action-failed', message: dialogOpenMessage(blocking, dialogs.canAnswer) } }
+    }
+  }
+  if (isCancelled(call, signal)) return cancelled()
+  const approvalContext: ApprovalContext = openDialog !== undefined
+    ? dialogApprovalContext(openDialog)
+    : tabManagement.unrestrictedAccess || call.name !== 'browser_type'
+      ? {}
+      : { typedTargetSensitive: await probeTypeTarget(tab.id, call, frames) }
   if (isCancelled(call, signal)) return cancelled()
   const approval = tabManagement.unrestrictedAccess
     ? undefined
@@ -1670,7 +1984,17 @@ export async function dispatchToolCall(
     executionFrames = await listTabFrames(tab.id, tab.url)
     if (isCancelled(call, signal)) return cancelled()
     if (targetStillAllowed?.() === false) return targetChanged()
-    const refreshedApproval = approvalPromptForCall(call, sharePageContent, executionFrames, undefined, approvalContext)
+    let refreshedContext = approvalContext
+    if (openDialog !== undefined && dialogs !== undefined) {
+      // The approval names one dialog; a different (or no) dialog now means
+      // the card no longer describes what would be answered.
+      openDialog = await dialogs.current(tab.id, executionFrames.find((frame) => frame.frameId === 0))
+      if (openDialog === undefined) {
+        return { ok: false, error: { code: 'action-failed', message: 'The dialog closed while approval was pending.' } }
+      }
+      refreshedContext = dialogApprovalContext(openDialog)
+    }
+    const refreshedApproval = approvalPromptForCall(call, sharePageContent, executionFrames, undefined, refreshedContext)
     if (refreshedApproval === undefined
       || !sameApprovalBoundary(approval, refreshedApproval)
       || (approval.kind === 'action' && !sameTargetDocument(call, frames, executionFrames))) {
@@ -1678,6 +2002,24 @@ export async function dispatchToolCall(
     }
     const refreshedTargetError = validateElementTarget(call, tab.id, executionFrames)
     if (refreshedTargetError !== undefined) return refreshedTargetError
+  }
+  if (call.name === 'browser_dialog' && openDialog !== undefined && dialogs !== undefined) {
+    if (isCancelled(call, signal)) return cancelled()
+    if (targetStillAllowed?.() === false) return targetChanged()
+    return answerDialog(tab.id, call, dialogs, openDialog, tabManagement.commitAction)
+  }
+  if (call.name === 'browser_save_pdf' || call.name === 'browser_pdf_text') {
+    if (isCancelled(call, signal)) return cancelled()
+    if (targetStillAllowed?.() === false) return targetChanged()
+    try {
+      return call.name === 'browser_save_pdf'
+        ? await savePagePdf({ ...tab, id: tab.id }, call.args, tabManagement.input) as ToolAnswer
+        : await readTabPdfText({ ...tab, id: tab.id }, call.args, effectiveBudget.maxChars, signal) as ToolAnswer
+    } catch (error: unknown) {
+      const mapped = devToolsFailure(error)
+      if (mapped !== undefined) return mapped
+      throw error
+    }
   }
   if (!isInjectablePage(tab.url)) {
     if (call.name === 'browser_screenshot') {
@@ -1701,6 +2043,7 @@ export async function dispatchToolCall(
       tabManagement.commitAction,
       tabManagement.rollbackActionCommit,
       tabManagement.input,
+      tabManagement.dialogs,
     )
   } catch (error: unknown) {
     if (isCancelled(call, signal)) return cancelled()
@@ -1746,6 +2089,7 @@ export async function dispatchToolCall(
         tabManagement.commitAction,
         tabManagement.rollbackActionCommit,
         tabManagement.input,
+        tabManagement.dialogs,
       )
     } catch (error: unknown) {
       const trustedFailureAnswer = devToolsFailure(error)
@@ -1769,6 +2113,7 @@ function validateFrameTarget(call: ToolCall, frames: TabFrame[]): ToolAnswer | u
 const INDEX_TARGETED_TOOLS = new Set([
   'browser_click',
   'browser_select',
+  'browser_hover',
   'browser_type',
   'browser_press',
   'browser_scroll',
@@ -1779,8 +2124,10 @@ const INDEX_TARGETED_TOOLS = new Set([
 function validateElementTarget(call: ToolCall, tabId: number, frames: TabFrame[]): ToolAnswer | undefined {
   // A selector or "the focused element" is self-contained; only
   // a snapshot index needs a snapshot of the same document to resolve.
-  if (!INDEX_TARGETED_TOOLS.has(call.name)) return undefined
-  if (call.args.index === undefined) return undefined
+  const indexed = call.name === 'browser_drag'
+    ? dragIndices(call.args).length > 0
+    : INDEX_TARGETED_TOOLS.has(call.name) && call.args.index !== undefined
+  if (!indexed) return undefined
   const frameId = requestedFrame(call.args)
   const frame = frames.find((candidate) => candidate.frameId === frameId)
   const snapshotted = snapshotDocumentsByTab.get(tabId)?.get(frameId)

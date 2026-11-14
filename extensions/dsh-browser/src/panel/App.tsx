@@ -338,6 +338,14 @@ function SettingsIcon(): React.JSX.Element {
   )
 }
 
+function StopIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <rect x="5.5" y="5.5" width="9" height="9" rx="1.5" />
+    </svg>
+  )
+}
+
 function PlusIcon(): React.JSX.Element {
   return (
     <svg viewBox="0 0 20 20" aria-hidden="true">
@@ -575,7 +583,7 @@ function ApprovalDetailView({ detail, copy }: { detail: ApprovalDetail; copy: Pa
       return (
         <div className="approval-payload">
           <div className="approval-payload-head">
-            <span>{copy.approval.typedTextLabel}</span>
+            <span>{detail.label ?? copy.approval.typedTextLabel}</span>
             {detail.masked && (
               <button type="button" className="approval-reveal" onClick={() => { setRevealed((value) => !value) }}>
                 {revealed ? copy.approval.hide : copy.approval.reveal}
@@ -649,13 +657,27 @@ function ApprovalDetailView({ detail, copy }: { detail: ApprovalDetail; copy: Pa
   }
 }
 
+/** Ask the browser for an optional permission (must run inside a click). */
+function requestOptionalPermission(permission: string): Promise<boolean> {
+  const permissions = (globalThis as { chrome?: { permissions?: { request?: (value: { permissions: string[] }) => Promise<boolean> } } }).chrome?.permissions
+  if (typeof permissions?.request !== 'function') return Promise.resolve(false)
+  try {
+    return Promise.resolve(permissions.request({ permissions: [permission] })).catch(() => false)
+  } catch {
+    return Promise.resolve(false)
+  }
+}
+
 function ApprovalDialog({
   request,
   onDecision,
+  onKillSwitch,
   copy,
 }: {
   request: ApprovalRequest
   onDecision: (decision: ApprovalDecision) => void
+  /** The modal covers the toolbar, so it carries its own stop button. */
+  onKillSwitch?: () => void
   copy: PanelCopy
 }): React.JSX.Element {
   useEffect(() => {
@@ -703,7 +725,17 @@ function ApprovalDialog({
         )}
         <div className="approval-actions">
           <button className="deny" autoFocus onClick={() => onDecision('deny')}>{copy.approval.deny}</button>
-          <button className="allow" onClick={() => onDecision(allowDecision(request, trustEval))}>{copy.approval.allowOnce}</button>
+          <button className="allow" onClick={() => {
+            const decision = allowDecision(request, trustEval)
+            if (request.permission === undefined) {
+              onDecision(decision)
+              return
+            }
+            // Started inside the click: the browser grants optional
+            // permissions only from a user gesture. The decision follows the
+            // browser's own prompt; the tool reports a refusal itself.
+            void requestOptionalPermission(request.permission).finally(() => { onDecision(decision) })
+          }}>{copy.approval.allowOnce}</button>
           {!devTools && request.kind === 'read' && (
             <button className="read-always" onClick={() => onDecision('always-allow-reads')}>{copy.approval.alwaysAllowReads}</button>
           )}
@@ -712,6 +744,9 @@ function ApprovalDialog({
           )}
           {offersDevToolsTrust(request) && (
             <button className="session-trust" onClick={() => onDecision('trust-session')}>{copy.approval.trustDevToolsOrigin(request.grantOrigin!)}</button>
+          )}
+          {onKillSwitch !== undefined && (
+            <button className="kill-switch-inline" onClick={onKillSwitch} title={copy.killSwitch.engageHint}>{copy.killSwitch.engage}</button>
           )}
         </div>
         {request.binding !== undefined && (
@@ -1084,6 +1119,9 @@ export function App(): React.JSX.Element {
   // attachment and reports every change here.
   const [devToolsStatus, setDevToolsStatus] = useState<DevToolsStatus | null>(null)
   useEffect(() => api.onDevToolsStatus(setDevToolsStatus), [api])
+  // Kill switch: the toolbar button and Ctrl+Shift+K stop the agent at once.
+  const [killSwitchEngaged, setKillSwitchEngaged] = useState(false)
+  useEffect(() => api.onKillSwitch?.(setKillSwitchEngaged), [api])
 
   // Discovery state reported by the background. 'not-found' is terminal for the
   // current panel lease, so the status chip can say so instead of "未连接".
@@ -2644,7 +2682,8 @@ export function App(): React.JSX.Element {
   const slashActiveIndex = slashRows.length === 0 ? -1 : Math.min(slashIndex, slashRows.length - 1)
   const approvalDialog = !approvalReadyForSession(queuedApproval, sessionRef.current, sessionChanging)
     ? null
-    : <ApprovalDialog key={queuedApproval!.id} request={queuedApproval!} onDecision={decideApproval} copy={copy} />
+    : <ApprovalDialog key={queuedApproval!.id} request={queuedApproval!} onDecision={decideApproval} copy={copy}
+        onKillSwitch={() => { setKillSwitchEngaged(true); void api.engageKillSwitch().catch(() => {}) }} />
   const permissionDialog = permissionConfirm === null
     ? null
     : (
@@ -3012,6 +3051,11 @@ export function App(): React.JSX.Element {
           <ChevronDownIcon />
         </button>
         <div className="topbar-actions">
+          <button className="icon-button kill-switch-trigger" disabled={killSwitchEngaged}
+            onClick={() => { setKillSwitchEngaged(true); void api.engageKillSwitch().catch(() => {}) }}
+            aria-label={copy.killSwitch.engage} title={copy.killSwitch.engageHint}>
+            <StopIcon />
+          </button>
           <button className="icon-button new-session-trigger" disabled={state !== 'connected' || sessionSwitchBlocked}
             onClick={() => { void startNewSession() }}
             aria-label={copy.app.newSession} title={copy.app.newSession}>
@@ -3032,6 +3076,15 @@ export function App(): React.JSX.Element {
         <TextSizePanel scale={uiScale} copy={copy}
           onStep={(direction) => changeUiScale(stepUiScale(uiScaleRef.current, direction))}
           onReset={() => changeUiScale(DEFAULT_UI_SCALE)} />
+      )}
+      {killSwitchEngaged && (
+        <section className="kill-switch-banner" role="alert">
+          <strong>{copy.killSwitch.title}</strong>
+          <p>{copy.killSwitch.body}</p>
+          <button className="secondary" onClick={() => { void api.releaseKillSwitch().catch(() => {}) }}>
+            {copy.killSwitch.reconnect}
+          </button>
+        </section>
       )}
       <TabAffinityBanner
         state={tabAffinity}

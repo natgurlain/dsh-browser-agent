@@ -115,6 +115,9 @@ describe('composer controls', () => {
       startDiscovery: vi.fn(async () => []),
       cancelDiscovery: vi.fn(async () => {}),
       onDiscoveryProgress: vi.fn(() => unsubscribe),
+      engageKillSwitch: vi.fn(async () => undefined),
+      releaseKillSwitch: vi.fn(async () => undefined),
+      onKillSwitch: vi.fn(() => () => {}),
     }
     root = createRoot(document.querySelector('#root')!)
   })

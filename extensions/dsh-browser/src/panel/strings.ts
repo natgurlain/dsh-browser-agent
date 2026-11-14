@@ -210,6 +210,15 @@ export interface PanelCopy {
     copied: string
     copyError: string
   }
+  killSwitch: {
+    /** Toolbar button that stops the agent. */
+    engage: string
+    /** Tooltip naming the keyboard shortcut. */
+    engageHint: string
+    title: string
+    body: string
+    reconnect: string
+  }
   textSize: {
     open: string
     title: string
@@ -551,6 +560,13 @@ const EN: PanelCopy = {
     copyCommand: 'Copy uninstall command',
     copied: 'Command copied',
     copyError: 'Copy failed',
+  },
+  killSwitch: {
+    engage: 'Stop the agent',
+    engageHint: 'Stop the agent now — shortcut Ctrl+Shift+K (⌘⇧K on Mac, Alt+Shift+K in Firefox)',
+    title: 'Agent stopped',
+    body: 'Pending approvals and running browser actions were cancelled, session trust and developer-tools grants were revoked, unrestricted access was turned off, the debugger was detached, and the connection to dsh was closed.',
+    reconnect: 'Reconnect',
   },
   textSize: {
     open: 'Text size',
@@ -895,6 +911,13 @@ const ZH: PanelCopy = {
     copyCommand: '复制卸载命令',
     copied: '命令已复制',
     copyError: '复制失败',
+  },
+  killSwitch: {
+    engage: '停止代理',
+    engageHint: '立即停止代理——快捷键 Ctrl+Shift+K（Mac 为 ⌘⇧K，Firefox 为 Alt+Shift+K）',
+    title: '代理已停止',
+    body: '已取消待确认的请求和正在执行的浏览器操作，撤销会话信任与开发者工具授权，关闭不受限访问，断开调试器，并关闭与 dsh 的连接。',
+    reconnect: '重新连接',
   },
   textSize: {
     open: '字号',

@@ -7,5 +7,8 @@
   },
   "actionTitle": {
     "message": "打开 dsh 浏览器助手"
+  },
+  "killSwitchCommand": {
+    "message": "停止代理：取消待执行操作、撤销信任并断开连接"
   }
 }

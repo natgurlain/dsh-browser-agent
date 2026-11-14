@@ -13,6 +13,7 @@ import type { InputSetupRequest, InputSetupResult } from '../shared/input-setup.
 import { ActionError, resolveActionTarget } from './actions.ts'
 import { deepActiveElement } from './dom.ts'
 import type { ElementIds } from './ids.ts'
+import { clearPointerMark, endWatch, measureTarget, syntheticDrag, syntheticHover } from './pointer-support.ts'
 
 /** Attribute used to hand one file input to the debugger without ambiguity. */
 const UPLOAD_ATTRIBUTE = 'data-dsh-upload'
@@ -99,6 +100,18 @@ export function handleInputSetup(request: InputSetupRequest, ids: ElementIds): I
       return { op: 'upload-mark', selector: markUpload(request, ids) }
     case 'upload-clear':
       return { op: 'upload-clear', cleared: clearUpload(request.token) }
+    // Pointer input (pointer-support.ts).
+    case 'measure':
+      return { op: 'measure', measure: measureTarget(request, ids) }
+    case 'pointer-clear':
+      return { op: 'pointer-clear', cleared: clearPointerMark(request.token) }
+    case 'watch-end':
+      return { op: 'watch-end', report: endWatch(request.token) }
+    case 'synthetic-hover':
+      syntheticHover(request, ids)
+      return { op: 'synthetic-hover' }
+    case 'synthetic-drag':
+      return { op: 'synthetic-drag', ...syntheticDrag(request, ids) }
     default: {
       const unknown = request as { op?: unknown }
       throw new ActionError('bad-args', `Unknown input setup operation: ${String(unknown.op)}.`)

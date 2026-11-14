@@ -7,7 +7,7 @@ const PRODUCT_ROOTS = ['Atlas', 'Birch', 'Cedar', 'Delta', 'Ember', 'Flint', 'Gr
 export const TASK_IDS = taskCatalog.map((task) => task.id)
 export const TASK_CATALOG = taskCatalog
 // Bump whenever task prompts, generated data, or validation semantics change.
-export const BENCHMARK_SUITE_VERSION = 3
+export const BENCHMARK_SUITE_VERSION = 4
 
 function hashString(value) {
   let hash = 2166136261
@@ -230,6 +230,67 @@ export function makeTaskInstance(taskId, seed, runId, baseUrl) {
       prompt: browserOnlyPrompt(`在当前注册页用用户名“${username}”和邮箱“${email}”注册。提交后如果页面提示错误，按提示修正后重新提交，直到注册成功。`),
       page: { title: '注册账号', username, suggestion },
       expected: { kind: 'state', value: { signedUp: true, account: { username: suggestion, email } } },
+    }
+  }
+
+  if (taskId === 'confirm_delete') {
+    const drafts = shuffled(['周报', '采购申请', '活动方案', '客户回访'].map((title, index) => ({
+      id: `D-${seed}-${index}`,
+      title: `${title} ${seed}-${index + 1}`,
+    })), random)
+    const target = drafts[seed % drafts.length]
+    return {
+      ...common,
+      prompt: browserOnlyPrompt(`在当前草稿箱删除草稿“${target.title}”。页面会弹出浏览器确认对话框，请确认删除。不要删除其他草稿。`),
+      page: { title: '草稿箱', drafts, targetId: target.id },
+      expected: { kind: 'state', value: { deletedDraft: target.id, deletedCount: 1 } },
+    }
+  }
+
+  if (taskId === 'hover_menu') {
+    const formats = ['CSV', 'PDF', 'Excel']
+    const format = formats[seed % formats.length]
+    return {
+      ...common,
+      prompt: browserOnlyPrompt(`在当前报表页，把鼠标悬停在“更多操作”上打开菜单，然后点击“导出 ${format}”。`),
+      page: { title: '销售报表', formats },
+      expected: { kind: 'state', value: { exported: format } },
+    }
+  }
+
+  if (taskId === 'drag_assign') {
+    const lanes = ['待办', '进行中', '已完成']
+    const cards = shuffled(['修复登录', '更新文档', '发布版本', '回访客户'].map((title, index) => ({
+      id: `T-${seed}-${index}`,
+      title: `${title} #${seed * 10 + index}`,
+    })), random)
+    const target = cards[(seed * 3) % cards.length]
+    const lane = lanes[1 + (seed % 2)]
+    return {
+      ...common,
+      prompt: browserOnlyPrompt(`在当前看板中，把任务卡片“${target.title}”拖到“${lane}”泳道。`),
+      page: { title: '任务看板', lanes, cards },
+      expected: { kind: 'state', value: { moved: { cardId: target.id, lane } } },
+    }
+  }
+
+  if (taskId === 'covered_subscribe') {
+    const email = `news+${seed}@example.com`
+    return {
+      ...common,
+      prompt: browserOnlyPrompt(`在当前页面用邮箱“${email}”订阅新闻通讯。`),
+      page: { title: '新闻通讯', email },
+      expected: { kind: 'state', value: { subscribed: true, email } },
+    }
+  }
+
+  if (taskId === 'pdf_lookup') {
+    const invoice = `INV-${String(seed).padStart(3, '0')}-${String(4000 + Math.floor(random() * 5000))}`
+    return {
+      ...common,
+      prompt: browserOnlyPrompt('打开当前页面上的“发票 PDF”，读取其中的发票号。最后只回答发票号。'),
+      page: { title: '账单', invoice, pdfUrl: `${baseUrl}/doc/invoice.pdf?seed=${seed}&run=${encodeURIComponent(runId)}` },
+      expected: { kind: 'answer', value: invoice },
     }
   }
 

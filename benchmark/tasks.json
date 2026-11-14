@@ -70,5 +70,35 @@
     "name": "表单校验修正",
     "category": "verify",
     "description": "提交后根据出现的校验错误修正字段并重新提交。"
+  },
+  {
+    "id": "confirm_delete",
+    "name": "确认删除草稿",
+    "category": "dialog",
+    "description": "删除指定草稿，并在浏览器确认对话框中确认。"
+  },
+  {
+    "id": "hover_menu",
+    "name": "悬停菜单导出",
+    "category": "pointer",
+    "description": "悬停打开“更多操作”菜单，再点击指定的导出项。"
+  },
+  {
+    "id": "drag_assign",
+    "name": "拖拽分配任务",
+    "category": "pointer",
+    "description": "把指定任务卡片拖到目标泳道。"
+  },
+  {
+    "id": "covered_subscribe",
+    "name": "关闭遮挡后订阅",
+    "category": "pointer",
+    "description": "先关闭遮挡按钮的通知横幅，再填写邮箱并订阅。"
+  },
+  {
+    "id": "pdf_lookup",
+    "name": "PDF 发票读取",
+    "category": "document",
+    "description": "打开 PDF 发票并读取发票号。"
   }
 ]

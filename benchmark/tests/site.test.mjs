@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { startBenchmarkSite } from '../site/server.mjs'
+import { simplePdf, startBenchmarkSite } from '../site/server.mjs'
+import { makeTaskInstance, validateTask } from '../lib/tasks.mjs'
 
 test('benchmark site serves tasks and records externally verifiable state', async (context) => {
   const site = await startBenchmarkSite({ port: 0 })
@@ -53,4 +54,51 @@ test('benchmark site renders and records the content-tool tasks', async (context
     const state = await (await fetch(`${site.origin}/api/state?run=${runId}`)).json()
     assert.deepEqual(Object.fromEntries(Object.keys(expected).map((key) => [key, state[key]])), expected, taskId)
   }
+})
+
+test('reliability tasks serve their fixtures and record dialog, pointer, and drag outcomes', async (context) => {
+  const site = await startBenchmarkSite({ port: 0 })
+  context.after(() => site.close())
+  const post = (runId, taskId, action, payload) => fetch(`${site.origin}/api/action`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ runId, taskId, action, payload }),
+  })
+  const stateOf = async (runId) => (await fetch(`${site.origin}/api/state?run=${runId}`)).json()
+
+  const confirmPage = await (await fetch(`${site.origin}/task/confirm_delete?seed=2&run=r1`)).text()
+  assert.match(confirmPage, /confirm\('确定删除/u)
+  const confirmTask = makeTaskInstance('confirm_delete', 2, 'r1', site.origin)
+  await post('r1', 'confirm_delete', 'delete-draft', { draftId: confirmTask.page.targetId })
+  assert.equal(validateTask(confirmTask, await stateOf('r1'), '', ['browser_click', 'browser_dialog']).success, true)
+
+  assert.match(await (await fetch(`${site.origin}/task/hover_menu?seed=1&run=r2`)).text(), /mouseenter/u)
+  const hoverTask = makeTaskInstance('hover_menu', 1, 'r2', site.origin)
+  await post('r2', 'hover_menu', 'export', { format: hoverTask.expected.value.exported })
+  assert.equal(validateTask(hoverTask, await stateOf('r2'), '', ['browser_hover', 'browser_click']).success, true)
+
+  assert.match(await (await fetch(`${site.origin}/task/drag_assign?seed=3&run=r3`)).text(), /draggable="true"/u)
+  const dragTask = makeTaskInstance('drag_assign', 3, 'r3', site.origin)
+  await post('r3', 'drag_assign', 'move-card', dragTask.expected.value.moved)
+  assert.equal(validateTask(dragTask, await stateOf('r3'), '', ['browser_drag']).success, true)
+
+  assert.match(await (await fetch(`${site.origin}/task/covered_subscribe?seed=4&run=r4`)).text(), /id="banner"/u)
+  const coveredTask = makeTaskInstance('covered_subscribe', 4, 'r4', site.origin)
+  await post('r4', 'covered_subscribe', 'subscribe', { email: coveredTask.page.email })
+  assert.equal(validateTask(coveredTask, await stateOf('r4'), '', ['browser_click', 'browser_type']).success, true)
+})
+
+test('the PDF task serves a real PDF carrying the expected invoice number', async (context) => {
+  const site = await startBenchmarkSite({ port: 0 })
+  context.after(() => site.close())
+  const task = makeTaskInstance('pdf_lookup', 5, 'r5', site.origin)
+  assert.match(await (await fetch(task.url)).text(), /发票 PDF/u)
+  const response = await fetch(task.page.pdfUrl)
+  assert.equal(response.headers.get('content-type'), 'application/pdf')
+  const body = Buffer.from(await response.arrayBuffer()).toString('latin1')
+  assert.match(body, /^%PDF-1\.4/u)
+  assert.ok(body.includes(`(Invoice No: ${task.page.invoice}) Tj`))
+  // The cross-reference table points at each object.
+  const offset = Number(/startxref\n(\d+)/u.exec(body)[1])
+  assert.ok(body.slice(offset).startsWith('xref'))
+  assert.ok(simplePdf(['a (b) \\ c']).toString('latin1').includes('(a \\(b\\) \\\\ c) Tj'))
+  assert.equal(validateTask(task, {}, task.page.invoice, ['browser_click', 'browser_pdf_text']).success, true)
 })

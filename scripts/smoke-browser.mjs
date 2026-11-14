@@ -34,6 +34,15 @@ const extension = join(directory, 'extension')
 await cp(builtExtension, extension, { recursive: true })
 await writeFile(join(extension, 'bridge-token'), `${token}\n`, { mode: 0o600 })
 await chmod(join(extension, 'bridge-token'), 0o600)
+// Optional permissions need a click on the browser's own prompt, which a
+// headless run cannot reach: grant `downloads` up front in this test copy.
+// (The first-use request from the approval card is covered by unit tests.)
+const installedManifest = JSON.parse(await readFile(join(extension, 'manifest.json'), 'utf8'))
+installedManifest.permissions.push(...installedManifest.optional_permissions.filter(permission => permission === 'downloads'))
+installedManifest.optional_permissions = installedManifest.optional_permissions.filter(permission => permission !== 'downloads')
+await writeFile(join(extension, 'manifest.json'), JSON.stringify(installedManifest, null, 2))
+const downloadDirectory = join(directory, 'downloads')
+await mkdir(downloadDirectory)
 const env = { ...process.env, DSH_HOME: join(directory, 'home'), TMPDIR: runtimeTmp, DSH_TELEMETRY_DISABLED: '1' }
 delete env.DSH_EXT_TOKEN
 delete env.DSH_BROWSER_SESSION_WORKSPACE
@@ -42,6 +51,7 @@ let browser
 let hostLog = ''
 const results = []
 let bridgeProxy
+let savedPdfPath = ''
 let bridgeOnline = true
 const bridgeSockets = new Set()
 const pendingSockets = new Set()
@@ -88,6 +98,49 @@ childServer.listen(0, '127.0.0.1')
 await once(childServer, 'listening')
 const crossOrigin = `http://127.0.0.1:${childServer.address().port}`
 const crossSiteOrigin = `http://localhost:${childServer.address().port}`
+const reliabilityPage = `<!doctype html><style>
+    body { margin: 0; min-height: 1200px; font: 14px sans-serif }
+    #hoverTarget { position: absolute; left: 20px; top: 300px; width: 120px; height: 40px; background: rgb(200, 200, 200) }
+    #hoverTarget:hover { background: rgb(10, 120, 200) }
+    #menu { display: none } #hoverTarget:hover + #menu { display: block }
+    #dragSource { position: absolute; left: 20px; top: 380px; width: 80px; height: 40px; background: #fc0 }
+    #dropZone { position: absolute; left: 300px; top: 380px; width: 120px; height: 60px; background: #9cf }
+    #track { position: absolute; left: 20px; top: 480px; width: 400px; height: 20px; background: #eee }
+    #knob { position: absolute; left: 0; top: 0; width: 20px; height: 20px; background: #333 }
+  </style><body>
+    <h1>Reliability fixture</h1>
+    <button id="alertBtn" style="position:absolute;left:20px;top:60px">Alert</button>
+    <button id="confirmBtn" style="position:absolute;left:120px;top:60px">Confirm</button>
+    <button id="promptBtn" style="position:absolute;left:240px;top:60px">Prompt</button>
+    <button id="coveredBtn" style="position:absolute;left:20px;top:120px;width:120px;height:40px">Covered</button>
+    <div id="overlay" class="modal backdrop" style="position:absolute;left:0;top:110px;width:400px;height:60px;background:rgba(0,0,0,.3)"></div>
+    <div id="trustedOnly" style="position:absolute;left:20px;top:200px;width:160px;height:40px;background:#cfc">Trusted only</div>
+    <div id="hoverTarget">Hover me</div><div id="menu" style="position:absolute;left:20px;top:340px">Menu</div>
+    <div id="dragSource" draggable="true">Drag</div><div id="dropZone">Drop</div>
+    <div id="track"><div id="knob"></div></div>
+    <a id="downloadLink" href="/files/quarterly-report.csv" download style="position:absolute;left:20px;top:540px">Download report</a>
+    <script>
+      window.coveredClicks = 0; window.trustedClicks = 0; window.untrustedClicks = 0; window.hovered = false; window.dropped = ''; window.knobX = 0;
+      document.querySelector('#alertBtn').addEventListener('click', () => { alert('Saved!'); window.afterAlert = true });
+      document.querySelector('#confirmBtn').addEventListener('click', () => { window.confirmed = confirm('Delete everything?') });
+      document.querySelector('#promptBtn').addEventListener('click', () => { window.prompted = prompt('Name?', 'nobody') });
+      document.querySelector('#coveredBtn').addEventListener('click', () => { window.coveredClicks++ });
+      // Like many widgets, this one ignores synthetic events and changes nothing for them.
+      document.querySelector('#trustedOnly').addEventListener('click', (event) => {
+        if (!event.isTrusted) { window.untrustedClicks++; return }
+        window.trustedClicks++; event.currentTarget.textContent = 'Activated';
+      });
+      document.querySelector('#hoverTarget').addEventListener('mouseenter', () => { window.hovered = true });
+      const source = document.querySelector('#dragSource');
+      source.addEventListener('dragstart', (event) => { event.dataTransfer.setData('text/plain', 'payload-' + source.id) });
+      const zone = document.querySelector('#dropZone');
+      zone.addEventListener('dragover', (event) => { event.preventDefault() });
+      zone.addEventListener('drop', (event) => { event.preventDefault(); window.dropped = event.dataTransfer.getData('text/plain') });
+      const knob = document.querySelector('#knob'); let grab;
+      knob.addEventListener('mousedown', (event) => { grab = event.clientX - window.knobX });
+      document.addEventListener('mousemove', (event) => { if (grab !== undefined && event.buttons === 1) { window.knobX = Math.max(0, Math.min(380, event.clientX - grab)); knob.style.left = window.knobX + 'px' } });
+      document.addEventListener('mouseup', () => { grab = undefined });
+    </script></body>`
 // Content-tool fixtures: widgets the inventory used to miss, selects, waits,
 // a scroll container that loads more, and a table paginated by full navigations.
 const contentToolsPage = `<!doctype html><title>Content tools</title><body>
@@ -158,6 +211,20 @@ const server = createServer((request, response) => {
   if (request.url.startsWith('/inner')) { response.end(inner); return }
   if (request.url.startsWith('/content-tools')) { response.end(contentToolsPage); return }
   if (request.url.startsWith('/ledger')) { response.end(tablePage(Number(new URL(request.url, 'http://x').searchParams.get('page') ?? 1))); return }
+  if (request.url.startsWith('/reliability')) { response.end(reliabilityPage); return }
+  if (request.url.startsWith('/files/quarterly-report.csv')) {
+    response.setHeader('content-type', 'text/csv')
+    response.setHeader('content-disposition', 'attachment; filename="quarterly-report.csv"')
+    response.end('quarter,revenue\nQ3,4200000\n')
+    return
+  }
+  if (request.url.startsWith('/files/saved.pdf')) {
+    readFile(savedPdfPath).then(data => {
+      response.setHeader('content-type', 'application/pdf')
+      response.end(data)
+    }, () => { response.statusCode = 404; response.end() })
+    return
+  }
   response.end(`<!doctype html><style>#button { color: rgb(1, 2, 3); background-color: rgb(240, 240, 240); margin: 2px 3px 4px 5px; }
     #unrelated { color: rgb(4, 5, 6) }</style><body>
     <button id="button" style="position:absolute;left:20px;top:20px;width:100px;height:50px">Target</button>
@@ -187,6 +254,7 @@ await new Promise(resolve => unavailableServer.close(resolve))
 // 保持真实 TCP 请求未响应，用于验证停止生成和断线期间的状态变化。
 const pendingServer = createTcpServer(socket => {
   pendingSockets.add(socket)
+  socket.on('error', () => {})
   socket.once('data', () => { pendingRequests += 1 })
   socket.on('close', () => { pendingSockets.delete(socket) })
 })
@@ -205,6 +273,10 @@ try {
     const upstream = createConnection({ host: '127.0.0.1', port: hostPort })
     bridgeSockets.add(client)
     bridgeSockets.add(upstream)
+    // A dropped bridge (kill switch, simulated outage) may reset either side;
+    // that is the scenario under test, not a harness failure.
+    client.on('error', () => { upstream.destroy() })
+    upstream.on('error', () => { client.destroy() })
     client.on('close', () => { bridgeSockets.delete(client); upstream.destroy() })
     upstream.on('close', () => { bridgeSockets.delete(upstream); client.destroy() })
     client.pipe(upstream).pipe(client)
@@ -438,6 +510,10 @@ try {
     assert.equal(await document.evaluate(() => window.innerClicks), 1, kind)
     succeed(await tool('browser_click', { frame, selector: '#inner' }))
     assert.equal(await document.evaluate(() => window.innerClicks), 2, kind)
+    // Real mouse input lands on the same element through frame offsets,
+    // borders, padding, and the nested frame's scale/rotate transform.
+    assert.match(succeed(await tool('browser_click', { frame, selector: '#inner', trusted: true })), /\(trusted\)/)
+    assert.equal(await document.evaluate(() => window.innerClicks), 3, kind)
     succeed(await tool('browser_type', { frame, selector: '#input', text: kind, replace: true }))
     assert.equal(await document.locator('#input').inputValue(), kind)
     succeed(await tool('browser_scroll', { frame, direction: 'down', amount: 100 }))
@@ -446,7 +522,7 @@ try {
     await waitFor(() => document.evaluate(() => scrollY === 0), `${kind} scroll to top`)
   }
   assert.equal(await page.evaluate(() => window.events.length), beforeEvents)
-  results.push('element indices, selectors, text input, and page scrolling work in all five frame types without clicking the outer page')
+  results.push('element indices, selectors, trusted clicks, text input, and page scrolling work in all five frame types without clicking the outer page')
 
   const upload = join(directory, 'upload.txt')
   await writeFile(upload, 'Browser upload regression fixture')
@@ -570,6 +646,132 @@ try {
   assert.match(succeed(await tool('browser_snapshot', {})), /Title: Ledger 3/)
   results.push('browser_extract reads tables inline and pages a schema across full navigations into a CSV in the session workspace')
 
+  // ---- Reliability: JavaScript dialogs, covered elements, trusted clicks, hover, drag ----
+  // Playwright auto-dismisses dialogs nobody listens for; a no-op listener
+  // leaves them open exactly as a real user's browser would.
+  const playwrightDialogs = []
+  page.on('dialog', dialog => { playwrightDialogs.push(dialog) })
+  await page.goto(`${origin}/reliability`)
+  await page.bringToFront()
+  succeed(await tool('browser_snapshot', {}))
+  let started = performance.now()
+  const alerted = await tool('browser_click', { selector: '#alertBtn' })
+  assert.equal(alerted.isError, true, JSON.stringify(alerted))
+  assert.match(text(alerted), /^(Error: )?dialog open: alert dialog\. The action was delivered/)
+  assert.match(text(alerted), /Saved!/)
+  assert.ok(performance.now() - started < 10_000, 'a dialog must fail the call long before the tool timeout')
+  started = performance.now()
+  const blocked = await tool('browser_get_text', { selector: 'h1' })
+  assert.equal(blocked.isError, true)
+  assert.match(text(blocked), /^(Error: )?dialog open: alert dialog/)
+  assert.ok(performance.now() - started < 5_000, 'later calls fail fast while the dialog is open')
+  assert.match(succeed(await tool('browser_dialog', { accept: true })), /Answered the alert dialog with OK/)
+  await waitFor(() => page.evaluate(() => window.afterAlert === true), 'alert handler completion')
+  assert.match(succeed(await tool('browser_get_text', { selector: 'h1' })), /Reliability fixture/)
+  const confirmed = await tool('browser_click', { selector: '#confirmBtn', trusted: true })
+  assert.match(text(confirmed), /^(Error: )?dialog open: confirm dialog/)
+  assert.match(text(confirmed), /Delete everything\?/)
+  succeed(await tool('browser_dialog', { accept: false }))
+  await waitFor(() => page.evaluate(() => window.confirmed === false), 'dismissed confirm')
+  results.push('alert and confirm dialogs fail the triggering call fast, block later calls, and are answered by browser_dialog (synthetic and trusted clicks)')
+
+  const prompted = await tool('browser_click', { selector: '#promptBtn' })
+  assert.match(text(prompted), /^(Error: )?dialog open: prompt dialog/)
+  await settings({ unrestrictedBrowserAccess: false, trustedActionOrigins: [] })
+  await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request') })
+  const answering = tool('browser_dialog', { accept: true, promptText: 'Ada' })
+  const dialogApproval = await waitFor(() => panel.evaluate(() => messages.find(message => message.type === 'approval.request'
+    && message.request.action === 'browser_dialog')?.request), 'browser_dialog approval')
+  assert.equal(dialogApproval.kind, 'action')
+  assert.deepEqual(dialogApproval.details.map(detail => detail.value), ['Name?', 'Ada'])
+  await panel.evaluate(id => { panelPort.postMessage({ type: 'approval.response', id, decision: 'allow-once' }) }, dialogApproval.id)
+  succeed(await answering)
+  await waitFor(() => page.evaluate(() => window.prompted === 'Ada'), 'answered prompt')
+  await settings({ unrestrictedBrowserAccess: true, trustedActionOrigins: [origin] })
+  results.push('browser_dialog asks with the dialog message and prompt text on the card and fills the prompt')
+
+  // "Leave site?" needs sticky user activation, which a trusted click gives.
+  await page.evaluate(() => {
+    window.stayHere = event => { event.preventDefault(); event.returnValue = '' }
+    window.addEventListener('beforeunload', window.stayHere)
+  })
+  succeed(await tool('browser_click', { selector: 'h1', trusted: true }))
+  const leaving = await tool('browser_navigate', { url: `${origin}/inner` })
+  assert.match(text(leaving), /dialog open: beforeunload dialog/, text(leaving))
+  assert.match(text(await tool('browser_get_text', { selector: 'h1' })), /^(Error: )?dialog open: beforeunload dialog/)
+  // Leave: the navigation completes (staying would leave Playwright's own
+  // navigation tracking waiting for a document that never comes).
+  succeed(await tool('browser_dialog', { accept: true }))
+  await waitFor(() => page.url().endsWith('/inner'), 'navigation after leaving')
+  // Playwright keeps its own record of the "leave site?" dialog the extension
+  // answered; settle it so closing the browser does not try again.
+  for (const dialog of playwrightDialogs.filter(dialog => dialog.type() === 'beforeunload')) await dialog.accept().catch(() => {})
+  await page.goto(`${origin}/reliability`)
+  succeed(await tool('browser_snapshot', {}))
+  results.push('a "leave site?" dialog raised by browser_navigate is reported at once and answered with browser_dialog')
+
+  const covered = await tool('browser_click', { selector: '#coveredBtn' })
+  assert.equal(covered.isError, true)
+  assert.match(text(covered), /is covered by <div id="overlay" class="modal backdrop">/)
+  assert.equal((await tool('browser_click', { selector: '#coveredBtn', trusted: true })).isError, true)
+  assert.equal(await page.evaluate(() => window.coveredClicks), 0)
+  await page.locator('#overlay').evaluate(overlay => overlay.remove())
+  succeed(await tool('browser_click', { selector: '#coveredBtn' }))
+  assert.equal(await page.evaluate(() => window.coveredClicks), 1)
+  results.push('a click on a covered element is refused with the covering element instead of clicking it')
+
+  assert.match(succeed(await tool('browser_click', { selector: '#trustedOnly' })), /retried with real mouse input/)
+  assert.deepEqual(await page.evaluate(() => [window.untrustedClicks, window.trustedClicks]), [1, 1])
+  // A native button is never retried, even when its handler shows nothing.
+  await page.locator('#trustedOnly').evaluate(element => {
+    const button = document.createElement('button'); button.id = 'silent'; button.textContent = 'Silent'; button.style.cssText = 'position:absolute;left:500px;top:200px'
+    button.addEventListener('click', () => { window.silentClicks = (window.silentClicks ?? 0) + 1 })
+    element.after(button)
+  })
+  assert.doesNotMatch(succeed(await tool('browser_click', { selector: '#silent' })), /retried/)
+  assert.equal(await page.evaluate(() => window.silentClicks), 1)
+  results.push('a synthetic click with no visible effect is retried once with real mouse input')
+
+  assert.match(succeed(await tool('browser_hover', { selector: '#hoverTarget' })), /Hovered over element \(#hoverTarget\) \(trusted\)/)
+  assert.equal(await page.evaluate(() => window.hovered), true)
+  assert.equal(await page.locator('#hoverTarget').evaluate(element => getComputedStyle(element).backgroundColor), 'rgb(10, 120, 200)')
+  assert.equal(await page.locator('#menu').isVisible(), true)
+  results.push('browser_hover moves the real pointer: hover handlers run and CSS :hover menus open')
+
+  assert.match(succeed(await tool('browser_drag', { from: { selector: '#dragSource' }, to: { selector: '#dropZone' } })), /HTML5 drag-and-drop/)
+  assert.equal(await page.evaluate(() => window.dropped), 'payload-dragSource')
+  succeed(await tool('browser_drag', { from: { selector: '#knob' }, toOffset: { x: 150, y: 0 }, steps: 6 }))
+  const knobX = await page.evaluate(() => window.knobX)
+  assert.ok(Math.abs(knobX - 150) <= 2, `knob moved ${knobX}px`)
+  results.push('browser_drag completes HTML5 drag-and-drop with a DataTransfer and real pointer drags in steps')
+
+  // Downloads: keep Chrome's own file names (Playwright would rename them).
+  const browserSession = await (browser.browser()?.newBrowserCDPSession() ?? browser.newCDPSession(page))
+  await browserSession.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadDirectory, eventsEnabled: true })
+  succeed(await tool('browser_click', { selector: '#downloadLink' }))
+  const waited = succeed(await tool('browser_downloads', { action: 'wait', filenameRegex: 'quarterly-report', timeoutMs: 20_000 }))
+  const downloadedPath = JSON.parse(waited.slice(waited.indexOf('{'), waited.lastIndexOf('}') + 1)).download.path
+  assert.equal(downloadedPath, join(downloadDirectory, 'quarterly-report.csv'))
+  assert.equal(await readFile(downloadedPath, 'utf8'), 'quarter,revenue\nQ3,4200000\n')
+  assert.match(succeed(await tool('browser_downloads', { action: 'list', limit: 5 })), /quarterly-report\.csv/)
+  results.push('browser_downloads waits for a finished download and reports a local path the host can read')
+
+  const savedPdf = await tool('browser_save_pdf', { filename: 'reliability fixture' })
+  const savedText = succeed(savedPdf)
+  savedPdfPath = join(env.DSH_HOME, 'browser-sessions', 'pdf', 'reliability fixture.pdf')
+  assert.ok(savedText.includes(savedPdfPath), savedText)
+  assert.equal((await readFile(savedPdfPath)).subarray(0, 5).toString('latin1'), '%PDF-')
+  results.push('browser_save_pdf renders the tab with Page.printToPDF into the session workspace')
+
+  await page.goto(`${origin}/files/saved.pdf`).catch(() => undefined)
+  await waitFor(async () => (await panel.evaluate(tabId => chrome.tabs.get(tabId).then(tab => tab.url), tabId)).endsWith('/files/saved.pdf'), 'PDF tab')
+  const pdfText = succeed(await tool('browser_pdf_text', {}))
+  assert.match(pdfText, /Extracted text from \d+ of \d+ PDF page/)
+  assert.match(pdfText, /Reliability fixture/)
+  assert.match(pdfText, /Trusted only|Activated/)
+  results.push('browser_pdf_text extracts the text layer of the PDF shown in the controlled tab')
+  await page.goto(`${origin}/reliability`)
+
   // 通过正式界面上传图片，并用真实连接失败验证继续生成。
   await worker.evaluate(async () => { await chrome.storage.local.set({ dshPanelUiLocale: 'en' }) })
   const chat = await browser.newPage()
@@ -687,11 +889,40 @@ try {
     'live projection after reconnect')
   await secondChat.getByRole('button', { name: 'Continue generating', exact: true }).waitFor()
   results.push('reconnection restores both panels, completed turn state, history and live projections without losing drafts')
+
+  // ---- Kill switch (last: it drops the bridge) ----
+  const badge = tab => panel.evaluate(tab => chrome.action.getBadgeText(tab === undefined ? {} : { tabId: tab }), tab)
+  await waitFor(async () => await badge(tabId) === 'AI', 'agent-controlled tab badge')
+  await settings({ unrestrictedBrowserAccess: true })
+  await settings({ unrestrictedBrowserAccess: false, trustedActionOrigins: [] })
+  await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request' && message.type !== 'status') })
+  const pendingClick = tool('browser_click', { selector: 'h1' })
+  await waitFor(() => panel.evaluate(() => messages.some(message => message.type === 'approval.request')), 'approval pending before the kill switch')
+  await chat.bringToFront()
+  // The approval card covers the toolbar, so it carries its own stop button.
+  await chat.locator('.approval-dialog').getByRole('button', { name: 'Stop the agent', exact: true }).click()
+  await chat.getByText('Agent stopped', { exact: true }).waitFor()
+  const stopped = await pendingClick
+  assert.equal(stopped.isError, true, JSON.stringify(stopped))
+  await waitFor(() => panel.evaluate(() => messages.some(message => message.type === 'approval.resolved')), 'pending approval cancelled')
+  await waitFor(() => panel.evaluate(() => messages.some(message => message.type === 'status' && message.state === 'stopped' && message.killSwitch === true)), 'bridge dropped')
+  assert.equal(await badge(), 'OFF')
+  assert.equal(await badge(tabId), 'OFF')
+  assert.equal((await tool('browser_snapshot', {})).isError, true)
+  await delay(1_000)
+  assert.equal(await panel.evaluate(() => messages.some(message => message.type === 'status' && message.state === 'connected')), false)
+  await chat.getByRole('button', { name: 'Reconnect', exact: true }).click()
+  await waitFor(() => panel.evaluate(() => messages.some(message => message.type === 'status' && message.state === 'connected')), 'reconnect after kill switch')
+  await waitFor(async () => (await (await fetch(probe, { headers })).json()).includes('browser_snapshot'), 'tools after reconnect')
+  succeed(await tool('browser_snapshot', {}))
+  await waitFor(async () => await badge(tabId) === 'AI', 'controlled tab badge after reconnect')
+  results.push('the kill switch cancels pending approvals and calls, drops the bridge until Reconnect, and the badge shows OFF / AI')
   await writeFile(join(directory, 'results.json'), JSON.stringify(results, null, 2))
   console.log(`Browser smoke passed: ${results.join('; ')}`)
   console.log(`Evidence: ${directory}`)
 } finally {
-  if (browser) await browser.close()
+  // Playwright may still hold dialogs the extension already answered.
+  if (browser) await browser.close().catch(error => { console.error(`browser close: ${error.message}`) })
   for (const socket of bridgeSockets) socket.destroy()
   if (bridgeProxy) await new Promise(resolve => bridgeProxy.close(resolve))
   for (const socket of pendingSockets) socket.destroy()

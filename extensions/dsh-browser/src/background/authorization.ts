@@ -9,10 +9,19 @@ import { attributeRisk } from '../security/attribute-risk.ts'
 import type { DevToolsGrantKind } from './devtools-grants.ts'
 import { getUiLocale, type UiLocale } from '../i18n.ts'
 
-const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text'])
+const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text', 'browser_pdf_text'])
+/**
+ * Reads that always ask (unless unrestricted access is on), whatever the
+ * page-sharing preference: they hand over more than the page text — pixels,
+ * a document written to the host disk, or the browser's download history.
+ */
+const ALWAYS_ASK_READS = new Set(['browser_screenshot', 'browser_save_pdf', 'browser_downloads'])
 const STATE_CHANGING_ACTIONS = new Set([
   'browser_click',
   'browser_select',
+  'browser_hover',
+  'browser_drag',
+  'browser_dialog',
   'browser_type',
   'browser_press',
   'browser_clipboard',
@@ -203,6 +212,14 @@ export interface ApprovalContext {
    * sensitive. `undefined` (not inspected) masks, failing closed.
    */
   typedTargetSensitive?: boolean
+  /**
+   * For browser_dialog: the dialog the answer would go to. It is shown on the
+   * card and folded into the binding, so a different dialog at execution time
+   * invalidates the approval.
+   */
+  dialog?: { type: string; message: string; defaultPrompt?: string }
+  /** For browser_downloads: the optional downloads permission is not granted yet. */
+  needsDownloadsPermission?: boolean
 }
 
 /**
@@ -252,7 +269,7 @@ export function approvalPromptForCall(
     ...prompt,
     binding: approvalBinding({
       action: call.name,
-      args: call.args,
+      args: call.name === 'browser_dialog' ? { ...call.args, dialog: context.dialog ?? null } : call.args,
       origins: prompt.origins,
       ...target === undefined ? {} : { frameId: target.frameId, documentKey: frameDocumentKey(target) },
     }),
@@ -269,13 +286,19 @@ function unboundPromptForCall(
   // A screenshot photographs exactly what the user sees — passwords, private
   // messages, account balances included — so it always prompts, regardless of
   // the page-content sharing preference. Only unrestricted access skips it.
-  if (call.name === 'browser_screenshot') {
+  if (ALWAYS_ASK_READS.has(call.name)) {
     return {
       kind: 'read',
       action: call.name,
-      summary: localized(locale, 'Capture a screenshot of the current page (may contain sensitive content)', '截取当前页面的可视区域截图（可能包含敏感信息）'),
-      origins: uniqueOrigins(frames, frames),
+      summary: summarizeAlwaysAskRead(call, locale) + (call.name === 'browser_downloads' && context.needsDownloadsPermission === true
+        ? localized(locale, ' (first use: Allow also asks the browser for permission to read downloads)', '（首次使用：允许后浏览器还会请求读取下载记录的权限）')
+        : ''),
+      origins: call.name === 'browser_downloads' ? [] : uniqueOrigins(frames, frames),
       canTrust: false,
+      ...call.name === 'browser_downloads' && typeof call.args.filenameRegex === 'string'
+        ? { details: [{ kind: 'text' as const, value: call.args.filenameRegex, masked: false, label: localized(locale, 'File name pattern', '文件名匹配模式') }] }
+        : {},
+      ...call.name === 'browser_downloads' && context.needsDownloadsPermission === true ? { permission: 'downloads' as const } : {},
     }
   }
   if (isPageRead(call)) {
@@ -357,6 +380,19 @@ function actionDetails(call: ToolCall, context: ApprovalContext): ApprovalDetail
     case 'browser_select':
     case 'browser_extract':
       return [payloadDetail(call)]
+    case 'browser_dialog': {
+      const locale = getUiLocale()
+      const details: ApprovalDetail[] = [{
+        kind: 'text',
+        value: context.dialog?.message ?? '',
+        masked: false,
+        label: localized(locale, `Message of the page's ${context.dialog?.type ?? 'unknown'} dialog`, `页面 ${context.dialog?.type ?? 'unknown'} 对话框的内容`),
+      }]
+      if (typeof call.args.promptText === 'string') {
+        details.push({ kind: 'text', value: call.args.promptText, masked: false, label: localized(locale, 'Text to enter in the prompt', '将填入输入框的文本') })
+      }
+      return details
+    }
     case 'browser_navigate':
     case 'browser_open_tab': {
       const url = analyzeUrl(typeof call.args.url === 'string' ? call.args.url : '')
@@ -491,6 +527,19 @@ function summarizeAction(call: ToolCall, locale: UiLocale, context: ApprovalCont
         `跨页提取数据行，最多点击下一页控件 ${typeof pages === 'number' ? pages : 5} 页${frame}（参数见下方）`,
       )
     }
+    case 'browser_hover': return localized(locale, `Move the pointer over ${elementTarget(call, locale)}${frame}`, `把指针移到${elementTarget(call, locale)}上${frame}`)
+    case 'browser_drag': return localized(
+      locale,
+      `Drag ${describeDragEnd(call.args.from, locale)} to ${describeDragDestination(call, locale)}${frame}`,
+      `把${describeDragEnd(call.args.from, locale)}拖到${describeDragDestination(call, locale)}${frame}`,
+    )
+    case 'browser_dialog': {
+      const kind = context.dialog?.type ?? 'unknown'
+      const accept = call.args.accept === true
+      return accept
+        ? localized(locale, `Answer the page's ${kind} dialog with OK (accept)`, `以「确定」回应页面的 ${kind} 对话框`)
+        : localized(locale, `Answer the page's ${kind} dialog with Cancel (dismiss)`, `以「取消」回应页面的 ${kind} 对话框`)
+    }
     case 'browser_back': return localized(locale, 'Go back in browser history (destination domain unknown)', '返回浏览历史上一页（目标域名未知）')
     case 'browser_forward': return localized(locale, 'Go forward in browser history (destination domain unknown)', '前进到浏览历史下一页（目标域名未知）')
     case 'browser_reload': return localized(locale, 'Reload the current page', '重新加载当前页面')
@@ -504,10 +553,44 @@ function summarizeRead(call: ToolCall, locale: UiLocale): string {
       return localized(locale, 'Read the current page and accessible iframes', '读取当前页面及可访问 iframe')
     case 'browser_extract':
       return localized(locale, 'Extract structured rows from the current page (arguments below)', '从当前页面提取结构化数据行（参数见下方）')
+    case 'browser_pdf_text':
+      return localized(locale, 'Read the text of the PDF open in the controlled tab', '读取受控标签页中 PDF 的文本')
     case 'browser_wait':
       return localized(locale, 'Wait for a condition on the current page (arguments below)', '等待当前页面满足条件（参数见下方）')
     default:
       return localized(locale, 'Read text from the specified area of the current page', '读取当前页面的指定文本区域')
+  }
+}
+
+/** One end of a drag: `{index}` or `{selector}`. */
+function describeDragEnd(value: unknown, locale: UiLocale): string {
+  const end = typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
+  if (typeof end.selector === 'string' && end.selector !== '') return localized(locale, `selected element (${safeInline(end.selector, 160)})`, `选择器元素（${safeInline(end.selector, 160)}）`)
+  if (typeof end.index === 'number') return localized(locale, `element [${end.index}]`, `元素 [${end.index}]`)
+  return localized(locale, '(no element given)', '（未指定元素）')
+}
+
+function describeDragDestination(call: ToolCall, locale: UiLocale): string {
+  const offset = call.args.toOffset
+  if (typeof offset === 'object' && offset !== null) {
+    const { x, y } = offset as { x?: unknown; y?: unknown }
+    return localized(locale, `an offset of (${String(x)}, ${String(y)}) px`, `偏移 (${String(x)}, ${String(y)}) 像素处`)
+  }
+  return describeDragEnd(call.args.to, locale)
+}
+
+function summarizeAlwaysAskRead(call: ToolCall, locale: UiLocale): string {
+  switch (call.name) {
+    case 'browser_save_pdf':
+      return localized(locale, 'Save the current page as a PDF into the agent workspace (may contain sensitive content)', '把当前页面保存为 PDF 到代理工作区（可能包含敏感信息）')
+    case 'browser_downloads': {
+      const waiting = call.args.action === 'wait'
+      return waiting
+        ? localized(locale, 'Wait for a browser download to finish and report its local file path', '等待浏览器下载完成并报告其本地文件路径')
+        : localized(locale, 'List recent browser downloads with their local file paths and source URLs', '列出最近的浏览器下载及其本地文件路径和来源 URL')
+    }
+    default:
+      return localized(locale, 'Capture a screenshot of the current page (may contain sensitive content)', '截取当前页面的可视区域截图（可能包含敏感信息）')
   }
 }
 
@@ -559,6 +642,8 @@ export interface ApprovalGateInput {
  * @returns the authorization to apply, or `'prompt'` when the user must decide.
  */
 export function resolveApprovalGate(input: ApprovalGateInput): ApprovalAuthorization | 'prompt' {
+  // A missing optional permission can only be granted from a user gesture.
+  if (input.prompt.permission !== undefined) return 'prompt'
   if (input.prompt.devTools === true) {
     const kind = devToolsGrantKind(input.prompt)
     if (input.prompt.perCallOnly === true) return 'prompt'

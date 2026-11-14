@@ -88,6 +88,15 @@ const TRUSTED_PARAMETER = {
   description: 'true forces real browser input (Chrome only, attaches the debugger); false forces the synthetic path; omit to let the browser choose.',
 }
 
+/** Dialog, pointer, download, and PDF tools; grouped so registries stay easy to merge. */
+export const RELIABILITY_TOOL_NAMES = [
+  'browser_dialog',
+  'browser_hover',
+  'browser_drag',
+  'browser_downloads',
+  'browser_pdf_text',
+] as const
+
 /** The keys the extension accepts as wire action names (tool name == action name). */
 export const BROWSER_TOOL_NAMES = [
   'browser_snapshot',
@@ -110,6 +119,8 @@ export const BROWSER_TOOL_NAMES = [
   // Content tools (defineContentTools).
   'browser_select',
   'browser_extract',
+  // Reliability tools (dialogs, pointer, downloads, PDF text).
+  ...RELIABILITY_TOOL_NAMES,
 ] as const
 
 /**
@@ -164,7 +175,7 @@ interface RawCall {
 function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[] {
   const snapshot = (): ToolDefinition => defineTool({
     name: 'browser_snapshot',
-    description: `Read the page and accessible iframes as structured text with numbered action targets. Use query to locate any element (including non-semantic controls and hidden focus proxies) and get its selector. Use frame to read one iframe with the full budget, and delta=true for changes only. ${UNTRUSTED_CONTENT_WARNING}`,
+    description: `Read the page and accessible iframes as structured text with numbered targets. query locates any element (even hidden focus proxies) and returns its selector; frame reads one iframe; delta=true returns changes only. ${UNTRUSTED_CONTENT_WARNING}`,
     parameters: {
       delta: { type: 'boolean', description: 'Return changes since the previous snapshot.' },
       region: { type: 'string', description: 'CSS selector or "main" to read only that region.' },
@@ -215,7 +226,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const click = (): ToolDefinition => defineTool({
     name: 'browser_click',
-    description: 'Click an element by index or selector; include frame for an iframe target. Supports double clicks, mouse buttons, and modifiers.',
+    description: 'Click an element by index or selector (frame for iframes); double clicks, buttons, and modifiers. Covered targets are refused; trusted=true uses real mouse input (Chrome).',
     parameters: {
       index: { type: 'number', description: 'Element index from the browser_snapshot inventory.' },
       selector: { type: 'string', description: 'CSS selector for the target element.' },
@@ -224,6 +235,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
       button: { type: 'string', enum: ['left', 'right', 'middle'], description: 'Mouse button; defaults to left.' },
       clicks: { type: 'number', description: 'Click count 1-3; 2 is a double click.' },
       modifiers: MODIFIERS_PARAMETER,
+      trusted: TRUSTED_PARAMETER,
     },
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
@@ -232,7 +244,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const type = (): ToolDefinition => defineTool({
     name: 'browser_type',
-    description: 'Enter text into a field, a contenteditable editor, or the focused element. Use replace=true to replace the target contents. mode=insert inserts text at the caret; mode=keystrokes emits one key event per character (autocomplete/shortcut-driven fields). For rich HTML or a real clipboard paste, use browser_clipboard instead. Sensitive values are never returned.',
+    description: 'Enter text into a field, editor, or the focused element. replace=true replaces the contents; mode=insert inserts at the caret, mode=keystrokes types key by key. Use browser_clipboard for rich HTML. Sensitive values are never returned.',
     parameters: {
       index: { type: 'number', description: 'Element index from the browser_snapshot inventory.' },
       selector: { type: 'string', description: 'CSS selector for the target element.' },
@@ -296,7 +308,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const openTab = (): ToolDefinition => defineTool({
     name: 'browser_open_tab',
-    description: 'Open an HTTP(S) URL in a new tab and make it the controlled target. Activates the tab by default; set active:false to keep the current visible tab in front.',
+    description: 'Open an HTTP(S) URL in a new tab and control it; active:false keeps the current tab in front.',
     parameters: {
       url: { type: 'string', required: true, description: 'Complete http or https URL.' },
       active: {
@@ -317,7 +329,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const listTabs = (): ToolDefinition => defineTool({
     name: 'browser_list_tabs',
-    description: 'List open tabs with tabId, windowId, title, URL, and active/controlled state. Results are untrusted. Call before follow/close; never guess tabId.',
+    description: 'List open tabs (tabId, windowId, title, URL, active/controlled). Results are untrusted; call before follow/close and never guess tabId.',
     parameters: {},
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
@@ -340,7 +352,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const followTab = (): ToolDefinition => defineTool({
     name: 'browser_follow_tab',
-    description: 'Control an open tab by browser_list_tabs tabId. It stays in the background by default; activate=true focuses its window and brings the tab to the front (needed for screenshots and pages that pause when hidden).',
+    description: 'Control an open tab by browser_list_tabs tabId; it stays in the background unless activate=true (needed for screenshots and pages that pause when hidden).',
     parameters: {
       tabId: { type: 'number', required: true, description: 'Stable tabId returned by browser_list_tabs.' },
       activate: { type: 'boolean', description: 'Focus the window and activate the tab. Defaults to false.' },
@@ -358,7 +370,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const clipboard = (): ToolDefinition => defineTool({
     name: 'browser_clipboard',
-    description: 'Clipboard transfer. write puts text and optional rich HTML on the system clipboard. paste delivers a clipboard payload to the page: method=event dispatches a paste event (works everywhere, no system clipboard), method=system writes the payload and presses the platform paste shortcut (Chrome only). Prefer browser_type for plain text.',
+    description: 'write puts text and rich HTML on the system clipboard. paste delivers it to the page: method=event fires a paste event (anywhere), method=system writes it and presses the paste shortcut (Chrome). Prefer browser_type for plain text.',
     parameters: {
       action: { type: 'string', required: true, enum: ['write', 'paste'], description: 'Write the system clipboard or paste into the page.' },
       text: { type: 'string', description: 'Plain-text payload; required for write and for event pastes.' },
@@ -375,7 +387,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
 
   const upload = (): ToolDefinition => defineTool({
     name: 'browser_upload',
-    description: 'Attach local files to an input[type=file] on the page. The browser process reads the paths; the extension never reads file content. Chrome only.',
+    description: 'Attach local files to an input[type=file]. The browser reads the paths; the extension never reads file content. Chrome only.',
     parameters: {
       index: { type: 'number', description: 'File-input index from browser_snapshot.' },
       selector: { type: 'string', description: 'CSS selector of the file input.' },
@@ -482,6 +494,8 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     },
   })
 
+  const reliability = defineReliabilityTools(call, options)
+
   return [
     snapshot(),
     click(),
@@ -500,6 +514,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     wait(),
     clipboard(),
     upload(),
+    ...reliability,
   ]
 }
 
@@ -585,4 +600,98 @@ function defineContentTools(ctx: Context, call: Call, rawCall: RawCall, options:
   })
 
   return [select(), extract()]
+}
+
+// ---- Reliability tools: dialogs, pointer gestures, downloads, PDF text ----
+
+const ELEMENT_TARGET = {
+  type: 'object' as const,
+  additionalProperties: false,
+  properties: {
+    index: { type: 'number' as const, description: 'Element index from browser_snapshot.' },
+    selector: { type: 'string' as const, description: 'CSS selector.' },
+  },
+}
+
+function defineReliabilityTools(call: Call, options: BrowserToolsOptions): ToolDefinition[] {
+  const dialog = defineTool({
+    name: 'browser_dialog',
+    description: 'Answer the JavaScript dialog (alert/confirm/prompt/leave-site) blocking the tab: accept=true is OK/Leave, false Cancel/Stay. Chrome only.',
+    parameters: {
+      accept: { type: 'boolean', required: true, description: 'true for OK / leave, false for Cancel / stay.' },
+      promptText: { type: 'string', description: 'Text to enter into a prompt() before accepting.' },
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => {
+      const a = args as { accept: boolean; promptText?: string }
+      return call(exec, 'browser_dialog', {
+        accept: a.accept,
+        ...a.promptText !== undefined ? { promptText: a.promptText } : {},
+      })
+    },
+  })
+
+  const hover = defineTool({
+    name: 'browser_hover',
+    description: 'Move the mouse over an element to open hover menus or tooltips.',
+    parameters: {
+      index: { type: 'number', description: 'Element index from browser_snapshot.' },
+      selector: { type: 'string', description: 'CSS selector for the target element.' },
+      frame: FRAME_PARAMETER,
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => call(exec, 'browser_hover', args as Record<string, unknown>),
+  })
+
+  const drag = defineTool({
+    name: 'browser_drag',
+    description: 'Drag an element onto another element or by a pixel offset, within one frame.',
+    parameters: {
+      from: { ...ELEMENT_TARGET, required: true, description: 'Element to drag: {index} or {selector}.' },
+      to: { ...ELEMENT_TARGET, description: 'Drop target: {index} or {selector}. Give this or toOffset.' },
+      toOffset: {
+        type: 'object',
+        additionalProperties: false,
+        description: 'Drop point relative to the center of from, in CSS pixels.',
+        properties: {
+          x: { type: 'number', required: true, description: 'Horizontal offset.' },
+          y: { type: 'number', required: true, description: 'Vertical offset.' },
+        },
+      },
+      frame: FRAME_PARAMETER,
+      steps: { type: 'number', description: 'Intermediate pointer moves, 1-60. Defaults to 10.' },
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => call(exec, 'browser_drag', args as Record<string, unknown>),
+  })
+
+  const downloads = defineTool({
+    name: 'browser_downloads',
+    description: 'List recent downloads or wait for one to finish; returns local file paths.',
+    parameters: {
+      action: { type: 'string', enum: ['list', 'wait'], description: 'list (default) or wait for a completed download.' },
+      filenameRegex: { type: 'string', description: 'wait: JavaScript regular expression the final file path must match.' },
+      timeoutMs: { type: 'number', description: 'wait: how long to wait, 1000-60000 ms. Defaults to 30000.' },
+      limit: { type: 'number', description: 'list: maximum entries, 1-50. Defaults to 10.' },
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => call(exec, 'browser_downloads', args as Record<string, unknown>),
+  })
+
+  const pdfText = defineTool({
+    name: 'browser_pdf_text',
+    description: `Extract text from the PDF open in the controlled tab. ${UNTRUSTED_CONTENT_WARNING}`,
+    parameters: {
+      maxPages: { type: 'number', description: 'Read at most this many pages. Defaults to 50.' },
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => call(exec, 'browser_pdf_text', args as Record<string, unknown>),
+  })
+
+  return [dialog, hover, drag, downloads, pdfText]
 }

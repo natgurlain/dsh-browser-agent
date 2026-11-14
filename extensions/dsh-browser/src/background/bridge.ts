@@ -95,6 +95,13 @@ export interface BridgeSinks {
   onStateChange(state: BridgeState): void
   onFrame(frame: ServerFrame): void
   onHelloOk(caps: BridgeCaps): void
+  /**
+   * The peer at `url` answered the handshake but could not prove knowledge of
+   * the token (we closed it with 4002). Whatever is listening there is not our
+   * bridge — typically a local process squatting on a probed port — so the
+   * owner should stop preferring that address.
+   */
+  onServerProofRejected?(url: string): void
 }
 
 /** Resolve whether opening a WebSocket is expected to succeed. */
@@ -306,6 +313,7 @@ export class BridgeClient {
     token: string,
     endpoint: BridgeEndpoint,
   ): { accepted: Promise<boolean>; release: () => void } {
+    const url = this.url
     type Stage = 'challenge' | 'awaiting-ok' | 'accepted' | 'ready' | 'failed'
     let stage: Stage = 'challenge'
     let serverNonce = ''
@@ -392,6 +400,8 @@ export class BridgeClient {
           if (!constantTimeEqual(expected, frame.mac)) {
             reject(BRIDGE_CLOSE_CODES.authFailed,
               'the bridge did not prove knowledge of the token for this address; refusing to trust it', 'token-mismatch')
+            // Not our bridge (e.g. a squatter on a probed port): let the owner forget it.
+            this.sinks.onServerProofRejected?.(url)
             return
           }
           channel = BridgeFrameChannel.derive(token, 'client', serverNonce, clientNonce, endpoint)

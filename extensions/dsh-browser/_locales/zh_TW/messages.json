@@ -7,5 +7,8 @@
   },
   "actionTitle": {
     "message": "開啟 dsh 瀏覽器助手"
+  },
+  "killSwitchCommand": {
+    "message": "停止代理：取消待執行操作、撤銷信任並中斷連線"
   }
 }

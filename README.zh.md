@@ -62,6 +62,10 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 | 列出标签页 | `browser_list_tabs` | 列出可访问标签页的稳定 ID、标题、URL、窗口/顺序以及活动/受控状态 |
 | 跟随标签页 | `browser_follow_tab` | 将后续浏览器工具绑定到 `browser_list_tabs` 返回的标签页；默认不激活，`activate: true` 才切到前台 |
 | 关闭标签页 | `browser_close_tab` | 关闭 `browser_list_tabs` 返回的标签页 |
+| 悬停 / 拖拽 | `browser_hover` / `browser_drag` | 用真实指针悬停元素（打开悬停菜单）；拖到另一元素或按偏移拖动，可拖拽源使用 HTML5 拖放事件 |
+| 对话框 | `browser_dialog` | 回应 alert/confirm/prompt/离开页面对话框；被对话框阻塞的调用会立即以 `dialog open: …` 失败（Chrome） |
+| 下载 | `browser_downloads` | 列出最近下载或等待下载完成，返回本地文件路径；首次使用时请求可选的 `downloads` 权限 |
+| PDF | `browser_save_pdf` / `browser_pdf_text` | 把标签页保存为 PDF 到代理工作区（Chrome）；提取标签页中 PDF 的文本 |
 | 读取区域 | `browser_get_text` | 懒加载内容 / 局部文本 |
 | 等待稳定 | `browser_wait` | 页面加载与渲染稳定检测 |
 | 发送图片 | `session.prompt` / `session.attachment` | 按宿主能力启用图片草稿、纯图片消息和持久历史预览 |
@@ -69,6 +73,8 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 | 继续生成 | 侧栏 | 请求失败后，点击出现的“继续生成”按钮继续对话 |
 
 点击、文本输入和滚动操作在指定文档中执行，支持跨域 iframe。Chrome 通过调试器执行原生键盘事件、光标位置插入、系统粘贴和文件上传。截图要求受控标签页处于活动状态且窗口聚焦，可以使用 `browser_follow_tab { activate: true }` 将页面切到前台。
+
+每次点击前都会对目标中心做命中测试；被其他元素遮挡的目标会以 `covered by <元素>` 拒绝，而不是点到上层元素。`browser_click { trusted: true }` 使用真实鼠标输入（Chrome）；对自定义元素的普通点击若没有任何可见效果，会自动用真实输入重试一次。侧栏中的**停止按钮**（或 Ctrl+Shift+K / ⌘⇧K；Firefox 为 Alt+Shift+K；可在浏览器扩展快捷键页面改绑）会取消待确认请求和正在执行的操作、撤销会话信任与开发者工具授权、关闭不受限访问、断开调试器，并在你点击「重新连接」前保持断开。代理控制的标签页显示 **AI** 徽标。
 
 ## 详细安装与使用
 
@@ -141,6 +147,14 @@ Chrome 本机使用无需配置；Firefox 需要填写上述本地桥 token。�
 - 打开**设置 → 自动检测**，选择需要连接的 DSH 实例。
 - 使用 Firefox 时，在设置中填写 `~/.dsh/ext-bridge-token` 中的 token。
 - 连接远程 DSH 时，在设置中填写服务器地址和对应的桥接 token。
+- 如果插件配置固定了自己的 `token`，请把该 token 粘贴到扩展设置中；已安装扩展里的副本只跟随 `~/.dsh/ext-bridge-token`。
+- 更新后请同时重新加载扩展并重启 DSH：桥接握手带有版本号，旧版扩展或插件会被拒绝，并以「protocol version mismatch」关闭连接。
+
+### 桥接安全
+
+- 每个客户端都必须认证（包括本机回环连接）：双方基于桥接 token 做 HMAC 双向挑战应答；token 本身从不在网络上传输，扩展也会拒绝无法反向证明自己持有 token 的桥。
+- Chrome 连接只接受 manifest key 固定的扩展 ID（`klmdgljhcjbbpjcplbanjeclilghnaoh`）。若使用不同 key 的构建或 Web Store 版本，请在 bridge-browser 插件配置中设置 `allowedChromeExtensionIds`；用 `pnpm --filter dsh-browser-extension run build:store` 构建商店包，该命令会去掉商店不接受的 `key`。
+- 桥只转发扩展实际用到的 Host 方法，且只作用于它创建的会话或其侧栏能列出的会话；它会拒绝把会话切换到完全访问权限预设（`danger-full-access`、`auto`）。如需允许从浏览器切换，请在插件配置中设置 `allowDangerFullAccess: true`。
 
 ## 开发
 

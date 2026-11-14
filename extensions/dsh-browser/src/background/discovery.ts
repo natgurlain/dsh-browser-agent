@@ -79,6 +79,8 @@ export interface DiscoveryPlanOptions {
   rememberedUrl?: string
   /** URL already tried and known to fail, never probed again. */
   excludeUrl?: string
+  /** Further URLs known to fail (for example a squatter whose proof failed). */
+  excludeUrls?: readonly string[]
 }
 
 /** Loopback URL of one port's discovery endpoint. */
@@ -129,8 +131,10 @@ export async function readBridgeConfig(
  */
 export function planDiscovery(options: DiscoveryPlanOptions): DiscoveryPlan {
   const probed = new Set<number>()
-  const excluded = portOfUrl(options.excludeUrl)
-  if (excluded !== undefined) probed.add(excluded)
+  for (const url of [options.excludeUrl, ...(options.excludeUrls ?? [])]) {
+    const excluded = portOfUrl(url)
+    if (excluded !== undefined) probed.add(excluded)
+  }
   const groups: DiscoveryGroup[] = []
   const push = (source: InstanceSource, ports: readonly number[]): void => {
     const fresh = ports.filter((port) => !probed.has(port))

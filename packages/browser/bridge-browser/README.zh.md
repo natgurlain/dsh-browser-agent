@@ -86,6 +86,10 @@ dsh 的**浏览器操作桥**挂载经过 token 认证的 WebSocket 通道（`/e
 | `browser_clipboard` / `browser_upload` | 写入/粘贴文本与富文本；把本机文件附加到 file input（系统粘贴与上传在 Chrome 可用）。 |
 | `browser_scroll` / `browser_navigate` / `browser_open_tab` / `browser_back` / `browser_forward` / `browser_reload` | 页面滚动与导航；滚动时可用 `frame` 指定 iframe。 |
 | `browser_get_text` / `browser_wait` | 读区域文本 / 稳定检测。 |
+| `browser_hover` / `browser_drag` | 真实指针悬停；拖到元素或偏移位置（可拖拽源使用 HTML5 拖放）。 |
+| `browser_dialog` | 回应阻塞标签页的 JavaScript 对话框（Chrome）；被阻塞的调用立即以 `dialog open: …` 失败。 |
+| `browser_downloads` | 列出或等待下载并返回本地路径（可选 `downloads` 权限，首次使用时请求）。 |
+| `browser_save_pdf` / `browser_pdf_text` | 把标签页保存为 PDF 到 `<sessionWorkspacePath>/pdf`（Chrome）；提取 PDF 标签页的文本。 |
 
 点击、文本输入和滚动操作在指定文档中执行，支持跨域 iframe。Chrome 通过调试器执行原生键盘事件、光标位置插入、系统粘贴和文件上传。截图要求受控标签页处于活动状态且窗口聚焦，可以使用 `browser_follow_tab { activate: true }` 将页面切到前台。
 

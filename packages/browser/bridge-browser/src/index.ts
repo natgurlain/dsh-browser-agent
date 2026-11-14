@@ -18,6 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
@@ -32,6 +33,7 @@ import { BridgeServer } from './server.ts'
 import { BrowserContextInjector } from './browser-context.ts'
 import { createBrowserToolCall, registerBrowserTools } from './tools.ts'
 import { registerScreenshotTool } from './screenshot-tools.ts'
+import { registerPdfTool } from './pdf-tools.ts'
 import { registerBrowserDevTools } from './devtools-tools.ts'
 import {
   BEACON_PORTS,
@@ -389,7 +391,14 @@ function mountBridge(
     const disposeScreenshot = registerScreenshotTool(ctx, server, {
       toolTimeoutMs: resolved.toolTimeoutMs,
     })
+    // PDFs land in the browser-session workspace; with grouping disabled
+    // (empty path) they still go to its default location.
+    const disposePdf = registerPdfTool(ctx, server, {
+      toolTimeoutMs: resolved.toolTimeoutMs,
+      directory: join(resolved.sessionWorkspacePath === '' ? DEFAULT_SESSION_WORKSPACE_PATH : resolved.sessionWorkspacePath, 'pdf'),
+    })
     return () => {
+      disposePdf()
       disposeScreenshot()
       for (const dispose of disposers.values()) dispose()
     }
@@ -437,7 +446,9 @@ function mountBridge(
         + 'followed-page browser_snapshot. Reuse that injected snapshot and its indices directly. Never assume page content you have not snapshotted. '
         + 'When visual appearance matters, call browser_screenshot to capture the controlled tab viewport as an image. '
         + 'Use browser_snapshot { query } to locate controls by text or selector; browser_click targets elements by index or selector, '
-        + 'browser_press sends chords and held keys, and browser_clipboard pastes rich content into editors.'
+        + 'browser_press sends chords and held keys, and browser_clipboard pastes rich content into editors. '
+        + 'When a call reports "dialog open", answer it with browser_dialog before anything else; when a click reports "covered by", '
+        + 'dismiss the covering element first. Use browser_pdf_text for a PDF tab and browser_downloads to find downloaded files.'
         + (devToolsDisposers === undefined
           ? ''
           : ' The browser_devtools_* and browser_console_* tools are available for element/CSS inspection, page-context JavaScript, and network '

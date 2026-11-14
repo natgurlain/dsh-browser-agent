@@ -72,6 +72,10 @@ export interface DebuggerBrokerOptions {
   idleDetachMs?: number
   /** Notified on every attachment change. */
   onStateChange?: () => void
+  /** Every top-level CDP event of every attached tab (dialog tracking). */
+  onCdpEvent?: (tabId: number, method: string, params: unknown) => void
+  /** A tab's attachment ended for any reason. */
+  onDetached?: (tabId: number) => void
 }
 
 /** Default idle window for an input-only attachment. */
@@ -137,10 +141,12 @@ export function createDebuggerBroker(options: DebuggerBrokerOptions = {}): Debug
       {
         onCdpEvent: (method, params) => {
           for (const listener of entry.listeners.values()) listener.onCdpEvent?.(method, params)
+          try { options.onCdpEvent?.(tabId, method, params) } catch { /* an observer must not break the broker */ }
         },
         onDetached: (reason) => {
           clearIdle(entry)
           for (const listener of entry.listeners.values()) listener.onDetached?.(reason)
+          try { options.onDetached?.(tabId) } catch { /* see above */ }
           notify()
         },
       },
@@ -172,7 +178,10 @@ export function createDebuggerBroker(options: DebuggerBrokerOptions = {}): Debug
     clearIdle(entry)
     entry.owners.clear()
     entry.listeners.clear()
-    if (entry.session.isAttached) await entry.session.detach()
+    if (entry.session.isAttached) {
+      await entry.session.detach()
+      try { options.onDetached?.(entry.tabId) } catch { /* an observer must not break the broker */ }
+    }
     notify()
   }
 

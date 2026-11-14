@@ -18,8 +18,11 @@ export type ApprovalAuthorization = 'approved' | 'denied' | 'unavailable' | 'tim
 export type ApprovalDetail =
   /** Source code the call runs (browser_console_eval). */
   | { kind: 'code'; value: string }
-  /** Text the call types; `masked` starts hidden (sensitive or uninspected field). */
-  | { kind: 'text'; value: string; masked: boolean }
+  /**
+   * Text the call types; `masked` starts hidden (sensitive or uninspected field).
+   * `label` replaces the default "Text to type" heading (dialog message, prompt answer).
+   */
+  | { kind: 'text'; value: string; masked: boolean; label?: string }
   /** Local file paths handed to the page. */
   | { kind: 'paths'; values: string[] }
   /** Destination URL, decoded, with suspicious values flagged. */
@@ -56,6 +59,11 @@ export interface ApprovalPrompt {
   perCallOnly?: true
   /** The destination URL carries a long or high-entropy value: trusted origins do not skip it. */
   urlRisk?: true
+  /**
+   * An optional browser permission the call needs. The panel requests it from
+   * the Allow click (a user gesture); such a card is never skipped.
+   */
+  permission?: 'downloads'
 }
 
 /** Correlated request delivered to every open side-panel view. */

@@ -21,6 +21,9 @@
  *   panel → bg: { type: 'request-status' }
  *   panel → bg: { type: 'discovery.start', id }
  *   panel → bg: { type: 'discovery.cancel' }
+ *   panel → bg: { type: 'kill-switch.engage' }
+ *   panel → bg: { type: 'kill-switch.release' }
+ *   bg → panel: { type: 'kill-switch', engaged }
  *   bg → panel: { type: 'discovery.progress', id, done, total, instances }
  *   bg → panel: { type: 'discovery.result', id, ok, instances? | error? }
  *   bg → panel: { type: 'rpc.result', id, ok, result? | error? }
@@ -51,7 +54,7 @@ import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts
 import { BRIDGE_CONFIG_PATH, BRIDGE_PATH, DEVTOOLS_CAPS_VERSION, parseBridgeConfigPayload } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, type BridgeFailure, type BridgeState } from './bridge.ts'
 import { createRpc } from './rpc.ts'
-import { discoverInstances, planDiscovery, readBridgeConfig } from './discovery.ts'
+import { discoverInstances, planDiscovery, portOfUrl, readBridgeConfig } from './discovery.ts'
 import { frameDocumentKey, listTabFrames } from './frames.ts'
 import {
   dispatchOpenTab,
@@ -65,6 +68,7 @@ import {
   type ToolCall,
 } from './tools.ts'
 import { createDebuggerBroker } from './debugger-broker.ts'
+import { DialogController } from './dialogs.ts'
 import {
   isApprovalDecision,
   type ApprovalAuthorization,
@@ -179,6 +183,42 @@ function rememberBridgeUrl(url: string): void {
   void Promise.resolve(chrome.storage.local.set({ [LAST_BRIDGE_URL_KEY]: url })).catch(() => {})
 }
 
+/**
+ * Discovered addresses whose peer failed the server proof during this panel
+ * lease. Discovery skips them so a port squatter cannot pin the extension to
+ * itself; the set resets with the lease or an explicit settings change.
+ */
+const rejectedBridgeUrls = new Set<string>()
+/** The discovery answer the current connection attempt uses, if it came from discovery. */
+let discoveredBridgeUrl: string | undefined
+
+/** Drop a remembered address that turned out not to be our bridge. */
+function forgetBridgeUrl(url: string): void {
+  if (lastBridgeUrl === undefined) return
+  const port = portOfUrl(url)
+  if (lastBridgeUrl !== url && (port === undefined || portOfUrl(lastBridgeUrl) !== port)) return
+  lastBridgeUrl = undefined
+  const local = chrome.storage.local as chrome.storage.StorageArea & { remove?: (key: string) => Promise<void> }
+  if (typeof local.remove === 'function') void Promise.resolve(local.remove(LAST_BRIDGE_URL_KEY)).catch(() => {})
+}
+
+/**
+ * The peer at `url` could not prove the token (we closed it with 4002): it is
+ * not our bridge. Forget it and, when discovery chose it, continue discovery
+ * without it instead of retrying the squatter forever.
+ */
+function onBridgeProofRejected(url: string): void {
+  const discovered = discoveredBridgeUrl
+  forgetBridgeUrl(url)
+  if (discovered !== undefined) forgetBridgeUrl(discovered)
+  if (discovered === undefined) return
+  rejectedBridgeUrls.add(discovered)
+  rejectedBridgeUrls.add(url)
+  discoveredBridgeUrl = undefined
+  bridge?.stop()
+  void settingsReady.then(() => startBridge())
+}
+
 /** 跨 service worker 重启保留「未找到」，避免后台重启后偷偷重试。 */
 function persistDiscoveryLatch(value: DiscoveryLatch): void {
   const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
@@ -225,6 +265,7 @@ async function discoverBridgeUrl(
     const instances = await discoverInstances(planDiscovery({
       ...(lastBridgeUrl === undefined ? {} : { rememberedUrl: lastBridgeUrl }),
       ...(excludeUrl === undefined ? {} : { excludeUrl }),
+      excludeUrls: [...rejectedBridgeUrls],
     }), {
       probe: (port, timeoutMs) => readBridgeConfig(port, timeoutMs),
       shouldContinue,
@@ -244,7 +285,8 @@ async function discoverBridgeUrl(
     }
     discoveryLatch = 'idle'
     discoveryState = 'found'
-    rememberBridgeUrl(first.wsUrl)
+    // Remembered only once the handshake proves the peer is our bridge
+    // (`onHelloOk`): a squatter answering the probe must not become sticky.
     return first.wsUrl
   } finally {
     if (discoveryLatch === 'running') discoveryLatch = 'idle'
@@ -302,13 +344,38 @@ const devToolsCapability = devToolsSupported()
  */
 const debuggerBroker = createDebuggerBroker({
   onStateChange: () => { broadcastDevToolsState() },
+  onCdpEvent: (tabId, method, params) => { dialogs.onCdpEvent(tabId, method, params) },
+  onDetached: (tabId) => { dialogs.onDetached(tabId) },
+})
+
+/**
+ * JavaScript dialogs: CDP reports them while an attachment has the Page
+ * domain; a liveness watchdog covers pages the debugger cannot see.
+ */
+const dialogs = new DialogController({
+  debugger: {
+    supported: devToolsCapability,
+    arm: async (tabId) => {
+      const lease = await debuggerBroker.acquire(tabId, 'input', { domains: ['Page'] })
+      return () => { void lease.release().catch(() => undefined) }
+    },
+    send: async (tabId, method, params) => {
+      const lease = await debuggerBroker.acquire(tabId, 'input')
+      try {
+        return await lease.session.send(method, params)
+      } finally {
+        await lease.release()
+      }
+    },
+  },
 })
 
 /** Trusted input channel handed to the tool dispatcher. */
 const inputRuntime: InputRuntime = {
   supported: devToolsCapability,
   async run(tabId, operation) {
-    const lease = await debuggerBroker.acquire(tabId, 'input')
+    // Page lets a dialog opened by the trusted input be reported at once.
+    const lease = await debuggerBroker.acquire(tabId, 'input', { domains: ['Page'] })
     try {
       return await operation(lease.session)
     } finally {
@@ -547,18 +614,166 @@ function statusPayload(): {
   discovery: DiscoveryState
   address?: string
   failure?: BridgeFailure
+  killSwitch: boolean
 } {
   return {
     type: 'status',
     state: bridge?.state ?? ('stopped' as BridgeState),
     caps,
     discovery: discoveryState,
+    killSwitch: killSwitchEngaged,
     ...(connectedAddress === undefined ? {} : { address: connectedAddress }),
     ...(bridge?.failure === undefined || bridge.state === 'connected' ? {} : { failure: bridge.failure }),
   }
 }
 
+// ---- Kill switch and the "agent controls this tab" badge ----
+
+const KILL_SWITCH_KEY = 'dshKillSwitch'
+/** Keyboard command declared in the manifest (`commands`). */
+const KILL_SWITCH_COMMAND = 'kill-switch'
+/** While engaged, nothing reconnects the bridge until the user releases it. */
+let killSwitchEngaged = false
+let killSwitchLoaded = false
+const killSwitchReady = (async (): Promise<void> => {
+  const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
+  try {
+    const stored = area === undefined ? undefined : await area.get(KILL_SWITCH_KEY)
+    // A worker restart must not silently reconnect a stopped agent.
+    if (stored?.[KILL_SWITCH_KEY] === true) killSwitchEngaged = true
+  } catch { /* unreadable: not engaged */ }
+  killSwitchLoaded = true
+  if (killSwitchEngaged) refreshActionBadges()
+})()
+
+function persistKillSwitch(): void {
+  const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
+  if (area === undefined) return
+  void Promise.resolve(area.set({ [KILL_SWITCH_KEY]: killSwitchEngaged })).catch(() => {})
+}
+
+function broadcastKillSwitch(): void {
+  for (const port of panelPorts) {
+    try { port.postMessage({ type: 'kill-switch', engaged: killSwitchEngaged }) } catch { /* port closed */ }
+  }
+}
+
+interface ActionBadgeApi {
+  setBadgeText?(details: { text: string; tabId?: number }): Promise<void> | void
+  setBadgeBackgroundColor?(details: { color: string; tabId?: number }): Promise<void> | void
+  setTitle?(details: { title: string; tabId?: number }): Promise<void> | void
+}
+
+/** Tabs currently showing the "agent controls this tab" badge. */
+const badgedTabs = new Set<number>()
+const CONTROL_BADGE = { text: 'AI', color: '#1769aa' }
+const STOPPED_BADGE = { text: 'OFF', color: '#b42318' }
+
+function actionApi(): ActionBadgeApi | undefined {
+  return (globalThis as { chrome?: { action?: ActionBadgeApi } }).chrome?.action
+}
+
+function setBadge(api: ActionBadgeApi, badge: { text: string; color: string }, tabId?: number): void {
+  const target = tabId === undefined ? {} : { tabId }
+  void Promise.resolve(api.setBadgeText?.({ text: badge.text, ...target })).catch(() => {})
+  if (badge.text !== '') void Promise.resolve(api.setBadgeBackgroundColor?.({ color: badge.color, ...target })).catch(() => {})
+}
+
+/** Tabs the agent may operate right now: every session's controlled tab. */
+function controlledTabIds(): Set<number> {
+  const ids = new Set<number>()
+  if (killSwitchEngaged || bridge?.state !== 'connected') return ids
+  const controlled = tabAffinity.snapshot().controlled
+  if (controlled !== null) ids.add(controlled.tabId)
+  for (const tab of Object.values(tabAffinity.sessionMap())) ids.add(tab.tabId)
+  return ids
+}
+
+/**
+ * Keep the toolbar badge truthful: "AI" on each tab the agent controls while
+ * connected, and a global "OFF" (on every tab) while the kill switch is engaged.
+ */
+function refreshActionBadges(): void {
+  const api = actionApi()
+  if (api === undefined) return
+  if (killSwitchEngaged) {
+    setBadge(api, STOPPED_BADGE)
+    // Tab-specific badges override the global one.
+    for (const tabId of badgedTabs) setBadge(api, STOPPED_BADGE, tabId)
+    return
+  }
+  setBadge(api, { text: '', color: '' })
+  const wanted = controlledTabIds()
+  for (const tabId of badgedTabs) {
+    if (wanted.has(tabId)) continue
+    setBadge(api, { text: '', color: '' }, tabId)
+    badgedTabs.delete(tabId)
+  }
+  for (const tabId of wanted) {
+    setBadge(api, CONTROL_BADGE, tabId)
+    badgedTabs.add(tabId)
+  }
+}
+
+/**
+ * Stop the agent immediately: cancel pending approvals and every in-flight
+ * tool call, revoke session/origin trust and developer-tools grants, turn
+ * unrestricted access off, detach the debugger from every tab, and drop the
+ * bridge until the user explicitly reconnects.
+ */
+async function engageKillSwitch(): Promise<void> {
+  killSwitchEngaged = true
+  persistKillSwitch()
+  // Nothing may reconnect or resume while the switch is engaged.
+  bridgeStartRevision += 1
+  activeScan?.controller.abort()
+  approvals.cancelAll()
+  sessionTrustedActionOrigins.clear()
+  devToolsGrants.clear()
+  for (const call of unsettledToolCalls) {
+    call.revocationRequested = true
+    call.controller.abort()
+  }
+  for (const refresh of activeFollowRefreshes.values()) refresh.controller.abort()
+  cancelAllToolCalls()
+  interactionResponses.failAll(responseMessages().disconnected)
+  transientEvents.clear()
+  dialogs.clearAll()
+  bridge?.stop()
+  bridge = null
+  rpc = null
+  caps = null
+  connectedAddress = undefined
+  disarmBridgeKeepalive()
+  refreshActionBadges()
+  broadcastStatus()
+  broadcastKillSwitch()
+  await Promise.allSettled([
+    devTools.detachAll(),
+    debuggerBroker.detachAll(),
+    settingsReady.then(() => settings.unrestrictedBrowserAccess
+      ? persistSettings({ unrestrictedBrowserAccess: false })
+      : undefined),
+  ])
+  broadcastDevToolsState()
+}
+
+/** Clear an engaged kill switch and reconnect (explicit user action only). */
+async function releaseKillSwitch(): Promise<void> {
+  if (!killSwitchEngaged) return
+  killSwitchEngaged = false
+  persistKillSwitch()
+  discoveryLatch = 'idle'
+  persistDiscoveryLatch('idle')
+  refreshActionBadges()
+  broadcastKillSwitch()
+  if (panelPorts.size > 0) armBridgeKeepalive()
+  await settingsReady
+  await startBridge()
+}
+
 function broadcastStatus(): void {
+  refreshActionBadges()
   const payload = statusPayload()
   for (const port of panelPorts) {
     try { port.postMessage(payload) } catch { /* port already closed */ }
@@ -586,6 +801,7 @@ function postDevToolsState(port: chrome.runtime.Port): void {
 }
 
 function broadcastTabAffinity(): void {
+  refreshActionBadges()
   const payload = { type: 'tab-affinity', state: tabAffinity.snapshot() }
   for (const port of panelPorts) {
     try { port.postMessage(payload) } catch { /* port already closed */ }
@@ -1445,6 +1661,7 @@ function routeToolCall(call: ToolCall): void {
         ...(controlledTabId === undefined ? {} : { controlledTabId }),
         followTab: (tab) => followModelSelectedTab(tab, call.sessionId),
         input: inputRuntime,
+        dialogs,
         commitAction,
         rollbackActionCommit,
       },
@@ -1478,7 +1695,7 @@ function routeToolCall(call: ToolCall): void {
           controller.signal,
           target,
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
-          { unrestrictedAccess, input: inputRuntime, commitAction, rollbackActionCommit },
+          { unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit },
         ))
   ).then(
     async (answer) => {
@@ -1666,6 +1883,12 @@ function cancelAllToolCalls(): void {
  */
 async function startBridge(): Promise<void> {
   if (panelPorts.size === 0) return
+  if (!killSwitchLoaded) await killSwitchReady
+  // The kill switch holds the bridge down until the user reconnects.
+  if (killSwitchEngaged) {
+    broadcastStatus()
+    return
+  }
   // One automatic pass per lease: a second panel in another window joins it
   // instead of launching a competing scan. Checked before the revision bump so
   // a duplicate trigger cannot invalidate the pass it is deferring to.
@@ -1673,13 +1896,16 @@ async function startBridge(): Promise<void> {
   const revision = ++bridgeStartRevision
   const lease = (): boolean => revision === bridgeStartRevision && panelPorts.size > 0
   let url = settings.bridgeUrl
+  let discovered: string | undefined
   if (url !== '') {
     if (isLocalBridgeAddress(url) && !await probeBridge(url)) {
       if (!lease()) return
-      url = await discoverBridgeUrl(lease, url) ?? ''
+      discovered = await discoverBridgeUrl(lease, url)
+      url = discovered ?? ''
     }
   } else if (discoveryLatch !== 'not-found') {
-    url = await discoverBridgeUrl(lease) ?? ''
+    discovered = await discoverBridgeUrl(lease)
+    url = discovered ?? ''
   } else {
     // Already confirmed absent in this lease: report and wait for the user.
     url = ''
@@ -1687,6 +1913,7 @@ async function startBridge(): Promise<void> {
   // Discovery is asynchronous. A panel may have closed or a newer settings
   // update may have started while its fetches were in flight.
   if (!lease()) return
+  discoveredBridgeUrl = discovered
   if (url === '') {
     bridge?.stop()
     bridge = null
@@ -1729,9 +1956,13 @@ async function startBridge(): Promise<void> {
       },
       onHelloOk: (negotiated) => {
         caps = negotiated
+        // The peer proved the token: only now is a discovered address worth
+        // trying first next time.
+        if (discoveredBridgeUrl !== undefined) rememberBridgeUrl(discoveredBridgeUrl)
         broadcastStatus()
         void pushBudgetToControlledTab(negotiated)
       },
+      onServerProofRejected: onBridgeProofRejected,
     }, probeBridge, () => panelPorts.size > 0, {
       // Advertised as soon as the platform can serve it, so the host registers
       // the developer-tools group; the user's setting and per-call approval
@@ -1793,7 +2024,6 @@ async function runPanelDiscovery(port: chrome.runtime.Port, id: string): Promise
     if (instances.length > 0) {
       discoveryLatch = 'idle'
       discoveryState = 'found'
-      rememberBridgeUrl(instances[0]!.wsUrl)
     } else {
       discoveryLatch = 'not-found'
       discoveryState = 'not-found'
@@ -1870,6 +2100,9 @@ chrome.runtime.onConnect.addListener((port) => {
     if (bridge === null || bridge.state === 'stopped') return startBridge()
   })
   try { port.postMessage(statusPayload()) } catch { /* port closed */ }
+  void killSwitchReady.then(() => {
+    try { port.postMessage({ type: 'kill-switch', engaged: killSwitchEngaged }) } catch { /* port closed */ }
+  })
   broadcastDevToolsState()
   void affinityReady.then(async () => {
     await syncActiveTab()
@@ -1941,6 +2174,7 @@ chrome.runtime.onConnect.addListener((port) => {
               || settings.token !== previousConnection.token
             if (connectionChanged) {
               // An explicit address supersedes a confirmed miss from this lease.
+              rejectedBridgeUrls.clear()
               discoveryLatch = 'idle'
               persistDiscoveryLatch('idle')
             }
@@ -2026,6 +2260,12 @@ chrome.runtime.onConnect.addListener((port) => {
         activeScan?.controller.abort()
         break
       }
+      case 'kill-switch.engage':
+        void engageKillSwitch()
+        break
+      case 'kill-switch.release':
+        void releaseKillSwitch()
+        break
       case 'selection.clear': {
         // The user sent, dismissed, or explicitly abandoned this window's
         // quote. A send/dismiss names the value it acted on so a newer capture
@@ -2177,7 +2417,8 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       case 'request-status':
         try {
-          port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps })
+          port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps, killSwitch: killSwitchEngaged })
+          port.postMessage({ type: 'kill-switch', engaged: killSwitchEngaged })
           // A push on connect cannot reach a panel that has not subscribed yet,
           // so the status request is also the pull path for developer tools.
           postDevToolsState(port)
@@ -2227,6 +2468,7 @@ chrome.runtime.onConnect.addListener((port) => {
       // A fresh panel lease re-runs the automatic pass, so a miss is not final
       // for the browser session — only for the lease it was observed in.
       activeScan?.controller.abort()
+      rejectedBridgeUrls.clear()
       discoveryLatch = 'idle'
       discoveryState = 'idle'
       persistDiscoveryLatch('idle')
@@ -2325,6 +2567,8 @@ chrome.webNavigation.onCommitted.addListener(({ tabId, frameId, url }) => {
   // A new top-level document drops any modifier or button held by a trusted
   // input sequence; keeping it would leak state into the next page.
   if (frameId === 0) {
+    // A new top-level document has no dialog of the old one.
+    dialogs.clear(tabId)
     resetInputState(tabId)
     // Only the input hold is stale after a navigation. The developer-tools
     // capture must survive navigation (it re-syncs frames and keeps buffering),
@@ -2336,6 +2580,7 @@ chrome.webNavigation.onCommitted.addListener(({ tabId, frameId, url }) => {
 // A closed tab cannot stay debugged; release the attachment immediately so the
 // "being debugged" banner never outlives its page.
 chrome.tabs.onRemoved.addListener((tabId) => {
+  dialogs.clear(tabId)
   resetInputState(tabId)
   devTools.releaseTab(tabId)
 })
@@ -2370,6 +2615,15 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     void settingsReady.then(() => startBridge())
   }
 })
+
+// ---- Kill switch shortcut ----
+
+// Ctrl+Shift+K / Cmd+Shift+K by default; users rebind it on the browser's
+// extension shortcuts page. Test harnesses without the API skip it.
+;(chrome as unknown as { commands?: { onCommand?: { addListener(listener: (command: string) => void): void } } })
+  .commands?.onCommand?.addListener((command) => {
+    if (command === KILL_SWITCH_COMMAND) void engageKillSwitch()
+  })
 
 // ---- Boot ----
 

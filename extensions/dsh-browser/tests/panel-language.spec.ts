@@ -62,6 +62,9 @@ describe('panel UI language setting', () => {
       startDiscovery: vi.fn(async () => []),
       cancelDiscovery: vi.fn(async () => {}),
       onDiscoveryProgress: vi.fn(() => unsubscribe),
+      engageKillSwitch: vi.fn(async () => undefined),
+      releaseKillSwitch: vi.fn(async () => undefined),
+      onKillSwitch: vi.fn(() => () => {}),
     }
     setUiLocalePreference('auto')
     vi.stubGlobal('navigator', { languages: ['en-US'], language: 'en-US' })

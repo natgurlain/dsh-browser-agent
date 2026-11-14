@@ -68,6 +68,9 @@ describe('discovery settings', () => {
       startDiscovery,
       cancelDiscovery,
       onDiscoveryProgress: vi.fn((callback) => { onDiscoveryProgress = callback; return unsubscribe }),
+      engageKillSwitch: vi.fn(async () => undefined),
+      releaseKillSwitch: vi.fn(async () => undefined),
+      onKillSwitch: vi.fn(() => () => {}),
     }
     root = createRoot(document.querySelector('#root')!)
   })

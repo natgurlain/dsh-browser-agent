@@ -104,6 +104,10 @@ Each `respond` carries a globally unique transport id as well as the host intera
 | `browser_clipboard` / `browser_upload` | Write/paste text and rich HTML; attach local files to a file input (Chrome for system paste and upload). |
 | `browser_scroll` / `browser_navigate` / `browser_open_tab` / `browser_back` / `browser_forward` / `browser_reload` | Page scrolling and navigation; `frame` selects an iframe for scrolling. |
 | `browser_get_text` / `browser_wait` | Read regions / settle detection. |
+| `browser_hover` / `browser_drag` | Real-pointer hover; drag to an element or offset (HTML5 drag-and-drop for draggable sources). |
+| `browser_dialog` | Answer the JavaScript dialog blocking the tab (Chrome); blocked calls fail fast with `dialog open: …`. |
+| `browser_downloads` | List or wait for downloads; returns local paths (optional `downloads` permission, asked on first use). |
+| `browser_save_pdf` / `browser_pdf_text` | Save the tab as a PDF under `<sessionWorkspacePath>/pdf` (Chrome); extract the text of a PDF tab. |
 
 Clicks, text entry, and scrolling run in the selected document, including cross-origin iframes. Chrome uses its debugger for native keyboard events, caret insertion, system paste, and file uploads. Screenshots require an active tab in a focused window; `browser_follow_tab { activate: true }` brings the controlled page to the front.
 

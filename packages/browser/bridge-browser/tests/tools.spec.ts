@@ -247,6 +247,34 @@ describe('registerBrowserTools', () => {
     expect(scroll.required).toContain('direction')
   })
 
+  it('forwards the reliability tools with their arguments', async () => {
+    const { ctx, bridge, requestTool, registered } = makeHarness()
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const byName = new Map(registered.map((r) => [r.name, r.definition]))
+    const exec = { signal: new AbortController().signal }
+    const run = async (name: string, args: unknown): Promise<void> => {
+      await (byName.get(name)!.execute as (a: unknown, e: { signal: AbortSignal }) => Promise<unknown>)(args, exec)
+    }
+    await run('browser_dialog', { accept: false })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_dialog', { accept: false }, exec.signal, 1_000)
+    await run('browser_dialog', { accept: true, promptText: 'Ada' })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_dialog', { accept: true, promptText: 'Ada' }, exec.signal, 1_000)
+    await run('browser_hover', { selector: '#menu', frame: 2 })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_hover', { selector: '#menu', frame: 2 }, exec.signal, 1_000)
+    await run('browser_drag', { from: { index: 1 }, toOffset: { x: 10, y: 0 } })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_drag', { from: { index: 1 }, toOffset: { x: 10, y: 0 } }, exec.signal, 1_000)
+    await run('browser_downloads', { action: 'wait', filenameRegex: 'report' })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_downloads', { action: 'wait', filenameRegex: 'report' }, exec.signal, 1_000)
+    await run('browser_pdf_text', {})
+    expect(requestTool).toHaveBeenLastCalledWith('browser_pdf_text', {}, exec.signal, 1_000)
+    await run('browser_click', { selector: '#x', trusted: true })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_click', { selector: '#x', trusted: true }, exec.signal, 1_000)
+    const dialog = byName.get('browser_dialog')!.parameters as { required?: string[] }
+    expect(dialog.required).toContain('accept')
+    const drag = byName.get('browser_drag')!.parameters as { required?: string[] }
+    expect(drag.required).toContain('from')
+  })
+
   it('validates upload paths on the host before dispatching', async () => {
     const { ctx, bridge, requestTool, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })

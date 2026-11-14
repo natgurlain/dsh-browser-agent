@@ -27,6 +27,9 @@
     "alarms",
     "notifications"
   ],
+  "optional_permissions": [
+    "downloads"
+  ],
   "host_permissions": [
     "<all_urls>"
   ],
@@ -40,6 +43,15 @@
     "default_icon": {
       "16": "assets/icons/icon16.png",
       "32": "assets/icons/icon32.png"
+    }
+  },
+  "commands": {
+    "kill-switch": {
+      "suggested_key": {
+        "default": "Alt+Shift+K",
+        "mac": "Alt+Shift+K"
+      },
+      "description": "__MSG_killSwitchCommand__"
     }
   },
   "sidebar_action": {
