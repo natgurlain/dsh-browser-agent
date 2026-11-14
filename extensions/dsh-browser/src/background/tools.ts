@@ -18,7 +18,8 @@ import {
   type TabFrame,
 } from './frames.ts'
 import { wrapUntrustedContent } from '../security/untrusted.ts'
-import { approvalPromptForCall, isConditionalPageWait, originFromUrl, type ApprovalContext } from './authorization.ts'
+import { approvalPromptForCall, callPolicyTargets, forcedApprovalPrompt, isConditionalPageWait, originFromUrl, type ApprovalContext } from './authorization.ts'
+import type { CallPolicyDecision, CallPolicyTargets } from '../security/call-policy.ts'
 import { approvalBinding } from '../security/payload-binding.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
@@ -183,6 +184,19 @@ export interface TabManagementContext {
   rollbackActionCommit?: () => void
   /** JavaScript dialog tracking and the page-call watchdog. */
   dialogs?: DialogRuntime
+  /**
+   * Site policy, managed policy, and taint rules (call-policy.ts). Evaluated
+   * before unrestricted access, trusted origins, or page sharing can skip a
+   * prompt; absent means the ordinary approval flow only.
+   */
+  policy?: CallPolicyHook
+}
+
+/** Evaluate the policy layer for one call against the origins it touches. */
+export type CallPolicyHook = (call: ToolCall, targets: CallPolicyTargets) => CallPolicyDecision
+
+function policyDenied(message: string): ToolAnswer {
+  return { ok: false, error: { code: 'action-failed', message } }
 }
 
 // ---- JavaScript dialogs (see dialogs.ts) ----
@@ -1711,6 +1725,13 @@ async function dispatchTabManagementTool(
   }
   const before = await findTab(tabId)
   if (before === undefined) return unavailable(`Tab ${tabId} is no longer open. Call browser_list_tabs again.`)
+  if (context.policy !== undefined) {
+    // Following a tab hands it to the agent (blocked sites refuse); closing it changes it.
+    const origin = originFromUrl(tabUrl(before))
+    const origins = origin === undefined ? [] : [origin]
+    const decision = context.policy(call, call.name === 'browser_close_tab' ? { reads: [], acts: origins } : { reads: origins, acts: [] })
+    if (decision.kind === 'deny') return policyDenied(decision.message)
+  }
   const approval = tabManagementApproval(call, before)
   const rejected = await authorizeTabManagement(approval, context.unrestrictedAccess, authorize, call, signal)
   if (rejected !== undefined) return rejected
@@ -1992,15 +2013,21 @@ export async function dispatchToolCall(
     }
   }
   if (isCancelled(call, signal)) return cancelled()
+  const decision: CallPolicyDecision = tabManagement.policy?.(call, callPolicyTargets(call, frames)) ?? { kind: 'default' }
+  if (decision.kind === 'deny') return policyDenied(decision.message)
+  const skipsPrompt = decision.kind === 'trust' || (tabManagement.unrestrictedAccess && decision.kind !== 'force')
   const approvalContext: ApprovalContext = openDialog !== undefined
     ? dialogApprovalContext(openDialog)
-    : tabManagement.unrestrictedAccess || call.name !== 'browser_type'
+    : skipsPrompt || call.name !== 'browser_type'
       ? {}
       : { typedTargetSensitive: await probeTypeTarget(tab.id, call, frames) }
   if (isCancelled(call, signal)) return cancelled()
-  const approval = tabManagement.unrestrictedAccess
-    ? undefined
-    : approvalPromptForCall(call, sharePageContent, frames, undefined, approvalContext)
+  // Recomputed after approval and after content-script recovery: the same
+  // decision must yield the same card, or the page changed under it.
+  const promptFor = (current: TabFrame[], context: ApprovalContext): ApprovalPrompt | undefined => decision.kind === 'force'
+    ? forcedApprovalPrompt(call, current, decision.reasons, undefined, context)
+    : approvalPromptForCall(call, sharePageContent, current, undefined, context)
+  const approval = skipsPrompt ? undefined : promptFor(frames, approvalContext)
   if (approval !== undefined) {
     const authorization = authorize === undefined ? 'unavailable' : await authorize(approval)
     if (isCancelled(call, signal)) return cancelled()
@@ -2024,7 +2051,7 @@ export async function dispatchToolCall(
       }
       refreshedContext = dialogApprovalContext(openDialog)
     }
-    const refreshedApproval = approvalPromptForCall(call, sharePageContent, executionFrames, undefined, refreshedContext)
+    const refreshedApproval = promptFor(executionFrames, refreshedContext)
     if (refreshedApproval === undefined
       || !sameApprovalBoundary(approval, refreshedApproval)
       || (approval.kind === 'action' && !sameTargetDocument(call, frames, executionFrames))) {
@@ -2101,7 +2128,7 @@ export async function dispatchToolCall(
       const refreshedTargetError = validateElementTarget(call, tab.id, refreshedFrames)
       if (refreshedTargetError !== undefined) return refreshedTargetError
       if (approval !== undefined) {
-        const refreshedApproval = approvalPromptForCall(call, sharePageContent, refreshedFrames, undefined, approvalContext)
+        const refreshedApproval = promptFor(refreshedFrames, approvalContext)
         if (refreshedApproval === undefined
           || !sameApprovalBoundary(approval, refreshedApproval)
           || (approval.kind === 'action' && !sameTargetDocument(call, executionFrames, refreshedFrames))) {
@@ -2248,6 +2275,7 @@ export async function dispatchOpenTab(
   bindCreatedTab: (tab: chrome.tabs.Tab) => boolean,
   targetStillAllowed: (tabId: number) => boolean,
   commitAction?: () => void,
+  policy?: CallPolicyHook,
 ): Promise<ToolAnswer> {
   if (isCancelled(call, signal)) return cancelled()
   const parsed = parseHttpUrl(call.args.url)
@@ -2256,13 +2284,18 @@ export async function dispatchOpenTab(
   }
   const active = call.args.active !== false
 
-  const approval = approvalPromptForCall(call, sharePageContent, [])
+  const decision: CallPolicyDecision = policy?.(call, callPolicyTargets(call, [])) ?? { kind: 'default' }
+  if (decision.kind === 'deny') return policyDenied(decision.message)
+  const promptFor = (): ApprovalPrompt | undefined => decision.kind === 'force'
+    ? forcedApprovalPrompt(call, [], decision.reasons)
+    : decision.kind === 'trust' ? undefined : approvalPromptForCall(call, sharePageContent, [])
+  const approval = promptFor()
   if (approval !== undefined) {
     const authorization = authorize === undefined ? 'unavailable' : await authorize(approval)
     if (isCancelled(call, signal)) return cancelled()
     if (authorization !== 'approved') return approvalFailure(approval, authorization)
     // The approval covers exactly the URL shown on the card.
-    if (approvalPromptForCall(call, sharePageContent, [])?.binding !== approval.binding) {
+    if (promptFor()?.binding !== approval.binding) {
       return unavailable('The request changed while approval was pending. Call the tool again to request a new approval.')
     }
   }

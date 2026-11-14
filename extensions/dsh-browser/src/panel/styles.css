@@ -3711,3 +3711,9 @@ textarea:focus-visible {
   color: var(--ink);
   cursor: pointer;
 }
+
+/* Session taint banner (TaintBanner.tsx) and site policy settings. */
+.taint-banner { display: flex; gap: 8px; align-items: center; padding: 6px 10px; font-size: 12px; background: var(--warning-bg, #fff4e5); color: var(--warning-fg, #7a4b00); border-bottom: 1px solid var(--border, #e5e5e5); }
+.taint-banner span { flex: 1; }
+.site-policy .trusted-origin span { margin-left: auto; margin-right: 8px; font-size: 12px; }
+.site-policy .managed-policy { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }

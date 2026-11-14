@@ -126,6 +126,10 @@ import {
   resolveApprovalGate,
 } from './authorization.ts'
 import { DevToolsGrants } from './devtools-grants.ts'
+import { BRIDGE_TAINT_CLEAR_METHOD, PolicyRuntime } from './policy-runtime.ts'
+import { callPolicyTargets, forcedApprovalPrompt, originFromUrl } from './authorization.ts'
+import { normalizeSiteRules, type SiteRuleEntry } from '../security/site-policy.ts'
+import { applyManagedOverrides } from '../security/managed-policy.ts'
 import {
   LEGACY_RECENT_SESSION_STORAGE_KEY,
   PAGE_SESSION_CONTEXT_STORAGE_KEY,
@@ -163,7 +167,19 @@ export interface Settings {
    * to 1–14 so the bridge's 15-minute hold can always cover it.
    */
   approvalTimeoutMinutes: number
+  /** Per-site rules (blocked / read-only / ask / trusted), see security/site-policy.ts. */
+  siteRules: SiteRuleEntry[]
+  /** The built-in read-only rules (banking, password vaults, identity, cloud consoles). */
+  siteDefaultsEnabled: boolean
+  /**
+   * 1 (or absent): before site policy, `unrestrictedBrowserAccess` skipped every
+   * prompt. 2: it means "trusted everywhere except policy-restricted sites".
+   */
+  settingsVersion: number
 }
+
+/** Current settings schema; see {@link Settings.settingsVersion}. */
+const SETTINGS_VERSION = 2
 
 const SETTINGS_DEFAULTS: Settings = {
   // 空地址 = 自动探测本机 dsh（零配置）；手动填地址时优先手动。
@@ -177,6 +193,9 @@ const SETTINGS_DEFAULTS: Settings = {
   catchPageDialogs: false,
   autoResumeSession: true,
   approvalTimeoutMinutes: 10,
+  siteRules: [],
+  siteDefaultsEnabled: true,
+  settingsVersion: SETTINGS_VERSION,
 }
 
 /** Longest no-panel approval window the bridge's hold can cover. */
@@ -358,6 +377,30 @@ type StoredTabAffinity =
   | { lost: true; sessionTabs?: Record<string, AffinityTab>; focusedSessionId?: string }
 
 let settings: Settings = { ...SETTINGS_DEFAULTS }
+/** Site policy, managed policy, and session taint (policy-runtime.ts). */
+const policyRuntime: PolicyRuntime = new PolicyRuntime({
+  settings: () => settings,
+  unrestricted: () => unrestrictedAccessEnabled(),
+  clearBridgeTaint: async (sessionId) => { await gatewayRpc(BRIDGE_TAINT_CLEAR_METHOD, { sessionId: sessionId ?? null }) },
+  onManagedChange: (managed) => {
+    // Managed values override user settings: re-apply them to what is loaded.
+    if (!settingsLoaded) return
+    const revokeUnrestricted = settings.unrestrictedBrowserAccess && managed.disableUnrestricted
+    const revokeDevTools = settings.allowDevTools && managed.disableDevTools
+    if (revokeUnrestricted || revokeDevTools) {
+      void persistSettings({
+        ...revokeUnrestricted ? { unrestrictedBrowserAccess: false } : {},
+        ...revokeDevTools ? { allowDevTools: false } : {},
+      }).catch(() => {})
+    }
+    policyRuntime.broadcast()
+  },
+  storage: (chrome.storage as { session?: chrome.storage.StorageArea }).session,
+})
+chrome.storage.onChanged?.addListener((_changes, area) => {
+  if (area !== 'managed') return
+  void import('../security/managed-policy.ts').then(({ loadManagedPolicy }) => loadManagedPolicy()).then((managed) => { policyRuntime.setManaged(managed) })
+})
 let unrestrictedAccessActive = SETTINGS_DEFAULTS.unrestrictedBrowserAccess
 let unrestrictedAccessRevision = 0
 let unrestrictedRevocation: Promise<void> | undefined
@@ -556,11 +599,18 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 
 async function loadSettings(): Promise<Settings> {
   const stored = await chrome.storage.local.get(STORAGE_KEY)
-  const loaded = normalizeSettings({ ...SETTINGS_DEFAULTS, ...(stored[STORAGE_KEY] as Partial<Settings> | undefined) })
+  const raw = stored[STORAGE_KEY] as Partial<Settings> | undefined
+  const loaded = normalizeSettings({ ...SETTINGS_DEFAULTS, ...raw })
+  let migrate = false
   if (loaded.bridgeUrl === LEGACY_LOCAL_URL || loaded.bridgeUrl === `${LEGACY_LOCAL_URL}/`) {
     loaded.bridgeUrl = ''
-    await chrome.storage.local.set({ [STORAGE_KEY]: loaded })
+    migrate = true
   }
+  // v1 -> v2 (site policy) needs no rewrite: every existing choice keeps its
+  // value, the new fields take their defaults in normalizeSettings, and the
+  // built-in read-only rules now apply, also under unrestricted access. The
+  // next settings save records settingsVersion 2.
+  if (migrate) await chrome.storage.local.set({ [STORAGE_KEY]: loaded })
   return loaded
 }
 
@@ -620,7 +670,7 @@ async function persistSettings(next: Partial<Settings>): Promise<void> {
   }
 }
 
-function normalizeSettings(candidate: Settings): Settings {
+function normalizeUserSettings(candidate: Settings): Settings {
   const trusted = Array.isArray(candidate.trustedActionOrigins)
     ? [...new Set(candidate.trustedActionOrigins.map(normalizeTrustedOrigin).filter((entry): entry is string => entry !== undefined))].sort()
     : []
@@ -641,7 +691,15 @@ function normalizeSettings(candidate: Settings): Settings {
     approvalTimeoutMinutes: typeof candidate.approvalTimeoutMinutes === 'number' && Number.isFinite(candidate.approvalTimeoutMinutes)
       ? Math.min(MAX_APPROVAL_TIMEOUT_MINUTES, Math.max(1, Math.round(candidate.approvalTimeoutMinutes)))
       : SETTINGS_DEFAULTS.approvalTimeoutMinutes,
+    siteRules: normalizeSiteRules(candidate.siteRules),
+    siteDefaultsEnabled: candidate.siteDefaultsEnabled !== false,
+    settingsVersion: SETTINGS_VERSION,
   }
+}
+
+/** User settings with enterprise overrides applied (managed values win). */
+function normalizeSettings(candidate: Settings): Settings {
+  return applyManagedOverrides(normalizeUserSettings(candidate), policyRuntime.managed)
 }
 
 // The side panel owns the UI language preference, but approval notifications
@@ -1645,6 +1703,7 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
     const snapshot = (answer.result as { text?: unknown }).text
     if (typeof snapshot !== 'string' || snapshot.trim() === '') return
     await gatewayRpc(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId, snapshot })
+    policyRuntime.recordInjection(sessionId, originFromUrl(target.url ?? ''))
   } finally {
     activeRefresh.settle()
     if (activeFollowRefreshes.get(sessionId) === activeRefresh) activeFollowRefreshes.delete(sessionId)
@@ -1861,6 +1920,8 @@ function routeToolCall(call: ToolCall): void {
     ? undefined
     : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
   const sharePageContent = unrestrictedAccess ? 'auto' : settings.sharePageContent
+  const policy = policyRuntime.hook(call.id, call.sessionId, unrestrictedAccess)
+  let policyTabOrigin: string | undefined
   const managementDispatch = async (): Promise<ToolAnswer> => {
     await affinityReady
     const affinity = tabAffinity.snapshot()
@@ -1889,10 +1950,11 @@ function routeToolCall(call: ToolCall): void {
         dialogs,
         commitAction,
         rollbackActionCommit,
+        policy,
       },
     )
   }
-  void (isTabManagementTool(call.name)
+  void policyRuntime.ready.then(() => isTabManagementTool(call.name)
     ? managementDispatch()
     : isDevToolsTool(call.name)
     ? dispatchDevToolsTool(call, controller.signal)
@@ -1909,10 +1971,11 @@ function routeToolCall(call: ToolCall): void {
           (tab) => bindOpenedTab(tab, call.sessionId, { active: call.args.active !== false }),
           (tabId) => tabAffinity.allowsTarget(tabId, call.sessionId),
           commitAction,
+          policy,
         ))
     : resolveToolTab(call.sessionId).then((target) => 'ok' in target
       ? target
-      : dispatchToolCall(
+      : (policyTabOrigin = originFromUrl(target.url ?? ''), dispatchToolCall(
           call,
           sharePageContent,
           budget,
@@ -1920,10 +1983,12 @@ function routeToolCall(call: ToolCall): void {
           controller.signal,
           target,
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
-          { unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit },
-        ))
+          { unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit, policy },
+        )))
   ).then(
     async (answer) => {
+      // Untrusted page content entered the session: taint it (security/taint.ts).
+      policyRuntime.recordResult(call, answer.ok, policyTabOrigin)
       if (activeToolCalls.get(call.id) !== activeCall) return
       // A committed browser_open_tab already rebound affinity; prefer that
       // factual success over a generic cancel that would leave the model wrong.
@@ -1998,7 +2063,14 @@ async function dispatchDevToolsTool(call: ToolCall, signal: AbortSignal): Promis
   if (activeCall !== undefined) activeCall.tabId = target.id
   if (signal.aborted) return devToolsCancelled()
   const frames = await listTabFrames(target.id!, target.url)
-  const prompt = devToolsApprovalForCall(call, frames)
+  await policyRuntime.ready
+  const decision = policyRuntime.evaluate(call, callPolicyTargets(call, frames), false)
+  if (decision.kind === 'deny') return { ok: false, error: { code: 'action-failed', message: decision.message } }
+  // Devtools keep their own consent surface: site trust never skips it, but
+  // an ask site or a taint rule makes every call ask.
+  const prompt = decision.kind === 'force'
+    ? forcedApprovalPrompt(call, frames, decision.reasons)
+    : devToolsApprovalForCall(call, frames)
   const authorization = await authorizeToolCall(prompt, signal, target.windowId ?? 0, call.sessionId, undefined, target.id, call.id)
   if (signal.aborted) return devToolsCancelled()
   if (authorization !== 'approved') {
@@ -2328,6 +2400,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
 // ---- Panel ports ----
 
 chrome.runtime.onConnect.addListener((port) => {
+  if (policyRuntime.connect(port)) return
   if (port.name !== 'dsh-panel') return
   const wasIdle = panelPorts.size === 0
   const tabAffinityRebinds = new Map<string, {

@@ -19,6 +19,9 @@
     "clipboardWrite",
     "offscreen"
   ],
+  "storage": {
+    "managed_schema": "managed-schema.json"
+  },
   "optional_permissions": [
     "downloads"
   ],

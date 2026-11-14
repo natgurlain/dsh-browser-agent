@@ -64,6 +64,12 @@ export interface ApprovalPrompt {
    * the Allow click (a user gesture); such a card is never skipped.
    */
   permission?: 'downloads'
+  /**
+   * Site policy or a taint rule demands a fresh decision for this call: no
+   * setting, trusted origin, session grant, or unrestricted access skips it.
+   * The reasons are shown on the card as a text detail.
+   */
+  forced?: true
 }
 
 /** Correlated request delivered to every open side-panel view. */

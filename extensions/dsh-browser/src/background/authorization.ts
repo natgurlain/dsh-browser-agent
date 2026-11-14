@@ -8,6 +8,7 @@ import { analyzeUrl } from '../security/url-risk.ts'
 import { attributeRisk } from '../security/attribute-risk.ts'
 import type { DevToolsGrantKind } from './devtools-grants.ts'
 import { getUiLocale, type UiLocale } from '../i18n.ts'
+import type { CallPolicyTargets } from '../security/call-policy.ts'
 
 const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text', 'browser_pdf_text'])
 /**
@@ -612,6 +613,87 @@ function safeInline(value: string, maxLength = 40): string {
   return inline.length <= maxLength ? inline : `${inline.slice(0, maxLength - 1)}…`
 }
 
+const READ_TOOLS = new Set([
+  ...PAGE_READS,
+  'browser_extract',
+  'browser_wait',
+  'browser_scroll',
+  'browser_hover',
+  ...ALWAYS_ASK_READS,
+])
+/** Tools that read every frame of the tab, not just one. */
+const WHOLE_TAB_READS = new Set(['browser_snapshot', 'browser_screenshot', 'browser_save_pdf'])
+
+/**
+ * Which origins a call reads, changes, or navigates to, for the policy layer
+ * (call-policy.ts). History moves (back/forward) and system-clipboard writes
+ * touch no page origin; navigation counts only its destination, so the agent
+ * can always leave a read-only or blocked page.
+ */
+export function callPolicyTargets(call: ToolCall, frames: TabFrame[]): CallPolicyTargets {
+  const url = typeof call.args.url === 'string' ? call.args.url : undefined
+  if (call.name === 'browser_navigate' || call.name === 'browser_open_tab') {
+    return { reads: [], acts: [], ...url === undefined ? {} : { destination: url } }
+  }
+  if (call.name === 'browser_back' || call.name === 'browser_forward' || call.name === 'browser_downloads') return { reads: [], acts: [] }
+  if (call.name === 'browser_clipboard' && call.args.action === 'write') return { reads: [], acts: [] }
+  const frameId = requestedFrame(call.args)
+  const target = frames.find((frame) => frame.frameId === frameId) ?? frames.find((frame) => frame.frameId === 0)
+  const targetOrigins = uniqueOrigins(target === undefined ? [] : [target], frames)
+  if (WHOLE_TAB_READS.has(call.name)) return { reads: uniqueOrigins(frames, frames), acts: [] }
+  const devToolsRead = isDevToolsTool(call.name)
+    && call.name !== 'browser_devtools_set_element_style'
+    && call.name !== 'browser_devtools_set_element_attribute'
+    && call.name !== 'browser_console_eval'
+  if ((READ_TOOLS.has(call.name) && !extractPaginates(call)) || devToolsRead) return { reads: targetOrigins, acts: [] }
+  return {
+    reads: [],
+    acts: targetOrigins,
+    ...(call.name === 'browser_type' || call.name === 'browser_clipboard') && targetOrigins[0] !== undefined
+      ? { typeTargetOrigin: targetOrigins[0] }
+      : {},
+  }
+}
+
+/**
+ * The prompt for a call the policy layer forces to ask: the ordinary card
+ * (built as if page sharing were "ask", so reads have one too) plus the
+ * reasons, never trustable, and marked so no shortcut can skip it.
+ */
+export function forcedApprovalPrompt(
+  call: ToolCall,
+  frames: TabFrame[],
+  reasons: readonly string[],
+  locale: UiLocale = getUiLocale(),
+  context: ApprovalContext = {},
+): ApprovalPrompt {
+  const base = call.name === 'browser_open_tab' || isDevToolsTool(call.name)
+    ? undefined
+    : approvalPromptForCall(call, 'ask', frames, locale, context)
+  const fallback = base ?? (isDevToolsTool(call.name)
+    ? devToolsApprovalForCall(call, frames, locale)
+    : approvalPromptForCall(call, 'ask', call.name === 'browser_open_tab' ? [] : frames, locale, context))
+  const prompt: ApprovalPrompt = fallback ?? {
+    kind: 'action',
+    action: call.name,
+    summary: call.name,
+    origins: uniqueOrigins(frames.filter((frame) => frame.frameId === 0), frames),
+    canTrust: false,
+    details: [payloadDetail(call)],
+    binding: approvalBinding({ action: call.name, args: call.args, origins: uniqueOrigins(frames.filter((frame) => frame.frameId === 0), frames) }),
+  }
+  return {
+    ...prompt,
+    canTrust: false,
+    forced: true,
+    perCallOnly: true,
+    details: [
+      { kind: 'text', value: reasons.join('\n'), masked: false, label: localized(locale, 'Why this needs your approval', '为何需要您的批准') },
+      ...prompt.details ?? [],
+    ],
+  }
+}
+
 /** Inputs the approval gate evaluates before a prompt is even sent. */
 export interface ApprovalGateInput {
   prompt: ApprovalPrompt
@@ -644,6 +726,8 @@ export interface ApprovalGateInput {
 export function resolveApprovalGate(input: ApprovalGateInput): ApprovalAuthorization | 'prompt' {
   // A missing optional permission can only be granted from a user gesture.
   if (input.prompt.permission !== undefined) return 'prompt'
+  // Site policy and taint rules run before every shortcut below.
+  if (input.prompt.forced === true) return 'prompt'
   if (input.prompt.devTools === true) {
     const kind = devToolsGrantKind(input.prompt)
     if (input.prompt.perCallOnly === true) return 'prompt'

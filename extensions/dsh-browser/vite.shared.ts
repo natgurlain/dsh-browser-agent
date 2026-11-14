@@ -29,6 +29,8 @@ export const copyManifest = {
     writeFileSync(resolve(outDir, 'manifest.json'), `${JSON.stringify(storeBuild ? storeManifest(manifest) : manifest, null, 2)}\n`)
     cpSync(resolve(import.meta.dirname, '_locales'), resolve(outDir, '_locales'), { recursive: true })
     cpSync(resolve(import.meta.dirname, 'assets'), resolve(outDir, 'assets'), { recursive: true })
+    // Enterprise policy schema (chrome.storage.managed); Firefox reads policies.json instead.
+    if (browserTarget === 'chrome') cpSync(resolve(import.meta.dirname, 'managed-schema.json'), resolve(outDir, 'managed-schema.json'))
   },
 }
 

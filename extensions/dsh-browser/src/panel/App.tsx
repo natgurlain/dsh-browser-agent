@@ -13,6 +13,8 @@ import type { BridgeCaps } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeFailure, BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
+import { SitePolicySettings } from './SitePolicySettings.tsx'
+import { TaintBanner } from './TaintBanner.tsx'
 import { connectPanel, PanelRpcError, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type PanelApi, type PanelSettings } from './api.ts'
 import { renderMarkdown } from './markdown.ts'
 import whaleUrl from '../../assets/icons/deepseek-256.png'
@@ -1113,6 +1115,9 @@ export function App(): React.JSX.Element {
         catchPageDialogs: raw?.catchPageDialogs ?? false,
         autoResumeSession: raw?.autoResumeSession ?? true,
         approvalTimeoutMinutes: raw?.approvalTimeoutMinutes ?? 10,
+        siteRules: raw?.siteRules ?? [],
+        siteDefaultsEnabled: raw?.siteDefaultsEnabled ?? true,
+        settingsVersion: raw?.settingsVersion ?? 1,
       })
     })
   }, [])
@@ -3060,6 +3065,13 @@ export function App(): React.JSX.Element {
             </div>
           ))}
         </section>
+        {settings !== null && (
+          <SitePolicySettings
+            locale={locale}
+            value={{ siteRules: settings.siteRules, siteDefaultsEnabled: settings.siteDefaultsEnabled }}
+            onChange={(next) => setSettings((current) => current === null ? current : { ...current, ...next })}
+          />
+        )}
         <div className="settings-actions">
           <button className="primary" onClick={saveSettings}>{copy.settings.save}</button>
           <button className="secondary" onClick={() => setShowSettings(false)}>{copy.settings.cancel}</button>
@@ -3105,6 +3117,7 @@ export function App(): React.JSX.Element {
             aria-label={copy.app.openSettings} title={copy.app.settings}><SettingsIcon /></button>
         </div>
       </header>
+      <TaintBanner sessionId={sessionRef.current} locale={locale} />
       {showTextSize && (
         <TextSizePanel scale={uiScale} copy={copy}
           onStep={(direction) => changeUiScale(stepUiScale(uiScaleRef.current, direction))}

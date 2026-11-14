@@ -1,0 +1,43 @@
+{
+  "type": "object",
+  "properties": {
+    "siteRules": {
+      "title": "Forced per-site rules",
+      "description": "Rules that outrank the user's site policy. pattern: host, *.host, a host glob like *bank*, optionally with a path prefix (github.com/settings). rule: blocked, read-only, ask, or trusted.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pattern": { "type": "string" },
+          "rule": { "type": "string", "enum": ["blocked", "read-only", "ask", "trusted"] }
+        }
+      }
+    },
+    "disableDevTools": {
+      "title": "Disable developer tools",
+      "description": "Refuse every developer-tools call (inspection, page JavaScript, network capture) and keep the setting off.",
+      "type": "boolean"
+    },
+    "disableUnrestricted": {
+      "title": "Disable unrestricted access",
+      "description": "The user cannot trust every site at once; every call follows the ordinary approval flow.",
+      "type": "boolean"
+    },
+    "disableScreenshots": {
+      "title": "Disable screenshots",
+      "description": "Refuse browser_screenshot.",
+      "type": "boolean"
+    },
+    "enforceSiteDefaults": {
+      "title": "Enforce built-in site defaults",
+      "description": "The built-in read-only rules for banking, password managers, identity providers, and cloud consoles cannot be turned off.",
+      "type": "boolean"
+    },
+    "allowedOrigins": {
+      "title": "Allowed web origins",
+      "description": "When set, the agent may read, act on, and navigate to only these origins (https://app.example.com or *.example.com).",
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

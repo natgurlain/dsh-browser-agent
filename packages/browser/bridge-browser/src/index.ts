@@ -51,6 +51,7 @@ import { withSessionWorkspace } from './session-workspace.ts'
 import { purgeSessionFiles, type SessionPurgeDeps } from './session-purge.ts'
 import { installedTokenMismatch, resolveToken, syncInstalledExtensionToken } from './token.ts'
 import { withBridgePolicy } from './bridge-policy.ts'
+import { installSessionTaint, SessionTaintRegistry, withTaintMethods } from './session-taint.ts'
 import { fileSessionLedger, type SessionLedger } from './session-ledger.ts'
 import {
   createRemoteHostApi,
@@ -237,6 +238,10 @@ function mountBridge(
     ctx.get('attachments')?.imageLimits,
   )
   const browserContext = new BrowserContextInjector(ctx.agents)
+  // Untrusted web content in a session makes its harness tools read-only
+  // until the user clears it in the panel (session-taint.ts).
+  const taint = new SessionTaintRegistry()
+  ctx.effect(() => installSessionTaint(ctx, taint), 'bridge-browser: session taint guard')
   // DSH 0.1.7+ replaced `agent/session-start` with `agent/created` as the
   // startup-driving extension point (agent registered with live session and
   // completed setup); bind there so deferred sessions still receive their
@@ -324,7 +329,7 @@ function mountBridge(
   })
   const server = new BridgeServer({
     token: tokenRes.token,
-    api: fenced,
+    api: withTaintMethods(fenced, taint, (sessionId, signal) => fenced.allowsSession(sessionId, signal, 'own')),
     sessionScope: fenced,
     allowedChromeExtensionIds: resolved.allowedChromeExtensionIds,
     forwardedPorts: trustedForwardedPorts(resolved, message => { ctx.logger.warn(message) }),
@@ -335,7 +340,10 @@ function mountBridge(
       maxInteractiveItems: resolved.maxInteractiveItems,
       devTools: { version: DEVTOOLS_CAPS_VERSION },
     },
-    injectBrowserSnapshot: (sessionId, snapshot) => { browserContext.inject(sessionId, snapshot) },
+    injectBrowserSnapshot: (sessionId, snapshot) => {
+      browserContext.inject(sessionId, snapshot)
+      taint.mark(sessionId, 'snapshot-injection')
+    },
     purgeSession,
     onCapsChange: () => { syncDevToolsTools() },
     // Browser approvals raised while no side panel is open are also put to

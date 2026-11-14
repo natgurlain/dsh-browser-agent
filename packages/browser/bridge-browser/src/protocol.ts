@@ -39,6 +39,12 @@ export const LEGACY_BRIDGE_PORTS = [3080, 3081, 3090, 14389] as const
 /** Internal RPC used after an explicit tab handoff to seed the Agent's next step. */
 export const BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD = 'bridge.injectBrowserSnapshot'
 
+/**
+ * Internal RPC the panel's "Clear" sends to lift a session's untrusted-content
+ * taint (session-taint.ts). Answered by the bridge itself, never the Host.
+ */
+export const BRIDGE_TAINT_CLEAR_METHOD = 'bridge.clearSessionTaint'
+
 /** Internal RPC used by the panel to permanently delete one session's durable storage. */
 export const BRIDGE_SESSION_PURGE_METHOD = 'bridge.session.purge'
 
