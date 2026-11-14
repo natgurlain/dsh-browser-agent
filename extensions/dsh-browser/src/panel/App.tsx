@@ -11,7 +11,7 @@ import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeCaps } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import type { BridgeState } from '../background/bridge.ts'
+import type { BridgeFailure, BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
 import { connectPanel, PanelRpcError, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type PanelApi, type PanelSettings } from './api.ts'
 import { renderMarkdown } from './markdown.ts'
@@ -1089,6 +1089,7 @@ export function App(): React.JSX.Element {
   // current panel lease, so the status chip can say so instead of "未连接".
   const [discovery, setDiscovery] = useState<DiscoveryStatus>('idle')
   const [bridgeAddress, setBridgeAddress] = useState<string | null>(null)
+  const [bridgeFailure, setBridgeFailure] = useState<BridgeFailure | null>(null)
   // Manual scan from the settings page: the only writer of this list.
   const [detecting, setDetecting] = useState(false)
   const [detected, setDetected] = useState<BridgeInstance[]>([])
@@ -1129,8 +1130,9 @@ export function App(): React.JSX.Element {
   const [sessionEpoch, setSessionEpoch] = useState(0)
   const lastStateRef = useRef<BridgeState | null>(null)
   useEffect(() => {
-    const offStatus = api.onStatus((next, nextCaps, nextDiscovery, nextAddress) => {
+    const offStatus = api.onStatus((next, nextCaps, nextDiscovery, nextAddress, nextFailure) => {
       setState(next)
+      setBridgeFailure(nextFailure ?? null)
       setCaps(nextCaps)
       setDiscovery(nextDiscovery)
       setBridgeAddress(nextAddress ?? null)
@@ -2577,9 +2579,12 @@ export function App(): React.JSX.Element {
 
   // 状态栏只显示连接状态；快照上限是技术细节，在设置页说明（见 hint）。
   // Discovery can end in a confirmed miss; that is more useful than "未连接".
-  const statusText = state === 'stopped' && discovery === 'not-found'
-    ? copy.statusNotFound
-    : copy.status[state]
+  // A refusal only the user can fix outranks the generic transport state.
+  const statusText = state !== 'connected' && bridgeFailure !== null
+    ? copy.bridgeFailure[bridgeFailure]
+    : state === 'stopped' && discovery === 'not-found'
+      ? copy.statusNotFound
+      : copy.status[state]
   const sessionMenuTitle = sessionTitle ?? copy.app.newSession
   const currentModelOption = sessionModels?.options.find((option) => (
     option.provider === sessionModels.current?.provider

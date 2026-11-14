@@ -22,6 +22,7 @@ const { default: WebSocket } = await import(pathToFileURL(bridgeRequire.resolve(
 const {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BEACON_PORTS, BRIDGE_CONFIG_PATH,
   BRIDGE_CLOSE_CODES, BRIDGE_PROTOCOL_VERSION, PINNED_CHROME_EXTENSION_ID, computeBridgeProof, createBridgeNonce,
+  BridgeFrameChannel, bridgeEndpointOfUrl,
 } = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
 const temp = await mkdtemp(join(tmpdir(), 'dsh-runtime-smoke-'))
 const home = join(temp, 'home')
@@ -187,9 +188,28 @@ async function start(reopen) {
     return code
   }
   const caps = { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }
+  const endpoint = bridgeEndpointOfUrl(config.wsUrl)
   assert.equal(await rejected(`chrome-extension://${PINNED_CHROME_EXTENSION_ID}`, {
-    t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: createBridgeNonce(), mac: createBridgeNonce(), caps,
+    t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: createBridgeNonce(), mac: createBridgeNonce(), endpoint, caps,
   }), BRIDGE_CLOSE_CODES.authFailed, 'a forged extension Origin without the token must be refused')
+  // A relay on another port forwards a valid proof bound to the port the
+  // victim dialed; the real bridge must refuse it.
+  {
+    const probe = new WebSocket(config.wsUrl, { handshakeTimeout: 10_000 })
+    const seen = []
+    probe.on('message', data => { seen.push(JSON.parse(data.toString())) })
+    const closed = once(probe, 'close')
+    await once(probe, 'open')
+    const relayed = await waitFor(() => seen.find(value => value.t === 'challenge'), 'bridge challenge', 10_000)
+    const nonce = createBridgeNonce()
+    const elsewhere = { host: '127.0.0.1', port: BEACON_PORTS[0] === endpoint.port ? BEACON_PORTS[1] : BEACON_PORTS[0] }
+    probe.send(JSON.stringify({
+      t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, endpoint: elsewhere, caps,
+      mac: await computeBridgeProof(token, 'client', relayed.nonce, nonce, elsewhere),
+    }))
+    const [code] = await closed
+    assert.equal(code, BRIDGE_CLOSE_CODES.authFailed, 'a handshake relayed from another port must be refused')
+  }
   assert.equal(await rejected(`chrome-extension://${PINNED_CHROME_EXTENSION_ID}`, { t: 'hello', token: '', caps }),
     BRIDGE_CLOSE_CODES.versionMismatch, 'a v1 hello must be refused with a version mismatch')
   assert.equal(await rejected('chrome-extension://abcdefghijklmnopabcdefghijklmnop'),
@@ -198,8 +218,19 @@ async function start(reopen) {
   socket = new WebSocket(config.wsUrl, { origin: 'moz-extension://runtime-smoke', handshakeTimeout: 10_000 })
   const frames = []
   let socketError
+  let channel
   socket.on('error', error => { socketError = error })
-  socket.on('message', data => { frames.push(JSON.parse(data.toString())) })
+  socket.on('message', data => {
+    const text = data.toString()
+    const parsed = JSON.parse(text)
+    if (channel === undefined || parsed.t === 'hello.ok') {
+      frames.push(parsed)
+      return
+    }
+    const opened = channel.open(text)
+    if (opened === undefined) socketError = new Error(`bridge frame failed authentication: ${text.slice(0, 200)}`)
+    else frames.push(opened)
+  })
   await once(socket, 'open')
   async function frame(predicate) {
     return waitFor(() => {
@@ -212,16 +243,19 @@ async function start(reopen) {
   const challenge = await frame(value => value.t === 'challenge')
   assert.equal(challenge.v, BRIDGE_PROTOCOL_VERSION)
   const clientNonce = createBridgeNonce()
+  const sealed = BridgeFrameChannel.derive(token, 'client', challenge.nonce, clientNonce, endpoint)
   socket.send(JSON.stringify({
-    t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: clientNonce, caps,
-    mac: await computeBridgeProof(token, 'client', challenge.nonce, clientNonce),
+    t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: clientNonce, endpoint, caps,
+    mac: await computeBridgeProof(token, 'client', challenge.nonce, clientNonce, endpoint),
   }))
+  // hello.ok is the last unsealed frame; everything after it is sealed.
+  channel = sealed
   const accepted = await frame(value => value.t === 'hello.ok')
-  assert.equal(accepted.mac, await computeBridgeProof(token, 'server', clientNonce, challenge.nonce),
+  assert.equal(accepted.mac, await computeBridgeProof(token, 'server', clientNonce, challenge.nonce, endpoint),
     'the bridge must prove knowledge of the token back')
   async function request(method, payload) {
     const id = randomUUID()
-    socket.send(JSON.stringify({ t: 'rpc', id, method, payload }))
+    socket.send(channel.seal({ t: 'rpc', id, method, payload }))
     return frame(value => value.t === 'rpc.result' && value.id === id)
   }
   async function send(method, payload) {

@@ -8,12 +8,19 @@
  * its own authentication, required from every client including loopback ones:
  *
  *   1. server → `challenge { v, nonce: Ns }` as soon as the socket opens;
- *   2. client → `hello { v, nonce: Nc, mac: HMAC(token, client|Ns|Nc), caps }`
- *      within HELLO_TIMEOUT_MS;
- *   3. server → `hello.ok { caps, mac: HMAC(token, server|Nc|Ns) }`, which the
- *      extension verifies before trusting anything else.
+ *   2. client → `hello { v, nonce: Nc, endpoint: E, mac: HMAC(token, client|Ns|Nc|E), caps }`
+ *      within HELLO_TIMEOUT_MS, where E is the host and port the client dialed;
+ *   3. server → `hello.ok { caps, mac: HMAC(token, server|Nc|Ns|E) }` after
+ *      checking E against the local address and port this socket was accepted
+ *      on, which the extension verifies before trusting anything else;
+ *   4. every later frame, both directions, is sealed with a per-connection,
+ *      per-direction key derived from token, Ns, Nc and E, and a strict
+ *      sequence number (protocol.BridgeFrameChannel). Any unsealed, replayed,
+ *      reordered or forged frame closes the connection.
  *
- * The token never crosses the wire. A `chrome-extension://` Origin is accepted
+ * A local process that relays the handshake from another port therefore
+ * fails step 3, and one that rides an authenticated socket fails step 4.
+ * Frames are authenticated, not encrypted. The token never crosses the wire. A `chrome-extension://` Origin is accepted
  * only for the pinned extension ID (defense in depth on top of the token; any
  * local process can forge an Origin header). Host calls terminate at the
  * bridge-owned Host adapter.
@@ -29,6 +36,7 @@
  */
 
 import { createHmac, randomUUID } from 'node:crypto'
+import type { Socket } from 'node:net'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
@@ -40,14 +48,18 @@ import {
   BRIDGE_SESSION_PURGE_METHOD,
   HELLO_TIMEOUT_MS,
   PINNED_CHROME_EXTENSION_ID,
-  bridgeProofMessage,
+  BridgeFrameChannel,
+  bridgeEndpointMatches,
+  bridgeProof,
   createBridgeNonce,
   helloProtocolVersion,
   PING_INTERVAL_MS,
   isDevToolsCaps,
   parseBridgeFrame,
+  type BridgeEndpoint,
   type BridgeFrame,
   type BridgeCaps,
+  type BridgeHmac,
   type ClientFrame,
   type ToolErrorCode,
 } from './protocol.ts'
@@ -102,9 +114,26 @@ export function isAllowedBridgeOrigin(origin: string | undefined, chromeExtensio
   return chrome !== null && chromeExtensionIds.has(chrome[1]!)
 }
 
-/** HMAC-SHA256 handshake proof (node side of protocol.computeBridgeProof). */
-function bridgeProof(token: string, role: 'client' | 'server', first: string, second: string): string {
-  return createHmac('sha256', Buffer.from(token, 'utf8')).update(bridgeProofMessage(role, first, second)).digest('hex')
+/** Native HMAC-SHA256 for the node half (same bytes as protocol.hmacSha256). */
+const nodeHmac: BridgeHmac = (key, message) => createHmac('sha256', key).update(message).digest()
+
+/** Largest message an unauthenticated socket may send (a `hello` is < 1 KiB). */
+export const PRE_AUTH_MAX_PAYLOAD = 64 * 1024
+
+/** Sockets allowed to sit in the handshake at once; more are refused as busy. */
+export const MAX_PENDING_SOCKETS = 16
+
+/**
+ * Lower or restore one socket's inbound message limit. `ws` sets `maxPayload`
+ * per server; its receiver keeps a per-socket copy that this adjusts. Returns
+ * false (and changes nothing) if a future `ws` drops that field, in which case
+ * only the server-wide limit, the pending-socket cap, and the hello timeout apply.
+ */
+function setSocketMaxPayload(ws: WebSocket, bytes: number): boolean {
+  const receiver = (ws as unknown as { _receiver?: { _maxPayload?: unknown } | null })._receiver
+  if (receiver === undefined || receiver === null || typeof receiver._maxPayload !== 'number') return false
+  receiver._maxPayload = bytes
+  return true
 }
 
 /** Error thrown by requestTool; the tool registry turns it into an isError result. */
@@ -156,6 +185,11 @@ export interface BridgeServerDeps {
    * branch is exercised through this override; production never sets it.
    */
   remoteAddressOverride?: string
+  /**
+   * Test seam: force the local endpoint the handshake is checked against
+   * (production reads the accepted socket's local address and port).
+   */
+  localEndpointOverride?: BridgeEndpoint
   /** Seconds a fresh socket may present `hello`; defaults to HELLO_TIMEOUT_MS. */
   helloTimeoutMs?: number
   /** Server ping cadence; defaults to PING_INTERVAL_MS. */
@@ -176,16 +210,26 @@ interface ReadyConnection {
   remoteAddress: string | undefined
   /** Capabilities the extension advertised in its `hello`. */
   clientCaps: BridgeCaps
+  /** Per-connection frame integrity (sealing and verification). */
+  channel: BridgeFrameChannel
   abort: AbortController
   pump: Promise<void>
   ping: NodeJS.Timeout
 }
 
-function sendFrame(ws: WebSocket, frame: BridgeFrame): void {
-  /* v8 ignore next -- teardown race: the socket can die between a pump's
-  readiness check and this write; the guard refuses writes on dead sockets */
+/** Send one unsealed handshake frame (challenge, hello.ok). */
+function sendHandshakeFrame(ws: WebSocket, frame: BridgeFrame): void {
+  /* v8 ignore next -- teardown race: the socket can die before the write */
   if (ws.readyState !== WebSocket.OPEN) return
   ws.send(JSON.stringify(frame))
+}
+
+/** Send one sealed frame on an authenticated connection. */
+function sendFrame(conn: Pick<ReadyConnection, 'ws' | 'channel'>, frame: BridgeFrame): void {
+  /* v8 ignore next -- teardown race: the socket can die between a pump's
+  readiness check and this write; the guard refuses writes on dead sockets */
+  if (conn.ws.readyState !== WebSocket.OPEN) return
+  conn.ws.send(conn.channel.seal(frame))
 }
 
 /**
@@ -211,6 +255,7 @@ export class BridgeServer {
   private readonly pendingTools = new Map<string, PendingTool>()
   private readonly orderedSessionRpcs = new Map<string, Promise<void>>()
   private closed = false
+  private pendingSockets = 0
   private readonly chromeExtensionIds: ReadonlySet<string>
 
   constructor(private readonly deps: BridgeServerDeps) {
@@ -226,7 +271,10 @@ export class BridgeServer {
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
     const remote = this.deps.remoteAddressOverride ?? req.socket.remoteAddress
     const origin = req.headers.origin
-    this.wss.handleUpgrade(req, socket, head, (ws) => { this.attach(ws, remote, origin) })
+    // The address and port this socket was actually accepted on, never the
+    // Host header (a relay controls that). The client binds what it dialed.
+    const local = this.deps.localEndpointOverride ?? localEndpointOf(req.socket)
+    this.wss.handleUpgrade(req, socket, head, (ws) => { this.attach(ws, remote, origin, local) })
   }
 
   /**
@@ -271,7 +319,7 @@ export class BridgeServer {
         // The extension may be paused on a user approval after the caller has
         // stopped waiting. Withdraw that approval before settling locally so
         // a late click cannot execute an expired action.
-        sendFrame(conn.ws, { t: 'tool.cancel', id })
+        sendFrame(conn, { t: 'tool.cancel', id })
         settle(error)
       }
       const onAbort = (): void => {
@@ -282,7 +330,7 @@ export class BridgeServer {
       }, timeoutMs)
       signal.addEventListener('abort', onAbort, { once: true })
       this.pendingTools.set(id, { resolve, reject, timer })
-      conn.ws.send(JSON.stringify({
+      conn.ws.send(conn.channel.seal({
         t: 'tool.call',
         id,
         name,
@@ -341,15 +389,34 @@ export class BridgeServer {
     return isDevToolsCaps(this.current?.clientCaps.devTools)
   }
 
-  private attach(ws: WebSocket, remoteAddress: string | undefined, origin: string | undefined): void {
+  private attach(
+    ws: WebSocket,
+    remoteAddress: string | undefined,
+    origin: string | undefined,
+    local: BridgeEndpoint | undefined,
+  ): void {
     if (!isAllowedBridgeOrigin(origin, this.chromeExtensionIds)) {
       ws.close(BRIDGE_CLOSE_CODES.originRejected, 'origin not allowed')
       return
     }
+    if (this.pendingSockets >= MAX_PENDING_SOCKETS) {
+      ws.close(BRIDGE_CLOSE_CODES.busy, 'too many unauthenticated connections')
+      return
+    }
+    this.pendingSockets += 1
+    let pending = true
+    const leavePending = (): void => {
+      if (!pending) return
+      pending = false
+      this.pendingSockets -= 1
+    }
+    // Pre-auth bound: a hello is tiny; the server limit returns once proven.
+    const limited = setSocketMaxPayload(ws, PRE_AUTH_MAX_PAYLOAD)
     let helloTimer: NodeJS.Timeout | undefined = setTimeout(() => {
       ws.close(BRIDGE_CLOSE_CODES.helloTimeout, 'hello timeout')
     }, this.deps.helloTimeoutMs ?? HELLO_TIMEOUT_MS)
     const serverNonce = createBridgeNonce()
+    let channel: BridgeFrameChannel | undefined
 
     const onMessage = (data: Buffer | ArrayBuffer | Buffer[]): void => {
       const text = messageToText(data)
@@ -374,50 +441,68 @@ export class BridgeServer {
           ws.close(1008, 'hello first')
           return
         }
-        const expected = bridgeProof(this.deps.token, 'client', serverNonce, frame.nonce)
+        if (local === undefined || !bridgeEndpointMatches(frame.endpoint, local)) {
+          // The client dialed somewhere else: a relay is forwarding this
+          // handshake (or the bridge sits behind a port forward, unsupported).
+          ws.close(BRIDGE_CLOSE_CODES.authFailed, 'authentication failed: endpoint mismatch')
+          return
+        }
+        const expected = bridgeProof(this.deps.token, 'client', serverNonce, frame.nonce, frame.endpoint, nodeHmac)
         if (frame.nonce === serverNonce || !verifyToken(expected, frame.mac)) {
           ws.close(BRIDGE_CLOSE_CODES.authFailed, 'authentication failed')
           return
         }
         clearTimeout(helloTimer)
         helloTimer = undefined
-        this.promote(ws, remoteAddress, frame.caps, bridgeProof(this.deps.token, 'server', frame.nonce, serverNonce))
+        leavePending()
+        if (limited) setSocketMaxPayload(ws, this.wss.options.maxPayload ?? 100 * 1024 * 1024)
+        channel = BridgeFrameChannel.derive(this.deps.token, 'server', serverNonce, frame.nonce, frame.endpoint, nodeHmac)
+        this.promote(ws, remoteAddress, frame.caps, channel,
+          bridgeProof(this.deps.token, 'server', frame.nonce, serverNonce, frame.endpoint, nodeHmac))
         return
       }
-      const frame = parseBridgeFrame(text)
+      const frame = channel?.open(text)
       if (frame === undefined) {
-        ws.close(1008, 'unparseable frame')
+        ws.close(BRIDGE_CLOSE_CODES.authFailed, 'frame authentication failed')
         return
       }
       this.handleReadyFrame(frame)
     }
     const onClose = (): void => {
+      leavePending()
       if (helloTimer !== undefined) clearTimeout(helloTimer)
       if (this.current !== null && this.current.ws === ws) this.replaceConnection()
     }
     ws.on('message', onMessage)
     ws.once('close', onClose)
     ws.once('error', onClose)
-    sendFrame(ws, { t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: serverNonce })
+    sendHandshakeFrame(ws, { t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: serverNonce })
   }
 
   /** Promote an authenticated socket to the single active slot. */
-  private promote(ws: WebSocket, remoteAddress: string | undefined, clientCaps: BridgeCaps, serverMac: string): void {
+  private promote(
+    ws: WebSocket,
+    remoteAddress: string | undefined,
+    clientCaps: BridgeCaps,
+    channel: BridgeFrameChannel,
+    serverMac: string,
+  ): void {
     this.replaceConnection()
     const abort = new AbortController()
-    const ping = setInterval(() => { sendFrame(ws, { t: 'ping' }) }, this.deps.pingIntervalMs ?? PING_INTERVAL_MS)
+    const target = { ws, channel }
+    const ping = setInterval(() => { sendFrame(target, { t: 'ping' }) }, this.deps.pingIntervalMs ?? PING_INTERVAL_MS)
     const pump = (async () => {
       try {
         for await (const frame of this.deps.api.events(abort.signal)) {
           if (ws.readyState !== WebSocket.OPEN) break
-          sendFrame(ws, {
+          sendFrame(target, {
             t: 'event',
             frame,
           })
         }
       } catch (error: unknown) {
         if (!abort.signal.aborted && ws.readyState === WebSocket.OPEN) {
-          sendFrame(ws, { t: 'error', code: 'stream-failed', message: String(error) })
+          sendFrame(target, { t: 'error', code: 'stream-failed', message: String(error) })
           // An authenticated socket without its Remote streams is unusable but
           // otherwise appears healthy to the extension. Closing the generation
           // activates its bounded reconnect loop and rebuilds every follower.
@@ -425,8 +510,8 @@ export class BridgeServer {
         }
       }
     })()
-    this.current = { ws, remoteAddress, clientCaps, abort, pump, ping }
-    sendFrame(ws, { t: 'hello.ok', caps: this.deps.caps, mac: serverMac })
+    this.current = { ws, remoteAddress, clientCaps, channel, abort, pump, ping }
+    sendHandshakeFrame(ws, { t: 'hello.ok', caps: this.deps.caps, mac: serverMac })
     // Notify only after the new connection owns the slot, so a listener reading
     // `devToolsSupported()` sees the capability that just arrived.
     this.deps.onCapsChange?.(clientCaps)
@@ -494,7 +579,7 @@ export class BridgeServer {
     if (conn === null) return
     const forbidden = PRIVILEGED_METHODS.has(frame.method) && !isLoopbackAddress(conn.remoteAddress)
     if (forbidden) {
-      sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'forbidden', message: 'method is loopback-only' } })
+      sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'forbidden', message: 'method is loopback-only' } })
       return
     }
     if (frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD || frame.method === BRIDGE_SESSION_PURGE_METHOD) {
@@ -503,7 +588,7 @@ export class BridgeServer {
         : browserSnapshotPayload(frame.payload)?.sessionId
       if (sessionId !== undefined && this.deps.sessionScope !== undefined
         && !await this.deps.sessionScope.allowsSession(sessionId, conn.abort.signal).catch(() => false)) {
-        sendFrame(conn.ws, {
+        sendFrame(conn, {
           t: 'rpc.result',
           id: frame.id,
           ok: false,
@@ -515,7 +600,7 @@ export class BridgeServer {
     if (frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD) {
       const payload = browserSnapshotPayload(frame.payload)
       if (payload === undefined) {
-        sendFrame(conn.ws, {
+        sendFrame(conn, {
           t: 'rpc.result',
           id: frame.id,
           ok: false,
@@ -525,9 +610,9 @@ export class BridgeServer {
       }
       try {
         await this.deps.injectBrowserSnapshot(payload.sessionId, payload.snapshot)
-        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { accepted: true } })
+        sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { accepted: true } })
       } catch (error: unknown) {
-        sendFrame(conn.ws, {
+        sendFrame(conn, {
           t: 'rpc.result',
           id: frame.id,
           ok: false,
@@ -539,7 +624,7 @@ export class BridgeServer {
     if (frame.method === BRIDGE_SESSION_PURGE_METHOD) {
       const sessionId = purgeSessionPayload(frame.payload)
       if (sessionId === undefined) {
-        sendFrame(conn.ws, {
+        sendFrame(conn, {
           t: 'rpc.result',
           id: frame.id,
           ok: false,
@@ -549,11 +634,11 @@ export class BridgeServer {
       }
       try {
         await this.deps.purgeSession(sessionId)
-        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: true, result: { purged: true } })
+        sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { purged: true } })
       } catch (error: unknown) {
         const code = error instanceof SessionPurgeError ? error.code : 'internal'
         const message = error instanceof Error ? error.message : String(error)
-        sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code, message } })
+        sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: false, error: { code, message } })
       }
       return
     }
@@ -564,14 +649,14 @@ export class BridgeServer {
         payload: frame.payload,
         signal: conn.abort.signal,
       })
-      sendFrame(conn.ws, {
+      sendFrame(conn, {
         t: 'rpc.result',
         id: frame.id,
         ok: true,
         result: { type: 'server-response', rpcId: frame.id, result },
       })
     } catch (error: unknown) {
-      sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'internal', message: String(error) } })
+      sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'internal', message: String(error) } })
     }
   }
 
@@ -582,9 +667,9 @@ export class BridgeServer {
     if (conn === null) return
     try {
       const result = await this.deps.api.respond(frame.rpcId, frame.result, conn.abort.signal)
-      sendFrame(conn.ws, { t: 'respond.result', id: frame.id, ok: true, result })
+      sendFrame(conn, { t: 'respond.result', id: frame.id, ok: true, result })
     } catch (error: unknown) {
-      sendFrame(conn.ws, { t: 'respond.result', id: frame.id, ok: false, error: { code: 'internal', message: String(error) } })
+      sendFrame(conn, { t: 'respond.result', id: frame.id, ok: false, error: { code: 'internal', message: String(error) } })
     }
   }
 
@@ -613,6 +698,13 @@ export class BridgeServer {
       pending.reject(new BridgeToolError('bridge-closed', 'the extension connection was replaced'))
     }
   }
+}
+
+/** The address and port an accepted socket is bound to. */
+function localEndpointOf(socket: Socket): BridgeEndpoint | undefined {
+  const { localAddress, localPort } = socket
+  if (typeof localAddress !== 'string' || typeof localPort !== 'number') return undefined
+  return { host: localAddress, port: localPort }
 }
 
 function browserSnapshotPayload(payload: unknown): { sessionId: string; snapshot: string } | undefined {

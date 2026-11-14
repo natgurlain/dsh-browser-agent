@@ -6,6 +6,8 @@ export interface PanelCopy {
   status: Record<BridgeState, string>
   /** Status shown when the startup pass found no local dsh at all. */
   statusNotFound: string
+  /** Specific refusals reported by the bridge (shown instead of the transport state). */
+  bridgeFailure: Record<'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy', string>
   approval: {
     eyebrow: string
     readTitle: string
@@ -315,6 +317,12 @@ const EN: PanelCopy = {
     stopped: 'Disconnected',
   },
   statusNotFound: 'No service found',
+  bridgeFailure: {
+    'token-mismatch': 'Token mismatch: check the bridge token in Settings',
+    'version-mismatch': 'Version mismatch: update the dsh plugin and the extension together',
+    'origin-rejected': 'Unrecognized extension ID: add it to allowedChromeExtensionIds',
+    busy: 'Bridge busy, retrying…',
+  },
   approval: {
     eyebrow: 'Security check',
     readTitle: 'Allow page access?',
@@ -653,6 +661,12 @@ const ZH: PanelCopy = {
     stopped: '未连接',
   },
   statusNotFound: '未找到服务',
+  bridgeFailure: {
+    'token-mismatch': '令牌不匹配：请在设置中检查桥接令牌',
+    'version-mismatch': '版本不匹配：请同时更新 dsh 插件和扩展',
+    'origin-rejected': '扩展 ID 未被允许：请将其加入 allowedChromeExtensionIds',
+    busy: '桥接繁忙，正在重试…',
+  },
   approval: {
     eyebrow: '安全检查',
     readTitle: '允许读取页面？',

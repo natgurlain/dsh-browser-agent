@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   BRIDGE_CLOSE_CODES,
   BRIDGE_PROTOCOL_VERSION,
+  BridgeFrameChannel,
   computeBridgeProof,
   createBridgeNonce,
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
@@ -36,6 +37,10 @@ class FakeWebSocket extends EventTarget {
 
   receive(frame: unknown): void {
     this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(frame) }))
+  }
+
+  receiveRaw(data: string): void {
+    this.dispatchEvent(new MessageEvent('message', { data }))
   }
 
   close(code = 1000, reason = ''): void {
@@ -178,6 +183,8 @@ describe('bridge capability advertisement', () => {
 
 describe('bridge mutual authentication', () => {
   const CAPS = { textOnly: true as const, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }
+  /** The endpoint every recordingClient dials. */
+  const ENDPOINT = { host: '127.0.0.1', port: 3080 }
 
   function recordingClient(token = TEST_BRIDGE_TOKEN, tokenSource?: () => Promise<string>) {
     vi.stubGlobal('WebSocket', FakeWebSocket)
@@ -218,7 +225,7 @@ describe('bridge mutual authentication', () => {
     expect(socket.sent).toEqual([])
     const serverNonce = createBridgeNonce()
     const hello = await challenge(socket, serverNonce)
-    expect(hello.mac).toBe(await computeBridgeProof(TEST_BRIDGE_TOKEN, 'client', serverNonce, hello.nonce))
+    expect(hello.mac).toBe(await computeBridgeProof(TEST_BRIDGE_TOKEN, 'client', serverNonce, hello.nonce, ENDPOINT))
     expect(JSON.stringify(socket.sent)).not.toContain(TEST_BRIDGE_TOKEN)
     client.stop()
   })
@@ -229,7 +236,7 @@ describe('bridge mutual authentication', () => {
     const serverNonce = createBridgeNonce()
     const hello = await challenge(socket, serverNonce)
     // An impostor that does not know the token can only guess the proof.
-    socket.receive({ t: 'hello.ok', caps: CAPS, mac: await computeBridgeProof('wrong-token', 'server', hello.nonce, serverNonce) })
+    socket.receive({ t: 'hello.ok', caps: CAPS, mac: await computeBridgeProof('wrong-token', 'server', hello.nonce, serverNonce, ENDPOINT) })
     socket.receive({ t: 'tool.call', id: 'evil', name: 'browser_navigate', args: { url: 'https://evil.example' }, expiresAt: Date.now() + 10_000 })
     await vi.waitFor(() => { expect(socket.closedWith?.code).toBe(BRIDGE_CLOSE_CODES.authFailed) })
     expect(helloOk).not.toHaveBeenCalled()
@@ -250,7 +257,7 @@ describe('bridge mutual authentication', () => {
     client.stop()
   })
 
-  it('ignores every frame before authentication, then delivers frames queued during verification in order', async () => {
+  it('ignores every frame before authentication, then delivers sealed frames queued before release in order', async () => {
     const { client, states, frames, helloOk } = recordingClient()
     const socket = await openSocket()
     // Unauthenticated noise before the handshake completes is dropped.
@@ -259,19 +266,78 @@ describe('bridge mutual authentication', () => {
     const serverNonce = createBridgeNonce()
     const hello = await challenge(socket, serverNonce)
     socket.receive({ t: 'rpc.result', id: 'r', ok: true, result: {} })
-    socket.receive({ t: 'hello.ok', caps: CAPS, mac: await computeBridgeProof(TEST_BRIDGE_TOKEN, 'server', hello.nonce, serverNonce) })
-    // Sent by the real bridge right after hello.ok, before the client verified it.
-    socket.receive({ t: 'event', frame: { rpcId: 'e1', method: 'session/subscribed', payload: {} } })
-    socket.receive({ t: 'ping' })
-    socket.receive({ t: 'event', frame: { rpcId: 'e2', method: 'session/queue', payload: {} } })
+    const channel = BridgeFrameChannel.derive(TEST_BRIDGE_TOKEN, 'server', serverNonce, hello.nonce, ENDPOINT)
+    socket.receive({ t: 'hello.ok', caps: CAPS, mac: await computeBridgeProof(TEST_BRIDGE_TOKEN, 'server', hello.nonce, serverNonce, ENDPOINT) })
+    // Sent by the real bridge right after hello.ok, before the loop released the socket.
+    socket.receiveRaw(channel.seal({ t: 'event', frame: { rpcId: 'e1', method: 'session/subscribed', payload: {} } }))
+    socket.receiveRaw(channel.seal({ t: 'ping' }))
+    socket.receiveRaw(channel.seal({ t: 'event', frame: { rpcId: 'e2', method: 'session/queue', payload: {} } }))
     await vi.waitFor(() => { expect(states.at(-1)).toBe('connected') })
     expect(helloOk).toHaveBeenCalledWith(CAPS)
     expect(frames).toEqual([
       { t: 'event', frame: { rpcId: 'e1', method: 'session/subscribed', payload: {} } },
       { t: 'event', frame: { rpcId: 'e2', method: 'session/queue', payload: {} } },
     ])
-    expect(socket.sent).toContainEqual({ t: 'pong' })
+    const pong = socket.sent.find((frame) => (frame as { t?: unknown }).t === 'sealed')
+    expect(channel.open(JSON.stringify(pong))).toEqual({ t: 'pong' })
     client.stop()
+  })
+
+  it('drops the connection on an unsealed or replayed frame after hello.ok and reports it', async () => {
+    for (const attack of ['unsealed', 'replayed'] as const) {
+      FakeWebSocket.instances.length = 0
+      const { client, frames } = recordingClient()
+      const socket = await openSocket()
+      const serverNonce = createBridgeNonce()
+      const hello = await challenge(socket, serverNonce)
+      const channel = BridgeFrameChannel.derive(TEST_BRIDGE_TOKEN, 'server', serverNonce, hello.nonce, ENDPOINT)
+      socket.receive({ t: 'hello.ok', caps: CAPS, mac: await computeBridgeProof(TEST_BRIDGE_TOKEN, 'server', hello.nonce, serverNonce, ENDPOINT) })
+      const first = channel.seal({ t: 'event', frame: { rpcId: 'e1', method: 'session/queue', payload: {} } })
+      socket.receiveRaw(first)
+      if (attack === 'unsealed') {
+        socket.receive({ t: 'tool.call', id: 'evil', name: 'browser_navigate', args: { url: 'https://evil.example' }, expiresAt: Date.now() + 10_000 })
+      } else {
+        socket.receiveRaw(first)
+      }
+      await vi.waitFor(() => { expect(socket.closedWith?.code).toBe(BRIDGE_CLOSE_CODES.authFailed) })
+      expect(frames.filter((frame) => (frame as { t: string }).t === 'tool.call')).toEqual([])
+      expect(client.failure).toBe('token-mismatch')
+      expect(client.send({ t: 'pong' })).toBe(false)
+      client.stop()
+    }
+  })
+
+  it('dials localhost as 127.0.0.1 and binds that endpoint into its proof', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const client = new BridgeClient({ onStateChange: () => {}, onFrame: () => {}, onHelloOk: () => {} }, async () => true)
+    client.start('ws://localhost:3080/ext/bridge', TEST_BRIDGE_TOKEN)
+    const socket = await openSocket()
+    expect(socket.url).toBe('ws://127.0.0.1:3080/ext/bridge')
+    const hello = await challenge(socket, createBridgeNonce())
+    expect((hello as unknown as { endpoint: unknown }).endpoint).toEqual({ host: '127.0.0.1', port: 3080 })
+    client.stop()
+  })
+
+  it('reports a specific refusal for token, version, and extension-ID closes and backs off', async () => {
+    for (const [code, failure] of [
+      [BRIDGE_CLOSE_CODES.authFailed, 'token-mismatch'],
+      [BRIDGE_CLOSE_CODES.versionMismatch, 'version-mismatch'],
+      [BRIDGE_CLOSE_CODES.originRejected, 'origin-rejected'],
+    ] as const) {
+      FakeWebSocket.instances.length = 0
+      vi.stubGlobal('WebSocket', FakeWebSocket)
+      const states: BridgeState[] = []
+      const client = new BridgeClient({ onStateChange: (state) => { states.push(state) }, onFrame: () => {}, onHelloOk: () => {} }, async () => true)
+      client.start('ws://127.0.0.1:3080/ext/bridge', TEST_BRIDGE_TOKEN)
+      const socket = await openSocket()
+      socket.close(code, 'refused')
+      await vi.waitFor(() => { expect(states.at(-1)).toBe('reconnecting') })
+      expect(client.failure).toBe(failure)
+      // No fast retry loop: the next attempt waits the refused-retry delay.
+      await new Promise((resolve) => { setTimeout(resolve, 1_000) })
+      expect({ code, n: FakeWebSocket.instances.length }).toEqual({ code, n: 1 })
+      client.stop()
+    }
   })
 
   it('closes a bridge that speaks another handshake version', async () => {

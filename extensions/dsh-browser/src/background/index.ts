@@ -49,7 +49,7 @@ import {
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { BRIDGE_CONFIG_PATH, BRIDGE_PATH, DEVTOOLS_CAPS_VERSION, parseBridgeConfigPayload } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import { BridgeClient, type BridgeState } from './bridge.ts'
+import { BridgeClient, type BridgeFailure, type BridgeState } from './bridge.ts'
 import { createRpc } from './rpc.ts'
 import { discoverInstances, planDiscovery, readBridgeConfig } from './discovery.ts'
 import { frameDocumentKey, listTabFrames } from './frames.ts'
@@ -546,6 +546,7 @@ function statusPayload(): {
   caps: BridgeCaps | null
   discovery: DiscoveryState
   address?: string
+  failure?: BridgeFailure
 } {
   return {
     type: 'status',
@@ -553,6 +554,7 @@ function statusPayload(): {
     caps,
     discovery: discoveryState,
     ...(connectedAddress === undefined ? {} : { address: connectedAddress }),
+    ...(bridge?.failure === undefined || bridge.state === 'connected' ? {} : { failure: bridge.failure }),
   }
 }
 

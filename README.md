@@ -146,7 +146,9 @@ Local Chrome use requires no configuration: the installer places the bridge toke
 
 ### Bridge security
 
-- Every client authenticates, loopback included, with a mutual HMAC challenge-response over the bridge token; the token itself never crosses the wire, and the extension refuses a bridge that cannot prove the token back.
+- Every client authenticates, loopback included, with a mutual HMAC challenge-response over the bridge token (handshake v3); the token itself never crosses the wire, and the extension refuses a bridge that cannot prove the token back.
+- Both proofs bind the address and port the extension dialed, and the bridge checks them against the socket it accepted, so a local process that relays the handshake from another port cannot complete it. Every later frame in both directions carries a MAC under a per-connection key and a strict sequence number; an unsealed, replayed, reordered, or altered frame closes the connection. Frames are authenticated, not encrypted: another local process able to observe loopback traffic can still read them. Because of the endpoint binding, a bridge reached through a port forward (Docker `-p`, SSH tunnels) on a different port is refused.
+- A token pinned in the plugin config must be at least 32 printable characters with real entropy (for example `openssl rand -hex 16`); a weaker token stops the plugin at startup, since a captured handshake would let a local observer guess it offline.
 - Chrome connections are accepted only from the extension ID fixed by the manifest key (`klmdgljhcjbbpjcplbanjeclilghnaoh`). Set `allowedChromeExtensionIds` in the bridge-browser plugin config for a differently keyed build or a Web Store listing; build a store package with `pnpm --filter dsh-browser-extension run build:store`, which omits the `key` the store rejects.
 - The bridge forwards only the Host methods the extension uses, only for sessions it created or that its panel can list, and refuses to switch a session to a full-access permission preset (`danger-full-access`, `auto`). Set `allowDangerFullAccess: true` in the plugin config to allow that from the browser.
 

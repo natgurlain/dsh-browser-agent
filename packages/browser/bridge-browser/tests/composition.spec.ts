@@ -37,6 +37,8 @@ import {
   BRIDGE_PATH,
   BRIDGE_PROTOCOL_VERSION,
   PINNED_CHROME_EXTENSION_ID,
+  BridgeFrameChannel,
+  bridgeEndpointOfUrl,
   computeBridgeProof,
   createBridgeNonce,
   type BridgeFrame,
@@ -44,7 +46,7 @@ import {
 import { BROWSER_CONTEXT_KIND } from '../src/browser-context.ts'
 
 const BRIDGE = '@natgurlain/dsh-bridge-browser'
-const TOKEN = 'abcdabcdabcdabcdabcdabcdabcdabcd'
+const TOKEN = '3c9f0a7e51b2d846e0f3a9c17b5d2e68'
 
 let root: string | undefined
 let context: Context | undefined
@@ -219,7 +221,18 @@ function connect(port: number): Promise<{
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}${BRIDGE_PATH}`, { headers: { origin: EXT_ORIGIN } })
     const frames: BridgeFrame[] = []
-    ws.on('message', (data) => { frames.push(JSON.parse(data.toString()) as BridgeFrame) })
+    ws.on('message', (data) => {
+      const text = data.toString()
+      const channel = channels.get(ws)
+      const parsed = JSON.parse(text) as { t?: unknown }
+      if (channel !== undefined && parsed.t === 'sealed') {
+        const frame = channel.open(text)
+        if (frame === undefined) throw new Error('bridge sent a frame that does not verify')
+        frames.push(frame)
+        return
+      }
+      frames.push(parsed as BridgeFrame)
+    })
     ws.on('error', reject)
     ws.on('open', () => {
       resolve({
@@ -233,8 +246,12 @@ function connect(port: number): Promise<{
   })
 }
 
+/** Frame channel each authenticated client derived in `sendHello`. */
+const channels = new WeakMap<WebSocket, BridgeFrameChannel>()
+
 function send(ws: WebSocket, frame: BridgeFrame): void {
-  ws.send(JSON.stringify(frame))
+  const channel = channels.get(ws)
+  ws.send(channel === undefined ? JSON.stringify(frame) : channel.seal(frame))
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
@@ -250,8 +267,10 @@ async function sendHello(client: Awaited<ReturnType<typeof connect>>, caps: Reco
   await waitFor(() => client.frames.some((f) => f.t === 'challenge'))
   const challenge = client.frames.find((f) => f.t === 'challenge') as Extract<BridgeFrame, { t: 'challenge' }>
   const nonce = createBridgeNonce()
-  const mac = await computeBridgeProof(TOKEN, 'client', challenge.nonce, nonce)
-  client.ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, mac, caps }))
+  const endpoint = bridgeEndpointOfUrl(client.ws.url)!
+  const mac = await computeBridgeProof(TOKEN, 'client', challenge.nonce, nonce, endpoint)
+  channels.set(client.ws, BridgeFrameChannel.derive(TOKEN, 'client', challenge.nonce, nonce, endpoint))
+  client.ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, mac, endpoint, caps }))
 }
 
 async function connectReady(port: number): Promise<Awaited<ReturnType<typeof connect>>> {

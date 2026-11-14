@@ -1,8 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { createHmac } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import {
   BRIDGE_PROTOCOL_VERSION,
+  BridgeFrameChannel,
+  bridgeDialUrl,
+  bridgeEndpointMatches,
+  bridgeEndpointOfUrl,
+  bridgeProof,
   bridgeProofMessage,
+  canonicalBridgeHost,
+  hmacSha256,
+  sha256,
   computeBridgeProof,
   constantTimeEqual,
   createBridgeNonce,
@@ -17,9 +25,10 @@ import {
 
 const NONCE = 'a'.repeat(64)
 const MAC = 'b'.repeat(64)
-/** A well-formed v2 hello; `token` is gone from the wire. */
+const ENDPOINT = { host: '127.0.0.1', port: 3080 }
+/** A well-formed v3 hello; `token` is gone from the wire. */
 const hello = (caps: unknown, extra: Record<string, unknown> = {}): string =>
-  JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: NONCE, mac: MAC, caps, ...extra })
+  JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: NONCE, mac: MAC, endpoint: ENDPOINT, caps, ...extra })
 
 describe('bridge handshake primitives', () => {
   it('computes HMAC-SHA256 proofs identical to node crypto', async () => {
@@ -28,18 +37,79 @@ describe('bridge handshake primitives', () => {
     expect(isBridgeHex256(server)).toBe(true)
     expect(server).not.toBe(client)
     const expected = createHmac('sha256', Buffer.from('a token', 'utf8'))
-      .update(bridgeProofMessage('client', server, client)).digest('hex')
-    expect(await computeBridgeProof('a token', 'client', server, client)).toBe(expected)
+      .update(bridgeProofMessage('client', server, client, ENDPOINT)).digest('hex')
+    expect(await computeBridgeProof('a token', 'client', server, client, ENDPOINT)).toBe(expected)
   })
 
-  it('binds the role so a client proof is never a valid server proof', async () => {
+  it('implements SHA-256 and HMAC-SHA256 byte-identically to node crypto', () => {
+    const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString('hex')
+    for (const length of [0, 1, 55, 56, 63, 64, 65, 119, 120, 1000, 70_000]) {
+      const data = new Uint8Array(length).map((_, index) => (index * 31 + length) & 0xff)
+      expect(hex(sha256(data))).toBe(createHash('sha256').update(data).digest('hex'))
+      for (const keyLength of [0, 16, 64, 65, 200]) {
+        const key = new Uint8Array(keyLength).map((_, index) => (index * 7) & 0xff)
+        expect(hex(hmacSha256(key, data))).toBe(createHmac('sha256', key).update(data).digest('hex'))
+      }
+    }
+  })
+
+  it('binds the role and the dialed endpoint into every proof', async () => {
     const [a, b] = [createBridgeNonce(), createBridgeNonce()]
-    expect(await computeBridgeProof('t', 'client', a, b)).not.toBe(await computeBridgeProof('t', 'server', a, b))
-    expect(bridgeProofMessage('client', a, b)).toBe(`dsh-bridge/v${String(BRIDGE_PROTOCOL_VERSION)}|client|${a}|${b}`)
+    expect(await computeBridgeProof('t', 'client', a, b, ENDPOINT)).not.toBe(await computeBridgeProof('t', 'server', a, b, ENDPOINT))
+    expect(bridgeProof('t', 'client', a, b, ENDPOINT)).not.toBe(bridgeProof('t', 'client', a, b, { ...ENDPOINT, port: 3081 }))
+    expect(bridgeProof('t', 'client', a, b, ENDPOINT)).not.toBe(bridgeProof('t', 'client', a, b, { ...ENDPOINT, host: '::1' }))
+    expect(bridgeProofMessage('client', a, b, ENDPOINT))
+      .toBe(`dsh-bridge/v${String(BRIDGE_PROTOCOL_VERSION)}|client|${a}|${b}|127.0.0.1|3080`)
   })
 
   it('refuses to compute a proof with an empty token', async () => {
-    await expect(computeBridgeProof('', 'client', NONCE, NONCE)).rejects.toThrow(/empty/)
+    await expect(computeBridgeProof('', 'client', NONCE, NONCE, ENDPOINT)).rejects.toThrow(/empty/)
+  })
+
+  it('derives the endpoint a client dials and matches it against the accepted socket', () => {
+    expect(bridgeDialUrl('ws://localhost:3080/ext/bridge')).toBe('ws://127.0.0.1:3080/ext/bridge')
+    expect(bridgeDialUrl('ws://[::1]:3080/ext/bridge')).toBe('ws://[::1]:3080/ext/bridge')
+    expect(bridgeEndpointOfUrl('ws://127.0.0.1:43189/ext/bridge')).toEqual({ host: '127.0.0.1', port: 43189 })
+    expect(bridgeEndpointOfUrl('ws://[::1]:3080/ext/bridge')).toEqual({ host: '::1', port: 3080 })
+    expect(bridgeEndpointOfUrl('ws://Box.LAN/ext/bridge')).toEqual({ host: 'box.lan', port: 80 })
+    expect(bridgeEndpointOfUrl('http://127.0.0.1:1/')).toBeUndefined()
+    expect(canonicalBridgeHost('::ffff:127.0.0.1')).toBe('127.0.0.1')
+    // Exact address and port, IPv4-mapped server addresses included.
+    expect(bridgeEndpointMatches(ENDPOINT, { host: '::ffff:127.0.0.1', port: 3080 })).toBe(true)
+    expect(bridgeEndpointMatches(ENDPOINT, { host: '127.0.0.1', port: 3081 })).toBe(false)
+    // A relay on [::1] cannot stand in for a bridge on 127.0.0.1 (or vice versa).
+    expect(bridgeEndpointMatches({ host: '::1', port: 3080 }, { host: '127.0.0.1', port: 3080 })).toBe(false)
+    expect(bridgeEndpointMatches(ENDPOINT, { host: '::1', port: 3080 })).toBe(false)
+    // A hand-configured DNS name is accepted only on a non-loopback socket.
+    expect(bridgeEndpointMatches({ host: 'box.lan', port: 3080 }, { host: '192.168.1.5', port: 3080 })).toBe(true)
+    expect(bridgeEndpointMatches({ host: 'box.lan', port: 3080 }, { host: '127.0.0.1', port: 3080 })).toBe(false)
+  })
+
+  it('seals frames per direction and rejects tampering, replay, reordering, and reflection', () => {
+    const [ns, nc] = [createBridgeNonce(), createBridgeNonce()]
+    const client = BridgeFrameChannel.derive('tok', 'client', ns, nc, ENDPOINT)
+    const server = BridgeFrameChannel.derive('tok', 'server', ns, nc, ENDPOINT)
+    const first = client.seal({ t: 'pong' })
+    const second = client.seal({ t: 'rpc', id: '1', method: 'session.list', payload: {} })
+    // Reordered: the second frame cannot be accepted first.
+    expect(server.open(second)).toBeUndefined()
+    expect(server.open(first)).toEqual({ t: 'pong' })
+    // Replayed.
+    expect(server.open(first)).toBeUndefined()
+    // Tampered body.
+    const tampered = JSON.stringify({ ...JSON.parse(second) as object, body: JSON.stringify({ t: 'rpc', id: '1', method: 'session.prompt', payload: {} }) })
+    expect(server.open(tampered)).toBeUndefined()
+    expect(server.open(second)).toEqual({ t: 'rpc', id: '1', method: 'session.list', payload: {} })
+    // Unsealed frames are never accepted.
+    expect(server.open(JSON.stringify({ t: 'pong' }))).toBeUndefined()
+    // A server frame reflected back to the server fails (separate direction keys).
+    const fromServer = server.seal({ t: 'ping' })
+    const otherServer = BridgeFrameChannel.derive('tok', 'server', ns, nc, ENDPOINT)
+    expect(otherServer.open(fromServer)).toBeUndefined()
+    expect(client.open(fromServer)).toEqual({ t: 'ping' })
+    // A different endpoint or token derives different keys.
+    const relayed = BridgeFrameChannel.derive('tok', 'server', ns, nc, { ...ENDPOINT, port: 1 })
+    expect(relayed.open(BridgeFrameChannel.derive('tok', 'client', ns, nc, ENDPOINT).seal({ t: 'pong' }))).toBeUndefined()
   })
 
   it('compares proofs in constant time and rejects empty or unequal lengths', () => {
@@ -63,7 +133,7 @@ describe('parseBridgeFrame', () => {
   it('parses a valid hello frame', () => {
     const frame = parseBridgeFrame(hello({ textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 }))
     expect(frame).toEqual({
-      t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: NONCE, mac: MAC,
+      t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: NONCE, mac: MAC, endpoint: ENDPOINT,
       caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 },
     })
   })
@@ -75,6 +145,11 @@ describe('parseBridgeFrame', () => {
     expect(parseBridgeFrame(hello(caps, { nonce: 'short' }))).toBeUndefined()
     expect(parseBridgeFrame(hello(caps, { mac: MAC.toUpperCase() }))).toBeUndefined()
     expect(parseBridgeFrame(hello(caps, { mac: undefined }))).toBeUndefined()
+    // v3 requires the dialed endpoint, in canonical form.
+    expect(parseBridgeFrame(hello(caps, { endpoint: undefined }))).toBeUndefined()
+    expect(parseBridgeFrame(hello(caps, { endpoint: { host: 'LOCALHOST', port: 3080 } }))).toBeUndefined()
+    expect(parseBridgeFrame(hello(caps, { endpoint: { host: '127.0.0.1', port: 0 } }))).toBeUndefined()
+    expect(parseBridgeFrame(hello(caps, { endpoint: { host: 'a|b', port: 1 } }))).toBeUndefined()
   })
 
   it('parses the server challenge and requires a proof on hello.ok', () => {
@@ -90,7 +165,7 @@ describe('parseBridgeFrame', () => {
   it('accepts the optional developer-tools capability', () => {
     const withDevTools = { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60, devTools: { version: DEVTOOLS_CAPS_VERSION } }
     expect(parseBridgeFrame(hello(withDevTools)))
-      .toEqual({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: NONCE, mac: MAC, caps: withDevTools })
+      .toEqual({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: NONCE, mac: MAC, endpoint: ENDPOINT, caps: withDevTools })
     // An older extension omits the field and still authenticates.
     const legacy = { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 }
     expect(parseBridgeFrame(hello(legacy))).toBeDefined()

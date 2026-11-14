@@ -8,6 +8,9 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { BEACON_PORTS, PINNED_CHROME_EXTENSION_ID } from '../src/protocol.ts'
 import { apply as applyPlugin, Config } from '../src/index.ts'
 
+/** A configured token that passes the strength rule. */
+const STRONG_TOKEN = '9e4b1f7c03a2d58e6b0c4f19a7d3e2b5'
+
 async function apply(ctx: Context, config: Config): Promise<void> {
   await applyPlugin(ctx, new Config(config))
 }
@@ -93,7 +96,7 @@ describe('config', () => {
 
   it('preserves explicit values and the empty-string workspace opt-out', () => {
     expect(new Config({
-      token: 'fixed',
+      token: STRONG_TOKEN,
       toolTimeoutMs: 1,
       snapshotMaxChars: 500,
       maxInteractiveItems: 3,
@@ -101,7 +104,7 @@ describe('config', () => {
       deferSessionCreate: false,
       beacon: false,
     })).toEqual({
-      token: 'fixed',
+      token: STRONG_TOKEN,
       toolTimeoutMs: 1,
       snapshotMaxChars: 500,
       maxInteractiveItems: 3,
@@ -128,7 +131,7 @@ describe('config', () => {
 
 describe('apply', () => {
   it('registers the bridge with a fixed token (no generation)', async () => {
-    await apply(stubContext(), { token: 'fixed-token', ...VALID, sessionWorkspacePath: '' })
+    await apply(stubContext(), { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
   })
 
   it.each([undefined, {}, { wireStream: {} }])('rejects unsupported Gateway capabilities: %j', async (gateway) => {
@@ -136,7 +139,7 @@ describe('apply', () => {
     const get = ctx.get.bind(ctx)
     vi.spyOn(ctx, 'get').mockImplementation((key) => key === 'typertGateway' ? gateway : get(key))
     const register = vi.spyOn(ctx.webServer, 'registerUpgrade')
-    await expect(apply(ctx, { token: 'fixed-token', ...VALID })).rejects.toThrow(/dsh 0\.2\.2-rc\.2.*wireStream unavailable/)
+    await expect(apply(ctx, { token: STRONG_TOKEN, ...VALID })).rejects.toThrow(/dsh 0\.2\.2-rc\.2.*wireStream unavailable/)
     expect(register).not.toHaveBeenCalled()
   })
 
@@ -147,7 +150,7 @@ describe('apply', () => {
       ? { createSharedFetchHandler: () => ({ fetch: async () => new Response(null, { status: 404 }) }) }
       : get(key))
     const register = vi.spyOn(ctx.webServer, 'registerUpgrade')
-    await expect(apply(ctx, { token: 'fixed-token', ...VALID })).rejects.toThrow(/createPeer unavailable/)
+    await expect(apply(ctx, { token: STRONG_TOKEN, ...VALID })).rejects.toThrow(/createPeer unavailable/)
     expect(register).not.toHaveBeenCalled()
   })
 
@@ -156,7 +159,7 @@ describe('apply', () => {
     const gateway = ctx.get('typertGateway')
     const open = vi.spyOn(gateway.wireStream, 'open')
 
-    await apply(ctx, { token: 'fixed-token', ...VALID, sessionWorkspacePath: '' })
+    await apply(ctx, { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
 
     expect(open).not.toHaveBeenCalled()
   })
@@ -187,7 +190,7 @@ describe('apply', () => {
     vi.stubEnv('DSH_HOME', home)
     await mkdir(join(home, 'browser-extension'), { recursive: true })
     await writeFile(join(home, 'browser-extension', 'install-info.json'), '{}\n')
-    await apply(stubContext(), { token: 'fixed-token', ...VALID, sessionWorkspacePath: '' })
+    await apply(stubContext(), { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
     await expect(stat(join(home, 'browser-extension', 'bridge-token'))).rejects.toThrow()
   })
 
@@ -202,7 +205,7 @@ describe('apply', () => {
   })
 
   it('advertises the bridge on the default beacon ports', async () => {
-    await apply(stubContext(), { token: 'fixed-token', ...VALID, sessionWorkspacePath: '' })
+    await apply(stubContext(), { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
 
     expect(beaconMock.start).toHaveBeenCalledOnce()
     expect(beaconMock.start.mock.calls[0]?.[0]).toMatchObject({
@@ -212,11 +215,11 @@ describe('apply', () => {
   })
 
   it('honours a custom port list and the beacon opt-out', async () => {
-    await apply(stubContext(), { token: 'fixed-token', ...VALID, sessionWorkspacePath: '', beaconPorts: [45111] })
+    await apply(stubContext(), { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '', beaconPorts: [45111] })
     expect(beaconMock.start.mock.calls[0]?.[0]).toMatchObject({ ports: [45111] })
 
     beaconMock.start.mockClear()
-    await apply(stubContext(), { token: 'fixed-token', ...VALID, sessionWorkspacePath: '', beacon: false })
+    await apply(stubContext(), { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '', beacon: false })
     expect(beaconMock.start).not.toHaveBeenCalled()
   })
 
@@ -224,7 +227,7 @@ describe('apply', () => {
     const ctx = stubContext()
     Object.assign(ctx.webServer as unknown as Record<string, unknown>, { host: '10.0.0.7' })
 
-    await apply(ctx, { token: 'fixed-token', ...VALID, sessionWorkspacePath: '' })
+    await apply(ctx, { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
 
     expect(beaconMock.start).not.toHaveBeenCalled()
   })
@@ -241,7 +244,7 @@ describe('apply', () => {
       return disposer as () => void
     })
 
-    await apply(ctx, { token: 'fixed-token', ...VALID, sessionWorkspacePath: '' })
+    await apply(ctx, { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
     await vi.waitFor(() => { expect(beaconMock.start).toHaveBeenCalledOnce() })
     await Promise.resolve()
     expect(typeof dispose).toBe('function')

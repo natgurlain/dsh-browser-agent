@@ -2,11 +2,15 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
-import { BridgeServer, BridgeToolError, isAllowedBridgeOrigin, isLoopbackAddress, messageToText } from '../src/server.ts'
+import {
+  BridgeServer, BridgeToolError, MAX_PENDING_SOCKETS, PRE_AUTH_MAX_PAYLOAD, isAllowedBridgeOrigin, isLoopbackAddress, messageToText,
+} from '../src/server.ts'
 import {
   BRIDGE_CLOSE_CODES,
   BRIDGE_PROTOCOL_VERSION,
   PINNED_CHROME_EXTENSION_ID,
+  BridgeFrameChannel,
+  bridgeEndpointOfUrl,
   computeBridgeProof,
   createBridgeNonce,
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
@@ -79,6 +83,10 @@ function hostApi(overrides: Partial<BrowserHostApi> = {}): BrowserHostApi {
 const socketFrames = new WeakMap<WebSocket, BridgeFrame[]>()
 /** Close code and reason each test socket observed. */
 const socketClose = new WeakMap<WebSocket, { code: number; reason: string }>()
+/** Frame channel each authenticated test socket derived in `sendHello`. */
+const socketChannels = new WeakMap<WebSocket, BridgeFrameChannel>()
+/** Endpoint each test socket dialed. */
+const endpointOf = (ws: WebSocket) => bridgeEndpointOfUrl(ws.url)!
 
 function connect(url: string, origin?: string): Promise<{ ws: WebSocket; frames: BridgeFrame[]; done: Promise<void> }> {
   return new Promise((resolve, reject) => {
@@ -86,7 +94,19 @@ function connect(url: string, origin?: string): Promise<{ ws: WebSocket; frames:
     const frames: BridgeFrame[] = []
     socketFrames.set(ws, frames)
     ws.on('close', (code, reason) => { socketClose.set(ws, { code, reason: reason.toString() }) })
-    ws.on('message', (data) => { frames.push(JSON.parse(data.toString()) as BridgeFrame) })
+    ws.on('message', (data) => {
+      const text = data.toString()
+      const channel = socketChannels.get(ws)
+      const parsed = JSON.parse(text) as { t?: unknown }
+      // After hello.ok every frame arrives sealed; tests see the inner frame.
+      if (channel !== undefined && parsed.t === 'sealed') {
+        const frame = channel.open(text)
+        if (frame === undefined) throw new Error('server sent a frame that does not verify')
+        frames.push(frame)
+        return
+      }
+      frames.push(parsed as BridgeFrame)
+    })
     ws.on('error', reject)
     ws.on('open', () => {
       resolve({
@@ -101,7 +121,8 @@ function connect(url: string, origin?: string): Promise<{ ws: WebSocket; frames:
 }
 
 function send(ws: WebSocket, frame: BridgeFrame): void {
-  ws.send(JSON.stringify(frame))
+  const channel = socketChannels.get(ws)
+  ws.send(channel === undefined ? JSON.stringify(frame) : channel.seal(frame))
 }
 
 /**
@@ -115,8 +136,10 @@ async function sendHello(ws: WebSocket, token: string, caps: Record<string, unkn
   const challenge = frames.find((frame) => frame.t === 'challenge') as Extract<BridgeFrame, { t: 'challenge' }> | undefined
   const nonce = createBridgeNonce()
   if (challenge === undefined || ws.readyState !== WebSocket.OPEN) return nonce
-  const mac = token === '' ? createBridgeNonce() : await computeBridgeProof(token, 'client', challenge.nonce, nonce)
-  ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, mac, caps }))
+  const endpoint = endpointOf(ws)
+  const mac = token === '' ? createBridgeNonce() : await computeBridgeProof(token, 'client', challenge.nonce, nonce, endpoint)
+  if (token !== '') socketChannels.set(ws, BridgeFrameChannel.derive(token, 'client', challenge.nonce, nonce, endpoint))
+  ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, mac, endpoint, caps }))
   return nonce
 }
 
@@ -175,7 +198,7 @@ describe('BridgeServer', () => {
     expect(frames.find((f) => f.t === 'hello.ok')).toEqual({
       t: 'hello.ok',
       caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 },
-      mac: await computeBridgeProof(TOKEN, 'server', clientNonce, challenge.nonce),
+      mac: await computeBridgeProof(TOKEN, 'server', clientNonce, challenge.nonce, endpointOf(ws)),
     })
     ws.close()
   })
@@ -197,14 +220,14 @@ describe('BridgeServer', () => {
     await waitFor(() => first.frames.some((f) => f.t === 'challenge'))
     const firstChallenge = first.frames[0] as Extract<BridgeFrame, { t: 'challenge' }>
     const nonce = createBridgeNonce()
-    const capturedMac = await computeBridgeProof(TOKEN, 'client', firstChallenge.nonce, nonce)
+    const capturedMac = await computeBridgeProof(TOKEN, 'client', firstChallenge.nonce, nonce, endpointOf(first.ws))
     first.ws.close()
     // Replay the exact hello a valid client sent on an earlier socket.
     const replay = await connect(h.url, EXT_ORIGIN)
     await waitFor(() => replay.frames.some((f) => f.t === 'challenge'))
     const replayChallenge = replay.frames[0] as Extract<BridgeFrame, { t: 'challenge' }>
     expect(replayChallenge.nonce).not.toBe(firstChallenge.nonce)
-    replay.ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, mac: capturedMac, caps: CAPS }))
+    replay.ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, mac: capturedMac, endpoint: endpointOf(replay.ws), caps: CAPS }))
     await replay.done
     expect(socketClose.get(replay.ws)?.code).toBe(BRIDGE_CLOSE_CODES.authFailed)
   })
@@ -288,8 +311,8 @@ describe('BridgeServer', () => {
     const { ws, frames, done } = await connect(h.url)
     await waitFor(() => frames.some((f) => f.t === 'challenge'))
     const challenge = frames[0] as Extract<BridgeFrame, { t: 'challenge' }>
-    const mac = await computeBridgeProof(TOKEN, 'client', challenge.nonce, challenge.nonce)
-    ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: challenge.nonce, mac, caps: CAPS }))
+    const mac = await computeBridgeProof(TOKEN, 'client', challenge.nonce, challenge.nonce, endpointOf(ws))
+    ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: challenge.nonce, mac, endpoint: endpointOf(ws), caps: CAPS }))
     await done
     expect(socketClose.get(ws)?.code).toBe(BRIDGE_CLOSE_CODES.authFailed)
   })
@@ -840,6 +863,30 @@ describe('BridgeServer', () => {
     await expect.poll(() => h.bridge.hasConnection()).toBe(false)
   })
 
+  it('bounds unauthenticated sockets: small pre-auth messages, a pending cap, then the normal limit', async () => {
+    const h = await startBridge({ helloTimeoutMs: 10_000 })
+    harnesses.push(h)
+    // A pre-auth message larger than PRE_AUTH_MAX_PAYLOAD is refused by the receiver.
+    const big = await connect(h.url)
+    big.ws.send('x'.repeat(PRE_AUTH_MAX_PAYLOAD + 1))
+    await big.done
+    expect(socketClose.get(big.ws)?.code).toBe(1009)
+    // At most MAX_PENDING_SOCKETS may wait in the handshake at once.
+    const waiting = await Promise.all(Array.from({ length: MAX_PENDING_SOCKETS }, () => connect(h.url)))
+    const extra = await connect(h.url)
+    await extra.done
+    expect(socketClose.get(extra.ws)?.code).toBe(BRIDGE_CLOSE_CODES.busy)
+    // An authenticated socket leaves the pending pool and regains the server limit.
+    await sendHello(waiting[0]!.ws, TOKEN, CAPS)
+    await waitFor(() => waiting[0]!.frames.some((f) => f.t === 'hello.ok'))
+    send(waiting[0]!.ws, { t: 'rpc', id: 'big', method: 'session.list', payload: { pad: 'x'.repeat(PRE_AUTH_MAX_PAYLOAD * 2) } })
+    await waitFor(() => waiting[0]!.frames.some((f) => f.t === 'rpc.result' && f.id === 'big'))
+    const next = await connect(h.url)
+    await waitFor(() => next.frames.some((f) => f.t === 'challenge'))
+    expect(next.ws.readyState).toBe(WebSocket.OPEN)
+    for (const socket of [...waiting, next]) socket.ws.close()
+  })
+
   it('closes sockets on unparseable frames and ignores client-only frames when ready', async () => {
     const h = await startBridge()
     harnesses.push(h)
@@ -848,13 +895,14 @@ describe('BridgeServer', () => {
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     // Client-only shapes after ready are ignored (no error frame, no close).
     send(ws, { t: 'pong' })
-    await sendHello(ws, TOKEN, CAPS)
+    send(ws, { t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: createBridgeNonce(), mac: createBridgeNonce(), endpoint: endpointOf(ws), caps: CAPS })
     await new Promise((resolve) => { setTimeout(resolve, 50) })
     expect(ws.readyState).toBe(WebSocket.OPEN)
-    // Garbage is a protocol violation and closes the socket.
+    // Garbage (anything not sealed by the channel) is a violation and closes the socket.
     ws.send('not-json')
     await done
     expect(ws.readyState).toBe(WebSocket.CLOSED)
+    expect(socketClose.get(ws)?.code).toBe(BRIDGE_CLOSE_CODES.authFailed)
   })
 
   it('relays business failures inside the server-response and isolates thrown adapter errors', async () => {

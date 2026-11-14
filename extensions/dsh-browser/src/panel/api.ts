@@ -7,7 +7,7 @@
 
 import type { BridgeCaps, RespondResult } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import type { BridgeState } from '../background/bridge.ts'
+import type { BridgeFailure, BridgeState } from '../background/bridge.ts'
 import type { Settings } from '../background/index.ts'
 import type { TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
@@ -74,6 +74,8 @@ interface StatusMessage {
   caps: BridgeCaps | null
   discovery?: DiscoveryStatus
   address?: string
+  /** Why the bridge refused the last attempt (token, version, extension ID). */
+  failure?: BridgeFailure
 }
 
 interface DiscoveryProgressMessage {
@@ -182,7 +184,7 @@ function panelRpcError(failure: RpcFailurePayload | undefined, fallbackMessage: 
 export interface PanelApi {
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>
   respond(rpcId: string, result: RespondResult): Promise<unknown>
-  onStatus(callback: (state: BridgeState, caps: BridgeCaps | null, discovery: DiscoveryStatus, address?: string) => void): () => void
+  onStatus(callback: (state: BridgeState, caps: BridgeCaps | null, discovery: DiscoveryStatus, address?: string, failure?: BridgeFailure) => void): () => void
   onEvent(callback: (frame: ServerFrame) => void): () => void
   onApprovalRequest(callback: (request: ApprovalRequest) => void): () => void
   onApprovalResolved(callback: (id: string) => void): () => void
@@ -237,7 +239,7 @@ export function connectPanel(): PanelApi {
     resolve: () => void
     reject: (error: Error) => void
   }>()
-  const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null, discovery: DiscoveryStatus, address?: string) => void>()
+  const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null, discovery: DiscoveryStatus, address?: string, failure?: BridgeFailure) => void>()
   const discoveryProgressListeners = new Set<(progress: DiscoveryProgress) => void>()
   const pendingScans = new Map<string, { resolve: (instances: BridgeInstance[]) => void; reject: (error: Error) => void }>()
   const eventListeners = new Set<(frame: ServerFrame) => void>()
@@ -299,6 +301,7 @@ export function connectPanel(): PanelApi {
             msg.caps,
             msg.discovery ?? 'idle',
             typeof msg.address === 'string' ? msg.address : undefined,
+            typeof msg.failure === 'string' ? msg.failure : undefined,
           )
         }
         break

@@ -27,7 +27,7 @@ const selection: PageSelection = {
 
 describe('attaching a page selection in the composer', () => {
   let root: Root
-  let onStatus: ((state: BridgeState, caps: null) => void) | undefined
+  let onStatus: ((state: BridgeState, caps: null, discovery?: 'idle', address?: string, failure?: string) => void) | undefined
   let onResumeHint: ((sessionId: string | null) => void) | undefined
   let onSelection: ((selection: PageSelection | null) => void) | undefined
   let rpc: Mock<(method: string, payload?: unknown) => Promise<unknown>>
@@ -90,6 +90,16 @@ describe('attaching a page selection in the composer', () => {
     })
     await vi.waitFor(() => { expect(rpc).toHaveBeenCalledWith('session.create', {}) })
   }
+
+  it('shows a specific bridge refusal instead of a silent reconnect', async () => {
+    await act(async () => { root.render(createElement(App)) })
+    await act(async () => { onStatus?.('reconnecting', null, 'idle', undefined, 'token-mismatch') })
+    expect(document.body.textContent).toContain('Token mismatch')
+    await act(async () => { onStatus?.('reconnecting', null, 'idle', undefined, 'version-mismatch') })
+    expect(document.body.textContent).toContain('update the dsh plugin and the extension together')
+    await act(async () => { onStatus?.('connected', null) })
+    expect(document.body.textContent).not.toContain('Version mismatch')
+  })
 
   it('shows the captured quote and sends it with the typed message', async () => {
     await startPanel()
