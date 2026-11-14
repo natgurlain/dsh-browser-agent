@@ -384,6 +384,8 @@ describe('relay settings and credentials', () => {
   it('spends a stored relay key in model discovery only against the address it was saved for', async () => {
     const { call, inner } = storedRelay()
     expect(await call('llm.discoverModels', discover({ baseURL: 'https://relay.example/v1/' }))).toMatchObject({ ok: true })
+    // The panel's listing fallbacks change the path, not the server.
+    expect(await call('llm.discoverModels', discover({ baseURL: 'https://relay.example/v1/v1' }))).toMatchObject({ ok: true })
     expect(await call('llm.discoverModels', discover({ baseURL: 'https://attacker.example/v1' }))).toMatchObject({ ok: false, error: { code: 'forbidden' } })
     // A draft key may go anywhere: it is the key the user just typed.
     expect(await call('llm.discoverModels', discover({ baseURL: 'https://attacker.example/v1', apiKey: 'sk-draft' }))).toMatchObject({ ok: true })
@@ -391,7 +393,7 @@ describe('relay settings and credentials', () => {
     expect(await call('llm.discoverModels', discover({ provider: 'relay-new', baseURL: 'https://x.example' }))).toMatchObject({ ok: false })
     // No other credential can be named.
     expect(await call('llm.discoverModels', discover({ apiKeyEnv: 'DEEPSEEK_API_KEY', baseURL: 'https://relay.example/v1' }))).toMatchObject({ ok: false })
-    expect(forwarded(inner, 'llm.discoverModels')).toHaveLength(2)
+    expect(forwarded(inner, 'llm.discoverModels')).toHaveLength(3)
   })
 
   it('clears a relay key when its address changes without the key being re-entered, and blocks making it the default', async () => {
@@ -409,6 +411,8 @@ describe('relay settings and credentials', () => {
 
   it('keeps the stored key when the route is re-saved at the same address or with a fresh key', async () => {
     const { call, inner } = storedRelay()
+    // A new route without a key has nothing stored to clear.
+    expect(await call('settings.mutate', { ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'relay-b'], value: relayRoute('relay-b') }] })).toMatchObject({ ok: true })
     expect(await call('settings.mutate', { ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'relay-a'], value: { ...relayRoute('relay-a'), displayName: 'Renamed' } }] })).toMatchObject({ ok: true })
     expect(await call('credentials.set', { ref: 'DSH_RELAY_A_TOKEN', value: 'sk-new' })).toMatchObject({ ok: true })
     expect(await call('settings.mutate', { ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'relay-a'], value: { ...relayRoute('relay-a'), baseURL: 'https://new.example' } }] })).toMatchObject({ ok: true })

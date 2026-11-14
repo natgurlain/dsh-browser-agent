@@ -386,6 +386,8 @@ try {
   // DSH 0.2 producer-owned kinds use `browser-context` (not plugin:<package>).
   assert.ok(injected, 'the live inbox must retain the producer-owned browser snapshot')
   assert.ok(injected.content.some(block => block.type === 'text' && block.text.includes('runtime smoke snapshot')))
+  // A snapshot refused while the session ran full access never reached the Agent.
+  assert.equal(JSON.stringify(history.events).includes('Page: refused'), false, 'a refused injection must not land')
   const migrated = await rpc('session.history', { sessionId: legacySessionId })
   assert.ok(migrated.events.some(({ event }) => event.type === 'system/message'), 'V2 migration must insert the V3 system head')
   assert.equal(migrated.events.find(({ event }) => event.type === 'user/message')?.event.data.content[0].text, 'Saved browser conversation')

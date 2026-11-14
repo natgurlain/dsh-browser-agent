@@ -195,9 +195,11 @@ export interface BridgeServerDeps {
   localEndpointOverride?: BridgeEndpoint
   /**
    * Loopback ports that forward to this bridge (a Docker `-p` mapping, an SSH
-   * tunnel, a test proxy). A loopback client that dialed one of them passes
-   * the endpoint check. Opt-in: any local process that binds such a port
-   * while it is free can relay the handshake through it.
+   * tunnel, a test proxy). A client that dialed one of them on a loopback
+   * address passes the endpoint check whatever address the forward delivers
+   * to (inside a container that is the container's own address). Opt-in: any
+   * local process that binds such a port while it is free can relay the
+   * handshake through it.
    */
   forwardedPorts?: readonly number[]
   /** Seconds a fresh socket may present `hello`; defaults to HELLO_TIMEOUT_MS. */
@@ -493,7 +495,7 @@ export class BridgeServer {
   private endpointAccepted(claimed: BridgeEndpoint, local: BridgeEndpoint): boolean {
     if (bridgeEndpointMatches(claimed, local)) return true
     const forwarded = this.deps.forwardedPorts ?? []
-    return forwarded.includes(claimed.port) && isLoopbackHost(claimed.host) && isLoopbackHost(local.host)
+    return forwarded.includes(claimed.port) && isLoopbackHost(claimed.host)
   }
 
   /** Promote an authenticated socket to the single active slot. */

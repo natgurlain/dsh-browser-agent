@@ -318,7 +318,7 @@ const EN: PanelCopy = {
   },
   statusNotFound: 'No service found',
   bridgeFailure: {
-    'token-mismatch': 'Token mismatch: check the bridge token in Settings',
+    'token-mismatch': 'Token mismatch or untrusted bridge: check the bridge token in Settings',
     'version-mismatch': 'Version mismatch: update the dsh plugin and the extension together',
     'origin-rejected': 'Unrecognized extension ID: add it to allowedChromeExtensionIds',
     busy: 'Bridge busy, retrying…',
@@ -662,7 +662,7 @@ const ZH: PanelCopy = {
   },
   statusNotFound: '未找到服务',
   bridgeFailure: {
-    'token-mismatch': '令牌不匹配：请在设置中检查桥接令牌',
+    'token-mismatch': '令牌不匹配或桥接不可信：请在设置中检查桥接令牌',
     'version-mismatch': '版本不匹配：请同时更新 dsh 插件和扩展',
     'origin-rejected': '扩展 ID 未被允许：请将其加入 allowedChromeExtensionIds',
     busy: '桥接繁忙，正在重试…',

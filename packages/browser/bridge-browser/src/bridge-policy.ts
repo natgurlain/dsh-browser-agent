@@ -189,8 +189,18 @@ function normalizeDirectory(path: string): string {
   return path.replace(/[\\/]+$/u, '')
 }
 
+/**
+ * Where a relay key would be sent: the origin (scheme, host, port) of a
+ * baseURL. Paths may differ (`/v1`, listing fallbacks) without moving the key
+ * to another server.
+ */
 function normalizeBaseUrl(value: unknown): string | undefined {
-  return typeof value === 'string' ? value.trim().replace(/\/+$/u, '') : undefined
+  if (typeof value !== 'string') return undefined
+  try {
+    return new URL(value.trim()).origin
+  } catch {
+    return value.trim().replace(/\/+$/u, '')
+  }
 }
 
 /**
@@ -345,7 +355,8 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
       const key = op.path[1]!
       if (freshCredentials.has(relayTokenRef(key))) continue
       const stored = await storedBaseUrl(key, signal)
-      if (stored !== normalizeBaseUrl(op.value.baseURL)) keys.push(key)
+      // A brand-new route has no stored key to protect.
+      if (stored !== undefined && stored !== normalizeBaseUrl(op.value.baseURL)) keys.push(key)
     }
     return keys
   }

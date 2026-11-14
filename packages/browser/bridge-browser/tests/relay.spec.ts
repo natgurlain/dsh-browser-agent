@@ -30,7 +30,10 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
 })
 
-async function realBridge(forwardedPorts: number[] = []): Promise<{ bridge: BridgeServer; port: number; calls: string[] }> {
+async function realBridge(
+  forwardedPorts: number[] = [],
+  localEndpointOverride?: { host: string; port: number },
+): Promise<{ bridge: BridgeServer; port: number; calls: string[] }> {
   const calls: string[] = []
   const api: BrowserHostApi = {
     call: vi.fn(async (call) => {
@@ -42,6 +45,7 @@ async function realBridge(forwardedPorts: number[] = []): Promise<{ bridge: Brid
   }
   const bridge = new BridgeServer({
     token: TOKEN, api, toolTimeoutMs: 1_000, caps: CAPS, injectBrowserSnapshot() {}, async purgeSession() {}, forwardedPorts,
+    ...(localEndpointOverride === undefined ? {} : { localEndpointOverride }),
   })
   const http: Server = createServer()
   http.on('upgrade', (req, socket, head) => { bridge.handleUpgrade(req, socket, head) })
@@ -132,6 +136,28 @@ describe('handshake relay', () => {
       ws.terminate()
     }
     expect(bridge).toBeDefined()
+  })
+
+  it('accepts a configured forward inside a container, where the socket address is not loopback', async () => {
+    const forward = 3080
+    const { port } = await realBridge([forward], { host: '172.17.0.2', port: 3080 })
+    const ws = new WebSocket(`ws://127.0.0.1:${String(port)}/ext/bridge`)
+    cleanups.push(() => { ws.terminate() })
+    const accepted = new Promise<boolean>((resolve) => {
+      ws.on('close', () => { resolve(false) })
+      ws.on('message', (data: Buffer) => {
+        const frame = parseBridgeFrame(data.toString())
+        if (frame?.t === 'hello.ok') resolve(true)
+        if (frame?.t !== 'challenge') return
+        const nonce = createBridgeNonce()
+        const endpoint = { host: '127.0.0.1', port: forward }
+        ws.send(JSON.stringify({
+          t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, endpoint, caps: CAPS,
+          mac: bridgeProof(TOKEN, 'client', frame.nonce, nonce, endpoint),
+        }))
+      })
+    })
+    expect(await accepted).toBe(true)
   })
 
   it('refuses a client that names a different endpoint than the socket it reached', async () => {
