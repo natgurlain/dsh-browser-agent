@@ -2916,6 +2916,7 @@ textarea:focus-visible {
   font-size: calc(11.5px * var(--ui-scale));
   font-weight: 650;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .approval-origins code {

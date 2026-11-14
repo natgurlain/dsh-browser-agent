@@ -661,7 +661,6 @@ function ApprovalDialog({
 
   const devTools = request.devTools === true
   const [trustEval, setTrustEval] = useState(false)
-  useEffect(() => { setTrustEval(false) }, [request.id])
   return (
     <div className="approval-backdrop">
       <section className="approval-dialog" role="alertdialog" aria-modal="true" aria-labelledby="approval-title">
@@ -2633,7 +2632,7 @@ export function App(): React.JSX.Element {
   const slashActiveIndex = slashRows.length === 0 ? -1 : Math.min(slashIndex, slashRows.length - 1)
   const approvalDialog = !approvalReadyForSession(queuedApproval, sessionRef.current, sessionChanging)
     ? null
-    : <ApprovalDialog request={queuedApproval!} onDecision={decideApproval} copy={copy} />
+    : <ApprovalDialog key={queuedApproval!.id} request={queuedApproval!} onDecision={decideApproval} copy={copy} />
   const permissionDialog = permissionConfirm === null
     ? null
     : (

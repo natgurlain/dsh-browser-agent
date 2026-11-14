@@ -138,8 +138,16 @@ function summarizeDevToolsAction(call: ToolCall, locale: UiLocale, optOuts: read
       return localized(locale, `Inspect page element (${detail})`, `查看页面元素（${detail}）`)
     case 'browser_devtools_set_element_style':
       return localized(locale, `Modify live CSS on page element (${detail})`, `修改页面元素 CSS（${detail}）`)
-    case 'browser_devtools_set_element_attribute':
-      return localized(locale, `Change page element attribute (${detail})`, `修改页面元素属性（${detail}）`)
+    case 'browser_devtools_set_element_attribute': {
+      // Name and full value: an on* handler or javascript: URL is effectively code.
+      const name = JSON.stringify(typeof call.args.name === 'string' ? call.args.name : '')
+      const change = call.args.remove === true
+        ? localized(locale, `remove ${name}`, `删除 ${name}`)
+        : typeof call.args.value === 'string'
+          ? `${name} = ${JSON.stringify(call.args.value)}`
+          : localized(locale, `read ${name}`, `读取 ${name}`)
+      return localized(locale, `Change page element attribute (${detail}): ${change}`, `修改页面元素属性（${detail}）：${change}`)
+    }
     case 'browser_console_eval': {
       const length = typeof call.args.expression === 'string' ? call.args.expression.length : 0
       const frame = typeof call.args.frame === 'number' && call.args.frame !== 0 ? call.args.frame : undefined
