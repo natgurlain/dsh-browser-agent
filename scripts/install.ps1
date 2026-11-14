@@ -4,8 +4,8 @@ dsh-browser 一键安装（Windows）：支持远程托管安装和本地 checko
 dsh-browser one-command install (Windows): supports both managed remote installs and local checkout installs.
 
 .DESCRIPTION
-之后无需任何配置：扩展自动探测本机 dsh 并连接（回环免 token）。
-No further configuration is required: the extension discovers local dsh automatically and loopback connections require no token.
+之后无需任何配置：扩展自动探测本机 dsh，并用安装时放入扩展目录的桥 token 完成双向认证。
+No further configuration is required: the extension discovers local dsh automatically and authenticates with the bridge token the installer places in its directory.
 
 这是 scripts/install.sh 的 Windows 对应版本，两者共享同一套托管目录与 install-info.json 约定。
 This is the Windows counterpart of scripts/install.sh; both share one managed-root and install-info.json contract.
@@ -316,6 +316,32 @@ function Invoke-Quiet {
   }
 }
 
+function Install-BridgeToken {
+  <#
+  Bridge token provisioning (zero-config Chrome), kept separate from the rest of the
+  installer. The helper creates ~/.dsh/ext-bridge-token in the plugin's format when it
+  is missing and copies it into the installed extension, which reads it through
+  chrome.runtime.getURL. Windows ignores POSIX modes, so both files are then limited
+  to the current user with an explicit ACL. Must run after the dist sync.
+  #>
+  param([Parameter(Mandatory = $true)][string]$ExtensionDir)
+
+  & node (Join-Path $Root 'scripts\provision-bridge-token.mjs') $DshHomeDir $ExtensionDir
+  if ($LASTEXITCODE -ne 0) { Stop-Install '无法写入浏览器桥 token。' 'Could not provision the browser bridge token.' }
+  foreach ($file in @((Join-Path $DshHomeDir 'ext-bridge-token'), (Join-Path $ExtensionDir 'bridge-token'))) {
+    try {
+      $acl = New-Object System.Security.AccessControl.FileSecurity
+      $acl.SetAccessRuleProtection($true, $false)
+      $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+      $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($user, 'FullControl', 'Allow')
+      $acl.AddAccessRule($rule)
+      Set-Acl -LiteralPath $file -AclObject $acl
+    } catch {
+      Write-Pair "警告：无法收紧 $file 的访问权限。" "Warning: could not restrict access to $file."
+    }
+  }
+}
+
 function Install-RemoteWorkspace {
   Assert-Command 'Expand-Archive' "当前 PowerShell 缺少 Expand-Archive；请升级到 PowerShell 5.1 或更高版本。" "This PowerShell has no Expand-Archive; upgrade to PowerShell 5.1 or newer."
 
@@ -463,6 +489,7 @@ $InstallMode = if (Test-Path -LiteralPath (Join-Path $Root '.managed-by-install-
 & node (Join-Path $Root 'scripts\write-install-info.mjs') `
   (Join-Path $DistDir 'install-info.json') $InstallMode $Root $DshHomeDir
 if ($LASTEXITCODE -ne 0) { Stop-Install '写入安装信息失败。' 'Writing install metadata failed.' }
+Install-BridgeToken -ExtensionDir $DistDir
 
 $ClipboardReady = Set-ClipboardText $DistDir
 $ChromeOpened = Start-ExtensionsPage (Get-BrowserPath)
@@ -509,7 +536,7 @@ if ($IsUpdate) {
 Write-Host ''
 Write-Pair "加载完成后：" "After loading the extension:"
 Write-Pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "Click the DeepSeek whale icon in the toolbar to open the side panel"
-Write-Pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "The extension discovers local dsh automatically; no address or token is required"
+Write-Pair "• 扩展会自动发现本机 dsh，无需填写地址或 token（已放入扩展目录）" "The extension discovers local dsh automatically; no address or token is required (it was placed in the extension directory)"
 $QuotedRoot = "'" + $Root.Replace("'", "''") + "'"
 Write-Host ("• 启动固定版本：cd {0}; pnpm start" -f $QuotedRoot)
 Write-Host ("   Start the pinned version: cd {0}; pnpm start" -f $QuotedRoot)

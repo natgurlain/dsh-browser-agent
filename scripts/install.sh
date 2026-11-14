@@ -1,8 +1,8 @@
 #!/bin/bash
 # dsh-browser 一键安装：支持远程托管安装和本地 checkout 安装。
 # dsh-browser one-command install: supports both managed remote installs and local checkout installs.
-# 之后无需任何配置：扩展自动探测本机 dsh 并连接（回环免 token）。
-# No further configuration is required: the extension discovers local dsh automatically and loopback connections require no token.
+# 之后无需任何配置：扩展自动探测本机 dsh，并用安装时放入扩展目录的桥 token 完成双向认证。
+# No further configuration is required: the extension discovers local dsh automatically and authenticates with the bridge token the installer places in its directory.
 set -euo pipefail
 
 REPOSITORY="natgurlain/dsh-browser-agent"
@@ -303,6 +303,20 @@ PLUGIN="$ROOT/packages/browser/bridge-browser"
 WEB_PROFILE_MANIFEST="$DSH_HOME_DIR/profiles/web/package.json"
 LEGACY_PLUGIN="@deepseek-ai/dsh-bridge-browser"
 
+# Bridge token provisioning (zero-config Chrome). Kept in its own function so other
+# installer changes stay independent. The plugin creates ~/.dsh/ext-bridge-token on
+# first start; the installer runs earlier, so the helper creates it in the plugin's
+# format when absent and copies it (0600) into the installed extension, which reads
+# it through chrome.runtime.getURL. Must run after the dist sync, whose --delete-after
+# would otherwise remove the copy. A token pinned in the plugin config is not copied:
+# paste that one into the extension settings instead.
+provision_bridge_token() {
+  local extension_dir="$1"
+
+  node "$ROOT/scripts/provision-bridge-token.mjs" "$DSH_HOME_DIR" "$extension_dir" ||
+    fail_pair "无法写入浏览器桥 token。" "Could not provision the browser bridge token."
+}
+
 profile_has_dependency() {
   local manifest="$1"
   local package_name="$2"
@@ -350,6 +364,7 @@ else
 fi
 node "$ROOT/scripts/write-install-info.mjs" \
   "$DIST_DIR/install-info.json" "$INSTALL_MODE" "$ROOT" "$DSH_HOME_DIR"
+provision_bridge_token "$DIST_DIR"
 if copy_to_clipboard "$DIST_DIR"; then
   CLIPBOARD_READY=1
 else
@@ -409,7 +424,7 @@ fi
 printf '\n'
 print_pair "加载完成后：" "After loading the extension:"
 print_pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "Click the DeepSeek whale icon in the toolbar to open the side panel"
-print_pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "The extension discovers local dsh automatically; no address or token is required"
+print_pair "• 扩展会自动发现本机 dsh，无需填写地址或 token（已放入扩展目录）" "The extension discovers local dsh automatically; no address or token is required (it was placed in the extension directory)"
 printf '• 启动固定版本：cd %q && pnpm start\n' "$ROOT"
 printf '   Start the pinned version: cd %q && pnpm start\n' "$ROOT"
 print_pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.2.2-rc.2 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.2-rc.2 web"

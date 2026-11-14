@@ -115,7 +115,7 @@ pnpm install
 pnpm --filter dsh-browser-extension run build:firefox
 ```
 
-The bridge address is still auto-discovered. Firefox's `moz-extension://` UUID does not authenticate an add-on, so copy the bearer token from `~/.dsh/ext-bridge-token` into the extension settings (the dsh startup log reports that file's path). Signed distribution can package the same `dist-firefox/` output.
+The bridge address is still auto-discovered. Firefox add-ons are not installed by the installer, so copy the bridge token from `~/.dsh/ext-bridge-token` into the extension settings (the dsh startup log reports that file's path). Signed distribution can package the same `dist-firefox/` output.
 
 ### Start and use
 
@@ -131,7 +131,7 @@ From a source checkout, run `pnpm start` in the repository root. The exact suppo
 npx @deepseek-ai/dsh@0.2.2-rc.2 web
 ```
 
-Local Chrome use requires no configuration; Firefox requires the local bridge token described above. Open a page, click the DeepSeek whale icon, and wait for **Connected**. Existing HTTP(S) tabs are instrumented on the first action. On browser-protected pages and extension stores, the model can read tab metadata and use browser-level HTTP(S) navigation, back, forward, and reload, but it cannot inspect or operate the protected page DOM.
+Local Chrome use requires no configuration: the installer places the bridge token in the installed extension directory, and the plugin keeps that copy current. Firefox requires the local bridge token described above. Open a page, click the DeepSeek whale icon, and wait for **Connected**. Existing HTTP(S) tabs are instrumented on the first action. On browser-protected pages and extension stores, the model can read tab metadata and use browser-level HTTP(S) navigation, back, forward, and reload, but it cannot inspect or operate the protected page DOM.
 
 ## Troubleshooting
 
@@ -141,6 +141,14 @@ Local Chrome use requires no configuration; Firefox requires the local bridge to
 - Open **Settings → Detect** and select your DSH instance.
 - In Firefox, enter the token from `~/.dsh/ext-bridge-token` in Settings.
 - For a remote DSH instance, enter its server address and bridge token in Settings.
+- If the plugin config pins its own `token`, paste that token into the extension settings; the installed copy only tracks `~/.dsh/ext-bridge-token`.
+- After updating, reload the extension and restart DSH together: the bridge handshake is versioned, and an older extension or plugin is refused with a "protocol version mismatch" close.
+
+### Bridge security
+
+- Every client authenticates, loopback included, with a mutual HMAC challenge-response over the bridge token; the token itself never crosses the wire, and the extension refuses a bridge that cannot prove the token back.
+- Chrome connections are accepted only from the extension ID fixed by the manifest key (`klmdgljhcjbbpjcplbanjeclilghnaoh`). Set `allowedChromeExtensionIds` in the bridge-browser plugin config for a differently keyed build or a Web Store listing; build a store package with `pnpm --filter dsh-browser-extension run build:store`, which omits the `key` the store rejects.
+- The bridge forwards only the Host methods the extension uses, only for sessions it created or that its panel can list, and refuses to switch a session to a full-access permission preset (`danger-full-access`, `auto`). Set `allowDangerFullAccess: true` in the plugin config to allow that from the browser.
 
 ## Development
 
