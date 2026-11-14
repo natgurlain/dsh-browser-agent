@@ -51,6 +51,7 @@ import {
   BridgeFrameChannel,
   bridgeEndpointMatches,
   bridgeProof,
+  canonicalBridgeHost,
   createBridgeNonce,
   helloProtocolVersion,
   PING_INTERVAL_MS,
@@ -192,6 +193,13 @@ export interface BridgeServerDeps {
    * (production reads the accepted socket's local address and port).
    */
   localEndpointOverride?: BridgeEndpoint
+  /**
+   * Loopback ports that forward to this bridge (a Docker `-p` mapping, an SSH
+   * tunnel, a test proxy). A loopback client that dialed one of them passes
+   * the endpoint check. Opt-in: any local process that binds such a port
+   * while it is free can relay the handshake through it.
+   */
+  forwardedPorts?: readonly number[]
   /** Seconds a fresh socket may present `hello`; defaults to HELLO_TIMEOUT_MS. */
   helloTimeoutMs?: number
   /** Server ping cadence; defaults to PING_INTERVAL_MS. */
@@ -443,7 +451,7 @@ export class BridgeServer {
           ws.close(1008, 'hello first')
           return
         }
-        if (local === undefined || !bridgeEndpointMatches(frame.endpoint, local)) {
+        if (local === undefined || !this.endpointAccepted(frame.endpoint, local)) {
           // The client dialed somewhere else: a relay is forwarding this
           // handshake (or the bridge sits behind a port forward, unsupported).
           ws.close(BRIDGE_CLOSE_CODES.authFailed, 'authentication failed: endpoint mismatch')
@@ -479,6 +487,13 @@ export class BridgeServer {
     ws.once('close', onClose)
     ws.once('error', onClose)
     sendHandshakeFrame(ws, { t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: serverNonce })
+  }
+
+  /** The dialed endpoint is this socket, or a configured loopback forward to it. */
+  private endpointAccepted(claimed: BridgeEndpoint, local: BridgeEndpoint): boolean {
+    if (bridgeEndpointMatches(claimed, local)) return true
+    const forwarded = this.deps.forwardedPorts ?? []
+    return forwarded.includes(claimed.port) && isLoopbackHost(claimed.host) && isLoopbackHost(local.host)
   }
 
   /** Promote an authenticated socket to the single active slot. */
@@ -706,6 +721,11 @@ export class BridgeServer {
       pending.reject(new BridgeToolError('bridge-closed', 'the extension connection was replaced'))
     }
   }
+}
+
+function isLoopbackHost(host: string): boolean {
+  const canonical = canonicalBridgeHost(host)
+  return canonical === '::1' || (canonical !== undefined && /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/u.test(canonical))
 }
 
 /** The address and port an accepted socket is bound to. */

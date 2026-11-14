@@ -132,6 +132,13 @@ export interface Config {
    * `workspace-write` are recognized automatically).
    */
   safePermissionPresets?: string[]
+  /**
+   * Loopback ports that forward to this host's port (Docker `-p`, SSH
+   * tunnels). The handshake binds the port the extension dialed, so a bridge
+   * reached through a forward on a different port is refused unless that port
+   * is listed here. List only ports you control.
+   */
+  forwardedPorts?: number[]
 }
 
 /** The shape after schemastery applies its defaults to every field. */
@@ -150,6 +157,7 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   allowedChromeExtensionIds: z.array(z.string().pattern(/^[a-p]{32}$/)).default([PINNED_CHROME_EXTENSION_ID]),
   allowDangerFullAccess: z.boolean().default(false),
   safePermissionPresets: z.array(z.string()).default([]),
+  forwardedPorts: z.array(z.number().step(1).min(1).max(65535)).default([]),
 })
 
 /**
@@ -309,6 +317,7 @@ function mountBridge(
     api: fenced,
     sessionScope: fenced,
     allowedChromeExtensionIds: resolved.allowedChromeExtensionIds,
+    forwardedPorts: resolved.forwardedPorts,
     toolTimeoutMs: resolved.toolTimeoutMs,
     caps: {
       textOnly: true,

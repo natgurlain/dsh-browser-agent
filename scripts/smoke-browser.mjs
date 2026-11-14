@@ -196,10 +196,26 @@ const pendingPort = pendingServer.address().port
 
 try {
   await command(['plugin', '--profile', 'web', 'add', '-w', `@natgurlain/dsh-bridge-browser@link:${bridge}`])
+  // A TCP forward in front of the bridge lets the smoke take it offline and
+  // back. The handshake binds the port the extension dialed, so the bridge is
+  // told that this loopback port forwards to it (`forwardedPorts`).
+  let hostPort
+  bridgeProxy = createTcpServer(client => {
+    if (!bridgeOnline || hostPort === undefined) { client.destroy(); return }
+    const upstream = createConnection({ host: '127.0.0.1', port: hostPort })
+    bridgeSockets.add(client)
+    bridgeSockets.add(upstream)
+    client.on('close', () => { bridgeSockets.delete(client); upstream.destroy() })
+    upstream.on('close', () => { bridgeSockets.delete(upstream); client.destroy() })
+    client.pipe(upstream).pipe(client)
+  })
+  bridgeProxy.listen(0, '127.0.0.1')
+  await once(bridgeProxy, 'listening')
   const patch = join(directory, 'host.patch.yml')
   await writeFile(patch, [
     '- id: bridge-browser', '  config:', `    token: ${JSON.stringify(token)}`,
     `    sessionWorkspacePath: ${JSON.stringify(workspace)}`,
+    `    forwardedPorts: [${String(bridgeProxy.address().port)}]`,
     '- id: tool-executor-native', '  disabled: false',
     '- id: tool-executor-ptc', '  disabled: true',
     '- id: agent-default-model', '  config:',
@@ -228,18 +244,7 @@ try {
   const configResponse = await fetch(`${base}/ext/bridge-config`)
   assert.equal(configResponse.status, 200)
   const config = await configResponse.json()
-  const hostPort = Number(new URL(config.wsUrl).port)
-  bridgeProxy = createTcpServer(client => {
-    if (!bridgeOnline) { client.destroy(); return }
-    const upstream = createConnection({ host: '127.0.0.1', port: hostPort })
-    bridgeSockets.add(client)
-    bridgeSockets.add(upstream)
-    client.on('close', () => { bridgeSockets.delete(client); upstream.destroy() })
-    upstream.on('close', () => { bridgeSockets.delete(upstream); client.destroy() })
-    client.pipe(upstream).pipe(client)
-  })
-  bridgeProxy.listen(0, '127.0.0.1')
-  await once(bridgeProxy, 'listening')
+  hostPort = Number(new URL(config.wsUrl).port)
   config.wsUrl = `ws://127.0.0.1:${bridgeProxy.address().port}/ext/bridge`
   const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' }
   const hostRpc = async (namespace, method, request) => {

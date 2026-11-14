@@ -85,6 +85,7 @@ describe('config', () => {
       allowedChromeExtensionIds: [PINNED_CHROME_EXTENSION_ID],
       allowDangerFullAccess: false,
       safePermissionPresets: [],
+      forwardedPorts: [],
     })
   })
 
@@ -117,6 +118,7 @@ describe('config', () => {
       allowedChromeExtensionIds: [PINNED_CHROME_EXTENSION_ID],
       allowDangerFullAccess: false,
       safePermissionPresets: [],
+      forwardedPorts: [],
     })
   })
 

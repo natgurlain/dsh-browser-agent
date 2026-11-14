@@ -30,7 +30,7 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
 })
 
-async function realBridge(): Promise<{ bridge: BridgeServer; port: number; calls: string[] }> {
+async function realBridge(forwardedPorts: number[] = []): Promise<{ bridge: BridgeServer; port: number; calls: string[] }> {
   const calls: string[] = []
   const api: BrowserHostApi = {
     call: vi.fn(async (call) => {
@@ -41,7 +41,7 @@ async function realBridge(): Promise<{ bridge: BridgeServer; port: number; calls
     respond: async () => ({ accepted: false }),
   }
   const bridge = new BridgeServer({
-    token: TOKEN, api, toolTimeoutMs: 1_000, caps: CAPS, injectBrowserSnapshot() {}, async purgeSession() {},
+    token: TOKEN, api, toolTimeoutMs: 1_000, caps: CAPS, injectBrowserSnapshot() {}, async purgeSession() {}, forwardedPorts,
   })
   const http: Server = createServer()
   http.on('upgrade', (req, socket, head) => { bridge.handleUpgrade(req, socket, head) })
@@ -103,6 +103,35 @@ describe('handshake relay', () => {
     expect(bridge.hasConnection()).toBe(false)
     await vi.waitFor(() => { expect(upstreamClose).toBe(BRIDGE_CLOSE_CODES.authFailed) })
     expect(calls).toEqual([])
+  })
+
+  it('accepts a forward only on a loopback port the operator configured', async () => {
+    const forward = 45_999
+    const { bridge, port } = await realBridge([forward])
+    for (const [endpoint, accepted] of [
+      [{ host: '127.0.0.1', port: forward }, true],
+      [{ host: '127.0.0.1', port: forward + 1 }, false],
+      [{ host: 'box.lan', port: forward }, false],
+    ] as const) {
+      const ws = new WebSocket(`ws://127.0.0.1:${String(port)}/ext/bridge`)
+      cleanups.push(() => { ws.terminate() })
+      const outcome = new Promise<string>((resolve) => {
+        ws.on('close', (code) => { resolve(`closed ${String(code)}`) })
+        ws.on('message', (data: Buffer) => {
+          const frame = parseBridgeFrame(data.toString())
+          if (frame?.t === 'hello.ok') resolve('accepted')
+          if (frame?.t !== 'challenge') return
+          const nonce = createBridgeNonce()
+          ws.send(JSON.stringify({
+            t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, endpoint, caps: CAPS,
+            mac: bridgeProof(TOKEN, 'client', frame.nonce, nonce, endpoint),
+          }))
+        })
+      })
+      expect(await outcome, JSON.stringify(endpoint)).toBe(accepted ? 'accepted' : `closed ${String(BRIDGE_CLOSE_CODES.authFailed)}`)
+      ws.terminate()
+    }
+    expect(bridge).toBeDefined()
   })
 
   it('refuses a client that names a different endpoint than the socket it reached', async () => {
