@@ -126,6 +126,12 @@ export interface Settings {
   trustedActionOrigins: string[]
   /** Show an OS notification when no side panel can display an approval. */
   approvalNotifications: boolean
+  /**
+   * Attach the debugger (Page domain) before clicks, key presses, pointer
+   * gestures, and navigation so JavaScript dialogs are reported and can be
+   * answered. Off by default: Chrome then shows its "being debugged" bar.
+   */
+  catchPageDialogs: boolean
   /** Restore the current tab and page path's conversation when the panel reopens. */
   autoResumeSession: boolean
 }
@@ -139,6 +145,7 @@ const SETTINGS_DEFAULTS: Settings = {
   allowDevTools: false,
   trustedActionOrigins: [],
   approvalNotifications: true,
+  catchPageDialogs: false,
   autoResumeSession: true,
 }
 
@@ -356,6 +363,8 @@ const dialogs = new DialogController({
   debugger: {
     supported: devToolsCapability,
     arm: async (tabId) => {
+      // Opt-in: pre-attaching shows Chrome's debugging bar on every action.
+      if (!settingsLoaded || !settings.catchPageDialogs) return () => {}
       const lease = await debuggerBroker.acquire(tabId, 'input', { domains: ['Page'] })
       return () => { void lease.release().catch(() => undefined) }
     },
@@ -580,6 +589,7 @@ function normalizeSettings(candidate: Settings): Settings {
     allowDevTools: candidate.allowDevTools === true && devToolsCapability,
     trustedActionOrigins: trusted,
     approvalNotifications: candidate.approvalNotifications !== false,
+    catchPageDialogs: candidate.catchPageDialogs === true && devToolsCapability,
     autoResumeSession: candidate.autoResumeSession !== false,
   }
 }

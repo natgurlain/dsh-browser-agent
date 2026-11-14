@@ -130,6 +130,8 @@ export interface PanelCopy {
     devToolsDetach: string
     approvalNotifications: string
     approvalNotificationsHelp: string
+    catchPageDialogs: string
+    catchPageDialogsHelp: string
     autoResumeSession: string
     autoResumeSessionHelp: string
     trustedOrigins: string
@@ -479,6 +481,8 @@ const EN: PanelCopy = {
     devToolsAttached: 'Debugger attached',
     devToolsError: 'Last error:',
     devToolsDetach: 'Detach now',
+    catchPageDialogs: 'Catch page dialogs — shows Chrome\'s debugging bar',
+    catchPageDialogsHelp: 'Attach the debugger before clicks, key presses, and navigation so alert/confirm/prompt/leave-site dialogs are reported and the agent can answer them. While attached, Chrome shows a "being debugged" bar that can shift the page.',
     approvalNotifications: 'Browser approval notifications',
     approvalNotificationsHelp: 'Notify you when an approval arrives while the side panel is closed',
     autoResumeSession: "Resume this page's conversation",
@@ -830,6 +834,8 @@ const ZH: PanelCopy = {
     devToolsAttached: '调试器已附加',
     devToolsError: '最近一次错误：',
     devToolsDetach: '立即断开',
+    catchPageDialogs: '捕获页面对话框——会显示 Chrome 调试提示栏',
+    catchPageDialogsHelp: '在点击、按键和导航前连接调试器，以便报告 alert/confirm/prompt/离开页面对话框并由代理回应。连接期间 Chrome 会显示“正在调试”提示栏，可能使页面位移。',
     approvalNotifications: '浏览器审批通知',
     approvalNotificationsHelp: '侧栏关闭时收到审批请求，通过系统通知提醒你',
     autoResumeSession: '续接当前页面会话',

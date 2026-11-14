@@ -102,7 +102,7 @@ describe('dialogs during actions', () => {
     const answer = await run({ id: '3', name: 'browser_click', args: { selector: '#x' } }, dialogs)
     expect(Date.now() - started).toBeLessThan(2_000)
     expect(answer.error?.code).toBe('timeout')
-    expect(answer.error?.message).toMatch(/stopped responding/)
+    expect(answer.error?.message).toMatch(/^The page is not responding \(.*\) — a JavaScript dialog .* may be open\. Ask the user .*Catch page dialogs/)
   })
 
   it('appends a dialog that opened while the action still answered', async () => {

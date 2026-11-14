@@ -1110,6 +1110,7 @@ export function App(): React.JSX.Element {
         allowDevTools: raw?.allowDevTools ?? false,
         trustedActionOrigins: raw?.trustedActionOrigins ?? [],
         approvalNotifications: raw?.approvalNotifications ?? true,
+        catchPageDialogs: raw?.catchPageDialogs ?? false,
         autoResumeSession: raw?.autoResumeSession ?? true,
       })
     })
@@ -2874,6 +2875,23 @@ export function App(): React.JSX.Element {
               </button>
             )}
           </div>
+          {devToolsStatus?.supported !== false && (
+            <label className="setting-toggle">
+              <span className="setting-toggle-copy">
+                <strong>{copy.settings.catchPageDialogs}</strong>
+                <small>{copy.settings.catchPageDialogsHelp}</small>
+              </span>
+              <input
+                className="setting-toggle-input"
+                type="checkbox"
+                checked={settings?.catchPageDialogs ?? false}
+                onChange={(event) => setSettings((current) => current === null
+                  ? current
+                  : { ...current, catchPageDialogs: event.target.checked })}
+              />
+              <span className="setting-toggle-control" aria-hidden="true"><span /></span>
+            </label>
+          )}
           <label className="setting-toggle">
             <span className="setting-toggle-copy">
               <strong>{copy.settings.approvalNotifications}</strong>

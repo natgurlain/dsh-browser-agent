@@ -654,7 +654,30 @@ try {
   await page.goto(`${origin}/reliability`)
   await page.bringToFront()
   succeed(await tool('browser_snapshot', {}))
+  // Default: no debugger pre-attach; the liveness watchdog fails the call fast.
+  // Drop the attachment earlier trusted input and developer tools left behind
+  // (an attached debugger still reports dialogs by name).
+  const detachId = await panel.evaluate(() => {
+    const id = crypto.randomUUID()
+    panelPort.postMessage({ type: 'devtools.detach', id })
+    return id
+  })
+  await waitFor(() => panel.evaluate(id => messages.some(message => message.type === 'devtools.detach.result' && message.id === id), detachId), 'debugger detach')
   let started = performance.now()
+  const stuck = await tool('browser_click', { selector: '#alertBtn' })
+  assert.equal(stuck.isError, true, JSON.stringify(stuck))
+  assert.match(text(stuck), /The page is not responding \([\d.]+s\) — a JavaScript dialog .* may be open\. Ask the user/)
+  assert.ok(performance.now() - started < 15_000, 'the watchdog must fail the call long before the tool timeout')
+  // The user closes the dialog; the next call finds the page responsive again.
+  await waitFor(() => playwrightDialogs.length > 0, 'alert seen by the harness')
+  await playwrightDialogs.at(-1).accept()
+  await waitFor(() => page.evaluate(() => window.afterAlert === true), 'alert closed by the user')
+  assert.match(succeed(await tool('browser_get_text', { selector: 'h1' })), /Reliability fixture/)
+  results.push('by default a dialog-blocked page fails the call fast via the liveness watchdog without attaching the debugger')
+
+  await settings({ catchPageDialogs: true })
+  await page.evaluate(() => { window.afterAlert = false })
+  started = performance.now()
   const alerted = await tool('browser_click', { selector: '#alertBtn' })
   assert.equal(alerted.isError, true, JSON.stringify(alerted))
   assert.match(text(alerted), /^(Error: )?dialog open: alert dialog\. The action was delivered/)
@@ -673,7 +696,7 @@ try {
   assert.match(text(confirmed), /Delete everything\?/)
   succeed(await tool('browser_dialog', { accept: false }))
   await waitFor(() => page.evaluate(() => window.confirmed === false), 'dismissed confirm')
-  results.push('alert and confirm dialogs fail the triggering call fast, block later calls, and are answered by browser_dialog (synthetic and trusted clicks)')
+  results.push('with "Catch page dialogs" on, alert and confirm dialogs fail the triggering call fast, block later calls, and are answered by browser_dialog')
 
   const prompted = await tool('browser_click', { selector: '#promptBtn' })
   assert.match(text(prompted), /^(Error: )?dialog open: prompt dialog/)
@@ -744,6 +767,7 @@ try {
   const knobX = await page.evaluate(() => window.knobX)
   assert.ok(Math.abs(knobX - 150) <= 2, `knob moved ${knobX}px`)
   results.push('browser_drag completes HTML5 drag-and-drop with a DataTransfer and real pointer drags in steps')
+  await settings({ catchPageDialogs: false })
 
   // Downloads: keep Chrome's own file names (Playwright would rename them).
   const browserSession = await (browser.browser()?.newBrowserCDPSession() ?? browser.newCDPSession(page))

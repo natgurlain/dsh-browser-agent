@@ -74,7 +74,7 @@ export function dialogGuidance(dialog: OpenDialog, canAnswer: boolean): string {
     // Chrome hands a dialog only to debugger clients that were listening when
     // it opened; one the extension did not see usually cannot be answered here.
     return 'Ask the user to answer or close it in the browser, then retry. '
-      + (canAnswer ? 'browser_dialog can try to answer it, but usually only dialogs reported as "dialog open: <type> dialog" can be answered from here.' : '')
+      + (canAnswer ? 'browser_dialog can try to answer it; dialogs are reliably answerable when "Catch page dialogs" is enabled in the side panel settings.' : '')
   }
   if (!canAnswer) {
     return 'This browser cannot answer native dialogs from the extension (no debugger). Ask the user to answer or close it, then retry.'
@@ -99,9 +99,9 @@ export function dialogOpenMessage(dialog: OpenDialog, canAnswer: boolean, lead?:
 
 /** Error text for a page that stopped answering without an identifiable dialog. */
 export function unresponsiveMessage(waitedMs: number): string {
-  return `The page stopped responding for ${Math.round(waitedMs / 100) / 10}s while the action ran. `
-    + 'A native JavaScript dialog (alert, confirm, prompt, or "leave site?") is the usual cause; the content script cannot see it. '
-    + 'Ask the user to answer or close it in the browser, then retry.'
+  return `The page is not responding (${Math.round(waitedMs / 100) / 10}s) — a JavaScript dialog (alert, confirm, prompt, or "leave site?") may be open. `
+    + 'Ask the user to answer or close it in the browser, then retry; with "Catch page dialogs" enabled in the side panel settings, '
+    + 'dialogs are reported by name and browser_dialog can answer them.'
 }
 
 /** Debugger access the dialog controller needs; the broker satisfies it. */
