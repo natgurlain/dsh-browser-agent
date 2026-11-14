@@ -71,9 +71,23 @@ describe('token', () => {
     await expect(readFile(file, 'utf8')).rejects.toThrow()
   })
 
+  it('accepts every generated random token (no false positives from the repeat and sequence checks)', () => {
+    for (const bytes of [16, 32]) {
+      for (let index = 0; index < 2000; index += 1) {
+        const token = generateToken(bytes)
+        expect(configuredTokenProblem(token), token).toBeUndefined()
+      }
+    }
+  })
+
   it('refuses weak configured tokens with an error naming the config key', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dsh-bridge-token-'))
-    for (const weak of ['fixed-token', 'a'.repeat(64), 'ab'.repeat(32), 'password'.repeat(4), `${STRONG} `]) {
+    for (const weak of [
+      'fixed-token', 'a'.repeat(64), 'ab'.repeat(32), 'password'.repeat(4), `${STRONG} `,
+      // N6: Shannon entropy alone passes these.
+      '0123456789abcdef'.repeat(4), 'abcdefghij'.repeat(4), 'Tr0ub4dor&3xyzQ'.repeat(3),
+      '0123456789abcdefghijklmnopqrstuvwxyzABCD', 'acegikmoqsuwyACEGIKMOQSUWY02468BDFH',
+    ]) {
       expect(configuredTokenProblem(weak)).toBeTypeOf('string')
       await expect(resolveToken(weak, join(dir, 'token'))).rejects.toThrow(/`token`/)
     }

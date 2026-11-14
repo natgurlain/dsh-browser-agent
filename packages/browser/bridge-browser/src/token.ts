@@ -36,6 +36,12 @@ const MIN_CONFIGURED_TOKEN_BITS = 96
 /** Minimum number of distinct characters in a configured token. */
 const MIN_CONFIGURED_TOKEN_DISTINCT = 10
 
+/** Minimum share of distinct 3-character substrings (catches repeated blocks such as `abc123`×6). */
+const MIN_DISTINCT_TRIGRAM_RATIO = 0.75
+
+/** Largest share of constant character steps (catches runs such as `0123…uv` or `aceg…`). */
+const MAX_CONSTANT_STEP_RATIO = 0.4
+
 /** `O_NOFOLLOW` where the platform has it (not on Windows; the lstat check covers that case). */
 const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0
 
@@ -46,7 +52,10 @@ const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0
  * entropy: at least {@link MIN_CONFIGURED_TOKEN_LENGTH} printable ASCII
  * characters, {@link MIN_CONFIGURED_TOKEN_DISTINCT} distinct ones, and an
  * estimated {@link MIN_CONFIGURED_TOKEN_BITS} bits (per-character Shannon
- * entropy × length). `openssl rand -hex 32` (or 16) always passes.
+ * entropy × length), and no low-entropy structure that Shannon entropy
+ * misses: repeated blocks (few distinct 3-character substrings) or
+ * arithmetic runs (`0123456789abcdef…`). `openssl rand -hex 32` (or 16)
+ * always passes.
  * @param token - the configured token.
  * @returns a human-readable problem, or undefined.
  */
@@ -66,6 +75,14 @@ export function configuredTokenProblem(token: string): string | undefined {
     perChar -= p * Math.log2(p)
   }
   if (perChar * token.length < MIN_CONFIGURED_TOKEN_BITS) return 'it is too predictable (low entropy)'
+  const trigrams = new Set<string>()
+  for (let index = 0; index + 3 <= token.length; index += 1) trigrams.add(token.slice(index, index + 3))
+  if (trigrams.size / (token.length - 2) < MIN_DISTINCT_TRIGRAM_RATIO) return 'it repeats the same characters (low entropy)'
+  let constantSteps = 0
+  for (let index = 2; index < token.length; index += 1) {
+    if (token.charCodeAt(index) - token.charCodeAt(index - 1) === token.charCodeAt(index - 1) - token.charCodeAt(index - 2)) constantSteps += 1
+  }
+  if (constantSteps / (token.length - 2) > MAX_CONSTANT_STEP_RATIO) return 'it is a predictable sequence (low entropy)'
   return undefined
 }
 
