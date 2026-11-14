@@ -31,10 +31,10 @@ export const INSTALLED_TOKEN_FILE_NAME = 'bridge-token'
 export const MIN_CONFIGURED_TOKEN_LENGTH = 32
 
 /** Minimum estimated entropy (bits) of a token pinned in the plugin config. */
-const MIN_CONFIGURED_TOKEN_BITS = 96
+const MIN_CONFIGURED_TOKEN_BITS = 80
 
 /** Minimum number of distinct characters in a configured token. */
-const MIN_CONFIGURED_TOKEN_DISTINCT = 10
+const MIN_CONFIGURED_TOKEN_DISTINCT = 8
 
 /** Minimum share of distinct 3-character substrings (catches repeated blocks such as `abc123`×6). */
 const MIN_DISTINCT_TRIGRAM_RATIO = 0.75
