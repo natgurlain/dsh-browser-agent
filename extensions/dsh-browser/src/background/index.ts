@@ -130,7 +130,7 @@ import { BRIDGE_TAINT_CLEAR_METHOD, PolicyRuntime } from './policy-runtime.ts'
 import { callPolicyTargets, forcedApprovalPrompt, originFromUrl } from './authorization.ts'
 import { normalizeSitePattern, normalizeSiteRules, type SiteRuleEntry } from '../security/site-policy.ts'
 import { CommitGate, STRICT_MODE_UNAVAILABLE } from './commit-gate.ts'
-import { applyManagedOverrides } from '../security/managed-policy.ts'
+import { applyManagedOverrides, loadManagedPolicy } from '../security/managed-policy.ts'
 import {
   LEGACY_RECENT_SESSION_STORAGE_KEY,
   PAGE_SESSION_CONTEXT_STORAGE_KEY,
@@ -142,7 +142,11 @@ export interface Settings {
   bridgeUrl: string
   token: string
   sharePageContent: 'ask' | 'auto' | 'off'
-  /** Allow every browser operation without an approval prompt. */
+  /**
+   * Trusted everywhere except policy-restricted sites: no approval prompts,
+   * but blocked / read-only / ask site rules, taint rules, and managed policy
+   * still apply (see security/site-policy.ts).
+   */
   unrestrictedBrowserAccess: boolean
   /**
    * High-privilege developer tools (element/CSS debugging, page JavaScript,
@@ -403,7 +407,7 @@ const policyRuntime: PolicyRuntime = new PolicyRuntime({
 })
 chrome.storage.onChanged?.addListener((_changes, area) => {
   if (area !== 'managed') return
-  void import('../security/managed-policy.ts').then(({ loadManagedPolicy }) => loadManagedPolicy()).then((managed) => { policyRuntime.setManaged(managed) })
+  void loadManagedPolicy().then((managed) => { policyRuntime.setManaged(managed) })
 })
 let unrestrictedAccessActive = SETTINGS_DEFAULTS.unrestrictedBrowserAccess
 let unrestrictedAccessRevision = 0
@@ -775,7 +779,9 @@ watchUiLocalePreference()
 
 /** Settings load is shared by every lazy connection trigger. */
 let settingsLoaded = false
-const settingsReady = loadSettings().then((loaded) => {
+// Managed policy loads first: user settings are normalized against it, so a
+// managed "disable unrestricted" can never lose a startup race.
+const settingsReady = policyRuntime.ready.then(() => loadSettings()).then((loaded) => {
   settings = loaded
   unrestrictedAccessActive = loaded.unrestrictedBrowserAccess
   settingsLoaded = true

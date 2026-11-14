@@ -24,6 +24,12 @@ export interface CallPolicyTargets {
   destination?: string
   /** Origin of the frame a typing or paste call writes into. */
   typeTargetOrigin?: string
+  /**
+   * Effective origin of the tab's top page. Taint records it as the "page last
+   * read": never an iframe's origin, so an embedded attacker frame cannot make
+   * its own origin the exempt navigation target.
+   */
+  pageOrigin?: string
 }
 
 /** Enterprise switches from chrome.storage.managed that shape single calls. */

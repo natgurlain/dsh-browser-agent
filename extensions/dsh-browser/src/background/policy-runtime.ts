@@ -145,12 +145,16 @@ export class PolicyRuntime {
     const origins = targets === undefined
       ? fallbackOrigin === undefined ? [] : [fallbackOrigin]
       : [...new Set([...targets.reads, ...targets.acts])]
-    // A new tab's page is read by later calls; its destination is what the
-    // agent now looks at.
+    // After a navigation or new tab the agent looks at the destination page.
+    let pageOrigin = targets === undefined ? fallbackOrigin : targets.pageOrigin
     if (targets?.destination !== undefined) {
-      try { origins.push(new URL(targets.destination).origin) } catch { /* not a URL */ }
+      try {
+        const destination = new URL(targets.destination).origin
+        origins.push(destination)
+        pageOrigin = destination
+      } catch { /* not a URL */ }
     }
-    this.taint.mark(call.sessionId, call.name, origins.length === 0 && fallbackOrigin !== undefined ? [fallbackOrigin] : origins)
+    this.taint.mark(call.sessionId, call.name, origins.length === 0 && fallbackOrigin !== undefined ? [fallbackOrigin] : origins, pageOrigin ?? fallbackOrigin)
   }
 
   /** Whether strict mode (commit gate) covers a call in this session on this page. */
@@ -173,7 +177,7 @@ export class PolicyRuntime {
 
   /** A snapshot was injected into a session without a tool call (follow refresh). */
   recordInjection(sessionId: string, origin: string | undefined): void {
-    this.taint.mark(sessionId, 'snapshot-injection', origin === undefined ? [] : [origin])
+    this.taint.mark(sessionId, 'snapshot-injection', origin === undefined ? [] : [origin], origin)
   }
 
   get(sessionId: string | undefined): TaintRecord | undefined {

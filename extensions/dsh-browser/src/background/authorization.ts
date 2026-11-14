@@ -631,6 +631,12 @@ const WHOLE_TAB_READS = new Set(['browser_snapshot', 'browser_screenshot', 'brow
  * can always leave a read-only or blocked page.
  */
 export function callPolicyTargets(call: ToolCall, frames: TabFrame[]): CallPolicyTargets {
+  const pageOrigin = uniqueOrigins(frames.filter((frame) => frame.frameId === 0), frames)[0]
+  const targets = callPolicyTargetsFor(call, frames)
+  return pageOrigin === undefined || targets.destination !== undefined ? targets : { ...targets, pageOrigin }
+}
+
+function callPolicyTargetsFor(call: ToolCall, frames: TabFrame[]): CallPolicyTargets {
   const url = typeof call.args.url === 'string' ? call.args.url : undefined
   if (call.name === 'browser_navigate' || call.name === 'browser_open_tab') {
     return { reads: [], acts: [], ...url === undefined ? {} : { destination: url } }

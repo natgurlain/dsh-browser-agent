@@ -81,13 +81,17 @@ export class TaintTracker {
     }
   }
 
-  /** Mark a session tainted by content from `origins` (may be empty). */
-  mark(sessionId: string | undefined, tool: string, origins: readonly string[]): void {
+  /**
+   * Mark a session tainted by content from `origins` (may be empty).
+   * `pageOrigin` is the top page's origin, recorded as the page last read; it
+   * is never guessed from a multi-origin list (an iframe must not set it).
+   */
+  mark(sessionId: string | undefined, tool: string, origins: readonly string[], pageOrigin?: string): void {
     const key = taintKey(sessionId)
     const existing = this.records.get(key)
     const sources = new Set(existing?.sources ?? [])
     for (const origin of origins) sources.add(origin)
-    const lastReadOrigin = origins.length === 1 ? origins[0] : origins.length > 1 ? origins[0] : existing?.lastReadOrigin
+    const lastReadOrigin = pageOrigin ?? existing?.lastReadOrigin
     const next: TaintRecord = {
       sources: [...sources].sort(),
       ...lastReadOrigin === undefined ? {} : { lastReadOrigin },

@@ -98,8 +98,8 @@ describe('taint', () => {
     await tracker.ready
     const events: string[] = []
     tracker.onChange((key) => events.push(key))
-    tracker.mark('s1', 'browser_snapshot', ['https://a.example'])
-    tracker.mark('s1', 'browser_get_text', ['https://b.example'])
+    tracker.mark('s1', 'browser_snapshot', ['https://a.example'], 'https://a.example')
+    tracker.mark('s1', 'browser_get_text', ['https://b.example', 'https://a.example'], 'https://b.example')
     tracker.mark(undefined, 'browser_list_tabs', [])
     expect(tracker.get('s1')).toEqual({ sources: ['https://a.example', 'https://b.example'], lastReadOrigin: 'https://b.example', firstTool: 'browser_snapshot', since: 5 })
     expect(tracker.get('')).toMatchObject({ sources: [], firstTool: 'browser_list_tabs' })

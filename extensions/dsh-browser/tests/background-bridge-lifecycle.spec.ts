@@ -793,6 +793,56 @@ describe('background bridge lifecycle', () => {
     expect(actionMessages).toHaveLength(1)
   })
 
+  it('applies a managed "disable unrestricted" before the first call, whatever loads first', async () => {
+    const tab = { id: 1, windowId: 1, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab
+    const chromeMock = mockChrome({
+      localGet: async () => ({
+        dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge', unrestrictedBrowserAccess: true, sharePageContent: 'auto' },
+      }),
+      tabQuery: async () => [tab],
+      tabSendMessage: async (_tabId, message) => (message as { type?: unknown }).type === 'DSH_ACTION'
+        ? { ok: true, result: { text: 'Pressed Enter.' } }
+        : undefined,
+    })
+    // The managed area answers only after the user's settings could have loaded.
+    let releaseManaged!: () => void
+    const managedHeld = new Promise<void>((resolve) => { releaseManaged = resolve })
+    ;(chrome.storage as { managed?: unknown }).managed = {
+      get: async () => { await managedHeld; return { disableUnrestricted: true } },
+    }
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await new Promise((resolve) => { setTimeout(resolve, 100) })
+    const call = { t: 'tool.call', id: 'managed-first', name: 'browser_press', args: { key: 'Enter' }, expiresAt: Date.now() + 10_000 }
+    let socket = FakeWebSocket.instances[0]
+    if (socket !== undefined) {
+      // Connected before the managed policy arrived: the call must still not
+      // run under the user's unrestricted setting.
+      socket.open()
+      await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
+      socket.receive(call)
+      await new Promise((resolve) => { setTimeout(resolve, 20) })
+      releaseManaged()
+    } else {
+      releaseManaged()
+      await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+      socket = FakeWebSocket.instances[0]!
+      socket.open()
+      await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
+      socket.receive(call)
+    }
+    await vi.waitFor(() => {
+      const request = panel.postMessage.mock.calls
+        .map((args: unknown[]) => args[0] as { type?: string })
+        .find((value) => value.type === 'approval.request')
+      expect(request).toBeDefined()
+    })
+    expect(socket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'managed-first', ok: true }))
+  })
+
   it('keeps an already-started restricted call under approval across access toggles', async () => {
     let holdTarget = false
     let releaseTarget!: (tabs: chrome.tabs.Tab[]) => void
