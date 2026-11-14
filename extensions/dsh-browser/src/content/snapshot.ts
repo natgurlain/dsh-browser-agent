@@ -400,13 +400,23 @@ const COLLAPSE_MIN_RUN = 8
 /** Items of a collapsed run that are still shown individually. */
 const COLLAPSE_KEEP = 3
 
-/** Shape of a name or path: digits and the last path segment are wildcards. */
+/** Shape of a name: digit runs are wildcards; other names compare by word count. */
+function textShape(name: string): string {
+  if (/\d/.test(name)) return name.replace(/\d+/g, '#').toLowerCase()
+  return `words:${Math.min(6, name.trim().split(/\s+/).filter((word) => word !== '').length)}`
+}
+
+/**
+ * Shape of an item for run collapsing. Links collapse only when their href
+ * pattern (digit runs wildcarded) and their text shape both match; distinct
+ * destinations (top-level navigation, `/account/delete` next to
+ * `/account/settings`) never share a shape, so none of them is hidden.
+ */
 function itemShape(item: InventoryItem): string {
   const state = `${String(item.checked)}/${String(item.disabled)}/${String(item.selected)}/${String(item.inViewport)}`
   if (item.href !== undefined) {
     const path = item.href.replace(/[?#].*$/, '').replace(/\d+/g, '#')
-    const parent = path.replace(/\/[^/]*\/?$/, '/*')
-    return `${item.role}|${parent}|${state}`
+    return `${item.role}|${path}|${textShape(item.name)}|${state}`
   }
   return `${item.role}|${item.name.replace(/\d+/g, '#').toLowerCase()}|${state}`
 }

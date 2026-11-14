@@ -75,6 +75,14 @@ export async function savePagePdf(
   }
 }
 
+function originOf(value: string): string | undefined {
+  try {
+    return new URL(value).origin
+  } catch {
+    return undefined
+  }
+}
+
 /** Read the response body with a hard size cap. */
 async function readCapped(response: Response, cap: number): Promise<Uint8Array> {
   const declared = Number(response.headers.get('content-length'))
@@ -129,15 +137,25 @@ export async function readTabPdfText(
   }
   try {
     const timeout = AbortSignal.timeout(FETCH_TIMEOUT_MS)
+    // The approval names the tab's origin only: never follow a redirect (no
+    // request may reach another URL with the user's cookies), and refuse a
+    // response that did not come from the tab's own origin.
     const response = await fetchImpl(url.href, {
       credentials: 'include',
+      redirect: 'manual',
       signal: signal === undefined ? timeout : AbortSignal.any([signal, timeout]),
     })
+    if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+      return failure('action-failed', 'The tab URL redirects elsewhere; browser_pdf_text reads only the document at the tab\'s own URL. Open the final PDF URL in the tab, then retry.')
+    }
+    if (response.url !== '' && originOf(response.url) !== url.origin) {
+      return failure('action-failed', 'The PDF response did not come from the tab\'s own origin, so it was not read.')
+    }
     if (!response.ok) return failure('action-failed', `Fetching the PDF failed with HTTP ${response.status}.`)
     const bytes = await readCapped(response, MAX_FETCH_BYTES)
     if (!looksLikePdf(bytes)) {
-      const type = response.headers.get('content-type') ?? 'unknown type'
-      return failure('action-failed', `The controlled tab is not showing a PDF document (${type}). Use browser_snapshot or browser_get_text for web pages.`)
+      // Server headers (content-type included) are page-controlled: not echoed.
+      return failure('action-failed', 'The controlled tab is not showing a PDF document. Use browser_snapshot or browser_get_text for web pages.')
     }
     const { pages, pageCount } = await extractPdfText(bytes, maxPages)
     const body = pages.map((text, index) => `--- page ${index + 1} ---\n${text}`).join('\n\n')

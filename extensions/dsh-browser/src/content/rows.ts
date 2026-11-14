@@ -9,6 +9,7 @@
  */
 
 import { resolveSelector, resolveSelectorAll } from './dom.ts'
+import { isSensitiveField, maskValue } from './privacy.ts'
 
 /** One extracted cell value. */
 export type CellValue = string | number | null
@@ -147,6 +148,9 @@ function readField(row: Element, spec: FieldSpec): CellValue {
     raw = target.getAttribute(spec.attr)
   }
   if (raw === null) return null
+  // A sensitive field (password, card, one-time code; latched once judged)
+  // is masked exactly as the snapshot masks it: its value never leaves the page.
+  if ((spec.attr === undefined || spec.attr === 'value') && isSensitiveField(target)) return maskValue(raw)
   return spec.type === 'number' ? parseNumber(raw) : clean(raw)
 }
 

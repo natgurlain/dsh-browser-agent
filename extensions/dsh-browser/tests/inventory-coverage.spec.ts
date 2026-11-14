@@ -90,6 +90,16 @@ describe('open shadow roots', () => {
     expect(resolveSelectorAll('x-card >>> input')).toHaveLength(1)
   })
 
+  it('splits >>> only outside quoted strings and brackets (#11)', () => {
+    const { button } = mountShadow()
+    // (jsdom's selector engine mis-parses spaces around > inside quotes, so the values avoid them.)
+    document.getElementById('card')!.setAttribute('title', 'a>>>b')
+    document.getElementById('card')!.setAttribute('data-x', 'a>>>b')
+    expect(resolveSelector('[title="a>>>b"] >>> button')).toBe(button)
+    expect(resolveSelector("[data-x='a>>>b'] >>> button")).toBe(button)
+    expect(resolveSelector('#card:not([title="x >>> y"]) >>> button')).toBe(button)
+  })
+
   it('builds selectors that address shadow elements and are accepted by actions', () => {
     const { button } = mountShadow()
     const selector = uniqueSelectorFor(button)
@@ -144,6 +154,15 @@ describe('snapshot knobs', () => {
     expect(text).toMatch(/\[\d+–\d+\] 17 more links like "Item 4"/)
     const full = renderSnapshot(buildSnapshot(ids, { budget: BUDGET, collapse: false }, view), false)
     expect(full).toContain('"Item 20"')
+  })
+
+  it('never hides distinct navigation links in a collapsed run (#11, collapse PoC)', () => {
+    const names = ['Products', 'Pricing', 'Docs', 'Blog', 'About', 'Careers', 'Contact', 'Delete account', 'Log out']
+    document.body.innerHTML = `<nav>${names.map((name) => `<a href="/${name.toLowerCase().replace(/ /g, '-')}">${name}</a>`).join(' ')}</nav>`
+      + `<div>${['Profile', 'Settings', 'Billing', 'Security', 'Sessions', 'Tokens', 'Export', 'Delete'].map((name) => `<a href="/account/${name.toLowerCase()}">${name}</a>`).join(' ')}</div>`
+    const text = renderSnapshot(buildSnapshot(new ElementIds(), { budget: BUDGET }, null), false)
+    for (const name of [...names, 'Tokens', 'Export', 'Delete']) expect(text).toContain(`"${name}"`)
+    expect(text).not.toMatch(/more links like/)
   })
 
   it('does not collapse short or dissimilar runs', () => {

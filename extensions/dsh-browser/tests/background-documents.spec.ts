@@ -178,6 +178,7 @@ describe('browser_pdf_text', () => {
   it('explains when the tab is not a PDF', async () => {
     const fetchImpl = vi.fn(async () => new Response('<html></html>', { headers: { 'content-type': 'text/html' } }))
     const answer = await readTabPdfText({ id: 1, url: 'https://example.com/' }, {}, 12_000, undefined, fetchImpl as unknown as typeof fetch)
-    expect(answer.error?.message).toMatch(/not showing a PDF document \(text\/html\)/)
+    expect(answer.error?.message).toMatch(/not showing a PDF document\. /)
+    expect(answer.error?.message).not.toContain('text/html')
   })
 })

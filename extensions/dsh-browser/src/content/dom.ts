@@ -64,9 +64,36 @@ export function querySelectorAllDeep(scope: Scope, selector: string): Element[] 
   return result
 }
 
-/** Split a piercing selector into its per-scope segments. */
+/**
+ * Split a piercing selector into its per-scope segments: `>>>` counts only at
+ * bracket/paren depth 0 and outside quoted strings (attribute values may contain it).
+ */
 function segments(selector: string): string[] {
-  return selector.split(SHADOW_PIERCE).map((part) => part.trim())
+  const parts: string[] = []
+  let start = 0
+  let depth = 0
+  let quote: string | undefined
+  for (let index = 0; index < selector.length; index += 1) {
+    const char = selector[index]!
+    if (char === '\\') {
+      index += 1
+      continue
+    }
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined
+      continue
+    }
+    if (char === '"' || char === "'") quote = char
+    else if (char === '[' || char === '(') depth += 1
+    else if ((char === ']' || char === ')') && depth > 0) depth -= 1
+    else if (depth === 0 && selector.startsWith(SHADOW_PIERCE, index)) {
+      parts.push(selector.slice(start, index))
+      index += SHADOW_PIERCE.length - 1
+      start = index + 1
+    }
+  }
+  parts.push(selector.slice(start))
+  return parts.map((part) => part.trim())
 }
 
 /**

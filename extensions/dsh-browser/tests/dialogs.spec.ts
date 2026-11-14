@@ -47,6 +47,9 @@ describe('dialog tracking', () => {
     const message = dialogOpenMessage(controller.peek(8)!, controller.canAnswer)
     expect(message).toMatch(/^dialog open: unidentified dialog \(the page stopped responding\)\. Ask the user to answer or close it/)
     expect(unresponsiveMessage(3_000)).toMatch(/Ask the user to answer or close it/)
+    // The action may already have run: no blind "retry" advice (#11).
+    expect(unresponsiveMessage(3_000)).toMatch(/may already have been delivered.*browser_snapshot before repeating/)
+    expect(unresponsiveMessage(3_000)).not.toMatch(/then retry/)
   })
 
   it('re-validates a record whose close may have been missed', async () => {

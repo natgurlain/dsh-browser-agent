@@ -100,7 +100,8 @@ export function dialogOpenMessage(dialog: OpenDialog, canAnswer: boolean, lead?:
 /** Error text for a page that stopped answering without an identifiable dialog. */
 export function unresponsiveMessage(waitedMs: number): string {
   return `The page is not responding (${Math.round(waitedMs / 100) / 10}s) — a JavaScript dialog (alert, confirm, prompt, or "leave site?") may be open. `
-    + 'Ask the user to answer or close it in the browser, then retry; with "Catch page dialogs" enabled in the side panel settings, '
+    + 'Ask the user to answer or close it in the browser. The action may already have been delivered: '
+    + 'check the page with browser_snapshot before repeating it. With "Catch page dialogs" enabled in the side panel settings, '
     + 'dialogs are reported by name and browser_dialog can answer them.'
 }
 
