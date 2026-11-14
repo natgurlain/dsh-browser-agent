@@ -27,7 +27,7 @@ describe('workspaceWriteTarget', () => {
 
   it('uses the session cwd under a writable sandbox, the fallback for agentless calls', () => {
     expect(workspaceWriteTarget(policyCtx('workspace-write'), agent, '/fallback')).toEqual({ mode: 'workspace-write', root: '/work/session' })
-    expect(workspaceWriteTarget(policyCtx('danger-full-access'), undefined, '/fallback')).toEqual({ mode: 'danger-full-access', root: '/fallback' })
+    expect(workspaceWriteTarget(policyCtx('danger-full-access'), undefined, '/fallback')).toEqual({ mode: 'danger-full-access', root: '/fallback', createRoot: true })
   })
 
   it('refuses read-only, unknown, missing, or failing sandbox policies and a missing workspace', () => {
@@ -62,6 +62,13 @@ describe('writeWorkspaceFile', () => {
     expect(readFileSync(join(root, 'out/page.pdf'))).toEqual(Buffer.from(bytes))
     expect(statSync(join(root, 'out/page.pdf')).mode & 0o777).toBe(0o644 & ~process.umask())
     await expect(writeWorkspaceFile({ mode: 'workspace-write', root }, 'out/page.pdf', bytes, { allowedExt: ['.pdf'] })).rejects.toThrow(/already exists/)
+  })
+
+  it('creates the bridge-owned fallback workspace but never a missing session cwd', async () => {
+    const base = tempDir()
+    await expect(writeWorkspaceFile({ mode: 'workspace-write', root: join(base, 'gone') }, 'a.csv', 'x', { allowedExt: ['.csv'] })).rejects.toThrow(/not an existing directory/)
+    const saved = await writeWorkspaceFile({ mode: 'workspace-write', root: join(base, 'bridge'), createRoot: true }, 'a.csv', 'x', { allowedExt: ['.csv'] })
+    expect(readFileSync(saved.path, 'utf8')).toBe('x')
   })
 
   it('refuses a target whose mode is not writable even if constructed by hand', async () => {

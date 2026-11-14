@@ -54,6 +54,11 @@ export interface WorkspaceWriteTarget {
   mode: 'workspace-write' | 'danger-full-access'
   /** Absolute workspace root (the session's working directory). */
   root: string
+  /**
+   * The root is the bridge's own configured workspace (agentless calls,
+   * sessions without a cwd) and may be created; a session cwd never is.
+   */
+  createRoot?: true
 }
 
 /** Where a write landed. */
@@ -115,11 +120,11 @@ export function workspaceWriteTarget(ctx: unknown, agent: unknown, fallbackWorks
     throw new WorkspaceWriteError(`unknown sandbox mode ${JSON.stringify(mode)}; nothing was written.`)
   }
   const cwd = session?.header?.cwd
-  const root = typeof cwd === 'string' && isAbsolute(cwd) ? cwd : fallbackWorkspace
-  if (root === '' || !isAbsolute(root)) {
+  if (typeof cwd === 'string' && isAbsolute(cwd)) return { mode, root: cwd }
+  if (fallbackWorkspace === '' || !isAbsolute(fallbackWorkspace)) {
     throw new WorkspaceWriteError('this session has no workspace directory to write into.')
   }
-  return { mode, root }
+  return { mode, root: fallbackWorkspace, createRoot: true }
 }
 
 /**
@@ -204,6 +209,7 @@ export async function writeWorkspaceFile(
   const relativePath = parts.join('/')
   let root: string
   try {
+    if (target.createRoot === true) await mkdir(target.root, { recursive: true, mode: 0o700 })
     root = await realpath(target.root)
     if (!(await lstat(root)).isDirectory()) throw new Error('not a directory')
   } catch {
