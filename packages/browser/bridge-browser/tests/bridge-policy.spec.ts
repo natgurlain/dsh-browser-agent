@@ -95,6 +95,16 @@ describe('session scope', () => {
     expect(await policy.allowsSession('desktop-private', signal)).toBe(false)
   })
 
+  it.each([
+    'session.history', 'session.permissions', 'session.setPermission', 'session.selectModel', 'session.attachment',
+    'session.state', 'session.cancel', 'session.prompt', 'commands.list', 'commands.execute', 'skills.list',
+  ])('refuses %s without a sessionId instead of letting the Host address it another way', async (method) => {
+    const { call, inner } = harness()
+    const result = await call(method, { address: { kind: 'session', sessionId: 'desktop-private' }, preset: 'read-only', line: '/plan' })
+    expect(result).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect(inner).not.toHaveBeenCalled()
+  })
+
   it('lets a provisional model catalog read go through without a session', async () => {
     const { call } = harness()
     expect(await call('session.models', {})).toMatchObject({ ok: true })

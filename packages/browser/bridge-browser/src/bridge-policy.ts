@@ -175,8 +175,9 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
         return forbidden(`session ${JSON.stringify(sessionId)} is not available to the browser extension`)
       }
       if (SESSION_SCOPED_METHODS.has(call.method) && sessionId === undefined && call.method !== 'session.models') {
-        // Every other scoped method needs its session; let the adapter report the bad request.
-        return api.call(call)
+        // Refuse rather than forward: a Host request that also accepted another
+        // addressing form would otherwise bypass the scope check above.
+        return { ok: false, error: { code: 'bad-request', message: `${call.method} requires a non-empty sessionId`, details: {} } }
       }
 
       const result = await api.call(call)

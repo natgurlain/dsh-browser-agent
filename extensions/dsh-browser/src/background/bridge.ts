@@ -7,8 +7,10 @@
  * the client answers `hello { nonce: Nc, mac: HMAC(token, client|Ns|Nc) }`;
  * the bridge answers `hello.ok { mac: HMAC(token, server|Nc|Ns) }`. Nothing
  * from the socket is trusted, and nothing but `hello` is sent, until that
- * server proof verifies, so a local process squatting on a probed port learns
- * neither the token nor any traffic. The token itself never crosses the wire.
+ * server proof verifies, so a local process squatting on a probed port cannot
+ * learn the token or impersonate the bridge. The token itself never crosses
+ * the wire. The channel is plain `ws://` without per-frame integrity, so a
+ * local relay that forwards the handshake to the real bridge is not prevented.
  *
  * Token source: the user's settings field when filled in (Firefox, custom
  * deployments), otherwise the `bridge-token` file the installer and the dsh

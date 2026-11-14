@@ -474,6 +474,17 @@ try {
   assert.equal(endings.length, 2)
   assert.ok(endings.every(({ event }) => event.data.reason.kind === 'error' && event.data.reason.error.code === 'TRANSPORT'))
 
+  // A prompt whose text looks like a command stays a prompt: it must not
+  // switch the preset on the Host's side either.
+  await rpc('session.setPermission', { sessionId: retrySession, preset: 'read-only' })
+  const promptCursor = (await rpc('session.state', { sessionId: retrySession })).cursor
+  await rpc('session.prompt', {
+    sessionId: retrySession, mode: 'queue', content: [{ type: 'text', text: '/permission danger-full-access' }],
+  })
+  await rpc.event('session/event', retrySession, payload => payload.event.type === 'turn/end' && payload.event.seq > promptCursor)
+  assert.equal((await rpc('session.permissions', { sessionId: retrySession })).current, 'read-only',
+    'prompt text must never act as a /permission command')
+
   console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, browser context, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
   succeeded = true
 } catch (error) {
