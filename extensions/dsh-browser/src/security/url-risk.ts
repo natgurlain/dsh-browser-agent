@@ -65,6 +65,18 @@ const BARE_RUN_LENGTH = 32
 const PIECE_RUN_LENGTH = 6
 /** Combined token-shaped characters across the whole URL that flag it. */
 const AGGREGATE_PAYLOAD = 24
+/**
+ * Opaque characters (see {@link opaqueRuns}) across the whole URL that flag
+ * it, when spread over at least {@link AGGREGATE_OPAQUE_RUNS} runs: catches a
+ * payload re-encoded as letters only or digits only and split into many short
+ * parameters or path segments, each below every per-value threshold.
+ */
+const AGGREGATE_OPAQUE_CHARS = 32
+const AGGREGATE_OPAQUE_RUNS = 3
+/** Letters in word-length runs whose combined shape is judged (see {@link opaquePayload}). */
+const LETTER_POOL_MIN = 32
+/** Natural-language text keeps ~38% vowels (y included); re-alphabetized payloads far fewer. */
+const LETTER_POOL_MIN_VOWELS = 0.3
 /** Decoded path + query + fragment characters beyond which any URL prompts. */
 export const MAX_URL_PAYLOAD = 512
 /** Canonical UUID: common in REST paths and ids, so it is not judged on its own. */
@@ -98,14 +110,17 @@ export function analyzeUrl(value: string): UrlAnalysis | undefined {
   const pathFlag = strongest(segments.map(flagSegment))
   // A token split into many short pieces: every piece is below the per-value
   // thresholds, so judge the token-shaped pieces of the whole URL together.
-  const aggregate = aggregatePayload([
+  const pieces = [
     ...params.flatMap((param) => [param.name, param.value]),
     ...segments,
     fragment,
-  ]) >= AGGREGATE_PAYLOAD
+  ]
+  const opaque = opaquePayload(pieces.filter((piece) => !UUID.test(piece)))
+  const aggregate = aggregatePayload(pieces) >= AGGREGATE_PAYLOAD
+    || (opaque.chars >= AGGREGATE_OPAQUE_CHARS && opaque.runs >= AGGREGATE_OPAQUE_RUNS)
   if (aggregate) {
     for (const [index, param] of params.entries()) {
-      if (param.flag === undefined && tokenPieces(`${param.name} ${param.value}`) > 0) {
+      if (param.flag === undefined && (tokenPieces(`${param.name} ${param.value}`) > 0 || opaquePayload([param.name, param.value]).runs > 0)) {
         params[index] = { ...param, flag: 'aggregate' }
       }
     }
@@ -198,6 +213,69 @@ function tokenPieces(value: string): number {
     if (/\d/.test(run) && /[A-Za-z]/.test(run) && shannonEntropy(run) >= 2.5) total += run.length
   }
   return total
+}
+
+/**
+ * Runs that do not read as words or ordinary numbers: mixed letter/digit runs
+ * of 4+ (beyond `utf8`/`page2`/`17z` shapes) and digit runs of 5+.
+ */
+function opaqueRuns(value: string): { chars: number; runs: number } {
+  let chars = 0
+  let runs = 0
+  for (const run of value.match(/[A-Za-z0-9]+/g) ?? []) {
+    const hasDigit = /\d/.test(run)
+    const hasLetter = /[A-Za-z]/.test(run)
+    const opaque = hasDigit && hasLetter
+      ? run.length >= 4 && !/^[A-Za-z]{1,8}\d{1,2}$/.test(run) && !/^\d{1,4}(?:st|nd|rd|th|px|em|k|m|s|p|x|z)$/i.test(run)
+      : hasDigit && run.length >= 5
+    if (opaque) {
+      chars += run.length
+      runs += 1
+    }
+  }
+  return { chars, runs }
+}
+
+/**
+ * Opaque characters across every piece of a URL: {@link opaqueRuns}, plus
+ * letter-only runs of 5+ that are judged together. A payload re-alphabetized
+ * to letters (hex as `a-p`, base32) and split into many short words keeps far
+ * fewer vowels and far more consonant clusters than natural-language slugs and
+ * queries; a single run with no vowel balance at all counts on its own.
+ */
+function opaquePayload(pieces: string[]): { chars: number; runs: number } {
+  let chars = 0
+  let runs = 0
+  const pool: string[] = []
+  let single = { chars: 0, runs: 0 }
+  for (const piece of pieces) {
+    const counted = opaqueRuns(piece)
+    chars += counted.chars
+    runs += counted.runs
+    for (const run of piece.match(/[A-Za-z]+/g) ?? []) {
+      if (run.length < 5) continue
+      const lower = run.toLowerCase()
+      pool.push(lower)
+      if (run.length >= 8 && !pronounceable(lower)) single = { chars: single.chars + run.length, runs: single.runs + 1 }
+    }
+  }
+  const letters = pool.join('')
+  // Longer pools vary less, so the bar rises with them.
+  const pooled = letters.length >= LETTER_POOL_MIN
+    && vowelShare(letters) < (letters.length >= 64 ? LETTER_POOL_MIN_VOWELS + 0.04 : LETTER_POOL_MIN_VOWELS)
+  return pooled
+    ? { chars: chars + letters.length, runs: runs + pool.length }
+    : { chars: chars + single.chars, runs: runs + single.runs }
+}
+
+function vowelShare(lower: string): number {
+  return (lower.match(/[aeiouy]/g) ?? []).length / lower.length
+}
+
+/** Whether one lowercase letters-only run reads like a natural-language word. */
+function pronounceable(lower: string): boolean {
+  if (vowelShare(lower) < 0.2) return false
+  return Math.max(0, ...(lower.match(/[^aeiouy]+/g) ?? []).map((cluster) => cluster.length)) < 5
 }
 
 /** Token-shaped characters across all pieces, ignoring canonical UUIDs. */

@@ -336,6 +336,17 @@ describe('mutations', () => {
     expect(attributeRisk('')).toBe('forbidden')
   })
 
+  it('treats resource, sandbox, redirect, and form-association attributes and loading styles as script-class (misc3)', () => {
+    for (const name of ['poster', 'background', 'srcset', 'sandbox', 'content', 'form', 'formtarget', 'ping', 'allow', 'formmethod', 'formenctype', 'codebase', 'manifest']) {
+      expect(attributeRisk(name, 'x'), name).toBe('script')
+    }
+    for (const value of ['background:url(https://evil/?d=1)', 'background: image-set("https://evil/x" 1x)', 'b\\61 ckground:u\\72l(https://evil)', '@import "https://evil/x.css"', 'list-style: URL ( //evil )']) {
+      expect(attributeRisk('style', value), value).toBe('script')
+    }
+    expect(attributeRisk('style', 'color: red; display: none')).toBe('normal')
+    expect(attributeRisk('style', 'background: linear-gradient(red, blue)')).toBe('normal')
+  })
+
   it('treats form targets, field identity, and navigation attributes as script-class', () => {
     for (const name of ['action', 'formaction', 'type', 'name', 'autocomplete', 'onclick', 'ONLOAD', 'http-equiv', 'href', 'src', 'xlink:href', 'srcset', 'data', 'ping', 'formtarget']) {
       expect(attributeRisk(name), name).toBe('script')

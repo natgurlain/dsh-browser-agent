@@ -39,6 +39,7 @@ import {
   shortIdentity,
   syncFrames,
 } from './devtools-elements.ts'
+import { FIELD_LABEL_ATTRIBUTES, styleCanLoad } from '../security/attribute-risk.ts'
 import {
   REDACTED,
   formatBody,
@@ -536,11 +537,20 @@ export function createDevToolsController(options: DevToolsControllerOptions): De
     if (risk === 'script' && !remove) {
       throw new Error(
         `Refusing to write the script-capable attribute "${name}". `
-        + 'Inline handlers, resource/navigation URLs, form targets, and field identity (type, name, autocomplete) '
+        + 'Inline handlers, resource/navigation URLs, form targets, frame sandboxes, loading styles, and field identity (type, name, autocomplete) '
         + 'change what the page executes, where it submits, or which values stay masked; use browser_console_eval for that.',
       )
     }
     const nodeId = await resolveNodeId(client, locatorOf(args), context.frames, context.executionContext)
+    if (FIELD_LABEL_ATTRIBUTES.has(name.toLowerCase()) && (remove || value !== undefined)) {
+      const target = await client.send('DOM.describeNode', { nodeId, depth: 0 }) as { node?: { localName?: string; nodeName?: string; attributes?: string[] } }
+      if (isFieldLike(target.node ?? {})) {
+        throw new Error(
+          `Refusing to change "${name}" on a form field: id, labels, and placeholders decide whether its value stays masked. `
+          + 'Change it through browser_console_eval if it is really needed.',
+        )
+      }
+    }
     const before = await attributeValue(client, nodeId, name)
     if (!remove && value === undefined) {
       const node = await client.send('DOM.describeNode', { nodeId, depth: 0 }) as { node?: { localName?: string; nodeName?: string; attributes?: string[] } }
@@ -774,12 +784,27 @@ function declarationList(value: unknown): { name: string; value: string; importa
     if (typeof record?.name !== 'string' || record.name.trim() === '' || typeof record.value !== 'string') {
       throw new Error('Each property needs a CSS name and a string value.')
     }
+    if (styleCanLoad(`${record.name}:${record.value}`)) {
+      throw new Error(`Refusing the style declaration "${record.name.trim()}": url(), image functions, @import, and CSS escapes can make the page fetch (and leak) data; use browser_console_eval for that.`)
+    }
     return {
       name: record.name.trim(),
       value: record.value,
       ...(record.important === true ? { important: true } : {}),
     }
   })
+}
+
+/** Form fields and editable hosts: the elements privacy.ts may mask. */
+function isFieldLike(node: { localName?: string; nodeName?: string; attributes?: string[] }): boolean {
+  const tag = (node.localName ?? node.nodeName ?? '').toLowerCase()
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true
+  const attributes = node.attributes ?? []
+  for (let index = 0; index + 1 < attributes.length; index += 2) {
+    if (attributes[index]!.toLowerCase() === 'contenteditable' && attributes[index + 1]!.toLowerCase() !== 'false') return true
+    if (attributes[index]!.toLowerCase() === 'role' && /^(?:textbox|searchbox|combobox|spinbutton)$/i.test(attributes[index + 1]!)) return true
+  }
+  return false
 }
 
 /** A string list argument, ignoring non-strings. */

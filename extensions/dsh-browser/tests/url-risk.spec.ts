@@ -79,6 +79,43 @@ describe('analyzeUrl', () => {
     expect(analyzeUrl(`https://e.example/?q=${'a b '.repeat(200)}`)?.risky).toBe(true)
   })
 
+  // misc3 residuals: a secret re-encoded as letters only, digits only, or short
+  // mixed pieces, split across many parameters or path segments.
+  it('flags a payload split into many short letters-only, digits-only, or mixed pieces', () => {
+    const hex = Buffer.from('sk-live-9fA3kQ7xLm2ZpT8vBn4Rw6Yc1Hd5Je0u').toString('hex')
+    const letters = hex.replace(/\d/g, (digit) => 'ghijklmnop'[Number(digit)]!)
+    const chunks = (text: string, size: number): string[] => text.match(new RegExp(`.{1,${String(size)}}`, 'g')) as string[]
+    for (const [label, url] of [
+      ['letters across params', 'https://t.example/c?' + chunks(letters, 15).map((c, i) => `${'abcdefgh'[i]!}=${c}`).join('&')],
+      ['letters across segments', 'https://t.example/' + chunks(letters, 15).join('/')],
+      ['letters as a dashed slug', 'https://t.example/c/' + chunks(letters, 12).join('-')],
+      ['digits across params', 'https://t.example/c?' + chunks(BigInt(`0x${hex}`).toString(), 15).map((c, i) => `${'abcdefghij'[i]!}=${c}`).join('&')],
+      ['5-character mixed pieces', 'https://t.example/c?' + chunks(hex, 5).map((c, i) => `k${String(i)}=${c}`).join('&')],
+    ] as const) {
+      expect(analyzeUrl(url)?.risky, label).toBe(true)
+    }
+  })
+
+  it('does not flag ordinary search queries, article slugs, and tracking links', () => {
+    for (const url of [
+      'https://www.google.com/search?q=how+to+bake+sourdough+bread+at+home&oq=how+to+bake&sourceid=chrome&ie=UTF-8',
+      'https://www.google.com/search?q=strength+training+schedule+for+beginners&source=hp',
+      'https://duckduckgo.com/?q=typescript+strict+null+checks+explained&ia=web',
+      'https://www.bbc.com/news/articles/how-the-international-construction-industry-rebuilt-after-the-earthquake-in-2023',
+      'https://www.nytimes.com/2024/05/12/world/europe/ukraine-russia-war-negotiations.html',
+      'https://www.theguardian.com/world/2024/mar/14/scientists-discover-new-species-of-deep-sea-anglerfish',
+      'https://en.wikipedia.org/wiki/List_of_tallest_buildings_in_the_United_States',
+      'https://shop.example.com/products/merino-wool-sweater?utm_source=newsletter&utm_medium=email&utm_campaign=spring_sale_2024',
+      'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s',
+      'https://www.google.com/maps/place/Eiffel+Tower/@48.8583701,2.2944813,17z',
+      'https://www.amazon.com/s?k=noise+cancelling+headphones&page=2',
+      'https://www.booking.com/searchresults.html?ss=Krakow&checkin=2024-06-01&checkout=2024-06-05&group_adults=2',
+      'https://stackoverflow.com/questions/12345678/how-do-i-undo-the-most-recent-local-commits-in-git',
+    ]) {
+      expect(analyzeUrl(url)?.risky, url).toBe(false)
+    }
+  })
+
   it('returns undefined for unparseable URLs', () => {
     expect(analyzeUrl('not a url')).toBeUndefined()
     expect(urlCarriesRiskyValue('not a url')).toBe(false)
