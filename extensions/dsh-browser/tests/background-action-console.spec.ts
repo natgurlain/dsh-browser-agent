@@ -13,7 +13,9 @@ function mockChrome(onClick: () => void) {
     tabs: {
       query: vi.fn(async () => []),
       get: vi.fn(),
-      sendMessage: vi.fn(async () => {
+      sendMessage: vi.fn(async (_tabId: number, message: { type?: string }) => {
+        // The pre-click hit-test is not the action itself.
+        if (message.type === 'DSH_INPUT_SETUP') return { ok: false, error: { code: 'action-failed', message: 'not measured' } }
         onClick()
         return { ok: true, result: { text: 'Clicked.' } }
       }),
