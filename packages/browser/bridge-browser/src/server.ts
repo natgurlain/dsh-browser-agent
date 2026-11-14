@@ -5,8 +5,18 @@
  *
  * The route this server mounts (`/ext/bridge`) lives OUTSIDE the /api trust
  * fence (which only guards the client-connection routes), so the bridge brings
- * its own authentication: a bearer token presented in the `hello` frame within
- * HELLO_TIMEOUT_MS. Host calls terminate at the bridge-owned Host adapter.
+ * its own authentication, required from every client including loopback ones:
+ *
+ *   1. server → `challenge { v, nonce: Ns }` as soon as the socket opens;
+ *   2. client → `hello { v, nonce: Nc, mac: HMAC(token, client|Ns|Nc), caps }`
+ *      within HELLO_TIMEOUT_MS;
+ *   3. server → `hello.ok { caps, mac: HMAC(token, server|Nc|Ns) }`, which the
+ *      extension verifies before trusting anything else.
+ *
+ * The token never crosses the wire. A `chrome-extension://` Origin is accepted
+ * only for the pinned extension ID (defense in depth on top of the token; any
+ * local process can forge an Origin header). Host calls terminate at the
+ * bridge-owned Host adapter.
  * Methods the /api carrier pins to loopback (`PRIVILEGED_METHODS`)
  * stay loopback-only here regardless of the token, defense in depth for
  * `--host 0.0.0.0` deployments.
@@ -18,15 +28,21 @@
  * @module
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { BrowserHostApi } from './host-api.ts'
 import {
+  BRIDGE_CLOSE_CODES,
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
+  BRIDGE_PROTOCOL_VERSION,
   BRIDGE_SESSION_PURGE_METHOD,
   HELLO_TIMEOUT_MS,
+  PINNED_CHROME_EXTENSION_ID,
+  bridgeProofMessage,
+  createBridgeNonce,
+  helloProtocolVersion,
   PING_INTERVAL_MS,
   isDevToolsCaps,
   parseBridgeFrame,
@@ -70,6 +86,27 @@ export function isLoopbackAddress(address: string | undefined): boolean {
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
 }
 
+/**
+ * Whether a WebSocket Origin may attempt the handshake at all. Web pages are
+ * refused outright; Chrome extensions only under an allowed ID; Firefox
+ * `moz-extension://` origins carry a per-install UUID (no identity), and
+ * Origin-less local clients prove themselves with the token alone.
+ * @param origin - the upgrade request's Origin header.
+ * @param chromeExtensionIds - allowed Chrome extension IDs.
+ * @returns true when the handshake may proceed.
+ */
+export function isAllowedBridgeOrigin(origin: string | undefined, chromeExtensionIds: ReadonlySet<string>): boolean {
+  if (origin === undefined || origin === '') return true
+  if (origin.startsWith('moz-extension://')) return true
+  const chrome = /^chrome-extension:\/\/([a-p]{32})$/u.exec(origin)
+  return chrome !== null && chromeExtensionIds.has(chrome[1]!)
+}
+
+/** HMAC-SHA256 handshake proof (node side of protocol.computeBridgeProof). */
+function bridgeProof(token: string, role: 'client' | 'server', first: string, second: string): string {
+  return createHmac('sha256', Buffer.from(token, 'utf8')).update(bridgeProofMessage(role, first, second)).digest('hex')
+}
+
 /** Error thrown by requestTool; the tool registry turns it into an isError result. */
 export class BridgeToolError extends Error {
   constructor(
@@ -83,8 +120,18 @@ export class BridgeToolError extends Error {
 
 /** Dependencies the bridge needs from the host. */
 export interface BridgeServerDeps {
-  /** Bearer token the extension must present in `hello`. */
+  /** Shared secret both sides prove knowledge of during the handshake. */
   token: string
+  /**
+   * Chrome extension IDs whose `chrome-extension://` Origin may connect.
+   * Defaults to {@link PINNED_CHROME_EXTENSION_ID}.
+   */
+  allowedChromeExtensionIds?: readonly string[]
+  /**
+   * Session scope for the bridge's own session-targeted methods (snapshot
+   * injection, purge). Absent means unrestricted (unit tests only).
+   */
+  sessionScope?: { allows(sessionId: string, signal: AbortSignal): Promise<boolean> }
   /** Active dsh Host adapter used for unary calls, events, and waterfalls. */
   api: BrowserHostApi
   /** Default per-tool-call timeout in ms. */
@@ -164,8 +211,11 @@ export class BridgeServer {
   private readonly pendingTools = new Map<string, PendingTool>()
   private readonly orderedSessionRpcs = new Map<string, Promise<void>>()
   private closed = false
+  private readonly chromeExtensionIds: ReadonlySet<string>
 
-  constructor(private readonly deps: BridgeServerDeps) {}
+  constructor(private readonly deps: BridgeServerDeps) {
+    this.chromeExtensionIds = new Set(deps.allowedChromeExtensionIds ?? [PINNED_CHROME_EXTENSION_ID])
+  }
 
   /**
    * Handle one HTTP upgrade for the bridge path.
@@ -292,43 +342,51 @@ export class BridgeServer {
   }
 
   private attach(ws: WebSocket, remoteAddress: string | undefined, origin: string | undefined): void {
+    if (!isAllowedBridgeOrigin(origin, this.chromeExtensionIds)) {
+      ws.close(BRIDGE_CLOSE_CODES.originRejected, 'origin not allowed')
+      return
+    }
     let helloTimer: NodeJS.Timeout | undefined = setTimeout(() => {
-      ws.close(4001, 'hello timeout')
+      ws.close(BRIDGE_CLOSE_CODES.helloTimeout, 'hello timeout')
     }, this.deps.helloTimeoutMs ?? HELLO_TIMEOUT_MS)
+    const serverNonce = createBridgeNonce()
 
     const onMessage = (data: Buffer | ArrayBuffer | Buffer[]): void => {
       const text = messageToText(data)
-      const frame = parseBridgeFrame(text)
-      if (frame === undefined) {
-        ws.close(1008, 'unparseable frame')
-        return
-      }
       if (helloTimer !== undefined) {
-        // Pending state: only `hello` is legal.
+        // Pending state: only a v2 `hello` answering this socket's challenge
+        // is legal. Every client authenticates, loopback included — an Origin
+        // header is forgeable by any local process and proves nothing alone.
+        const version = helloProtocolVersion(text)
+        if (version !== undefined && version !== BRIDGE_PROTOCOL_VERSION) {
+          ws.close(
+            BRIDGE_CLOSE_CODES.versionMismatch,
+            `protocol version mismatch: bridge speaks v${String(BRIDGE_PROTOCOL_VERSION)}, client sent v${String(version)}; update the extension and dsh plugin together`,
+          )
+          return
+        }
+        const frame = parseBridgeFrame(text)
+        if (frame === undefined) {
+          ws.close(1008, 'unparseable frame')
+          return
+        }
         if (frame.t !== 'hello') {
           ws.close(1008, 'hello first')
           return
         }
-        // Zero-config local mode: loopback sockets skip the token (the
-        // extension auto-discovers the bridge and connects without setup).
-        // WebSockets have no same-origin policy, so a malicious page could
-        // open a cross-origin socket to 127.0.0.1 with a loopback remote —
-        // the loopback shortcut therefore requires a chrome-extension://
-        // Origin (only extension contexts can present one; pages cannot
-        // forge the header). Firefox moz-extension:// origins contain a
-        // per-install UUID rather than the manifest's stable Gecko ID, so
-        // they are not an identity boundary and must present the bearer token.
-        // Non-loopback remotes must also present the bearer token.
-        const loopbackNoToken = isLoopbackAddress(remoteAddress)
-          && typeof origin === 'string'
-          && origin.startsWith('chrome-extension://')
-        if (!loopbackNoToken && !verifyToken(this.deps.token, frame.token)) {
-          ws.close(4002, 'bad token')
+        const expected = bridgeProof(this.deps.token, 'client', serverNonce, frame.nonce)
+        if (frame.nonce === serverNonce || !verifyToken(expected, frame.mac)) {
+          ws.close(BRIDGE_CLOSE_CODES.authFailed, 'authentication failed')
           return
         }
         clearTimeout(helloTimer)
         helloTimer = undefined
-        this.promote(ws, remoteAddress, frame.caps)
+        this.promote(ws, remoteAddress, frame.caps, bridgeProof(this.deps.token, 'server', frame.nonce, serverNonce))
+        return
+      }
+      const frame = parseBridgeFrame(text)
+      if (frame === undefined) {
+        ws.close(1008, 'unparseable frame')
         return
       }
       this.handleReadyFrame(frame)
@@ -340,10 +398,11 @@ export class BridgeServer {
     ws.on('message', onMessage)
     ws.once('close', onClose)
     ws.once('error', onClose)
+    sendFrame(ws, { t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: serverNonce })
   }
 
   /** Promote an authenticated socket to the single active slot. */
-  private promote(ws: WebSocket, remoteAddress: string | undefined, clientCaps: BridgeCaps): void {
+  private promote(ws: WebSocket, remoteAddress: string | undefined, clientCaps: BridgeCaps, serverMac: string): void {
     this.replaceConnection()
     const abort = new AbortController()
     const ping = setInterval(() => { sendFrame(ws, { t: 'ping' }) }, this.deps.pingIntervalMs ?? PING_INTERVAL_MS)
@@ -367,7 +426,7 @@ export class BridgeServer {
       }
     })()
     this.current = { ws, remoteAddress, clientCaps, abort, pump, ping }
-    sendFrame(ws, { t: 'hello.ok', caps: this.deps.caps })
+    sendFrame(ws, { t: 'hello.ok', caps: this.deps.caps, mac: serverMac })
     // Notify only after the new connection owns the slot, so a listener reading
     // `devToolsSupported()` sees the capability that just arrived.
     this.deps.onCapsChange?.(clientCaps)
@@ -390,6 +449,7 @@ export class BridgeServer {
         break
       case 'pong':
       case 'hello':
+      case 'challenge':
       case 'hello.ok':
       case 'rpc.result':
       case 'respond.result':
@@ -436,6 +496,21 @@ export class BridgeServer {
     if (forbidden) {
       sendFrame(conn.ws, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'forbidden', message: 'method is loopback-only' } })
       return
+    }
+    if (frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD || frame.method === BRIDGE_SESSION_PURGE_METHOD) {
+      const sessionId = frame.method === BRIDGE_SESSION_PURGE_METHOD
+        ? purgeSessionPayload(frame.payload)
+        : browserSnapshotPayload(frame.payload)?.sessionId
+      if (sessionId !== undefined && this.deps.sessionScope !== undefined
+        && !await this.deps.sessionScope.allows(sessionId, conn.abort.signal).catch(() => false)) {
+        sendFrame(conn.ws, {
+          t: 'rpc.result',
+          id: frame.id,
+          ok: false,
+          error: { code: 'forbidden', message: `session ${JSON.stringify(sessionId)} is not available to the browser bridge` },
+        })
+        return
+      }
     }
     if (frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD) {
       const payload = browserSnapshotPayload(frame.payload)
@@ -530,7 +605,7 @@ export class BridgeServer {
     clearInterval(conn.ping)
     conn.abort.abort()
     if (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING) {
-      conn.ws.close(4000, 'replaced')
+      conn.ws.close(BRIDGE_CLOSE_CODES.replaced, 'replaced')
     }
     for (const [id, pending] of this.pendingTools) {
       clearTimeout(pending.timer)

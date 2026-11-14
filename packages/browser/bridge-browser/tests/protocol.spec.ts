@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
+import { createHmac } from 'node:crypto'
 import {
+  BRIDGE_PROTOCOL_VERSION,
+  bridgeProofMessage,
+  computeBridgeProof,
+  constantTimeEqual,
+  createBridgeNonce,
+  helloProtocolVersion,
+  isBridgeHex256,
   DEVTOOLS_CAPS_VERSION,
   DEVTOOLS_TOOL_NAMES,
   isDevToolsCaps,
@@ -7,21 +15,87 @@ import {
   parseBridgeFrame,
 } from '../src/protocol.ts'
 
+const NONCE = 'a'.repeat(64)
+const MAC = 'b'.repeat(64)
+/** A well-formed v2 hello; `token` is gone from the wire. */
+const hello = (caps: unknown, extra: Record<string, unknown> = {}): string =>
+  JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: NONCE, mac: MAC, caps, ...extra })
+
+describe('bridge handshake primitives', () => {
+  it('computes HMAC-SHA256 proofs identical to node crypto', async () => {
+    const server = createBridgeNonce()
+    const client = createBridgeNonce()
+    expect(isBridgeHex256(server)).toBe(true)
+    expect(server).not.toBe(client)
+    const expected = createHmac('sha256', Buffer.from('a token', 'utf8'))
+      .update(bridgeProofMessage('client', server, client)).digest('hex')
+    expect(await computeBridgeProof('a token', 'client', server, client)).toBe(expected)
+  })
+
+  it('binds the role so a client proof is never a valid server proof', async () => {
+    const [a, b] = [createBridgeNonce(), createBridgeNonce()]
+    expect(await computeBridgeProof('t', 'client', a, b)).not.toBe(await computeBridgeProof('t', 'server', a, b))
+    expect(bridgeProofMessage('client', a, b)).toBe(`dsh-bridge/v${String(BRIDGE_PROTOCOL_VERSION)}|client|${a}|${b}`)
+  })
+
+  it('refuses to compute a proof with an empty token', async () => {
+    await expect(computeBridgeProof('', 'client', NONCE, NONCE)).rejects.toThrow(/empty/)
+  })
+
+  it('compares proofs in constant time and rejects empty or unequal lengths', () => {
+    expect(constantTimeEqual(MAC, MAC)).toBe(true)
+    expect(constantTimeEqual(MAC, `${MAC.slice(0, 63)}c`)).toBe(false)
+    expect(constantTimeEqual(MAC, MAC.slice(1))).toBe(false)
+    expect(constantTimeEqual('', '')).toBe(false)
+  })
+
+  it('reads the claimed handshake version of a raw hello', () => {
+    expect(helloProtocolVersion(hello({}))).toBe(BRIDGE_PROTOCOL_VERSION)
+    // The v1 shape carried the raw token and no version.
+    expect(helloProtocolVersion(JSON.stringify({ t: 'hello', token: 'x', caps: {} }))).toBe(1)
+    expect(helloProtocolVersion(JSON.stringify({ t: 'rpc' }))).toBeUndefined()
+    expect(helloProtocolVersion('nope')).toBeUndefined()
+    expect(helloProtocolVersion('[]')).toBeUndefined()
+  })
+})
+
 describe('parseBridgeFrame', () => {
   it('parses a valid hello frame', () => {
-    const frame = parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'abc123', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } }))
-    expect(frame).toEqual({ t: 'hello', token: 'abc123', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    const frame = parseBridgeFrame(hello({ textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 }))
+    expect(frame).toEqual({
+      t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: NONCE, mac: MAC,
+      caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 },
+    })
+  })
+
+  it('rejects a hello that carries no proof, a v1 token, or a malformed nonce', () => {
+    const caps = { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 }
+    expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'abc123', caps }))).toBeUndefined()
+    expect(parseBridgeFrame(hello(caps, { v: 1 }))).toBeUndefined()
+    expect(parseBridgeFrame(hello(caps, { nonce: 'short' }))).toBeUndefined()
+    expect(parseBridgeFrame(hello(caps, { mac: MAC.toUpperCase() }))).toBeUndefined()
+    expect(parseBridgeFrame(hello(caps, { mac: undefined }))).toBeUndefined()
+  })
+
+  it('parses the server challenge and requires a proof on hello.ok', () => {
+    expect(parseBridgeFrame(JSON.stringify({ t: 'challenge', v: 2, nonce: NONCE }))).toEqual({ t: 'challenge', v: 2, nonce: NONCE })
+    // A different version still parses so the client can report the mismatch.
+    expect(parseBridgeFrame(JSON.stringify({ t: 'challenge', v: 3, nonce: NONCE }))).toEqual({ t: 'challenge', v: 3, nonce: NONCE })
+    expect(parseBridgeFrame(JSON.stringify({ t: 'challenge', v: 2, nonce: 'x' }))).toBeUndefined()
+    expect(parseBridgeFrame(JSON.stringify({ t: 'challenge', nonce: NONCE }))).toBeUndefined()
+    expect(parseBridgeFrame(JSON.stringify({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })))
+      .toBeUndefined()
   })
 
   it('accepts the optional developer-tools capability', () => {
     const withDevTools = { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60, devTools: { version: DEVTOOLS_CAPS_VERSION } }
-    expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x', caps: withDevTools })))
-      .toEqual({ t: 'hello', token: 'x', caps: withDevTools })
+    expect(parseBridgeFrame(hello(withDevTools)))
+      .toEqual({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: NONCE, mac: MAC, caps: withDevTools })
     // An older extension omits the field and still authenticates.
     const legacy = { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 }
-    expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x', caps: legacy }))).toBeDefined()
+    expect(parseBridgeFrame(hello(legacy))).toBeDefined()
     // An unknown version is not usable, so the frame is rejected outright.
-    expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x', caps: { ...legacy, devTools: { version: 99 } } }))).toBeUndefined()
+    expect(parseBridgeFrame(hello({ ...legacy, devTools: { version: 99 } }))).toBeUndefined()
     expect(isDevToolsCaps({ version: DEVTOOLS_CAPS_VERSION })).toBe(true)
     expect(isDevToolsCaps({})).toBe(false)
     expect(isDevToolsCaps(undefined)).toBe(false)
@@ -34,11 +108,11 @@ describe('parseBridgeFrame', () => {
   })
 
   it('rejects hello with wrong caps shape', () => {
-    expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x', caps: { textOnly: false, snapshotMaxChars: 500, maxInteractiveItems: 10 } }))).toBeUndefined()
-    expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x', caps: { textOnly: true } }))).toBeUndefined()
-    expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x', caps: { textOnly: true, snapshotMaxChars: 0, maxInteractiveItems: 10 } }))).toBeUndefined()
-    expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x', caps: { textOnly: true, snapshotMaxChars: 499, maxInteractiveItems: 10 } }))).toBeUndefined()
-    expect(parseBridgeFrame(JSON.stringify({ t: 'hello', token: 'x' }))).toBeUndefined()
+    expect(parseBridgeFrame(hello({ textOnly: false, snapshotMaxChars: 500, maxInteractiveItems: 10 }))).toBeUndefined()
+    expect(parseBridgeFrame(hello({ textOnly: true }))).toBeUndefined()
+    expect(parseBridgeFrame(hello({ textOnly: true, snapshotMaxChars: 0, maxInteractiveItems: 10 }))).toBeUndefined()
+    expect(parseBridgeFrame(hello({ textOnly: true, snapshotMaxChars: 499, maxInteractiveItems: 10 }))).toBeUndefined()
+    expect(parseBridgeFrame(hello(undefined))).toBeUndefined()
   })
 
   it('parses rpc and tool frames', () => {
@@ -51,8 +125,8 @@ describe('parseBridgeFrame', () => {
   })
 
   it('parses server-side frames the extension receives', () => {
-    expect(parseBridgeFrame(JSON.stringify({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })))
-      .toEqual({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    expect(parseBridgeFrame(JSON.stringify({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 }, mac: MAC })))
+      .toEqual({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 }, mac: MAC })
     expect(parseBridgeFrame(JSON.stringify({ t: 'event', frame: { rpcId: 'r', method: 'turn/start', payload: {} } })))
       .toEqual({ t: 'event', frame: { rpcId: 'r', method: 'turn/start', payload: {} } })
     expect(parseBridgeFrame(JSON.stringify({ t: 'tool.call', id: '4', name: 'browser_click', args: { index: 1 }, expiresAt: 123, sessionId: 'session-1' })))
@@ -119,10 +193,10 @@ describe('parseBridgeFrame', () => {
 
   it('classifies frames by sender side', () => {
     const server = parseBridgeFrame(JSON.stringify({ t: 'tool.call', id: '1', name: 'browser_click', args: {}, expiresAt: 123 }))!
-    const client = parseBridgeFrame(JSON.stringify({ t: 'hello', token: 't', caps: { textOnly: true, snapshotMaxChars: 500, maxInteractiveItems: 10 } }))!
+    const client = parseBridgeFrame(hello({ textOnly: true, snapshotMaxChars: 500, maxInteractiveItems: 10 }))!
     expect(isServerFrame(server)).toBe(true)
     expect(isServerFrame(client)).toBe(false)
-    for (const t of ['hello.ok', 'rpc.result', 'respond.result', 'event', 'tool.call', 'tool.cancel', 'ping', 'error'] as const) {
+    for (const t of ['challenge', 'hello.ok', 'rpc.result', 'respond.result', 'event', 'tool.call', 'tool.cancel', 'ping', 'error'] as const) {
       const frame = parseBridgeFrame(JSON.stringify(serverShape(t)))!
       expect(isServerFrame(frame)).toBe(true)
     }
@@ -148,9 +222,10 @@ describe('parseBridgeFrame', () => {
 })
 
 /** Minimal valid shape per server-side frame type (for classification tests). */
-function serverShape(t: 'hello.ok' | 'rpc.result' | 'respond.result' | 'event' | 'tool.call' | 'tool.cancel' | 'ping' | 'error'): Record<string, unknown> {
+function serverShape(t: 'challenge' | 'hello.ok' | 'rpc.result' | 'respond.result' | 'event' | 'tool.call' | 'tool.cancel' | 'ping' | 'error'): Record<string, unknown> {
   switch (t) {
-    case 'hello.ok': return { t, caps: { textOnly: true, snapshotMaxChars: 500, maxInteractiveItems: 10 } }
+    case 'challenge': return { t, v: BRIDGE_PROTOCOL_VERSION, nonce: NONCE }
+    case 'hello.ok': return { t, caps: { textOnly: true, snapshotMaxChars: 500, maxInteractiveItems: 10 }, mac: MAC }
     case 'rpc.result': return { t, id: '1', ok: true, result: {} }
     case 'respond.result': return { t, id: '1', ok: true, result: { accepted: true } }
     case 'event': return { t, frame: { rpcId: 'r', method: 'x', payload: {} } }

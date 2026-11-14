@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
 
 class FakeWebSocket extends EventTarget {
   static readonly CONNECTING = 0
@@ -94,7 +95,12 @@ function mockChrome(options: {
     },
     storage: {
       local: {
-        get: vi.fn(options.localGet ?? (async () => ({}))),
+        // Every suite connects with the shared test token unless it stores its own.
+        get: vi.fn(async () => {
+          const stored: Record<string, unknown> = await (options.localGet ?? (async () => ({})))()
+          const settings = (stored.dshSettings ?? {}) as Record<string, unknown>
+          return { ...stored, dshSettings: { token: TEST_BRIDGE_TOKEN, ...settings } }
+        }),
         set: vi.fn(options.localSet ?? (async () => {})),
       },
       session: {
@@ -202,11 +208,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
     const socket = FakeWebSocket.instances[0]!
     socket.open()
-    await Promise.resolve()
-    socket.receive({
-      t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
-    })
+    await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
     await Promise.resolve()
     socket.close(4000, 'replaced')
     const probed = fetchMock.mock.calls.length
@@ -236,11 +238,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
     const originalSocket = FakeWebSocket.instances[0]!
     originalSocket.open()
-    await Promise.resolve()
-    originalSocket.receive({
-      t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
-    })
+    await completeHandshake(originalSocket, { until: panelSawConnected(panel.postMessage) })
     await vi.waitFor(() => {
       expect(panel.port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ state: 'connected' }))
     })
@@ -277,11 +275,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
     const socket = FakeWebSocket.instances[0]!
     socket.open()
-    await Promise.resolve()
-    socket.receive({
-      t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
-    })
+    await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
 
     panel.onMessage.emit({
       type: 'settings',
@@ -330,11 +324,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
     const socket = FakeWebSocket.instances[0]!
     socket.open()
-    await Promise.resolve()
-    socket.receive({
-      t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
-    })
+    await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
     panel.onMessage.emit({
       type: 'settings',
       id: 'settings-failed',
@@ -445,11 +435,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
     const socket = FakeWebSocket.instances[0]!
     socket.open()
-    await Promise.resolve()
-    socket.receive({
-      t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
-    })
+    await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
     await Promise.resolve()
     socket.receive({
       t: 'tool.call',
@@ -515,11 +501,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
     const socket = FakeWebSocket.instances[0]!
     socket.open()
-    await Promise.resolve()
-    socket.receive({
-      t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
-    })
+    await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
     await Promise.resolve()
     socket.receive({
       t: 'tool.call',
@@ -583,11 +565,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
     const socket = FakeWebSocket.instances[0]!
     socket.open()
-    await Promise.resolve()
-    socket.receive({
-      t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
-    })
+    await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
     await Promise.resolve()
     socket.receive({
       t: 'tool.call',
@@ -655,11 +633,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
     const originalSocket = FakeWebSocket.instances[0]!
     originalSocket.open()
-    await Promise.resolve()
-    originalSocket.receive({
-      t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
-    })
+    await completeHandshake(originalSocket, { until: panelSawConnected(panel.postMessage) })
     await Promise.resolve()
     originalSocket.receive({
       t: 'tool.call',
@@ -677,11 +651,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })
     const replacementSocket = FakeWebSocket.instances[1]!
     replacementSocket.open()
-    await Promise.resolve()
-    replacementSocket.receive({
-      t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
-    })
+    await completeHandshake(replacementSocket, { until: panelSawConnected(panel.postMessage) })
     await Promise.resolve()
 
     panel.onMessage.emit({
@@ -729,8 +699,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
     const original = FakeWebSocket.instances[0]!
     original.open()
-    await Promise.resolve()
-    original.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    await completeHandshake(original, { until: panelSawConnected(panel.postMessage) })
     await Promise.resolve()
     original.receive({
       t: 'tool.call', id: 'follow-before-reload', name: 'browser_follow_tab',
@@ -748,8 +717,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })
     const replacement = FakeWebSocket.instances[1]!
     replacement.open()
-    await Promise.resolve()
-    replacement.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    await completeHandshake(replacement, { until: panelSawConnected(panel.postMessage) })
     await Promise.resolve()
     finishCheckpoint(tab)
     await new Promise((resolve) => { setTimeout(resolve, 0) })
@@ -784,11 +752,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
     const socket = FakeWebSocket.instances[0]!
     socket.open()
-    await Promise.resolve()
-    socket.receive({
-      t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
-    })
+    await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
     await Promise.resolve()
     socket.receive({
       t: 'tool.call',
@@ -846,11 +810,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
     const socket = FakeWebSocket.instances[0]!
     socket.open()
-    await Promise.resolve()
-    socket.receive({
-      t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
-    })
+    await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
     await new Promise((resolve) => { setTimeout(resolve, 0) })
     holdTarget = true
     socket.receive({
@@ -920,11 +880,7 @@ describe('background bridge lifecycle', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
     const socket = FakeWebSocket.instances[0]!
     socket.open()
-    await Promise.resolve()
-    socket.receive({
-      t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
-    })
+    await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
     await Promise.resolve()
     panel.onMessage.emit({ type: 'session.active', sessionId: 'session-refresh', isNew: true })
     await vi.waitFor(() => {

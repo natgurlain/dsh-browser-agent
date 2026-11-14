@@ -45,6 +45,136 @@ export const BRIDGE_SESSION_PURGE_METHOD = 'bridge.session.purge'
 /** Seconds a fresh socket may take to present `hello` before it is closed. */
 export const HELLO_TIMEOUT_MS = 5_000
 
+/**
+ * Wire version of the authentication handshake. Version 1 sent the raw bearer
+ * token in `hello` (and let loopback Chrome origins skip it); version 2 is a
+ * mutual HMAC challenge-response in which the token never crosses the wire.
+ * Both halves reject any other version with {@link BRIDGE_CLOSE_CODES.versionMismatch}.
+ */
+export const BRIDGE_PROTOCOL_VERSION = 2
+
+/** WebSocket close codes the bridge uses; the reason string carries human text. */
+export const BRIDGE_CLOSE_CODES = {
+  /** Another authenticated connection took the single active slot. */
+  replaced: 4000,
+  /** No valid `hello` within {@link HELLO_TIMEOUT_MS}. */
+  helloTimeout: 4001,
+  /** The client's proof did not verify (wrong or missing token). */
+  authFailed: 4002,
+  /** The client speaks a different handshake version (e.g. a v1 extension). */
+  versionMismatch: 4003,
+  /** The WebSocket Origin is not an allowed extension. */
+  originRejected: 4004,
+} as const
+
+/**
+ * Chrome extension ID of the dsh browser extension, fixed by the public key in
+ * `extensions/dsh-browser/manifest.json` (`key`). The bridge accepts
+ * `chrome-extension://` origins only for this ID unless the plugin config
+ * names additional IDs (development builds, a Web Store listing).
+ */
+export const PINNED_CHROME_EXTENSION_ID = 'klmdgljhcjbbpjcplbanjeclilghnaoh'
+
+/** Nonces and proofs are 32 bytes rendered as lowercase hex. */
+const HEX_256 = /^[0-9a-f]{64}$/u
+
+/** Whether a value is a well-formed handshake nonce or proof (64 lowercase hex digits). */
+export function isBridgeHex256(value: unknown): value is string {
+  return typeof value === 'string' && HEX_256.test(value)
+}
+
+/**
+ * Exact bytes one side authenticates. The role label keeps a client proof from
+ * being reflected as a server proof; both nonces are fixed-length hex, so the
+ * separator cannot be smuggled into either field.
+ * @param role - which side produces the proof.
+ * @param first - for the client, the server nonce; for the server, the client nonce.
+ * @param second - the other nonce.
+ * @returns the message to MAC.
+ */
+export function bridgeProofMessage(role: 'client' | 'server', first: string, second: string): string {
+  return `dsh-bridge/v${String(BRIDGE_PROTOCOL_VERSION)}|${role}|${first}|${second}`
+}
+
+/**
+ * Fresh 32-byte nonce from the platform CSPRNG (WebCrypto, available in both
+ * node and extension contexts).
+ * @returns 64 lowercase hex digits.
+ */
+export function createBridgeNonce(): string {
+  const bytes = new Uint8Array(32)
+  globalThis.crypto.getRandomValues(bytes)
+  return toHex(bytes)
+}
+
+/**
+ * HMAC-SHA256 proof over {@link bridgeProofMessage}, keyed by the token's UTF-8
+ * bytes (configured tokens need not be hex).
+ * @param token - shared bridge token; must be non-empty.
+ * @param role - which side produces the proof.
+ * @param first - see {@link bridgeProofMessage}.
+ * @param second - see {@link bridgeProofMessage}.
+ * @returns the proof as 64 lowercase hex digits.
+ */
+export async function computeBridgeProof(
+  token: string,
+  role: 'client' | 'server',
+  first: string,
+  second: string,
+): Promise<string> {
+  if (token === '') throw new Error('bridge token is empty')
+  const encoder = new TextEncoder()
+  const key = await globalThis.crypto.subtle.importKey(
+    'raw',
+    encoder.encode(token),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+  const mac = await globalThis.crypto.subtle.sign('HMAC', key, encoder.encode(bridgeProofMessage(role, first, second)))
+  return toHex(new Uint8Array(mac))
+}
+
+/**
+ * Compare two strings without an early exit on the first differing byte.
+ * Lengths are not secret here (proofs are fixed-length hex).
+ * @returns true only for equal, non-empty strings.
+ */
+export function constantTimeEqual(expected: string, actual: string): boolean {
+  if (expected.length === 0 || expected.length !== actual.length) return false
+  let diff = 0
+  for (let index = 0; index < expected.length; index += 1) {
+    diff |= expected.charCodeAt(index) ^ actual.charCodeAt(index)
+  }
+  return diff === 0
+}
+
+function toHex(bytes: Uint8Array): string {
+  let out = ''
+  for (const byte of bytes) out += byte.toString(16).padStart(2, '0')
+  return out
+}
+
+/**
+ * Handshake version a raw `hello` message claims, read before full parsing so
+ * an outdated client gets a version-mismatch close instead of a parse error.
+ * A `hello` without `v` is the version-1 (raw token) shape.
+ * @param text - raw message text.
+ * @returns the claimed version, or `undefined` when the message is not a `hello`.
+ */
+export function helloProtocolVersion(text: string): number | undefined {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const frame = value as Record<string, unknown>
+  if (frame.t !== 'hello') return undefined
+  return typeof frame.v === 'number' ? frame.v : 1
+}
+
 /** Server-side ping cadence; the client answers `pong` to prove liveness. */
 export const PING_INTERVAL_MS = 30_000
 
@@ -120,8 +250,12 @@ export const DEVTOOLS_TOOL_NAMES = [
 
 /** Frames sent by the extension to the bridge plugin. */
 export type ClientFrame =
-  /** First frame, within HELLO_TIMEOUT_MS of socket open. */
-  | { t: 'hello'; token: string; caps: BridgeCaps }
+  /**
+   * Answer to `challenge`, within HELLO_TIMEOUT_MS of socket open. `mac` is
+   * {@link computeBridgeProof}(token, 'client', serverNonce, nonce); the token
+   * itself never crosses the wire.
+   */
+  | { t: 'hello'; v: typeof BRIDGE_PROTOCOL_VERSION; nonce: string; mac: string; caps: BridgeCaps }
   /** Unary call projected by the active dsh Host adapter. */
   | { t: 'rpc'; id: string; method: string; payload: unknown }
   /** Answer or cancel a pending Host interaction waterfall. */
@@ -134,8 +268,14 @@ export type ClientFrame =
 
 /** Frames sent by the bridge plugin to the extension. */
 export type ServerFrame =
-  /** Accepted after a valid `hello`. */
-  | { t: 'hello.ok'; caps: BridgeCaps }
+  /** First frame on every socket: the handshake version and a fresh server nonce. */
+  | { t: 'challenge'; v: number; nonce: string }
+  /**
+   * Accepted after a valid `hello`. `mac` is
+   * {@link computeBridgeProof}(token, 'server', clientNonce, serverNonce); the
+   * extension must verify it before trusting any other frame.
+   */
+  | { t: 'hello.ok'; caps: BridgeCaps; mac: string }
   /** Reply to an `rpc` frame; `result` is the bridge's stable ServerResponse envelope. */
   | { t: 'rpc.result'; id: string; ok: true; result: unknown }
   | { t: 'rpc.result'; id: string; ok: false; error: { code: string; message: string } }
@@ -164,7 +304,8 @@ export type BridgeFrame = ClientFrame | ServerFrame
  * @returns true for server-sendable frames.
  */
 export function isServerFrame(frame: BridgeFrame): frame is ServerFrame {
-  return frame.t === 'hello.ok'
+  return frame.t === 'challenge'
+    || frame.t === 'hello.ok'
     || frame.t === 'rpc.result'
     || frame.t === 'respond.result'
     || frame.t === 'event'
@@ -191,9 +332,15 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
   if (typeof frame.t !== 'string') return undefined
   switch (frame.t) {
     case 'hello':
-      return typeof frame.token === 'string'
+      return frame.v === BRIDGE_PROTOCOL_VERSION
+        && isBridgeHex256(frame.nonce)
+        && isBridgeHex256(frame.mac)
         && isCaps(frame.caps)
-        ? { t: 'hello', token: frame.token, caps: frame.caps }
+        ? { t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: frame.nonce, mac: frame.mac, caps: frame.caps }
+        : undefined
+    case 'challenge':
+      return typeof frame.v === 'number' && Number.isInteger(frame.v) && isBridgeHex256(frame.nonce)
+        ? { t: 'challenge', v: frame.v, nonce: frame.nonce }
         : undefined
     case 'rpc':
       return typeof frame.id === 'string' && typeof frame.method === 'string'
@@ -214,8 +361,8 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
     case 'pong':
       return { t: 'pong' }
     case 'hello.ok':
-      return isCaps(frame.caps)
-        ? { t: 'hello.ok', caps: frame.caps }
+      return isCaps(frame.caps) && isBridgeHex256(frame.mac)
+        ? { t: 'hello.ok', caps: frame.caps, mac: frame.mac }
         : undefined
     case 'rpc.result':
       if (typeof frame.id !== 'string') return undefined

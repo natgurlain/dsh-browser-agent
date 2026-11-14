@@ -1,7 +1,19 @@
 /**
  * Bridge WebSocket client (background side): connects to the dsh bridge,
- * authenticates with the bearer token, keeps the connection alive with
- * exponential-backoff reconnects, and answers protocol pings.
+ * runs the mutual challenge-response handshake, keeps the connection alive
+ * with exponential-backoff reconnects, and answers protocol pings.
+ *
+ * Handshake (protocol v2): the bridge opens with `challenge { nonce: Ns }`;
+ * the client answers `hello { nonce: Nc, mac: HMAC(token, client|Ns|Nc) }`;
+ * the bridge answers `hello.ok { mac: HMAC(token, server|Nc|Ns) }`. Nothing
+ * from the socket is trusted, and nothing but `hello` is sent, until that
+ * server proof verifies, so a local process squatting on a probed port learns
+ * neither the token nor any traffic. The token itself never crosses the wire.
+ *
+ * Token source: the user's settings field when filled in (Firefox, custom
+ * deployments), otherwise the `bridge-token` file the installer and the dsh
+ * plugin keep inside the unpacked Chrome extension directory. That file is not
+ * a web-accessible resource, so pages and other extensions cannot read it.
  *
  * The reconnect policy mirrors the dsh GUI's own ConnectionController: base
  * 500ms, ×2 per attempt, capped at 10s, jittered 0.5–1×.
@@ -11,10 +23,39 @@
 
 import type { BridgeCaps, ClientFrame, ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import {
+  BRIDGE_CLOSE_CODES,
+  BRIDGE_PROTOCOL_VERSION,
   DEFAULT_SNAPSHOT_MAX_CHARS,
+  computeBridgeProof,
+  constantTimeEqual,
+  createBridgeNonce,
   isServerFrame,
   parseBridgeFrame,
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+
+/** Extension-relative path of the token file provisioned for zero-config installs. */
+export const INSTALLED_TOKEN_PATH = 'bridge-token'
+
+/** Resolve the shared bridge token when settings leave it empty. */
+export type BridgeTokenSource = () => Promise<string>
+
+/**
+ * Read the token the installer (and the dsh plugin on each start) writes into
+ * the unpacked extension directory. Absent or malformed files yield `''`.
+ * @returns the token, or an empty string when none is provisioned.
+ */
+export async function loadInstalledToken(): Promise<string> {
+  try {
+    const runtime = (globalThis as { chrome?: { runtime?: { getURL?: (path: string) => string } } }).chrome?.runtime
+    if (typeof runtime?.getURL !== 'function') return ''
+    const response = await fetch(runtime.getURL(INSTALLED_TOKEN_PATH), { cache: 'no-store' })
+    if (!response.ok) return ''
+    const token = (await response.text()).trim()
+    return /^[\x21-\x7e]{1,1024}$/u.test(token) ? token : ''
+  } catch {
+    return ''
+  }
+}
 
 /** Coarse connection state for the UI. */
 export type BridgeState = 'connecting' | 'connected' | 'reconnecting' | 'stopped'
@@ -58,6 +99,8 @@ export class BridgeClient {
      * gates every call.
      */
     private readonly capabilities: Pick<BridgeCaps, 'devTools'> = {},
+    /** Token fallback when settings carry none (zero-config Chrome installs). */
+    private readonly tokenSource: BridgeTokenSource = loadInstalledToken,
   ) {}
 
   /** Current coarse state (mirrors the last emitted sink value). */
@@ -67,7 +110,8 @@ export class BridgeClient {
    * Connect (or reconnect) to the bridge. Idempotent: calling again with the
    * same url/token restarts the loop from attempt 0.
    * @param url - bridge WebSocket URL (e.g. ws://127.0.0.1:3080/ext/bridge).
-   * @param token - bearer token from settings.
+   * @param token - shared token from settings; empty falls back to the
+   *   provisioned `bridge-token` file, re-read on every attempt.
    */
   start(url: string, token: string): void {
     this.stop()
@@ -127,13 +171,25 @@ export class BridgeClient {
         continue
       }
 
+      const token = this.token !== '' ? this.token : await this.tokenSource().catch(() => '')
+      if (!this.running || generation !== this.generation) return
+      if (token === '') {
+        // Without a secret the handshake cannot succeed; wait for the installer
+        // or the dsh plugin to provision it (or for the user to paste one).
+        console.warn('dsh bridge: no bridge token is configured or provisioned; skipping connection attempt')
+        if (!this.retryAllowed()) return
+        this.emitState('reconnecting')
+        await this.waitBeforeRetry()
+        continue
+      }
+
       const socket = new WebSocket(this.url)
       this.ws = socket
       // A replacement is an ownership handoff, not a transient transport
       // failure. Yield permanently so two open profiles cannot reconnect in a
       // tight loop and repeatedly evict one another.
       socket.addEventListener('close', (event) => {
-        if (event.code !== 4000 || this.ws !== socket || !this.running) return
+        if (event.code !== BRIDGE_CLOSE_CODES.replaced || this.ws !== socket || !this.running) return
         this.running = false
         this.clearAckTimer()
         this.ws = null
@@ -155,47 +211,8 @@ export class BridgeClient {
         continue
       }
 
-      // Authenticate: hello must be accepted before any other traffic.
-      socket.send(JSON.stringify({
-        t: 'hello',
-        token: this.token,
-        caps: {
-          textOnly: true,
-          snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS,
-          maxInteractiveItems: 60,
-          ...this.capabilities,
-        },
-      } satisfies ClientFrame))
-
-      let authed = false
-      const accepted = await new Promise<boolean>((resolve) => {
-        const onMessage = (event: MessageEvent): void => {
-          const frame = parseBridgeFrame(String(event.data))
-          if (frame === undefined) return
-          if (!authed) {
-            if (frame.t === 'hello.ok') {
-              authed = true
-              this.clearAckTimer()
-              resolve(true)
-              this.sinks.onHelloOk(frame.caps)
-            } else if (frame.t === 'error' || frame.t === 'rpc.result' || frame.t === 'event') {
-              this.sinks.onFrame(frame)
-            }
-            return
-          }
-          if (frame.t === 'ping') {
-            socket.send(JSON.stringify({ t: 'pong' } satisfies ClientFrame))
-            return
-          }
-          if (isServerFrame(frame)) this.sinks.onFrame(frame)
-        }
-        socket.addEventListener('message', onMessage)
-        socket.addEventListener('close', () => {
-          this.clearAckTimer()
-          resolve(false)
-        }, { once: true })
-        this.ackTimer = setTimeout(() => resolve(false), HELLO_ACK_TIMEOUT_MS)
-      })
+      const session = this.authenticate(socket, token)
+      const accepted = await session.accepted
       if (!accepted || !this.running || generation !== this.generation) {
         await this.fail(socket)
         continue
@@ -203,16 +220,125 @@ export class BridgeClient {
 
       this.attempt = 0
       this.emitState('connected')
+      // Frames that arrived while the server proof was being verified are
+      // delivered now, in order, ahead of anything newer.
+      session.release()
 
-      await new Promise<void>((resolve) => {
-        socket.addEventListener('close', () => resolve(), { once: true })
-        socket.addEventListener('error', () => resolve(), { once: true })
-      })
+      if (socket.readyState === WebSocket.OPEN) {
+        await new Promise<void>((resolve) => {
+          socket.addEventListener('close', () => resolve(), { once: true })
+          socket.addEventListener('error', () => resolve(), { once: true })
+        })
+      }
       if (!this.running || generation !== this.generation) {
         socket.close()
         return
       }
       await this.fail(socket)
+    }
+  }
+
+  /**
+   * Run the client half of the handshake on an open socket. One listener owns
+   * the socket for its whole life: before the server proof verifies every
+   * frame except the expected handshake step is dropped; while it verifies,
+   * frames queue; after {@link release} they flow to the sinks.
+   */
+  private authenticate(socket: WebSocket, token: string): { accepted: Promise<boolean>; release: () => void } {
+    type Stage = 'challenge' | 'proving' | 'awaiting-ok' | 'verifying' | 'accepted' | 'ready' | 'failed'
+    let stage: Stage = 'challenge'
+    let serverNonce = ''
+    let clientNonce = ''
+    const queued: ServerFrame[] = []
+    let settle!: (accepted: boolean) => void
+    const accepted = new Promise<boolean>((resolve) => { settle = resolve })
+    const finish = (ok: boolean): void => {
+      if (stage === 'accepted' || stage === 'ready' || stage === 'failed') return
+      stage = ok ? 'accepted' : 'failed'
+      this.clearAckTimer()
+      settle(ok)
+    }
+    const reject = (code: number, reason: string): void => {
+      console.warn(`dsh bridge: ${reason}`)
+      finish(false)
+      if (socket.readyState === WebSocket.OPEN) socket.close(code, reason)
+    }
+    const deliver = (frame: ServerFrame): void => {
+      if (frame.t === 'ping') {
+        socket.send(JSON.stringify({ t: 'pong' } satisfies ClientFrame))
+        return
+      }
+      this.sinks.onFrame(frame)
+    }
+
+    socket.addEventListener('message', (event: MessageEvent) => {
+      const frame = parseBridgeFrame(String(event.data))
+      if (frame === undefined || !isServerFrame(frame)) return
+      switch (stage) {
+        case 'challenge': {
+          if (frame.t !== 'challenge') return
+          if (frame.v !== BRIDGE_PROTOCOL_VERSION) {
+            reject(BRIDGE_CLOSE_CODES.versionMismatch,
+              `protocol version mismatch: extension speaks v${String(BRIDGE_PROTOCOL_VERSION)}, bridge sent v${String(frame.v)}`)
+            return
+          }
+          stage = 'proving'
+          serverNonce = frame.nonce
+          clientNonce = createBridgeNonce()
+          void computeBridgeProof(token, 'client', serverNonce, clientNonce).then((mac) => {
+            if (stage !== 'proving' || socket.readyState !== WebSocket.OPEN) return
+            socket.send(JSON.stringify({
+              t: 'hello',
+              v: BRIDGE_PROTOCOL_VERSION,
+              nonce: clientNonce,
+              mac,
+              caps: {
+                textOnly: true,
+                snapshotMaxChars: DEFAULT_SNAPSHOT_MAX_CHARS,
+                maxInteractiveItems: 60,
+                ...this.capabilities,
+              },
+            } satisfies ClientFrame))
+            stage = 'awaiting-ok'
+          }, () => { reject(BRIDGE_CLOSE_CODES.authFailed, 'could not compute the handshake proof') })
+          return
+        }
+        case 'awaiting-ok': {
+          if (frame.t !== 'hello.ok') return
+          stage = 'verifying'
+          const caps = frame.caps
+          void computeBridgeProof(token, 'server', clientNonce, serverNonce).then((expected) => {
+            if (stage !== 'verifying') return
+            if (!constantTimeEqual(expected, frame.mac)) {
+              reject(BRIDGE_CLOSE_CODES.authFailed, 'the bridge did not prove knowledge of the token; refusing to trust it')
+              return
+            }
+            finish(true)
+            this.sinks.onHelloOk(caps)
+          }, () => { reject(BRIDGE_CLOSE_CODES.authFailed, 'could not verify the bridge proof') })
+          return
+        }
+        case 'verifying':
+        case 'accepted':
+          queued.push(frame)
+          return
+        case 'ready':
+          deliver(frame)
+          return
+        case 'proving':
+        case 'failed':
+          return
+      }
+    })
+    socket.addEventListener('close', () => { finish(false) }, { once: true })
+    this.ackTimer = setTimeout(() => { reject(BRIDGE_CLOSE_CODES.helloTimeout, 'handshake timed out') }, HELLO_ACK_TIMEOUT_MS)
+    return {
+      accepted,
+      release: () => {
+        if (stage !== 'accepted') return
+        stage = 'ready'
+        for (const frame of queued.splice(0)) deliver(frame)
+      },
     }
   }
 

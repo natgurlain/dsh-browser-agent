@@ -2,8 +2,13 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
-import { BridgeServer, BridgeToolError, isLoopbackAddress, messageToText } from '../src/server.ts'
+import { BridgeServer, BridgeToolError, isAllowedBridgeOrigin, isLoopbackAddress, messageToText } from '../src/server.ts'
 import {
+  BRIDGE_CLOSE_CODES,
+  BRIDGE_PROTOCOL_VERSION,
+  PINNED_CHROME_EXTENSION_ID,
+  computeBridgeProof,
+  createBridgeNonce,
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_SESSION_PURGE_METHOD,
   DEVTOOLS_CAPS_VERSION,
@@ -14,8 +19,10 @@ import type { BrowserHostApi, HostEventFrame } from '../src/host-api.ts'
 
 const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
 
-/** 扩展上下文的 Origin（回环免 token 的必要条件）。 */
-const EXT_ORIGIN = 'chrome-extension://test-extension-id'
+/** Origin of the pinned (manifest-keyed) Chrome extension. */
+const EXT_ORIGIN = `chrome-extension://${PINNED_CHROME_EXTENSION_ID}`
+/** Any other installed Chrome extension presents a real, but foreign, Origin. */
+const OTHER_EXT_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop'
 const FIREFOX_EXT_ORIGIN = 'moz-extension://per-install-uuid'
 
 /** Extension caps used by every hello in this suite. */
@@ -68,10 +75,17 @@ function hostApi(overrides: Partial<BrowserHostApi> = {}): BrowserHostApi {
   }
 }
 
+/** Frames each test socket received, so `sendHello` can answer its challenge. */
+const socketFrames = new WeakMap<WebSocket, BridgeFrame[]>()
+/** Close code and reason each test socket observed. */
+const socketClose = new WeakMap<WebSocket, { code: number; reason: string }>()
+
 function connect(url: string, origin?: string): Promise<{ ws: WebSocket; frames: BridgeFrame[]; done: Promise<void> }> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url, origin !== undefined ? { headers: { origin } } : undefined)
     const frames: BridgeFrame[] = []
+    socketFrames.set(ws, frames)
+    ws.on('close', (code, reason) => { socketClose.set(ws, { code, reason: reason.toString() }) })
     ws.on('message', (data) => { frames.push(JSON.parse(data.toString()) as BridgeFrame) })
     ws.on('error', reject)
     ws.on('open', () => {
@@ -88,6 +102,22 @@ function connect(url: string, origin?: string): Promise<{ ws: WebSocket; frames:
 
 function send(ws: WebSocket, frame: BridgeFrame): void {
   ws.send(JSON.stringify(frame))
+}
+
+/**
+ * Answer the server's challenge the way the extension does. An empty token
+ * stands for a client that does not know the secret: it can only guess a proof.
+ * @returns the client nonce the hello carried.
+ */
+async function sendHello(ws: WebSocket, token: string, caps: Record<string, unknown>): Promise<string> {
+  const frames = socketFrames.get(ws)!
+  await waitFor(() => frames.some((frame) => frame.t === 'challenge') || ws.readyState !== WebSocket.OPEN)
+  const challenge = frames.find((frame) => frame.t === 'challenge') as Extract<BridgeFrame, { t: 'challenge' }> | undefined
+  const nonce = createBridgeNonce()
+  if (challenge === undefined || ws.readyState !== WebSocket.OPEN) return nonce
+  const mac = token === '' ? createBridgeNonce() : await computeBridgeProof(token, 'client', challenge.nonce, nonce)
+  ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, mac, caps }))
+  return nonce
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
@@ -119,50 +149,156 @@ describe('BridgeServer', () => {
     // No connection yet: the capability is unsupported.
     expect(h.bridge.devToolsSupported()).toBe(false)
 
-    const ws = new WebSocket(h.url, { headers: { origin: EXT_ORIGIN } })
-    const frames: BridgeFrame[] = []
-    ws.on('message', (data) => { frames.push(JSON.parse(String(data)) as BridgeFrame) })
-    await waitFor(() => ws.readyState === WebSocket.OPEN)
-    send(ws, { t: 'hello', token: TOKEN, caps: { ...CAPS, devTools: { version: DEVTOOLS_CAPS_VERSION } } })
+    const { ws, frames } = await connect(h.url, EXT_ORIGIN)
+    await sendHello(ws, TOKEN, { ...CAPS, devTools: { version: DEVTOOLS_CAPS_VERSION } })
     await waitFor(() => frames.some((frame) => frame.t === 'hello.ok'))
     expect(onCapsChange).toHaveBeenCalledWith(expect.objectContaining({ devTools: { version: DEVTOOLS_CAPS_VERSION } }))
     expect(h.bridge.devToolsSupported()).toBe(true)
 
     // A reconnecting extension without the capability retracts it again.
-    const legacy = new WebSocket(h.url, { headers: { origin: EXT_ORIGIN } })
-    await waitFor(() => legacy.readyState === WebSocket.OPEN)
-    send(legacy, { t: 'hello', token: TOKEN, caps: CAPS })
+    const { ws: legacy } = await connect(h.url, EXT_ORIGIN)
+    await sendHello(legacy, TOKEN, CAPS)
     await waitFor(() => h.bridge.devToolsSupported() === false)
     expect(onCapsChange).toHaveBeenLastCalledWith(CAPS)
     ws.close()
     legacy.close()
   })
 
-  it('authenticates a valid hello and acknowledges caps', async () => {
+  it('authenticates a valid hello and proves its own knowledge of the token back', async () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    const clientNonce = await sendHello(ws, TOKEN, { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
-    expect(frames.find((f) => f.t === 'hello.ok')).toEqual({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    const challenge = frames[0] as Extract<BridgeFrame, { t: 'challenge' }>
+    expect(challenge).toMatchObject({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION })
+    expect(frames.find((f) => f.t === 'hello.ok')).toEqual({
+      t: 'hello.ok',
+      caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 },
+      mac: await computeBridgeProof(TOKEN, 'server', clientNonce, challenge.nonce),
+    })
     ws.close()
   })
 
-  it('accepts loopback connections without a token when Origin is an extension (zero-config mode)', async () => {
+  it('never puts the token on the wire', async () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url, EXT_ORIGIN)
-    send(ws, { t: 'hello', token: '', caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
-    expect(frames.find((f) => f.t === 'hello.ok')).toBeDefined()
+    expect(JSON.stringify(frames)).not.toContain(TOKEN)
     ws.close()
+  })
+
+  it('issues a fresh challenge per socket so a captured proof cannot be replayed', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const first = await connect(h.url, EXT_ORIGIN)
+    await waitFor(() => first.frames.some((f) => f.t === 'challenge'))
+    const firstChallenge = first.frames[0] as Extract<BridgeFrame, { t: 'challenge' }>
+    const nonce = createBridgeNonce()
+    const capturedMac = await computeBridgeProof(TOKEN, 'client', firstChallenge.nonce, nonce)
+    first.ws.close()
+    // Replay the exact hello a valid client sent on an earlier socket.
+    const replay = await connect(h.url, EXT_ORIGIN)
+    await waitFor(() => replay.frames.some((f) => f.t === 'challenge'))
+    const replayChallenge = replay.frames[0] as Extract<BridgeFrame, { t: 'challenge' }>
+    expect(replayChallenge.nonce).not.toBe(firstChallenge.nonce)
+    replay.ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, mac: capturedMac, caps: CAPS }))
+    await replay.done
+    expect(socketClose.get(replay.ws)?.code).toBe(BRIDGE_CLOSE_CODES.authFailed)
+  })
+
+  it('rejects a Chrome-extension Origin without a valid proof (an Origin header is forgeable)', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames, done } = await connect(h.url, EXT_ORIGIN)
+    await sendHello(ws, '', CAPS)
+    await done
+    expect(frames.some((f) => f.t === 'hello.ok')).toBe(false)
+    expect(socketClose.get(ws)?.code).toBe(BRIDGE_CLOSE_CODES.authFailed)
+    expect(h.bridge.hasConnection()).toBe(false)
+  })
+
+  it('rejects a proof made with the wrong token', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, done } = await connect(h.url, EXT_ORIGIN)
+    await sendHello(ws, 'not-the-token', CAPS)
+    await done
+    expect(socketClose.get(ws)?.code).toBe(BRIDGE_CLOSE_CODES.authFailed)
+  })
+
+  it('rejects a foreign Chrome extension before the handshake', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames, done } = await connect(h.url, OTHER_EXT_ORIGIN)
+    await done
+    expect(frames).toEqual([])
+    expect(socketClose.get(ws)?.code).toBe(BRIDGE_CLOSE_CODES.originRejected)
+  })
+
+  it('accepts additional Chrome extension IDs named by configuration', async () => {
+    const other = OTHER_EXT_ORIGIN.slice('chrome-extension://'.length)
+    const h = await startBridge({ allowedChromeExtensionIds: [PINNED_CHROME_EXTENSION_ID, other] })
+    harnesses.push(h)
+    const { ws, frames } = await connect(h.url, OTHER_EXT_ORIGIN)
+    await sendHello(ws, TOKEN, CAPS)
+    await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
+    ws.close()
+  })
+
+  it('classifies WebSocket origins', () => {
+    const pinned = new Set([PINNED_CHROME_EXTENSION_ID])
+    expect(isAllowedBridgeOrigin(undefined, pinned)).toBe(true)
+    expect(isAllowedBridgeOrigin(EXT_ORIGIN, pinned)).toBe(true)
+    expect(isAllowedBridgeOrigin(FIREFOX_EXT_ORIGIN, pinned)).toBe(true)
+    expect(isAllowedBridgeOrigin(OTHER_EXT_ORIGIN, pinned)).toBe(false)
+    expect(isAllowedBridgeOrigin(`${EXT_ORIGIN}.evil.example`, pinned)).toBe(false)
+    expect(isAllowedBridgeOrigin('https://evil.example', pinned)).toBe(false)
+    expect(isAllowedBridgeOrigin('null', pinned)).toBe(false)
+  })
+
+  it('closes a version-1 client (raw token in hello) with a version-mismatch code', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames, done } = await connect(h.url, EXT_ORIGIN)
+    await waitFor(() => frames.some((f) => f.t === 'challenge'))
+    ws.send(JSON.stringify({ t: 'hello', token: TOKEN, caps: CAPS }))
+    await done
+    expect(socketClose.get(ws)).toEqual({
+      code: BRIDGE_CLOSE_CODES.versionMismatch,
+      reason: expect.stringContaining('protocol version mismatch'),
+    })
+    expect(frames.some((f) => f.t === 'hello.ok')).toBe(false)
+  })
+
+  it('closes a client claiming a newer handshake version', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, done } = await connect(h.url)
+    ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION + 1, nonce: createBridgeNonce(), mac: createBridgeNonce(), caps: CAPS }))
+    await done
+    expect(socketClose.get(ws)?.code).toBe(BRIDGE_CLOSE_CODES.versionMismatch)
+  })
+
+  it('rejects a hello that echoes the server nonce as its own', async () => {
+    const h = await startBridge()
+    harnesses.push(h)
+    const { ws, frames, done } = await connect(h.url)
+    await waitFor(() => frames.some((f) => f.t === 'challenge'))
+    const challenge = frames[0] as Extract<BridgeFrame, { t: 'challenge' }>
+    const mac = await computeBridgeProof(TOKEN, 'client', challenge.nonce, challenge.nonce)
+    ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: challenge.nonce, mac, caps: CAPS }))
+    await done
+    expect(socketClose.get(ws)?.code).toBe(BRIDGE_CLOSE_CODES.authFailed)
   })
 
   it('requires a token from Firefox extension origins because their UUID is not an extension identity', async () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, done } = await connect(h.url, FIREFOX_EXT_ORIGIN)
-    send(ws, { t: 'hello', token: '', caps: CAPS })
+    await sendHello(ws, '', CAPS)
     await done
     expect(ws.readyState).toBe(WebSocket.CLOSED)
   })
@@ -171,7 +307,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url, FIREFOX_EXT_ORIGIN)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     expect(frames.find((f) => f.t === 'hello.ok')).toBeDefined()
     ws.close()
@@ -181,7 +317,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, done } = await connect(h.url, 'https://evil.example')
-    send(ws, { t: 'hello', token: '', caps: CAPS })
+    await sendHello(ws, '', CAPS)
     await done
     expect(ws.readyState).toBe(WebSocket.CLOSED)
   })
@@ -190,7 +326,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, done } = await connect(h.url)
-    send(ws, { t: 'hello', token: '', caps: CAPS })
+    await sendHello(ws, '', CAPS)
     await done
     expect(ws.readyState).toBe(WebSocket.CLOSED)
   })
@@ -199,7 +335,7 @@ describe('BridgeServer', () => {
     const h = await startBridge({ remoteAddressOverride: '192.168.1.5' })
     harnesses.push(h)
     const { ws, done } = await connect(h.url)
-    send(ws, { t: 'hello', token: '', caps: CAPS })
+    await sendHello(ws, '', CAPS)
     await done
     expect(ws.readyState).toBe(WebSocket.CLOSED)
   })
@@ -225,7 +361,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    await sendHello(ws, TOKEN, { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     send(ws, { t: 'rpc', id: 'rpc-1', method: 'session.list', payload: {} })
     await waitFor(() => frames.some((f) => f.t === 'rpc.result'))
@@ -244,7 +380,7 @@ describe('BridgeServer', () => {
     const h = await startBridge({ api: hostApi({ call: async () => { throw new Error('boom') } }) })
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    await sendHello(ws, TOKEN, { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     send(ws, { t: 'rpc', id: 'rpc-2', method: 'session.list', payload: {} })
     await waitFor(() => frames.some((f) => f.t === 'rpc.result' && f.id === 'rpc-2'))
@@ -258,7 +394,7 @@ describe('BridgeServer', () => {
     const h = await startBridge({ injectBrowserSnapshot })
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((frame) => frame.t === 'hello.ok'))
 
     send(ws, {
@@ -293,7 +429,7 @@ describe('BridgeServer', () => {
     const h = await startBridge({ purgeSession })
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((frame) => frame.t === 'hello.ok'))
 
     send(ws, {
@@ -325,7 +461,7 @@ describe('BridgeServer', () => {
     const failureBridge = await startBridge({ purgeSession: failing })
     harnesses.push(failureBridge)
     const failure = await connect(failureBridge.url)
-    send(failure.ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(failure.ws, TOKEN, CAPS)
     await waitFor(() => failure.frames.some((frame) => frame.t === 'hello.ok'))
     send(failure.ws, {
       t: 'rpc',
@@ -348,7 +484,7 @@ describe('BridgeServer', () => {
     const h = await startBridge({ injectBrowserSnapshot })
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((frame) => frame.t === 'hello.ok'))
 
     send(ws, {
@@ -385,7 +521,7 @@ describe('BridgeServer', () => {
     const h = await startBridge({ api: hostApi({ call }) })
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((frame) => frame.t === 'hello.ok'))
 
     send(ws, {
@@ -414,7 +550,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((frame) => frame.t === 'hello.ok'))
     send(ws, {
       t: 'respond',
@@ -439,7 +575,7 @@ describe('BridgeServer', () => {
     const h = await startBridge({ api: hostApi({ respond: async () => { throw new Error('response rejected') } }) })
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((frame) => frame.t === 'hello.ok'))
     send(ws, {
       t: 'respond', id: 'response-2', rpcId: 'question-2',
@@ -465,7 +601,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    await sendHello(ws, TOKEN, { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     const result = h.bridge.requestTool('browser_click', { index: 1 }, new AbortController().signal)
     await waitFor(() => frames.some((f) => f.t === 'tool.call'))
@@ -481,7 +617,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url, EXT_ORIGIN)
-    send(ws, { t: 'hello', token: '', caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     const abort = new AbortController()
     abort.abort()
@@ -504,7 +640,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    await sendHello(ws, TOKEN, { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     await expect(h.bridge.requestTool('browser_wait', {}, new AbortController().signal, 30))
       .rejects.toMatchObject({ code: 'timeout' })
@@ -521,7 +657,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    await sendHello(ws, TOKEN, { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     const result = h.bridge.requestTool('browser_navigate', { url: 'https://x' }, new AbortController().signal)
     await waitFor(() => frames.some((f) => f.t === 'tool.call'))
@@ -536,7 +672,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const first = await connect(h.url)
-    send(first.ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    await sendHello(first.ws, TOKEN, { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
     await waitFor(() => first.frames.some((f) => f.t === 'hello.ok'))
     const pending = h.bridge.requestTool('browser_click', {}, new AbortController().signal)
     // Attach the assertion eagerly: the replacement below settles it before the final await.
@@ -544,7 +680,7 @@ describe('BridgeServer', () => {
     await waitFor(() => first.frames.some((f) => f.t === 'tool.call'))
 
     const second = await connect(h.url)
-    send(second.ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    await sendHello(second.ws, TOKEN, { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
     await waitFor(() => second.frames.some((f) => f.t === 'hello.ok'))
 
     await pendingAssertion
@@ -556,7 +692,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    await sendHello(ws, TOKEN, { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     const abort = new AbortController()
     const pending = h.bridge.requestTool('browser_click', {}, abort.signal)
@@ -573,7 +709,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     const pending = h.bridge.requestTool(
       'browser_click',
@@ -594,7 +730,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 } })
+    await sendHello(ws, TOKEN, { textOnly: true, snapshotMaxChars: 12000, maxInteractiveItems: 60 })
     await waitFor(() => frames.filter((f) => f.t === 'event').length >= 2)
     const events = frames.filter((f) => f.t === 'event') as Extract<BridgeFrame, { t: 'event' }>[]
     expect(events.map((e) => e.frame.method)).toEqual(['session/subscribed', 'session/queue'])
@@ -605,7 +741,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     const pending = h.bridge.requestTool('browser_click', {}, new AbortController().signal)
     // Tear the socket down immediately: the in-flight send reports a write
@@ -626,7 +762,7 @@ describe('BridgeServer', () => {
     const h = await startBridge({ pingIntervalMs: 50 })
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'ping'))
     send(ws, { t: 'pong' })
     ws.close()
@@ -643,7 +779,7 @@ describe('BridgeServer', () => {
     const h = await startBridge({ api: hostApi({ events: () => lateFailEvents }) })
     harnesses.push(h)
     const { ws, frames, done } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     ws.close()
     await done
@@ -655,7 +791,7 @@ describe('BridgeServer', () => {
   it('closes cleanly and rejects pending work', async () => {
     const h = await startBridge()
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     const pending = h.bridge.requestTool('browser_click', {}, new AbortController().signal)
     // Attach the assertion eagerly: close() settles it before the final await.
@@ -672,7 +808,7 @@ describe('BridgeServer', () => {
     harnesses.push(h)
     expect(h.bridge.hasConnection()).toBe(false)
     const { ws, frames, done } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     expect(h.bridge.hasConnection()).toBe(true)
     ws.close()
@@ -685,11 +821,11 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames, done } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     // Client-only shapes after ready are ignored (no error frame, no close).
     send(ws, { t: 'pong' })
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await new Promise((resolve) => { setTimeout(resolve, 50) })
     expect(ws.readyState).toBe(WebSocket.OPEN)
     // Garbage is a protocol violation and closes the socket.
@@ -707,7 +843,7 @@ describe('BridgeServer', () => {
     })
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     send(ws, { t: 'rpc', id: 'rpc-3', method: 'session.list', payload: {} })
     await waitFor(() => frames.some((f) => f.t === 'rpc.result' && f.id === 'rpc-3'))
@@ -723,7 +859,7 @@ describe('BridgeServer', () => {
     })
     harnesses.push(throwing)
     const second = await connect(throwing.url)
-    send(second.ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(second.ws, TOKEN, CAPS)
     await waitFor(() => second.frames.some((f) => f.t === 'hello.ok'))
     send(second.ws, { t: 'rpc', id: 'rpc-4', method: 'session.list', payload: {} })
     await waitFor(() => second.frames.some((f) => f.t === 'rpc.result' && f.id === 'rpc-4'))
@@ -736,7 +872,7 @@ describe('BridgeServer', () => {
     const h = await startBridge()
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     // Unknown id: ignored, connection stays healthy.
     send(ws, { t: 'tool.result', id: 'nope', ok: true, result: {} })
@@ -751,7 +887,7 @@ describe('BridgeServer', () => {
     const h = await startBridge({ remoteAddressOverride: '192.168.1.5' })
     harnesses.push(h)
     const { ws, frames } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'hello.ok'))
     send(ws, { t: 'rpc', id: 'priv-1', method: 'settings.describe', payload: {} })
     await waitFor(() => frames.some((f) => f.t === 'rpc.result' && f.id === 'priv-1'))
@@ -775,7 +911,7 @@ describe('BridgeServer', () => {
     const h = await startBridge({ api: hostApi({ events: () => failingEvents }) })
     harnesses.push(h)
     const { ws, frames, done } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'error' && f.code === 'stream-failed'))
     expect(frames.find((f) => f.t === 'error')).toMatchObject({ t: 'error', code: 'stream-failed' })
     await done
@@ -794,7 +930,7 @@ describe('BridgeServer', () => {
     const h = await startBridge({ api: hostApi({ events: () => slowEvents }) })
     harnesses.push(h)
     const { ws, frames, done } = await connect(h.url)
-    send(ws, { t: 'hello', token: TOKEN, caps: CAPS })
+    await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.filter((f) => f.t === 'event').length >= 2)
     ws.close()
     await done

@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PAGE_SESSION_CONTEXT_STORAGE_KEY } from '../src/background/session-continuity.ts'
+import { completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
 
 class FakeWebSocket extends EventTarget {
   static readonly CONNECTING = 0
@@ -112,6 +113,7 @@ describe('tool-driven session checkpoints', () => {
           get: vi.fn(async () => ({
             dshSettings: {
               bridgeUrl: 'wss://bridge.example/ext/bridge',
+              token: TEST_BRIDGE_TOKEN,
               sharePageContent: 'auto',
               trustedActionOrigins: ['https://example.com'],
             },
@@ -158,11 +160,7 @@ describe('tool-driven session checkpoints', () => {
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
     const socket = FakeWebSocket.instances[0]!
     socket.open()
-    await vi.waitFor(() => { expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'hello' })) })
-    socket.receive({
-      t: 'hello.ok',
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
-    })
+    await completeHandshake(socket, { until: panelSawConnected(panel.port.postMessage as unknown as { mock: { calls: unknown[][] } }) })
     panel.onMessage.emit({ type: 'session.active', sessionId: 'session-live', isNew: true })
     await vi.waitFor(() => { expect(storedUrlKey(sessionData)).toBe('https://example.com/start') })
     panel.onDisconnect.emit()

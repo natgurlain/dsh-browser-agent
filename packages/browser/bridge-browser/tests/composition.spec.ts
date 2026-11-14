@@ -32,7 +32,15 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { createSessionFormatV3ToV4 } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import * as BridgeBrowser from '../src/index.ts'
-import { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_PATH, type BridgeFrame } from '../src/protocol.ts'
+import {
+  BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
+  BRIDGE_PATH,
+  BRIDGE_PROTOCOL_VERSION,
+  PINNED_CHROME_EXTENSION_ID,
+  computeBridgeProof,
+  createBridgeNonce,
+  type BridgeFrame,
+} from '../src/protocol.ts'
 import { BROWSER_CONTEXT_KIND } from '../src/browser-context.ts'
 
 const BRIDGE = '@natgurlain/dsh-bridge-browser'
@@ -200,8 +208,8 @@ async function loadComposition(): Promise<{ ctx: Context; configPath: string; po
   return { ctx: context, configPath, port: web.port }
 }
 
-/** 扩展上下文 Origin（回环免 token 的必要条件）。 */
-const EXT_ORIGIN = 'chrome-extension://test-extension-id'
+/** Origin of the pinned (manifest-keyed) Chrome extension. */
+const EXT_ORIGIN = `chrome-extension://${PINNED_CHROME_EXTENSION_ID}`
 
 function connect(port: number): Promise<{
   ws: WebSocket
@@ -237,9 +245,18 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
   }
 }
 
+/** Answer the bridge challenge with a proof of TOKEN, as the extension does. */
+async function sendHello(client: Awaited<ReturnType<typeof connect>>, caps: Record<string, unknown>): Promise<void> {
+  await waitFor(() => client.frames.some((f) => f.t === 'challenge'))
+  const challenge = client.frames.find((f) => f.t === 'challenge') as Extract<BridgeFrame, { t: 'challenge' }>
+  const nonce = createBridgeNonce()
+  const mac = await computeBridgeProof(TOKEN, 'client', challenge.nonce, nonce)
+  client.ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, mac, caps }))
+}
+
 async function connectReady(port: number): Promise<Awaited<ReturnType<typeof connect>>> {
   const client = await connect(port)
-  send(client.ws, { t: 'hello', token: '', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+  await sendHello(client, { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 })
   await Promise.race([
     waitFor(() => client.frames.some((f) => f.t === 'hello.ok')),
     client.closed.then(({ code, reason }) => {
@@ -364,11 +381,12 @@ describe('real Loader composition', () => {
     expect(tools.get('browser_click')).toBeDefined()
     expect(tools.get('browser_navigate')).toBeDefined()
 
-    // Zero-config semantics: loopback connections need no token (the
-    // non-loopback token gate is covered by server.spec overrides).
+    // Every client proves knowledge of the token, loopback included; the
+    // bridge proves it back in hello.ok.
     const client = await connectReady(port)
     expect(client.frames.find((f) => f.t === 'hello.ok')).toEqual({
       t: 'hello.ok',
+      mac: expect.stringMatching(/^[0-9a-f]{64}$/),
       // `devTools` is the host's offer; the extension's own hello decides
       // whether the matching tool group is registered (asserted below).
       caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60, devTools: { version: 1 } },
@@ -398,15 +416,11 @@ describe('real Loader composition', () => {
     expect(tools.get('browser_devtools_elements')).toBeUndefined()
 
     const capabilityClient = await connect(port)
-    send(capabilityClient.ws, {
-      t: 'hello',
-      token: '',
-      caps: {
-        textOnly: true,
-        snapshotMaxChars: 32_000,
-        maxInteractiveItems: 60,
-        devTools: { version: 1 },
-      },
+    await sendHello(capabilityClient, {
+      textOnly: true,
+      snapshotMaxChars: 32_000,
+      maxInteractiveItems: 60,
+      devTools: { version: 1 },
     })
     await waitFor(() => tools.get('browser_devtools_elements') !== undefined)
     expect(tools.get('browser_devtools_network')).toBeDefined()
