@@ -10,6 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:net'
+import { createServer as createHttpServer } from 'node:http'
 import { zstdCompressSync } from 'node:zlib'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -22,7 +23,7 @@ const { default: WebSocket } = await import(pathToFileURL(bridgeRequire.resolve(
 const {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BEACON_PORTS, BRIDGE_CONFIG_PATH,
   BRIDGE_CLOSE_CODES, BRIDGE_PROTOCOL_VERSION, PINNED_CHROME_EXTENSION_ID, computeBridgeProof, createBridgeNonce,
-  BridgeFrameChannel, bridgeEndpointOfUrl,
+  BridgeFrameChannel, bridgeEndpointOfUrl, BRIDGE_APPROVAL_ASK_METHOD, BRIDGE_TOOL_HOLD_METHOD,
 } = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
 const temp = await mkdtemp(join(tmpdir(), 'dsh-runtime-smoke-'))
 const home = join(temp, 'home')
@@ -60,6 +61,36 @@ unavailableServer.listen(0, '127.0.0.1')
 await once(unavailableServer, 'listening')
 const unavailablePort = unavailableServer.address().port
 await new Promise(resolve => unavailableServer.close(resolve))
+// A scripted local model (OpenAI chat-completions streaming): asked by a user
+// turn it calls `browser_press`; after the tool result it answers in text.
+// It drives a real Agent turn so a real browser tool call reaches the bridge.
+const scriptedModel = createHttpServer((req, res) => {
+  let body = ''
+  req.on('data', chunk => { body += chunk })
+  req.on('end', () => {
+    if (!req.url.endsWith('/chat/completions')) {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: [{ id: 'scripted', object: 'model' }] }))
+      return
+    }
+    const messages = JSON.parse(body).messages ?? []
+    const afterTool = messages.at(-1)?.role === 'tool'
+    const chunk = (delta, finish) => `data: ${JSON.stringify({
+      id: 'scripted-1', object: 'chat.completion.chunk', created: 0, model: 'scripted',
+      choices: [{ index: 0, delta, finish_reason: finish }],
+    })}\n\n`
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.write(afterTool
+      ? chunk({ role: 'assistant', content: 'Done.' }, null)
+      : chunk({ role: 'assistant', tool_calls: [{ index: 0, id: `call_${randomUUID().slice(0, 8)}`, type: 'function', function: { name: 'browser_press', arguments: '{"key":"Enter"}' } }] }, null))
+    res.write(chunk({}, afterTool ? 'stop' : 'tool_calls'))
+    res.end('data: [DONE]\n\n')
+  })
+})
+scriptedModel.listen(0, '127.0.0.1')
+await once(scriptedModel, 'listening')
+const scriptedPort = scriptedModel.address().port
+const approvalLog = join(temp, 'approvals.jsonl')
 // Do not inherit bridge settings or credentials from the developer's shell.
 delete env.DSH_EXT_TOKEN
 delete env.DSH_BROWSER_SESSION_WORKSPACE
@@ -116,6 +147,16 @@ async function start(reopen) {
     '        retryPolicy:',
     '          mode: normal',
     '          maxRetries: 0',
+    '      scripted:',
+    '        api: openai-completions',
+    `        baseURL: http://127.0.0.1:${scriptedPort}/v1`,
+    '        headers:',
+    '          Authorization: Bearer scripted',
+    '        models:',
+    '          - id: scripted',
+    '        retryPolicy:',
+    '          mode: normal',
+    '          maxRetries: 0',
     '- insert:',
     '    - id: runtime-smoke-probe',
     `      name: ${JSON.stringify(pathToFileURL(join(root, 'scripts/fixtures/runtime-probe.mjs')).href)}`,
@@ -127,6 +168,7 @@ async function start(reopen) {
     `        expectedVersion: ${JSON.stringify(expectedVersion)}`,
     `        imagePath: ${JSON.stringify(join(root, 'extensions/dsh-browser/assets/icons/icon32.png'))}`,
     `        worktreeSessions: ${JSON.stringify(worktreeSessions)}`,
+    `        approvalLog: ${JSON.stringify(approvalLog)}`,
     '',
   ].join('\n'))
   hostLog = ''
@@ -285,6 +327,43 @@ async function start(reopen) {
   return rpc
 }
 
+/**
+ * Authenticate one more bridge client with its own caps (a second browser
+ * install). Returns its frames and a sealed rpc helper.
+ */
+async function connectClient(wsUrl, clientCaps) {
+  const ws = new WebSocket(wsUrl, { handshakeTimeout: 10_000 })
+  const frames = []
+  let channel
+  let ready = false
+  const closed = once(ws, 'close')
+  ws.on('message', data => {
+    const text = data.toString()
+    if (!ready) { frames.push(JSON.parse(text)); return }
+    const opened = channel.open(text)
+    if (opened === undefined) throw new Error('bridge frame failed authentication')
+    frames.push(opened)
+  })
+  await once(ws, 'open')
+  const challenge = await waitFor(() => frames.find(value => value.t === 'challenge'), 'challenge', 10_000)
+  const endpoint = bridgeEndpointOfUrl(wsUrl)
+  const nonce = createBridgeNonce()
+  channel = BridgeFrameChannel.derive(token, 'client', challenge.nonce, nonce, endpoint)
+  ws.send(JSON.stringify({
+    t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, endpoint, caps: clientCaps,
+    mac: await computeBridgeProof(token, 'client', challenge.nonce, nonce, endpoint, { client: clientCaps }),
+  }))
+  const ok = await waitFor(() => frames.find(value => value.t === 'hello.ok'), 'hello.ok', 10_000)
+  ready = true
+  const send = frame => ws.send(channel.seal(frame))
+  const request = async (method, payload, timeout = 30_000) => {
+    const id = randomUUID()
+    send({ t: 'rpc', id, method, payload })
+    return waitFor(() => frames.find(value => value.t === 'rpc.result' && value.id === id), `${method} result`, timeout)
+  }
+  return { ws, frames, ok, send, request, closed }
+}
+
 async function observation(file = marker) {
   return waitFor(async () => {
     try { return JSON.parse(await readFile(file, 'utf8')) } catch (error) {
@@ -392,6 +471,71 @@ try {
   assert.ok(migrated.events.some(({ event }) => event.type === 'system/message'), 'V2 migration must insert the V3 system head')
   assert.equal(migrated.events.find(({ event }) => event.type === 'user/message')?.event.data.content[0].text, 'Saved browser conversation')
   assert.deepEqual(await readFile(legacyFile), legacyBytes, 'migration must preserve the original V2 log')
+
+  // ---- Multi-connection bridge and approvals answered by another owner client ----
+  {
+    const wsUrl = rpc.base.replace('http:', 'ws:') + '/ext/bridge'
+    const baseCaps = { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }
+    const chrome = await connectClient(wsUrl, { ...baseCaps, client: { id: 'smoke-chrome-0001', browser: 'chrome' } })
+    const firefox = await connectClient(wsUrl, { ...baseCaps, client: { id: 'smoke-firefox-001', browser: 'firefox' } })
+    assert.equal(chrome.ok.caps.hostApprovals, 1, 'the real bridge forwards approvals to dsh')
+    // Two installs coexist with the original (legacy) connection.
+    await delay(200)
+    assert.equal(chrome.ws.readyState, WebSocket.OPEN)
+    assert.equal(firefox.ws.readyState, WebSocket.OPEN)
+    assert.equal(socket.readyState, WebSocket.OPEN)
+    // The same install reconnecting replaces only itself.
+    const firefoxAgain = await connectClient(wsUrl, { ...baseCaps, client: { id: 'smoke-firefox-001', browser: 'firefox' } })
+    const [replacedCode] = await firefox.closed
+    assert.equal(replacedCode, BRIDGE_CLOSE_CODES.replaced)
+    assert.equal(chrome.ws.readyState, WebSocket.OPEN)
+    // Holds and forwarded approvals only name calls this connection was sent.
+    const foreignHold = await chrome.request(BRIDGE_TOOL_HOLD_METHOD, { toolCallId: 'not-mine', holdMs: 1_000 })
+    assert.equal(foreignHold.error?.code, 'not-found')
+
+    // A real Agent turn, driven from the Chrome install, calls a browser tool.
+    const approvalSession = (await rpc('session.create', { cwd: temp })).sessionId
+    await rpc('session.selectModel', { sessionId: approvalSession, provider: 'scripted', model: 'scripted' })
+    const pressOnce = async (decisionMarker) => {
+      const before = chrome.frames.filter(value => value.t === 'tool.call').length
+      const prompted = await chrome.request('session.prompt', {
+        sessionId: approvalSession, mode: 'queue', content: [{ type: 'text', text: 'Press Enter.' }],
+      })
+      assert.equal(prompted.ok, true, JSON.stringify(prompted))
+      const call = await waitFor(() => chrome.frames.filter(value => value.t === 'tool.call')[before], 'browser tool call', 60_000)
+      assert.equal(call.name, 'browser_press')
+      assert.equal(call.sessionId, approvalSession, 'the call carries its Agent session')
+      assert.equal(firefoxAgain.frames.some(value => value.t === 'tool.call'), false, 'the session routes to the install that prompted it')
+      // No side panel: hold the call, then ask dsh's approval service.
+      const hold = await chrome.request(BRIDGE_TOOL_HOLD_METHOD, { toolCallId: call.id, holdMs: 120_000 })
+      assert.ok(hold.result.expiresAt > call.expiresAt, 'the hold extends the call deadline')
+      const binding = 'b'.repeat(64)
+      const asked = await chrome.request(BRIDGE_APPROVAL_ASK_METHOD, {
+        toolCallId: call.id, approvalId: `smoke-${randomUUID()}`, binding,
+        reason: `Press Enter on example.com ${decisionMarker}`, sessionId: 'spoofed-session',
+      }, 60_000)
+      assert.equal(asked.ok, true, JSON.stringify(asked))
+      assert.equal(asked.result.binding, binding, 'the answer echoes the payload binding asked about')
+      // The extension acts on the decision.
+      chrome.send(asked.result.decision === 'allow-once'
+        ? { t: 'tool.result', id: call.id, ok: true, result: { text: 'Pressed Enter.' } }
+        : { t: 'tool.result', id: call.id, ok: false, error: { code: 'action-failed', message: 'The user denied this browser action.' } })
+      return asked.result.decision
+    }
+    assert.equal(await pressOnce('SMOKE-ALLOW'), 'allow-once')
+    const logged = (await readFile(approvalLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    assert.equal(logged[0].toolName, 'browser_press')
+    assert.equal(logged[0].sessionId, approvalSession, 'the session comes from the bridge record, not the payload')
+    assert.match(logged[0].reason, /Press Enter on example\.com/)
+    await waitFor(async () => (await rpc('session.state', { sessionId: approvalSession })).running === false, 'turn end', 60_000)
+    assert.equal(await pressOnce('SMOKE-DENY'), 'deny')
+    await waitFor(async () => (await rpc('session.state', { sessionId: approvalSession })).running === false, 'turn end', 60_000)
+    const approvalHistory = JSON.stringify((await rpc('session.history', { sessionId: approvalSession })).events)
+    assert.match(approvalHistory, /Pressed Enter\./)
+    assert.match(approvalHistory, /denied this browser action/)
+    chrome.ws.close()
+    firefoxAgain.ws.close()
+  }
 
   await stop()
   rpc = await start(true)
@@ -565,7 +709,7 @@ try {
   assert.equal((await rpc('session.permissions', { sessionId: retrySession })).current, 'read-only',
     'prompt text must never act as a /permission command')
 
-  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, browser context, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
+  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), multi-client bridge with per-install replacement and session routing, browser approvals forwarded to dsh and answered by another owner client (allow and deny), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, browser context, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
   succeeded = true
 } catch (error) {
   console.error(hostLog)
@@ -573,5 +717,6 @@ try {
   throw error
 } finally {
   await stop()
+  scriptedModel.close()
   if (succeeded) await rm(temp, { recursive: true, force: true, maxRetries: 3 })
 }

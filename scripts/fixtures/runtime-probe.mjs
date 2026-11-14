@@ -37,6 +37,22 @@ export async function apply(ctx, config) {
       })
     },
   }), 'runtime-smoke-probe: session placement route')
+  // Stand-in for another owner client (the DSH web UI or CLI) answering
+  // approvals: browser approvals forwarded by the bridge reach dsh's real
+  // approval service, which asks every answerer. Only browser tools are
+  // answered here; the decision is read from the question so the smoke can
+  // exercise both outcomes.
+  if (config.approvalLog !== undefined) {
+    ctx.on('approval/request', (request, next) => {
+      if (!request.toolName.startsWith('browser_')) return next()
+      writeFileSync(config.approvalLog, JSON.stringify({
+        toolName: request.toolName,
+        sessionId: String(request.agent.session.id),
+        reason: request.reason ?? '',
+      }) + '\n', { flag: 'a' })
+      return Promise.resolve((request.reason ?? '').includes('SMOKE-ALLOW') ? 'allowed-once' : 'rejected')
+    })
+  }
   ctx.on('worktree/cleanup', info => {
     if (info.cleanup.status !== 'scheduled') {
       writeFileSync(`${config.marker}.cleanup-${info.sessionId}`, JSON.stringify(info))
