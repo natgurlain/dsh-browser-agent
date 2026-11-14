@@ -17,7 +17,8 @@ import { isAbsolute } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { BridgeServer } from './server.ts'
-import { ExtractSaveError, extractDataOf, normalizeSavePath, saveExtract, sessionWorkspaceDir } from './extract-save.ts'
+import { extractDataOf, normalizeSavePath, saveExtract } from './extract-save.ts'
+import { workspaceWriteTarget, type WorkspaceWriteTarget } from './workspace-write.ts'
 
 /** Options resolved from plugin config before tool registration. */
 export interface BrowserToolsOptions {
@@ -136,7 +137,7 @@ export function registerBrowserTools(
       : bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, sessionId)
   }
 
-  for (const tool of [...defineTools(call, options), ...defineContentTools(call, rawCall, options)]) {
+  for (const tool of [...defineTools(call, options), ...defineContentTools(ctx, call, rawCall, options)]) {
     disposers.set(tool.name, ctx.tools.register(tool))
   }
   return disposers
@@ -508,7 +509,7 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
  * Tools that read or operate structured page content: native and ARIA option
  * selection, and row extraction with optional host-side saving.
  */
-function defineContentTools(call: Call, rawCall: RawCall, options: BrowserToolsOptions): ToolDefinition[] {
+function defineContentTools(ctx: Context, call: Call, rawCall: RawCall, options: BrowserToolsOptions): ToolDefinition[] {
   const select = (): ToolDefinition => defineTool({
     name: 'browser_select',
     description: 'Choose options in a <select>, ARIA listbox, or combobox (opens it and clicks the option). Pass value(s), label, or optionIndex.',
@@ -555,7 +556,7 @@ function defineContentTools(call: Call, rawCall: RawCall, options: BrowserToolsO
         },
       },
       limit: { type: 'number', description: 'Maximum rows per page (default 500).' },
-      saveTo: { type: 'string', description: 'Workspace-relative file path (.csv or .json); returns the path, row count, and a 5-row sample instead of all rows.' },
+      saveTo: { type: 'string', description: 'New workspace-relative file path (.csv or .json; no hidden directories; an existing file is never overwritten). Needs a writable sandbox. Returns the path, row count, and a 5-row sample instead of all rows.' },
       format: { type: 'string', enum: ['csv', 'json'], description: 'File format for saveTo; inferred from the extension, default csv.' },
       frame: FRAME_PARAMETER,
     },
@@ -565,21 +566,20 @@ function defineContentTools(call: Call, rawCall: RawCall, options: BrowserToolsO
       const a = args as Record<string, unknown>
       const saveTo = typeof a.saveTo === 'string' && a.saveTo !== '' ? a.saveTo : undefined
       const format = typeof a.format === 'string' ? a.format : undefined
-      let workspace: string | undefined
       if (saveTo !== undefined) {
-        // Validate on the host before the page is touched, as upload does.
+        // Validate on the host before the page is touched, as upload does:
+        // the path, and whether this session's sandbox lets it write at all.
         normalizeSavePath(saveTo, format)
-        workspace = sessionWorkspaceDir(exec.agent, options.workspacePath ?? '')
-        if (workspace === undefined) {
-          throw new ExtractSaveError('browser_extract: this session has no workspace directory to save into; omit saveTo to receive the rows inline.')
-        }
+        workspaceWriteTarget(ctx, exec.agent, options.workspacePath ?? '')
       }
       const result = await rawCall(exec, 'browser_extract', a)
       const text = normalizeTextResult(result, 'browser_extract')
-      if (saveTo === undefined || workspace === undefined) return text
+      if (saveTo === undefined) return text
       const data = extractDataOf(result)
       if (data === undefined) return text
-      const saved = await saveExtract(workspace, saveTo, data, format)
+      // Re-resolved after the page work: the session's mode may have changed.
+      const target: WorkspaceWriteTarget = workspaceWriteTarget(ctx, exec.agent, options.workspacePath ?? '')
+      const saved = await saveExtract(target, saveTo, data, format)
       return { text: `Saved ${saved.rowCount} row(s) as ${saved.format.toUpperCase()} to ${saved.relativePath} (${saved.path}).\n${text.text}` }
     },
   })

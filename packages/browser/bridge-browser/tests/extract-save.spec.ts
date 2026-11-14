@@ -1,10 +1,11 @@
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeServer } from '../src/server.ts'
-import { normalizeSavePath, saveExtract, serializeRows, sessionWorkspaceDir } from '../src/extract-save.ts'
+import { normalizeSavePath, saveExtract, serializeRows } from '../src/extract-save.ts'
+import type { WorkspaceWriteTarget } from '../src/workspace-write.ts'
 import { registerBrowserTools } from '../src/tools.ts'
 
 const dirs: string[] = []
@@ -27,6 +28,12 @@ describe('extract saving', () => {
     expect(() => normalizeSavePath('../escape.csv')).toThrow(/"\.\."/)
     expect(() => normalizeSavePath('a/../../b.csv')).toThrow(/"\.\."/)
     expect(() => normalizeSavePath('x.csv', 'xml')).toThrow(/csv or json/)
+    expect(() => normalizeSavePath('conftest.py')).toThrow(/only \.csv, \.json/)
+    expect(() => normalizeSavePath('.github/workflows/ci.yml')).toThrow(/hidden/)
+    expect(() => normalizeSavePath('.git/hooks/rows.csv')).toThrow(/hidden/)
+    expect(() => normalizeSavePath('out/.env.csv')).toThrow(/hidden/)
+    expect(() => normalizeSavePath('a/..\\b.csv')).toThrow(/"\.\."/)
+    expect(() => normalizeSavePath('x.csv', 'json')).toThrow(/does not match/)
   })
 
   it('writes RFC 4180 CSV and neutralizes spreadsheet formulas', () => {
@@ -37,41 +44,52 @@ describe('extract saving', () => {
     expect(csv).toBe('name,note,n\r\n"Mug, large","say ""hi""\nnow",3\r\n"\'=HYPERLINK(""x"")",,-2\r\n')
   })
 
-  it('saves inside the workspace and refuses symlinked escapes', async () => {
-    const workspace = tempDir()
-    const outside = tempDir()
-    const saved = await saveExtract(workspace, 'data/rows.json', { columns: ['a'], rows: [{ a: 1 }] })
-    expect(saved).toMatchObject({ relativePath: 'data/rows.json', format: 'json', rowCount: 1 })
-    expect(JSON.parse(readFileSync(join(workspace, 'data/rows.json'), 'utf8'))).toEqual([{ a: 1 }])
-    mkdirSync(join(workspace, 'links'))
-    symlinkSync(outside, join(workspace, 'links/out'))
-    await expect(saveExtract(workspace, 'links/out/rows.csv', { columns: ['a'], rows: [] })).rejects.toThrow(/symbolic link/)
-  })
+  const target = (root: string): WorkspaceWriteTarget => ({ mode: 'workspace-write', root })
 
-  it('replaces a symlink at the target instead of writing through it', async () => {
-    const workspace = tempDir()
-    const outside = tempDir()
-    const victim = join(outside, 'victim.txt')
-    writeFileSync(victim, 'keep me')
-    mkdirSync(join(workspace, 'exports'))
-    symlinkSync(victim, join(workspace, 'exports/rows.csv'))
-    await saveExtract(workspace, 'exports/rows.csv', { columns: ['a'], rows: [{ a: 1 }] })
-    expect(readFileSync(victim, 'utf8')).toBe('keep me')
-    expect(lstatSync(join(workspace, 'exports/rows.csv')).isSymbolicLink()).toBe(false)
-    expect(readFileSync(join(workspace, 'exports/rows.csv'), 'utf8')).toBe('a\r\n1\r\n')
-  })
+  for (const portable of [false, true]) {
+    describe(portable ? 'portable strategy' : 'descriptor strategy', () => {
+      it('saves inside the workspace and refuses symlinked escapes', async () => {
+        const workspace = tempDir()
+        const outside = tempDir()
+        const saved = await saveExtract(target(workspace), 'data/rows.json', { columns: ['a'], rows: [{ a: 1 }] }, undefined, portable)
+        expect(saved).toMatchObject({ relativePath: 'data/rows.json', format: 'json', rowCount: 1 })
+        expect(JSON.parse(readFileSync(join(workspace, 'data/rows.json'), 'utf8'))).toEqual([{ a: 1 }])
+        mkdirSync(join(workspace, 'links'))
+        symlinkSync(outside, join(workspace, 'links/out'))
+        await expect(saveExtract(target(workspace), 'links/out/rows.csv', { columns: ['a'], rows: [] }, undefined, portable)).rejects.toThrow(/symbolic link/)
+      })
 
-  it('prefers the session working directory over the configured workspace', () => {
-    expect(sessionWorkspaceDir({ session: { header: { cwd: '/work/session' } } }, '/fallback')).toBe('/work/session')
-    expect(sessionWorkspaceDir({ session: { header: {} } }, '/fallback')).toBe('/fallback')
-    expect(sessionWorkspaceDir(undefined, '')).toBeUndefined()
-  })
+      it('creates no directory outside the workspace through a symlinked parent (save3 #2)', async () => {
+        const workspace = tempDir()
+        const outside = tempDir()
+        symlinkSync(outside, join(workspace, 'link'))
+        await expect(saveExtract(target(workspace), 'link/newdir/sub/x.csv', { columns: ['a'], rows: [] }, undefined, portable)).rejects.toThrow(/symbolic link/)
+        expect(existsSync(join(outside, 'newdir'))).toBe(false)
+      })
+
+      it('never overwrites an existing file or a symlink at the target (save3 #1)', async () => {
+        const workspace = tempDir()
+        const outside = tempDir()
+        writeFileSync(join(workspace, 'rows.csv'), '# user file\n')
+        await expect(saveExtract(target(workspace), 'rows.csv', { columns: ['a'], rows: [{ a: 1 }] }, undefined, portable)).rejects.toThrow(/already exists/)
+        expect(readFileSync(join(workspace, 'rows.csv'), 'utf8')).toBe('# user file\n')
+        const victim = join(outside, 'victim.csv')
+        writeFileSync(victim, 'keep me')
+        mkdirSync(join(workspace, 'exports'))
+        symlinkSync(victim, join(workspace, 'exports/rows.csv'))
+        await expect(saveExtract(target(workspace), 'exports/rows.csv', { columns: ['a'], rows: [{ a: 1 }] }, undefined, portable)).rejects.toThrow(/already exists/)
+        expect(readFileSync(victim, 'utf8')).toBe('keep me')
+      })
+    })
+  }
 })
 
 describe('browser_extract tool', () => {
-  function harness(result: unknown, workspacePath = '') {
+  function harness(result: unknown, workspacePath = '', mode: string | null = 'workspace-write') {
     const registered = new Map<string, { execute: (args: unknown, exec: unknown) => Promise<unknown> }>()
+    const sandboxPolicy = { resolve: vi.fn(() => ({ mode, workspaceRoot: '/ignored' })) }
     const ctx = {
+      get: (name: string) => name === 'sandboxPolicy' && mode !== null ? sandboxPolicy : undefined,
       tools: {
         register: vi.fn((definition: { name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }) => {
           registered.set(definition.name, definition)
@@ -83,7 +101,7 @@ describe('browser_extract tool', () => {
     registerBrowserTools(ctx, { requestTool } as unknown as BridgeServer, {
       toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60, workspacePath,
     })
-    return { tool: registered.get('browser_extract')!, requestTool }
+    return { tool: registered.get('browser_extract')!, requestTool, sandboxPolicy }
   }
   const RESULT = { text: 'Extracted 2 row(s).', data: { columns: ['name'], rows: [{ name: 'Mug' }, { name: 'Pen' }] } }
 
@@ -114,5 +132,28 @@ describe('browser_extract tool', () => {
     await expect(none.tool.execute({ table: '#t', saveTo: 'a.json' }, exec)).rejects.toThrow(/no workspace directory/)
     expect(none.requestTool).not.toHaveBeenCalled()
     await expect(none.tool.execute({ table: '#t', saveTo: '../a.json' }, exec)).rejects.toThrow(/"\.\."/)
+  })
+
+  it('refuses in a read-only sandbox and when the sandbox cannot be determined, before touching the page', async () => {
+    const workspace = tempDir()
+    const exec = { signal: new AbortController().signal, agent: { id: 's1', session: { header: { cwd: workspace } } } }
+    const readOnly = harness(RESULT, '', 'read-only')
+    await expect(readOnly.tool.execute({ table: '#t', saveTo: 'rows.csv' }, exec)).rejects.toThrow(/read-only/)
+    expect(readOnly.requestTool).not.toHaveBeenCalled()
+    expect(readOnly.sandboxPolicy.resolve).toHaveBeenCalledWith({ session: exec.agent.session })
+    const unknown = harness(RESULT, '', null)
+    await expect(unknown.tool.execute({ table: '#t', saveTo: 'rows.csv' }, exec)).rejects.toThrow(/sandbox policy/)
+    expect(unknown.requestTool).not.toHaveBeenCalled()
+    expect(existsSync(join(workspace, 'rows.csv'))).toBe(false)
+  })
+
+  it('refuses executable and hidden targets the page could plant (save3)', async () => {
+    const workspace = tempDir()
+    const { tool, requestTool } = harness(RESULT)
+    const exec = { signal: new AbortController().signal, agent: { id: 's1', session: { header: { cwd: workspace } } } }
+    for (const saveTo of ['conftest.py', 'd/r1.desktop', '.github/workflows/ci.yml', '.git/hooks/pre-commit', '.envrc']) {
+      await expect(tool.execute({ table: '#t', saveTo }, exec)).rejects.toThrow()
+    }
+    expect(requestTool).not.toHaveBeenCalled()
   })
 })

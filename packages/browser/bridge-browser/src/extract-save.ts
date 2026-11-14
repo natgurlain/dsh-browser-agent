@@ -3,16 +3,13 @@
  * returns the rows, and the bridge writes them as CSV or JSON inside the
  * calling session's workspace.
  *
- * Paths are always workspace-relative. A path that leaves the workspace,
- * lexically or through a symlinked directory, is refused before anything is
- * written.
+ * Paths are always workspace-relative `.csv`/`.json` files; the write itself
+ * (sandbox check, containment, no overwrite) is workspace-write.ts.
  *
  * @module
  */
 
-import { randomUUID } from 'node:crypto'
-import { mkdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { WorkspaceWriteError, workspacePathComponents, writeWorkspaceFile, type WorkspaceWriteTarget } from './workspace-write.ts'
 
 /** Output formats the bridge writes. */
 export type ExtractFormat = 'csv' | 'json'
@@ -36,25 +33,15 @@ export interface SavedExtract {
 }
 
 /** Failure the model can correct (bad path, missing workspace). */
-export class ExtractSaveError extends Error {
+export class ExtractSaveError extends WorkspaceWriteError {
   constructor(message: string) {
     super(message)
     this.name = 'ExtractSaveError'
   }
 }
 
-/**
- * The workspace directory of the calling session: its recorded working
- * directory, else the configured browser-session workspace.
- * @param agent - the calling Agent, when known.
- * @param fallback - configured workspace path ('' when disabled).
- * @returns an absolute directory, or undefined when none is known.
- */
-export function sessionWorkspaceDir(agent: unknown, fallback: string): string | undefined {
-  const cwd = (agent as { session?: { header?: { cwd?: unknown } } } | undefined)?.session?.header?.cwd
-  if (typeof cwd === 'string' && isAbsolute(cwd)) return cwd
-  return fallback !== '' && isAbsolute(fallback) ? fallback : undefined
-}
+/** Extensions `saveTo` may name. */
+export const EXTRACT_EXTENSIONS: readonly string[] = ['.csv', '.json']
 
 /**
  * Validate a workspace-relative save path and settle its format.
@@ -63,20 +50,20 @@ export function sessionWorkspaceDir(agent: unknown, fallback: string): string | 
  * @returns the normalized relative path and format.
  */
 export function normalizeSavePath(saveTo: string, format?: string): { relativePath: string; format: ExtractFormat } {
-  const trimmed = saveTo.trim()
-  if (trimmed === '') throw new ExtractSaveError('saveTo must be a non-empty relative path.')
-  if (isAbsolute(trimmed) || /^[a-zA-Z]:[\\/]/.test(trimmed) || trimmed.startsWith('\\\\')) {
-    throw new ExtractSaveError(`saveTo must be relative to the session workspace; "${saveTo}" is absolute.`)
-  }
-  if (trimmed.split(/[\\/]/).includes('..')) {
-    throw new ExtractSaveError(`saveTo must stay inside the session workspace; "${saveTo}" contains "..".`)
-  }
   if (format !== undefined && format !== 'csv' && format !== 'json') {
     throw new ExtractSaveError('format must be csv or json.')
   }
-  const ext = extname(trimmed).toLowerCase()
-  const inferred: ExtractFormat = format ?? (ext === '.json' ? 'json' : 'csv')
-  const relativePath = ext === '' ? `${trimmed}.${inferred}` : trimmed
+  let parts: string[]
+  try {
+    parts = workspacePathComponents(saveTo, { allowedExt: EXTRACT_EXTENSIONS, defaultExt: `.${format ?? 'csv'}` })
+  } catch (error: unknown) {
+    throw new ExtractSaveError(`saveTo: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  const relativePath = parts.join('/')
+  const inferred: ExtractFormat = relativePath.toLowerCase().endsWith('.json') ? 'json' : 'csv'
+  if (format !== undefined && format !== inferred) {
+    throw new ExtractSaveError(`format ${format} does not match the extension of "${saveTo}".`)
+  }
   return { relativePath, format: inferred }
 }
 
@@ -101,44 +88,23 @@ export function serializeRows(data: ExtractData, format: ExtractFormat): string 
   return `${lines.join('\r\n')}\r\n`
 }
 
-/** Whether `child` is `parent` or inside it. */
-function within(parent: string, child: string): boolean {
-  const rel = relative(parent, child)
-  return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel))
-}
-
 /**
- * Write extracted rows into the workspace.
- * @param workspace - absolute workspace directory.
+ * Write extracted rows into the session workspace as a NEW file (see
+ * workspace-write.ts for the sandbox, path, and no-overwrite rules).
+ * @param target - from `workspaceWriteTarget`.
  * @param saveTo - workspace-relative path.
  * @param data - rows to write.
  * @param format - explicit format, if any.
+ * @param portable - tests only: force the portable write strategy.
  * @returns where the file landed.
  */
-export async function saveExtract(workspace: string, saveTo: string, data: ExtractData, format?: string): Promise<SavedExtract> {
+export async function saveExtract(target: WorkspaceWriteTarget, saveTo: string, data: ExtractData, format?: string, portable?: boolean): Promise<SavedExtract> {
   const normalized = normalizeSavePath(saveTo, format)
-  const target = resolve(workspace, normalized.relativePath)
-  if (!within(resolve(workspace), target)) {
-    throw new ExtractSaveError(`saveTo must stay inside the session workspace; "${saveTo}" leaves it.`)
-  }
-  await mkdir(dirname(target), { recursive: true })
-  // A symlinked directory inside the workspace must not redirect the write.
-  const [realWorkspace, realParent] = await Promise.all([realpath(workspace), realpath(dirname(target))])
-  if (!within(realWorkspace, realParent)) {
-    throw new ExtractSaveError(`saveTo resolves outside the session workspace through a symbolic link: "${saveTo}".`)
-  }
-  const finalPath = join(realParent, basename(target))
-  // Write beside the target and rename over it: a rename replaces a symlink
-  // at the final component instead of following it out of the workspace.
-  const temporary = join(realParent, `.${basename(target)}.${randomUUID()}.tmp`)
-  try {
-    await writeFile(temporary, serializeRows(data, normalized.format), { encoding: 'utf8', flag: 'wx' })
-    await rename(temporary, finalPath)
-  } catch (error: unknown) {
-    await rm(temporary, { force: true })
-    throw error
-  }
-  return { path: finalPath, relativePath: normalized.relativePath, format: normalized.format, rowCount: data.rows.length }
+  const written = await writeWorkspaceFile(target, normalized.relativePath, serializeRows(data, normalized.format), {
+    allowedExt: EXTRACT_EXTENSIONS,
+    ...portable === true ? { portable } : {},
+  })
+  return { path: written.path, relativePath: written.relativePath, format: normalized.format, rowCount: data.rows.length }
 }
 
 /**
