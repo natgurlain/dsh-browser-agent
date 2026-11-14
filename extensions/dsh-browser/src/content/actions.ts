@@ -1026,12 +1026,12 @@ async function selectAction(args: Record<string, unknown>, ctx: ActionContext): 
   }
   await waitForPageSettled(ACTION_SETTLE)
   const count = outcome.selected.length
-  // Option labels are page text: name them only when sharing allows it.
-  const detail = ctx.shareContent === true && count > 0
-    ? `: ${outcome.selected.map((name) => `"${name}"`).join(', ')}`
-    : ''
   const kind = outcome.kind === 'native' ? 'select' : outcome.kind
-  return withPageDelta(`Selected in ${kind} ${label}; ${count} option(s) now selected${detail}.`, ctx)
+  const result = withPageDelta(`Selected in ${kind} ${label}; ${count} option(s) now selected.`, ctx)
+  // Option labels are page text: they travel only as page content, under sharing.
+  if (ctx.shareContent !== true || count === 0) return result
+  const selected = `Selected options: ${outcome.selected.map((name) => `"${clip(name)}"`).join(', ')}`
+  return { ...result, pageContent: result.pageContent === undefined ? selected : `${selected}\n\n${result.pageContent}` }
 }
 
 /** Rows returned inline per page when the caller does not save to a file. */
@@ -1045,7 +1045,8 @@ function extractAction(args: Record<string, unknown>): ActionResult {
   }
   const dropped = extracted.dropped > 0 ? `; ${extracted.dropped} more matched beyond limit` : ''
   return {
-    text: `Extracted ${extracted.rows.length} row(s) with columns ${extracted.columns.join(', ')}${dropped}.`,
+    // Column names may be page-authored table headers; they ride only in `data`.
+    text: `Extracted ${extracted.rows.length} row(s) in ${extracted.columns.length} column(s)${dropped}.`,
     data: { columns: extracted.columns, rows: extracted.rows, dropped: extracted.dropped, url: location.href },
   }
 }
@@ -1132,7 +1133,9 @@ function finishVerification(
   }
   if (focused !== null) {
     const index = ctx.ids.indexOf(focused)
-    const role = roleOfElement(focused)
+    // An explicit role attribute is page-authored; the status line takes only role-shaped words.
+    const raw = roleOfElement(focused)
+    const role = /^[a-z]{1,24}$/.test(raw) ? raw : 'element'
     facts.push(`Focus: ${index === undefined ? role : `[${index}] ${role}`}.`)
   }
   if (subject !== null) {

@@ -305,6 +305,9 @@ function unboundPromptForCall(
   const target = frames.find((frame) => frame.frameId === frameId) ?? frames.find((frame) => frame.frameId === 0)
   const origins = uniqueOrigins(target === undefined ? [] : [target], frames)
   let canTrust = origins.length === 1 && call.name !== 'browser_back' && call.name !== 'browser_forward'
+  // A paginated extraction also reads the page: under "ask" no action trust
+  // may stand in for the read consent it needs.
+  if (extractPaginates(call) && sharePageContent !== 'auto') canTrust = false
   // Clipboard writes affect the user's system clipboard and uploads hand local
   // files to a page; neither is an origin-scoped permission.
   if (call.name === 'browser_clipboard' || call.name === 'browser_upload') canTrust = false

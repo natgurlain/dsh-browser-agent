@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -46,6 +46,19 @@ describe('extract saving', () => {
     mkdirSync(join(workspace, 'links'))
     symlinkSync(outside, join(workspace, 'links/out'))
     await expect(saveExtract(workspace, 'links/out/rows.csv', { columns: ['a'], rows: [] })).rejects.toThrow(/symbolic link/)
+  })
+
+  it('replaces a symlink at the target instead of writing through it', async () => {
+    const workspace = tempDir()
+    const outside = tempDir()
+    const victim = join(outside, 'victim.txt')
+    writeFileSync(victim, 'keep me')
+    mkdirSync(join(workspace, 'exports'))
+    symlinkSync(victim, join(workspace, 'exports/rows.csv'))
+    await saveExtract(workspace, 'exports/rows.csv', { columns: ['a'], rows: [{ a: 1 }] })
+    expect(readFileSync(victim, 'utf8')).toBe('keep me')
+    expect(lstatSync(join(workspace, 'exports/rows.csv')).isSymbolicLink()).toBe(false)
+    expect(readFileSync(join(workspace, 'exports/rows.csv'), 'utf8')).toBe('a\r\n1\r\n')
   })
 
   it('prefers the session working directory over the configured workspace', () => {

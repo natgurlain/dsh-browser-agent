@@ -549,8 +549,8 @@ try {
   succeed(await tool('browser_navigate', { url: `${origin}/ledger?page=1` }))
   await waitFor(() => page.evaluate(() => document.title === 'Ledger 1'), 'ledger page')
   const inline = succeed(await tool('browser_extract', { table: '#ledger' }))
-  assert.match(inline, /Extracted 3 row\(s\)\. Columns: Ref, Amount\./)
-  assert.match(inline, /\{"Ref":"L1-1","Amount":"11"\}/)
+  assert.match(inline, /Extracted 3 row\(s\); 2 column\(s\)\./)
+  assert.match(inline, /<UNTRUSTED_PAGE_CONTENT[^>]*>\nColumns: \["Ref","Amount"\]\n\{"Ref":"L1-1","Amount":"11"\}/)
   const saved = succeed(await tool('browser_extract', {
     schema: { rows: '#ledger tbody tr', fields: { ref: 'td:nth-child(1)', amount: { selector: 'td:nth-child(2)', type: 'number' } } },
     paginate: { nextSelector: 'a.next', maxPages: 5 },
@@ -560,6 +560,8 @@ try {
   assert.match(saved, /from 3 page\(s\) \(stopped: no next page/)
   assert.equal(await readFile(join(workspace, 'exports/ledger.csv'), 'utf8'),
     `ref,amount\r\n${[1, 2, 3].flatMap(p => [1, 2, 3].map(r => `L${p}-${r},${p * 10 + r}`)).join('\r\n')}\r\n`)
+  // Pagination navigated the controlled tab; later tools must address the last page.
+  assert.match(succeed(await tool('browser_snapshot', {})), /Title: Ledger 3/)
   results.push('browser_extract reads tables inline and pages a schema across full navigations into a CSV in the session workspace')
 
   // 通过正式界面上传图片，并用真实连接失败验证继续生成。

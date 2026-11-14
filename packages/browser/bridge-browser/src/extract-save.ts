@@ -10,8 +10,9 @@
  * @module
  */
 
-import { mkdir, realpath, writeFile } from 'node:fs/promises'
-import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { mkdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 /** Output formats the bridge writes. */
 export type ExtractFormat = 'csv' | 'json'
@@ -126,8 +127,17 @@ export async function saveExtract(workspace: string, saveTo: string, data: Extra
   if (!within(realWorkspace, realParent)) {
     throw new ExtractSaveError(`saveTo resolves outside the session workspace through a symbolic link: "${saveTo}".`)
   }
-  const finalPath = join(realParent, target.slice(dirname(target).length + 1))
-  await writeFile(finalPath, serializeRows(data, normalized.format), 'utf8')
+  const finalPath = join(realParent, basename(target))
+  // Write beside the target and rename over it: a rename replaces a symlink
+  // at the final component instead of following it out of the workspace.
+  const temporary = join(realParent, `.${basename(target)}.${randomUUID()}.tmp`)
+  try {
+    await writeFile(temporary, serializeRows(data, normalized.format), { encoding: 'utf8', flag: 'wx' })
+    await rename(temporary, finalPath)
+  } catch (error: unknown) {
+    await rm(temporary, { force: true })
+    throw error
+  }
   return { path: finalPath, relativePath: normalized.relativePath, format: normalized.format, rowCount: data.rows.length }
 }
 

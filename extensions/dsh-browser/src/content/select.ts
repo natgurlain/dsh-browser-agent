@@ -120,7 +120,8 @@ function pickChoices(choices: Choice[], request: SelectRequest): Choice[] {
     if (partial.length > 1) {
       throw new SelectError('action-failed', `"${needle}" matches ${partial.length} options; use the exact label or value.`)
     }
-    throw new SelectError('action-failed', `No option matches "${needle}". Available: ${choices.slice(0, 15).map((choice) => `"${choice.label}"`).join(', ')}${choices.length > 15 ? ', …' : ''}.`)
+    // Option labels are page text and errors bypass the page-content boundary: report counts only.
+    throw new SelectError('action-failed', `No option matches "${needle}" among ${choices.length} option(s). List them with browser_snapshot { query: { role: "option" } } or browser_get_text.`)
   })
 }
 
@@ -134,7 +135,7 @@ function selectNative(select: HTMLSelectElement, request: SelectRequest): Select
     throw new SelectError('bad-args', 'This select accepts one option; pass a single value.')
   }
   for (const option of picked) {
-    if (option.disabled) throw new SelectError('action-failed', `Option "${clean(option.text)}" is disabled.`)
+    if (option.disabled) throw new SelectError('action-failed', `The requested option at position ${option.index} is disabled.`)
   }
   select.focus()
   if (select.multiple) {

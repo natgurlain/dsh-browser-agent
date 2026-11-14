@@ -4,6 +4,7 @@ import { approvalPromptForCall, isConditionalPageWait } from '../src/background/
 import type { TabFrame } from '../src/background/frames.ts'
 import type { ToolCall } from '../src/background/tools.ts'
 import { approvalBinding } from '../src/security/payload-binding.ts'
+import { actionCoveredByTrustedOrigins } from '../src/security/trusted-origins.ts'
 
 const FRAMES: TabFrame[] = [
   { frameId: 0, parentFrameId: -1, documentId: 'top', url: 'https://app.example/page' },
@@ -43,6 +44,15 @@ describe('content tool approvals', () => {
     expect(prompt).toMatchObject({ kind: 'action', origins: ['https://app.example'] })
     expect(prompt?.summary).toContain('up to 3 pages')
     expect(prompt?.details?.[0]).toMatchObject({ kind: 'payload' })
+    expect(prompt?.canTrust).toBe(true)
+  })
+
+  it('never lets action trust cover a paginated extraction under "ask"', () => {
+    const args = { table: '#t', paginate: { nextSelector: '.next', maxPages: 1 } }
+    const prompt = approvalPromptForCall(call('browser_extract', args), 'ask', FRAMES, 'en')!
+    expect(prompt.canTrust).toBe(false)
+    // The persistent origin allowlist only covers prompts with a known trust boundary.
+    expect(actionCoveredByTrustedOrigins(prompt, ['https://app.example'])).toBe(false)
   })
 
   it('treats conditional waits as reads and leaves the plain settle alone', () => {

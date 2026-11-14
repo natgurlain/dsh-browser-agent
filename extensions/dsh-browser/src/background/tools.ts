@@ -80,6 +80,8 @@ const ACTION_DELTA_GUIDANCE = 'The page settled and its current changes are incl
 const NAVIGATION_CANDIDATE_TOOLS = new Set([
   'browser_click',
   'browser_select',
+  // A paginated extraction may follow next-page links.
+  'browser_extract',
   'browser_navigate',
   'browser_back',
   'browser_forward',
@@ -894,12 +896,25 @@ async function dispatchOnce(
   const route = inputRoute(call)
   const syntheticFallback = route === 'trusted'
   const hasSnapshotBaseline = snapshotDocumentsByTab.get(tabId)?.get(frameId) === frameDocumentKey(frame)
+  // Sharing allows page-authored verification details even without a baseline.
+  const shareContent = includeActionDelta && ACTION_DELTA_TOOLS.has(call.name)
+  const stateChangingAction = STATE_CHANGING_PAGE_TOOLS.has(call.name)
   if (route !== 'content') {
     // Commit before dispatching: a trusted gesture cannot be withdrawn once the
     // browser has delivered it, so the deadline must not abort it mid-flight.
-    if (STATE_CHANGING_PAGE_TOOLS.has(call.name)) commitAction?.()
-    const trusted = await dispatchTrustedInput(tabId, frame, call, budget, inputRuntime, includeActionDelta && hasSnapshotBaseline)
-    if (trusted !== undefined) return trusted
+    if (stateChangingAction) commitAction?.()
+    const trustedWatch = stateChangingAction ? watchOpenedTabs(tabId) : undefined
+    const trustedConsoleMark = stateChangingAction ? consoleErrorMark(tabId) : undefined
+    let trusted: ToolAnswer | undefined
+    try {
+      trusted = await dispatchTrustedInput(tabId, frame, call, budget, inputRuntime, includeActionDelta && hasSnapshotBaseline)
+    } finally {
+      trustedWatch?.stop()
+    }
+    if (trusted !== undefined) {
+      const errors = trustedConsoleMark === undefined ? [] : consoleErrorsSince(tabId, trustedConsoleMark)
+      return withSideEffects(trusted, trustedWatch?.stop() ?? [], errors, shareContent, budget.maxChars)
+    }
     if (!syntheticFallback) {
       return inputUnavailable('This browser has no trusted input channel for this action.')
     }
@@ -926,9 +941,6 @@ async function dispatchOnce(
   if (isCancelled(call, signal)) return cancelled()
   if (targetStillAllowed?.() === false) return targetChanged()
   const requestPageDelta = includeActionDelta && hasSnapshotBaseline && ACTION_DELTA_TOOLS.has(call.name)
-  // Sharing allows page-authored verification details even without a baseline.
-  const shareContent = includeActionDelta && ACTION_DELTA_TOOLS.has(call.name)
-  const stateChangingAction = STATE_CHANGING_PAGE_TOOLS.has(call.name)
   const tabWatch = stateChangingAction ? watchOpenedTabs(tabId) : undefined
   const consoleMark = stateChangingAction ? consoleErrorMark(tabId) : undefined
   const navigationWait = includeActionDelta && isNavigationCandidateTool(call.name)
@@ -1054,6 +1066,27 @@ function describeSideEffects(openedTabs: number[], consoleErrors: ConsoleEntry[]
     facts.push(`${consoleErrors.length} console error(s) were logged during the action${shareContent ? '' : '; read them with browser_console_logs'}.`)
   }
   return facts.length === 0 ? '' : ` ${facts.join(' ')}`
+}
+
+/**
+ * Append side effects to an answer produced outside the content script
+ * (trusted input): opened tabs and console errors. Console text stays inside
+ * a fresh untrusted boundary and only under page sharing.
+ */
+function withSideEffects(
+  answer: ToolAnswer,
+  openedTabs: number[],
+  consoleErrors: ConsoleEntry[],
+  shareContent: boolean,
+  maxChars: number,
+): ToolAnswer {
+  const text = answerText(answer)
+  const facts = describeSideEffects(openedTabs, consoleErrors, shareContent)
+  if (text === undefined || facts === '') return answer
+  const quoted = shareContent && consoleErrors.length > 0
+    ? `\n\n${wrapUntrustedContent(renderConsoleErrors(consoleErrors), Math.max(500, Math.floor(maxChars / 4)))}`
+    : ''
+  return { ...answer, result: { ...(answer.result as object), text: `${text}${facts}${quoted}` } }
 }
 
 /** Default and maximum time a browser_wait condition may take. */
@@ -1266,16 +1299,17 @@ async function dispatchExtract(
   }
   const pagesText = paginate === undefined ? '' : ` from ${pages} page(s)`
   const stopped = stopReason === '' ? '' : ` (stopped: ${stopReason})`
-  const summary = `Extracted ${rows.length} row(s)${pagesText}${stopped}. Columns: ${columns.join(', ')}.`
+  const summary = `Extracted ${rows.length} row(s)${pagesText}${stopped}; ${columns.length} column(s).`
   const saving = typeof call.args.saveTo === 'string' && call.args.saveTo !== ''
   const shown = rows.slice(0, saving ? SAVED_EXTRACT_SAMPLE : INLINE_EXTRACT_ROWS)
-  const body = shown.map((row) => JSON.stringify(row)).join('\n')
+  // Column names come from the page (table headers), so they stay inside the boundary.
+  const body = [`Columns: ${JSON.stringify(columns)}`, ...shown.map((row) => JSON.stringify(row))].join('\n')
   const note = saving
     ? `Sample of the first ${shown.length} row(s):`
     : rows.length > shown.length
       ? `Showing ${shown.length} of ${rows.length} rows; pass saveTo to write all rows to a file.`
       : 'Rows (one JSON object per line):'
-  const text = `${summary}\n${note}\n${wrapUntrustedContent(body === '' ? '(no rows)' : body, Math.max(500, budget.maxChars - summary.length - note.length - 2))}`
+  const text = `${summary}\n${note}\n${wrapUntrustedContent(shown.length === 0 ? `${body}\n(no rows)` : body, Math.max(500, budget.maxChars - summary.length - note.length - 2))}`
   return { ok: true, result: { text, data: { columns, rows, pages, url: current.url } } }
 }
 
