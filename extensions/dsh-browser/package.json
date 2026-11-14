@@ -9,6 +9,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:firefox": "node scripts/build.mjs --firefox",
+    "build:store": "node scripts/build.mjs --store",
     "dev": "node scripts/build.mjs --watch",
     "dev:firefox": "node scripts/build.mjs --firefox --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",

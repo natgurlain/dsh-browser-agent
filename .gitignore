@@ -7,3 +7,6 @@ node_modules/
 coverage/
 .artifacts/
 release/
+**/dist-store/
+# Extension signing keys live outside the repository; never commit one.
+*.pem

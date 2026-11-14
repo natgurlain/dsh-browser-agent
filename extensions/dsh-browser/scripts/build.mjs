@@ -1,6 +1,7 @@
 /**
  * Build extension targets sequentially into dist/ (or dist-firefox/
- * with --firefox):
+ * with --firefox, or dist-store/ with --store for a Chrome Web Store upload,
+ * whose manifest omits the `key` that pins unpacked installs to one ID):
  * background (es|iife) → content (iife) → panel (React) → offscreen (iife).
  * The first target cleans the output; the later ones append.
  * Pass --watch for dev rebuilds.
@@ -15,6 +16,10 @@ const watch = process.argv.includes('--watch')
 // --firefox switches the manifest and background bundle for the Firefox build.
 if (process.argv.includes('--firefox')) {
   process.env.EXT_TARGET = 'firefox'
+}
+// --store strips the manifest `key` (the Web Store rejects it) into dist-store/.
+if (process.argv.includes('--store')) {
+  process.env.EXT_STORE = '1'
 }
 
 const configs = [

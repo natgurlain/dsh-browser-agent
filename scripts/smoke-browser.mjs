@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { createConnection, createServer as createTcpServer } from 'node:net'
 import { createRequire } from 'node:module'
@@ -12,17 +12,25 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const bridge = join(root, 'packages/browser/bridge-browser')
-const extension = join(root, 'extensions/dsh-browser/dist')
+const builtExtension = join(root, 'extensions/dsh-browser/dist')
 const require = createRequire(join(root, 'package.json'))
 const bridgeRequire = createRequire(join(bridge, 'package.json'))
 const { chromium } = bridgeRequire('playwright-core')
 const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
+const { PINNED_CHROME_EXTENSION_ID } = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
 const artifacts = process.env.DSH_SMOKE_ARTIFACTS ?? join(root, '.artifacts/browser-smoke')
 await mkdir(artifacts, { recursive: true })
 const directory = await mkdtemp(join(artifacts, 'run-'))
 const runtimeTmp = join(directory, 'tmp')
 await mkdir(runtimeTmp)
 const token = randomUUID()
+// Install the extension the way the installers do: a copy of dist/ with the
+// bridge token provisioned beside it (0600), so the panel connects without
+// any token in its settings (the zero-config Chrome path).
+const extension = join(directory, 'extension')
+await cp(builtExtension, extension, { recursive: true })
+await writeFile(join(extension, 'bridge-token'), `${token}\n`, { mode: 0o600 })
+await chmod(join(extension, 'bridge-token'), 0o600)
 const env = { ...process.env, DSH_HOME: join(directory, 'home'), TMPDIR: runtimeTmp, DSH_TELEMETRY_DISABLED: '1' }
 delete env.DSH_EXT_TOKEN
 delete env.DSH_BROWSER_SESSION_WORKSPACE
@@ -189,6 +197,8 @@ try {
   })
   const worker = browser.serviceWorkers()[0] ?? await browser.waitForEvent('serviceworker')
   const extensionId = new URL(worker.url()).host
+  // The manifest key pins every unpacked install to the ID the bridge accepts.
+  assert.equal(extensionId, PINNED_CHROME_EXTENSION_ID)
   const page = await browser.newPage()
   await page.goto(`${origin}/`)
   const panel = await browser.newPage()
@@ -207,9 +217,10 @@ try {
       panelPort.postMessage({ type: 'settings', id, settings })
       return id
     }
-    return sendSettings({ bridgeUrl: config.wsUrl, token: config.token, autoResumeSession: false, trustedActionOrigins: [origin] })
+    // No token here: the extension reads the provisioned bridge-token file.
+    return sendSettings({ bridgeUrl: config.wsUrl, token: '', autoResumeSession: false, trustedActionOrigins: [origin] })
     function assertTab(tab) { if (tab?.id === undefined) throw new Error('Fixture tab missing') }
-  }, { config: { wsUrl: config.wsUrl, token }, origin })
+  }, { config: { wsUrl: config.wsUrl }, origin })
   const settingsDone = async id => {
     const answer = await waitFor(() => panel.evaluate(id => messages.find(message => message.type === 'settings.result' && message.id === id), id), 'settings response')
     assert.equal(answer.ok, true, JSON.stringify(answer))
