@@ -56,6 +56,7 @@ function text(answer: ToolAnswer): string {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -104,9 +105,14 @@ describe('browser_extract dispatch', () => {
     mockChrome((message) => message.action === 'browser_extract'
       ? { ok: true, result: { text: 'x', data: { columns: ['n'], rows: [{ n: 'same' }] } } }
       : { ok: true, result: { text: 'Clicked.' } })
-    const answer = await run({ id: '4', name: 'browser_extract', args: { table: '#t', paginate: { nextSelector: '.next' } } })
+    // The pagination settle waits are real delays in the dispatcher: run them on fake time.
+    vi.useFakeTimers()
+    const pending = run({ id: '4', name: 'browser_extract', args: { table: '#t', paginate: { nextSelector: '.next' } } })
+    await vi.runAllTimersAsync()
+    const answer = await pending
+    vi.useRealTimers()
     expect(text(answer)).toContain('stopped: the next control did not change the rows')
-  }, 10_000)
+  })
 
   it('is refused when page content sharing is off', async () => {
     mockChrome(() => { throw new Error('must not reach the page') })

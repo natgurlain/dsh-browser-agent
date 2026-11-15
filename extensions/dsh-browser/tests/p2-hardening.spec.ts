@@ -125,7 +125,8 @@ describe('poc1 §3: quick notification approvals', () => {
     expect(approvalNotificationClass(req)).toBe('review')
     const nav = request('browser_navigate', { url: words })
     const o = approvalNotificationOptions(nav, { target: 'chrome', iconUrl: '', copy: APPROVAL_NOTIFICATION_COPY.en, minutes: 10 })
-    if (approvalNotificationClass(nav) === 'quick') expect(o.message).not.toContain('…')
+    expect(approvalNotificationClass(nav)).toBe('quick')
+    expect(o.message).not.toContain('…')
     const noOrigin = { ...request('browser_click', { index: 7 }), origins: [] }
     expect(approvalNotificationClass(noOrigin)).toBe('review')
   })

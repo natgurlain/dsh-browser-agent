@@ -740,7 +740,7 @@ describe('background bridge lifecycle', () => {
     expect(actionMessages).toHaveLength(1)
   })
 
-  it('applies a managed "disable unrestricted" before the first call, whatever loads first', async () => {
+  it('applies a managed "disable unrestricted" before the first call, even when the managed area answers after the user settings', async () => {
     const tab = { id: 1, windowId: 1, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab
     const chromeMock = mockChrome({
       localGet: async () => ({
@@ -1164,7 +1164,7 @@ describe('background bridge lifecycle', () => {
       expect(pulled).toMatchObject({ state: 'connected', discovery: expect.any(String), killSwitch: false })
     })
 
-    it('engages from the keyboard command and survives a worker restart', async () => {
+    it('engages from the keyboard command and persists the switch in session storage', async () => {
       const chromeMock = mockChrome({
         localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }),
       })

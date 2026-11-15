@@ -98,6 +98,10 @@ function runtime(harness: Harness, supported = true, hit: () => HitOutcome = () 
 }
 
 async function run(call: ToolCall, input?: InputRuntime): Promise<ToolAnswer> {
+  return runCall(call, input)
+}
+
+async function runCall(call: ToolCall, input?: InputRuntime): Promise<ToolAnswer> {
   return dispatchOnTab(call, { tab: TAB, context: { unrestrictedAccess: true, ...(input === undefined ? {} : { input }) } })
 }
 
@@ -108,6 +112,7 @@ function mouseEvents(harness: Harness): Array<[string, number, number]> {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -206,11 +211,14 @@ describe('CDP re-hit-test before trusted input (#2, pointer-poc)', () => {
   })
 
   it('fails closed when the debugger cannot reach the isolated world', async () => {
-    const harness = stubChrome()
-    const input: InputRuntime = { supported: true, run: async (_tabId, operation) => operation({ send: async () => ({}) }) }
+    stubChrome()
+    // The debugger answers nothing useful (no isolated world): nothing may be dispatched.
+    const sent: string[] = []
+    const input: InputRuntime = { supported: true, run: async (_tabId, operation) => operation({ send: async (method: string) => { sent.push(method); return {} } }) }
     const answer = await run({ id: '37', name: 'browser_click', args: { selector: '#target', trusted: true } }, input)
     expect(answer.ok).toBe(false)
-    expect(harness.methods).toEqual([])
+    expect(sent.some((method) => method.startsWith('Input.'))).toBe(false)
+    expect(answer.error?.message).toBe('The browser cannot locate the target element for trusted input.')
   })
 })
 
@@ -240,6 +248,13 @@ describe('synthetic click with no visible effect (#6)', () => {
   })
 
   it('gives no hint for toggles, native buttons, or a click that changed something', async () => {
+    // The effect watch waits real time in the dispatcher: run it on fake time.
+    vi.useFakeTimers()
+    const run = async (...args: Parameters<typeof runCall>) => {
+      const pending = runCall(...args)
+      await vi.runAllTimersAsync()
+      return await pending
+    }
     const toggle = stubChrome({ watch: { changed: false, reasons: [] }, measure: () => measured({ activation: 'toggle', tag: 'label' }) })
     expect(JSON.stringify((await run({ id: '8', name: 'browser_click', args: { selector: '#check' } }, runtime(toggle))).result)).not.toContain('trusted: true')
     expect(toggle.methods).toEqual([])
@@ -252,6 +267,7 @@ describe('synthetic click with no visible effect (#6)', () => {
     await run({ id: '10', name: 'browser_click', args: { selector: '#target', trusted: false } }, runtime(explicit))
     expect(explicit.methods).toEqual([])
     expect(explicit.setups.some((setup) => setup.watch !== undefined)).toBe(false)
+    vi.useRealTimers()
   })
 
   it('ends the effect watch when the click fails or is cancelled (#11)', async () => {
