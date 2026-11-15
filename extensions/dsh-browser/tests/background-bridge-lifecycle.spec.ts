@@ -1120,6 +1120,37 @@ describe('background bridge lifecycle', () => {
       expect(panel.postMessage).toHaveBeenCalledWith({ type: 'kill-switch', engaged: false })
     })
 
+    it('revokes standing grants and pending cards: watchers, dev-loop links, fleets, approvals (G2)', async () => {
+      const chromeMock = mockChrome({
+        localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge', allowPageWatchers: true } }),
+      })
+      const now = Date.now()
+      chromeMock.sessionStore.dshPageWatchers = [{
+        id: 'w-1', sessionId: 's1', tabId: 1, origin: 'https://example.com', url: 'https://example.com/',
+        condition: { kind: 'selector', selector: '#x', gone: false }, prompt: 'p', createdAt: now, expiresAt: now + 60_000, maxFires: 1, fires: 0,
+      }]
+      chromeMock.sessionStore.devLoopLinks = [{ sessionId: 's1', tabId: 1, origin: 'http://localhost:3000' }]
+      chromeMock.sessionStore.dshFleets = [{ fleetId: 'fleet-1', parentSessionId: 's1', children: ['c1'], tabIds: [1], allowActions: false }]
+      const { panel, socket } = await connected(chromeMock)
+      panel.onMessage.emit({ type: 'session.active', sessionId: 's1', isNew: true })
+      // A call that needs the user's approval: its card is pending when the switch engages.
+      socket.receive({ t: 'tool.call', id: 'needs-card', name: 'browser_click', args: { selector: 'h1' }, expiresAt: Date.now() + 30_000, sessionId: 's1' })
+      let cardId: string | undefined
+      await vi.waitFor(() => {
+        const request = panel.postMessage.mock.calls.map(([message]) => message as { type?: string; request?: { id: string } }).find((message) => message.type === 'approval.request')
+        expect(request).toBeDefined()
+        cardId = request!.request!.id
+      })
+      panel.onMessage.emit({ type: 'kill-switch.engage' })
+      await vi.waitFor(() => {
+        expect(socket.readyState).toBe(FakeWebSocket.CLOSED)
+        expect(panel.postMessage).toHaveBeenCalledWith({ type: 'approval.resolved', id: cardId })
+        expect(chromeMock.sessionStore.dshPageWatchers).toEqual([])
+        expect(chromeMock.sessionStore.devLoopLinks).toEqual([])
+        expect(chromeMock.sessionStore.dshFleets).toEqual([])
+      })
+    })
+
     it('engages from the keyboard command and survives a worker restart', async () => {
       const chromeMock = mockChrome({
         localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }),

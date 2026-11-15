@@ -147,6 +147,9 @@ describe('resume delta', () => {
   it('treats element-addressed calls as stale after the page changed', () => {
     expect(heldCallStale({ name: 'browser_click', args: { index: 3 } }, true)).toBe(true)
     expect(heldCallStale({ name: 'browser_drag', args: { fromIndex: 1, toIndex: 2 } }, true)).toBe(true)
+    // The real browser_drag shape (G23).
+    expect(heldCallStale({ name: 'browser_drag', args: { from: { index: 1 }, to: { selector: '#b' } } }, true)).toBe(true)
+    expect(heldCallStale({ name: 'browser_drag', args: { from: { index: 1 } } }, true)).toBe(true)
     expect(heldCallStale({ name: 'browser_type', args: { selector: '#q', text: 'x' } }, true)).toBe(true)
     expect(heldCallStale({ name: 'browser_snapshot', args: {} }, true)).toBe(false)
     expect(heldCallStale({ name: 'browser_click', args: { index: 3 } }, false)).toBe(false)

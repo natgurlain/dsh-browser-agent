@@ -270,7 +270,21 @@ describe('bridge mutual authentication', () => {
     client.stop()
   })
 
+  it('closes a bridge that never challenges within the handshake timeout (G26)', async () => {
+    vi.useFakeTimers()
+    const { client, states, helloOk } = recordingClient()
+    const socket = await openSocket()
+    await vi.advanceTimersByTimeAsync(4_900)
+    expect(socket.closedWith).toBeUndefined()
+    await vi.advanceTimersByTimeAsync(200)
+    expect(socket.closedWith).toEqual({ code: BRIDGE_CLOSE_CODES.helloTimeout, reason: 'handshake timed out' })
+    expect(helloOk).not.toHaveBeenCalled()
+    expect(states).not.toContain('connected')
+    client.stop()
+  })
+
   it('reports a specific refusal for token, version, and extension-ID closes and backs off', async () => {
+    vi.useFakeTimers()
     for (const [code, failure] of [
       [BRIDGE_CLOSE_CODES.authFailed, 'token-mismatch'],
       [BRIDGE_CLOSE_CODES.versionMismatch, 'version-mismatch'],
@@ -286,7 +300,7 @@ describe('bridge mutual authentication', () => {
       await vi.waitFor(() => { expect(states.at(-1)).toBe('reconnecting') })
       expect(client.failure).toBe(failure)
       // No fast retry loop: the next attempt waits the refused-retry delay.
-      await new Promise((resolve) => { setTimeout(resolve, 1_000) })
+      await vi.advanceTimersByTimeAsync(1_000)
       expect({ code, n: FakeWebSocket.instances.length }).toEqual({ code, n: 1 })
       client.stop()
     }

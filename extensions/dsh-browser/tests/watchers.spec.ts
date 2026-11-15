@@ -150,6 +150,25 @@ describe('browser_watch / browser_watches', () => {
       .toMatchObject({ ok: false, error: { message: expect.stringMatching(/not controlled by this session/) } })
     expect(registry.list()).toEqual([])
   })
+
+  it('refuses a watcher on a page site policy hides, without a card or its address (G10)', async () => {
+    const registry = new WatcherRegistry(memoryStorage())
+    const deps = toolDeps(registry, { pageHidden: () => true })
+    const answer = await createWatcher({ id: 'c', name: 'browser_watch', args: { condition: { text: 'x' }, prompt: 'p' }, sessionId: 's1' }, deps)
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringMatching(/blocked by site policy/) } })
+    expect(JSON.stringify(answer)).not.toContain(PAGE)
+    expect(deps.authorize).not.toHaveBeenCalled()
+    expect(registry.list()).toEqual([])
+  })
+
+  it('lists a watcher whose page became hidden without printing its URL (G10)', async () => {
+    const registry = new WatcherRegistry(memoryStorage())
+    await registry.add(watcher())
+    const listed = await manageWatchers({ id: 'l', name: 'browser_watches', args: {}, sessionId: 's1' }, toolDeps(registry, { pageHidden: () => true }))
+    const text = (listed as { result: { text: string } }).result.text
+    expect(text).toContain('blocked by site policy (suspended)')
+    expect(text).not.toContain(watcher().url)
+  })
 })
 
 describe('handleWatchHit', () => {

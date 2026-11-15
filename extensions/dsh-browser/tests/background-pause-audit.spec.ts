@@ -5,6 +5,7 @@ import {
   BRIDGE_AUDIT_RECORD_METHOD,
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import { STRICT_MODE_UNAVAILABLE } from '../src/background/commit-gate.ts'
 import { HOLD_EXPIRED_MESSAGE } from '../src/background/pause-gate.ts'
 import { completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
 import { FakeWebSocket } from './support/fake-websocket.ts'
@@ -19,7 +20,7 @@ function browserTab(url: string, title = 'Page'): chrome.tabs.Tab {
 
 interface Sent { t?: string; id?: string; method?: string; payload?: Record<string, unknown>; ok?: boolean; error?: { message?: string } }
 
-async function boot(extraSettings: Record<string, unknown> = {}) {
+async function boot(extraSettings: Record<string, unknown> = {}, chromeExtras: Record<string, unknown> = {}) {
   let currentTab = browserTab('https://example.com/start')
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const onMessage = chromeEvent<[unknown, chrome.runtime.MessageSender, (response: unknown) => void]>()
@@ -74,6 +75,7 @@ async function boot(extraSettings: Record<string, unknown> = {}) {
       onCommitted: chromeEvent<[{ tabId: number; frameId: number }]>(),
     },
     windows: { WINDOW_ID_NONE: -1, onFocusChanged: chromeEvent<[number]>(), onRemoved: chromeEvent<[number]>() },
+    ...chromeExtras,
   } as unknown as typeof chrome)
   vi.stubGlobal('WebSocket', FakeWebSocket)
   await import('../src/background/index.ts')
@@ -224,4 +226,58 @@ describe('audit notes and the pause gate', () => {
       expect(env.sent()).toContainEqual(expect.objectContaining({ t: 'rpc', method: BRIDGE_AUDIT_RECORD_METHOD, payload: { event: 'kill-switch' } }))
     })
   })
+
+  it('ignores the kill switch and takeover Resume from another extension, outside a tab, or from an unbound tab (G22)', async () => {
+    const env = await boot()
+    env.socket.receive({ t: 'tool.call', id: 'first', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 10_000, sessionId: 'session-live' })
+    await vi.waitFor(() => { expect(env.sent()).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'first' })) })
+    const killSwitchRecorded = () => env.sent().some((frame) => frame.method === BRIDGE_AUDIT_RECORD_METHOD && frame.payload?.event === 'kill-switch')
+    env.content.emit({ type: 'DSH_KILL_SWITCH' }, { id: 'other-extension', tab: browserTab('https://example.com/start') }, () => {})
+    env.content.emit({ type: 'DSH_KILL_SWITCH' }, { id: 'test-extension' }, () => {})
+    env.panel.emit({ type: 'agent.pause', mode: 'take-over' })
+    await vi.waitFor(() => { expect(env.pauseStates().at(-1)?.mode).toBe('taken-over') })
+    const unbound = { ...browserTab('https://example.com/other'), id: 99 }
+    env.content.emit({ type: 'DSH_AGENT_RESUME' }, { id: 'test-extension', tab: unbound }, () => {})
+    env.content.emit({ type: 'DSH_AGENT_RESUME' }, { id: 'other-extension', tab: browserTab('https://example.com/start') }, () => {})
+    // A positive control afterwards: the bound tab's Resume does open the panel.
+    env.content.emit({ type: 'DSH_AGENT_RESUME' }, { id: 'test-extension', tab: browserTab('https://example.com/start') }, () => {})
+    await vi.waitFor(() => { expect(chrome.sidePanel.open).toHaveBeenCalledTimes(1) })
+    expect(killSwitchRecorded()).toBe(false)
+    expect(env.socket.readyState).toBe(FakeWebSocket.OPEN)
+  })
 })
+
+describe('strict mode wiring (G4)', () => {
+  const click = { t: 'tool.call', id: 'strict-click', name: 'browser_click', args: { selector: 'h1' }, sessionId: 'session-live' }
+
+  it('refuses a call on a strict site where the debugger is unavailable, before any page action', async () => {
+    const env = await boot({ strictSites: ['https://example.com'] })
+    env.socket.receive({ ...click, expiresAt: Date.now() + 10_000 })
+    await vi.waitFor(() => { expect(env.sent()).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'strict-click', ok: false })) })
+    const result = env.sent().find((frame) => frame.t === 'tool.result' && frame.id === 'strict-click')!
+    expect(result.error?.message).toBe(STRICT_MODE_UNAVAILABLE)
+    expect(env.tabMessages.some(({ message }) => message.action === 'browser_click')).toBe(false)
+    expect(env.sent().find((frame) => frame.method === BRIDGE_AUDIT_RECORD_METHOD && frame.payload?.callId === 'strict-click')!.payload)
+      .toMatchObject({ strict: 'refused' })
+  })
+
+  it('refuses rather than runs unguarded when the gate cannot attach', async () => {
+    const attach = vi.fn(async () => { throw new Error('Another debugger is already attached') })
+    const env = await boot({ strictSites: ['https://example.com'] }, {
+      debugger: { attach, detach: vi.fn(async () => {}), sendCommand: vi.fn(async () => ({})), onEvent: chromeEvent(), onDetach: chromeEvent() },
+    })
+    env.socket.receive({ ...click, expiresAt: Date.now() + 10_000 })
+    await vi.waitFor(() => { expect(env.sent()).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'strict-click', ok: false })) })
+    expect(attach).toHaveBeenCalled()
+    const result = env.sent().find((frame) => frame.t === 'tool.result' && frame.id === 'strict-click')!
+    expect(result.error?.message).toMatch(/refused rather than run unguarded/)
+    expect(env.tabMessages.some(({ message }) => message.action === 'browser_click')).toBe(false)
+  })
+
+  it('runs the same call normally off the strict site', async () => {
+    const env = await boot({ strictSites: ['https://other.example'] })
+    env.socket.receive({ ...click, expiresAt: Date.now() + 10_000 })
+    await vi.waitFor(() => { expect(env.sent()).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'strict-click', ok: true })) })
+  })
+})
+
