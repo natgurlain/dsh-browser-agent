@@ -119,10 +119,15 @@ describe('runFanout', () => {
     })
     await runFanout(parent, { tasks: [tasks[0]!], allowActions: false, closeTabs: true }, { signal }, { ...h.deps, subagents: () => ({ startActivation: start }) as never }, { toolTimeoutMs: 1000, provider: 'spawn' })
     expect(taintedAtStart).toBe(true)
-    const fresh = new SessionTaintRegistry()
-    fresh.link('kid', 'p')
-    fresh.mark('kid', 'browser_get_text')
-    expect(fresh.isTainted('p')).toBe(true)
+    // An untainted parent: a worker reading a page taints the parent through the fleet's link.
+    const clean = harness()
+    const reading = vi.fn(async (spec: Parameters<FleetSubagents['startActivation']>[0]) => {
+      clean.lineage.mark(spec.childId, 'browser_get_text')
+      return { childId: spec.childId, result: Promise.resolve({ output: [], stopReason: 'completed' }) as never, dispose: async () => {} }
+    })
+    expect(clean.lineage.isTainted('parent')).toBe(false)
+    await runFanout(parent, { tasks: [tasks[0]!], allowActions: false, closeTabs: true }, { signal }, { ...clean.deps, subagents: () => ({ startActivation: reading }) as never }, { toolTimeoutMs: 1000, provider: 'spawn' })
+    expect(clean.lineage.get('parent')).toMatchObject({ firstTool: expect.stringContaining('browser_get_text') })
   })
 
   it('does not record children of a session the bridge does not own', async () => {

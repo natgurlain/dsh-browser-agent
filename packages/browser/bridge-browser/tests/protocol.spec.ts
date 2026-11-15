@@ -27,6 +27,7 @@ import {
   UNTRUSTED_NOTICE,
   UNTRUSTED_NOTICE_LEAD,
   wrapUntrustedPageText,
+  isProgramStepRef,
 } from '../src/protocol.ts'
 
 const NONCE = 'a'.repeat(64)
@@ -147,6 +148,19 @@ describe('bridge handshake primitives', () => {
     expect(helloProtocolVersion(JSON.stringify({ t: 'rpc' }))).toBeUndefined()
     expect(helloProtocolVersion('nope')).toBeUndefined()
     expect(helloProtocolVersion('[]')).toBeUndefined()
+  })
+})
+
+describe('program step refs', () => {
+  it('accepts { id, step } and drops a malformed ref from a tool.call', () => {
+    expect(isProgramStepRef({ id: 'p', step: 0 })).toBe(true)
+    for (const bad of [undefined, null, 'p', {}, { id: '', step: 0 }, { id: 'p' }, { id: 'p', step: -1 }, { id: 'p', step: 1.5 }, { id: 7, step: 0 }]) {
+      expect(isProgramStepRef(bad), JSON.stringify(bad)).toBe(false)
+    }
+    const frame = (program: unknown) => parseBridgeFrame(JSON.stringify({ t: 'tool.call', id: 'c', name: 'browser_click', args: {}, expiresAt: 1, program }))
+    expect(frame({ id: 'p', step: 2 })).toMatchObject({ program: { id: 'p', step: 2 } })
+    expect(frame({ id: 'p', step: -1 })).not.toHaveProperty('program')
+    expect(frame('p')).not.toHaveProperty('program')
   })
 })
 

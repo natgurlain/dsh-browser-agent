@@ -262,6 +262,24 @@ describe('deferred creation cannot adopt foreign sessions', () => {
   })
 })
 
+describe('strict preset check for standing grants (dev loop)', () => {
+  it('reports a full-access preset even when allowDangerFullAccess lets writes through', async () => {
+    const signal = new AbortController().signal
+    const { policy } = harness({
+      'session.permissions': () => ({ ok: true, value: { current: 'danger-full-access' } }),
+    }, { allowDangerFullAccess: true, ledger: memorySessionLedger(['mine']) })
+    expect(await policy.allowsSession('mine', signal, 'write')).toBe(true)
+    expect(await policy.unsafePreset('mine', signal)).toBe('danger-full-access')
+  })
+
+  it('treats a failed permissions lookup as unknown, and a safe preset as safe', async () => {
+    const signal = new AbortController().signal
+    const failing = harness({ 'session.permissions': () => ({ ok: false, error: { code: 'internal', message: 'down', details: {} } }) }, { allowDangerFullAccess: true })
+    expect(await failing.policy.unsafePreset('mine', signal)).toBe('unknown')
+    expect(await harness().policy.unsafePreset('mine', signal)).toBeUndefined()
+  })
+})
+
 describe('full-access permission presets', () => {
   it('refuses session.setPermission to danger-full-access with an actionable message', async () => {
     const { call, inner } = harness()

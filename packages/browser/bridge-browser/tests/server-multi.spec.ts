@@ -222,6 +222,18 @@ describe('tool routing', () => {
     expect(toolCalls(b)).toHaveLength(0)
   })
 
+  it('tags a browser_run step with its program on the tool.call frame', async () => {
+    const h = await startBridge()
+    const a = await connectClient(h.url, identity('client-aaaa'))
+    const step = h.bridge.requestTool('browser_click', { index: 1 }, new AbortController().signal, 1_000, 's-1', 'tc-1', { id: 'prog-1', step: 2 })
+    void step.catch(() => {})
+    const plain = h.bridge.requestTool('browser_click', { index: 1 }, new AbortController().signal, 1_000, 's-1')
+    void plain.catch(() => {})
+    const [tagged, untagged] = [await nextToolCall(a, 1), await nextToolCall(a, 2)]
+    expect(tagged).toMatchObject({ program: { id: 'prog-1', step: 2 } })
+    expect(untagged).not.toHaveProperty('program')
+  })
+
   it('forgets a purged session\'s install binding', async () => {
     const h = await startBridge()
     const a = await connectClient(h.url, identity('client-aaaa'))

@@ -152,8 +152,13 @@ describe('browser_extract tool', () => {
     const workspace = tempDir()
     const { tool, requestTool } = harness(RESULT)
     const exec = { signal: new AbortController().signal, agent: { id: 's1', session: { header: { cwd: workspace } } } }
-    for (const saveTo of ['conftest.py', 'd/r1.desktop', '.github/workflows/ci.yml', '.git/hooks/pre-commit', '.envrc']) {
-      await expect(tool.execute({ table: '#t', saveTo }, exec)).rejects.toThrow()
+    const wrongType = /only \.csv, \.json files can be written/u
+    const hidden = /hidden files and directories/u
+    for (const [saveTo, why] of [
+      ['conftest.py', wrongType], ['d/r1.desktop', wrongType],
+      ['.github/workflows/ci.yml', hidden], ['.git/hooks/pre-commit', hidden], ['.envrc', hidden],
+    ] as const) {
+      await expect(tool.execute({ table: '#t', saveTo }, exec), saveTo).rejects.toThrow(why)
     }
     expect(requestTool).not.toHaveBeenCalled()
   })

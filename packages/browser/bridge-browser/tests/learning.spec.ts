@@ -362,13 +362,17 @@ describe('failure fixtures', () => {
     })
     const saved = await saveFixture({ mode: 'workspace-write', root }, input, new Date('2026-11-15T10:00:00Z'))
     const meta = JSON.parse(readFileSync(join(root, saved.meta), 'utf8'))
-    expect(meta.intended.args.text).not.toContain('secret')
+    expect(meta.intended.args.text).toEqual({ masked: true, length: 12 })
+    expect(JSON.stringify(meta)).not.toContain('secret words')
     expect(meta.url).not.toContain('abcdef')
     expect(meta.page.file.endsWith('.html')).toBe(true)
     expect(readdirSync(join(root, 'browser-fixtures'))).toHaveLength(2)
     expect(() => parseFixtureInput({ ...input, failure: 'bogus' })).toThrow(/failure class/)
     expect(() => parseFixtureInput({ ...input, url: 'file:///etc/passwd' })).toThrow(/http/)
-    await expect(saveFixture({ mode: 'workspace-write', root }, input)).resolves.toBeDefined()
+    // Saving the same failure again never overwrites the first capture.
+    const again = await saveFixture({ mode: 'workspace-write', root }, input, new Date('2026-11-15T10:00:00Z'))
+    expect(again.meta).not.toBe(saved.meta)
+    expect(readdirSync(join(root, 'browser-fixtures'))).toHaveLength(4)
   })
 })
 
@@ -516,11 +520,12 @@ describe('learning mount', () => {
         edit: vi.fn(async (request) => { tasks.delete(request.id); return {} }),
       }
       const { ctx, registered } = fakeCtx(root)
-      ;(ctx as unknown as { get: (name: string) => unknown }).get = (name: string) => name === 'schedule' ? service : undefined
+      ;(ctx as unknown as { get: (name: string) => unknown }).get = (name: string) => name === 'schedule' ? service
+        : name === 'sandboxPolicy' ? { resolve: () => ({ mode: 'workspace-write' }) } : undefined
       const audit = vi.fn()
       const mount = mountLearning(ctx, { requestTool: vi.fn() } as never, { toolTimeoutMs: 1000, workspacePath: root, scheduleFile: file, ownsSession: async () => true, audit })
       const as = (connection: string) => ({ connection, allowsSession: async () => true })
-      return { mount, tasks, as, registered, audit }
+      return { mount, tasks, as, registered, audit, file, service }
     }
 
     it('list and cancel work while workflows are off', async () => {
@@ -565,6 +570,20 @@ describe('learning mount', () => {
       expect(early.registered.size).toBe(0)
     })
 
+    it('records the creating install, so only that install turning workflows off revokes it (c7468a3)', async () => {
+      const { mount, as, file, service } = setup([])
+      const workflow = { ...baseWorkflow(), params: [{ name: 'contact', default: 'Ada' }], steps: (baseWorkflow().steps as unknown[]).filter((_s, i) => i !== 2) }
+      await mount.rpc(LEARNING_METHODS.state, { workflows: true }, as('browser-a'))
+      expect(await mount.rpc(LEARNING_METHODS.saveWorkflow, { sessionId: 'owned', workflow }, as('browser-a'))).toMatchObject({ ok: true })
+      const created = await mount.rpc(LEARNING_METHODS.scheduleCreate, { sessionId: 'owned', workflow: 'add-contact', timing: { kind: 'every', every_seconds: 3600 } }, as('browser-a'))
+      expect(created).toMatchObject({ ok: true, result: { id: 'x', sessionId: 'owned' } })
+      expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual([expect.objectContaining({ id: 'x', sessionId: 'owned', install: 'browser-a' })])
+      await mount.rpc(LEARNING_METHODS.state, { workflows: false, workflowsTurnedOff: true }, as('browser-b'))
+      expect(service.edit).not.toHaveBeenCalled()
+      await mount.rpc(LEARNING_METHODS.state, { workflows: false, workflowsTurnedOff: true }, as('browser-a'))
+      expect(service.edit).toHaveBeenCalledWith({ id: 'x', action: 'delete' })
+    })
+
     it('the kill switch revokes every schedule regardless of state or install', async () => {
       const { mount, tasks, as } = setup([{ id: 's1', install: 'a' }, { id: 's2', install: 'b' }, { id: 'legacy' }])
       await mount.rpc(LEARNING_METHODS.state, { workflows: true }, as('a'))
@@ -589,5 +608,22 @@ describe('learning mount', () => {
     expect(await mount.rpc(LEARNING_METHODS.saveFixture, { fixture }, context)).toMatchObject({ ok: false, error: { code: 'disabled' } })
     await mount.rpc(LEARNING_METHODS.state, { fixtures: true }, context)
     expect(await mount.rpc(LEARNING_METHODS.saveFixture, { fixture }, context)).toMatchObject({ ok: true })
+  })
+
+  it('taints the session a fixture was saved for and audits it without the URL\'s secrets', async () => {
+    const root = tempDir()
+    const { ctx } = fakeCtx(root)
+    const markTainted = vi.fn()
+    const audit = vi.fn()
+    const mount = mountLearning(ctx, { requestTool: vi.fn() } as never, { toolTimeoutMs: 1000, workspacePath: root, scheduleFile: join(root, 's.json'), ownsSession: async () => true, markTainted, audit })
+    const fixture = { tool: 'browser_click', args: { selector: '#x' }, error: { code: 'action-failed', message: 'nope' }, failure: 'not-found', url: 'https://a.example/cart?token=abcdefabcdefabcdefabcdef', page: { kind: 'dom', content: '<p>x</p>' } }
+    const context = { connection: 'c', allowsSession: async () => true }
+    await mount.rpc(LEARNING_METHODS.state, { fixtures: true }, context)
+    expect(await mount.rpc(LEARNING_METHODS.saveFixture, { sessionId: 's1', fixture }, context)).toMatchObject({ ok: true })
+    expect(markTainted).toHaveBeenCalledWith('s1')
+    expect(audit).toHaveBeenCalledWith('s1', expect.objectContaining({ tool: 'browser_failure_fixture', decision: 'not-found', resultDigest: expect.stringMatching(/^sha256:/u) }))
+    const entry = audit.mock.calls[0]![1] as { url: string }
+    expect(entry.url).toMatch(/^https:\/\/a\.example\/cart/u)
+    expect(entry.url).not.toContain('abcdef')
   })
 })

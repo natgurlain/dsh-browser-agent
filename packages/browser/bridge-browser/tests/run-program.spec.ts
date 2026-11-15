@@ -44,7 +44,8 @@ describe('parseProgram', () => {
       expect(() => parseProgram([{ tool }])).toThrow(/tool must be one of/)
     }
     expect(() => parseProgram([{ tool: 'browser_click', expect: {} }])).toThrow(/names no condition/)
-    expect(() => parseProgram([{ tool: 'browser_click', expect: { bogus: 1 } }])).toThrow(/unknown field|names no condition/)
+    expect(() => parseProgram([{ tool: 'browser_click', expect: { bogus: 1 } }])).toThrow(/unknown field bogus/)
+    expect(() => parseProgram([{ tool: 'browser_click', expect: { timeoutMs: 100 } }])).toThrow(/names no condition/)
     expect(() => parseProgram([{ tool: 'browser_click', args: [] }])).toThrow(/args must be an object/)
   })
 
@@ -113,6 +114,18 @@ describe('runProgram', () => {
     expect(outcome.stop).toBe('error')
     expect(outcome.steps.map((step) => step.ok)).toEqual([true, false])
     expect(calls.filter((call) => call.program !== undefined)).toHaveLength(2)
+  })
+
+  it.each([
+    ['no programId', {}],
+    ['an empty programId', { programId: '' }],
+    ['a non-string programId', { programId: 7 }],
+    ['no answer', undefined],
+  ])('fails closed on an approval with %s', async (_label, approval) => {
+    const { bridge, calls } = fakeBridge((name) => name === 'browser_run' ? approval : ok('ran'))
+    const outcome = await runProgram(bridge, parseProgram([{ tool: 'browser_click' }]), { signal }, { toolTimeoutMs: 1000 })
+    expect(outcome.stop).toBe('not-approved')
+    expect(calls.map((call) => call.name)).toEqual(['browser_run'])
   })
 
   it('does not run anything when the program card is refused', async () => {
