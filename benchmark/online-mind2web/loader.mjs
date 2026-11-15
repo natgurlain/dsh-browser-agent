@@ -43,6 +43,16 @@ export function normalizeTask(raw) {
   return { taskId, task: task.trim(), website, referenceLength: Number.isFinite(referenceLength) ? referenceLength : undefined, level }
 }
 
+/** Whether a URL is on a Hugging Face host (the only place `HF_TOKEN` may be sent). */
+export function isHuggingFaceUrl(value) {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && (url.hostname === 'huggingface.co' || url.hostname.endsWith('.huggingface.co'))
+  } catch {
+    return false
+  }
+}
+
 /**
  * Download (or read) and parse the task list.
  * @param options - `{ source, token, fetch }`; `source` may be a URL or a local path.
@@ -50,7 +60,9 @@ export function normalizeTask(raw) {
 export async function loadOnlineMind2Web({ source = DEFAULT_SOURCE, token = process.env.HF_TOKEN, fetch: fetcher = globalThis.fetch } = {}) {
   let text
   if (/^https?:\/\//u.test(source)) {
-    const response = await fetcher(source, { headers: token === undefined || token === '' ? {} : { authorization: `Bearer ${token}` } })
+    // The Hugging Face token never goes to another host (a --source someone else chose).
+    const sendToken = token !== undefined && token !== '' && isHuggingFaceUrl(source)
+    const response = await fetcher(source, { headers: sendToken ? { authorization: `Bearer ${token}` } : {} })
     if (response.status === 401 || response.status === 403) {
       throw new Error(`the dataset is gated (HTTP ${String(response.status)}): accept its terms on Hugging Face and pass a token (HF_TOKEN or --token)`)
     }

@@ -15,6 +15,7 @@
  * @module
  */
 
+import { EXTERNAL_SESSION_PREFIX } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { analyzeUrl } from './url-risk.ts'
 
 /** Session key used for calls that carry no agent session (probes, tests). */
@@ -46,10 +47,18 @@ export function resultTaintsSession(toolName: string, ok: boolean): boolean {
   return ok && toolName.startsWith('browser_') && !CONTENT_FREE_TOOLS.has(toolName)
 }
 
+/**
+ * One taint bucket for every external (MCP) client session (`mcp-…`): each
+ * MCP `initialize` mints a fresh session, so per-session taint would let a
+ * client shed taint by reconnecting.
+ */
+export const EXTERNAL_TAINT_KEY = 'mcp-external'
+
 /** Session key for an optional agent session id. */
 export function taintKey(sessionId: string | undefined): string {
   const trimmed = sessionId?.trim()
-  return trimmed === undefined || trimmed === '' ? NO_SESSION_KEY : trimmed
+  if (trimmed === undefined || trimmed === '') return NO_SESSION_KEY
+  return trimmed.startsWith(EXTERNAL_SESSION_PREFIX) ? EXTERNAL_TAINT_KEY : trimmed
 }
 
 /** Storage seam so taint survives an MV3 worker restart. */

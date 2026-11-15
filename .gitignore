@@ -10,3 +10,5 @@ release/
 **/dist-store/
 # Extension signing keys live outside the repository; never commit one.
 *.pem
+# Failure fixtures imported as benchmark tasks hold captured pages; never commit them.
+benchmark/fixture-tasks/

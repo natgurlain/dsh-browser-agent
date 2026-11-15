@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fixtureTaskFromMeta, importFixtures, loadFixtureTasks, validateFixtureTask } from '../lib/fixture-tasks.mjs'
 import { parseImportArgs } from '../import-fixtures.mjs'
 import { startBenchmarkSite } from '../site/server.mjs'
-import { levelOf, loadOnlineMind2Web, normalizeTask, parseLoaderArgs, selectSubset, DEFAULT_SOURCE } from '../online-mind2web/loader.mjs'
+import { isHuggingFaceUrl, levelOf, loadOnlineMind2Web, normalizeTask, parseLoaderArgs, selectSubset, DEFAULT_SOURCE } from '../online-mind2web/loader.mjs'
 import { buildLeaderboard, escapeHtml, parseResults, renderLeaderboardHtml } from '../online-mind2web/report.mjs'
 
 const meta = (overrides = {}) => ({
@@ -84,6 +84,13 @@ test('the loader downloads with a token, explains gating, and selects a balanced
   await assert.rejects(loadOnlineMind2Web({ fetch: fetcher, token: '' }), /gated/u)
   const tasks = await loadOnlineMind2Web({ fetch: fetcher, token: 'hf_x' })
   assert.equal(seen[1].url, DEFAULT_SOURCE)
+  // The token goes to Hugging Face hosts only.
+  await assert.rejects(loadOnlineMind2Web({ fetch: fetcher, token: 'hf_x', source: 'https://evil.example/tasks.json' }), /gated/u)
+  assert.equal(seen[2].init.headers.authorization, undefined)
+  assert.equal(isHuggingFaceUrl('https://huggingface.co/datasets/x'), true)
+  assert.equal(isHuggingFaceUrl('https://cdn-lfs.huggingface.co/x'), true)
+  assert.equal(isHuggingFaceUrl('https://huggingface.co.evil.example/x'), false)
+  assert.equal(isHuggingFaceUrl('http://huggingface.co/x'), false)
   assert.equal(tasks.length, 30)
   const subset = selectSubset(tasks, { count: 9, seed: 7 })
   assert.equal(subset.length, 9)

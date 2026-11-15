@@ -112,6 +112,16 @@ describe('taint', () => {
     expect(restored.clear('s1')).toBe(false)
   })
 
+  it('shares one taint bucket across external MCP sessions, so a fresh initialize cannot shed taint (review finding 10)', async () => {
+    const tracker = new TaintTracker({ read: async () => ({}), write: async () => {} })
+    await tracker.ready
+    tracker.mark('mcp-1111', 'browser_snapshot', ['https://mail.example'])
+    expect(tracker.get('mcp-2222')).toMatchObject({ sources: ['https://mail.example'] })
+    expect(tracker.get('s1')).toBeUndefined()
+    expect(tracker.clear('mcp-2222')).toBe(true)
+    expect(tracker.get('mcp-1111')).toBeUndefined()
+  })
+
   it('forces approval only for the exfiltration-shaped calls', () => {
     const taint: TaintRecord = { sources: ['https://news.example'], lastReadOrigin: 'https://news.example', firstTool: 'browser_snapshot', since: 0 }
     const risky = 'https://sink.example/c?d=c2VjcmV0LXRva2VuLXZhbHVlLTEyMzQ1Njc4OTA'

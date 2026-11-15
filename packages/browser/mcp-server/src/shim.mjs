@@ -78,17 +78,35 @@ async function readPrivateFile(file) {
   }
 }
 
+/**
+ * Whether the process that wrote the endpoint file still runs. A stale file
+ * from a crashed DSH names a port anything may now listen on: the token must
+ * not go there. `EPERM` means the process exists (owned by someone else).
+ */
+export function pidAlive(pid, kill = process.kill.bind(process)) {
+  try {
+    kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
+}
+
 /** Endpoint URL and token, or a reason they are unavailable. */
-export async function loadEndpoint(env) {
+export async function loadEndpoint(env, isAlive = pidAlive) {
   const home = dshHome(env)
   let url = env.DSH_BROWSER_MCP_URL
   if (url === undefined || url === '') {
     const raw = await readPrivateFile(join(home, ENDPOINT_FILE_NAME))
     if (raw === undefined) return { error: NOT_RUNNING }
+    let pid
     try {
-      url = JSON.parse(raw).url
+      ({ url, pid } = JSON.parse(raw))
     } catch {
       return { error: NOT_RUNNING }
+    }
+    if (pid !== undefined && (!Number.isSafeInteger(pid) || pid <= 0 || !isAlive(pid))) {
+      return { error: `${NOT_RUNNING} (the endpoint file in ${home} is stale: its DSH process is gone)` }
     }
   }
   if (typeof url !== 'string' || !isLoopbackHttpUrl(url)) {

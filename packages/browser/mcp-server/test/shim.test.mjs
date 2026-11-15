@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { after, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { isLoopbackHttpUrl, loadEndpoint } from '../src/shim.mjs'
+import { isLoopbackHttpUrl, loadEndpoint, pidAlive } from '../src/shim.mjs'
 
 const bin = fileURLToPath(new URL('../bin/dsh-browser-mcp.mjs', import.meta.url))
 const TOKEN = 'shim-test-token-0123456789abcdefghijklmnop'
@@ -134,5 +134,22 @@ test('never sends the token to a non-loopback URL or reads a token others can re
   if (process.platform !== 'win32') {
     const loose = await home('http://127.0.0.1:9/mcp', { tokenMode: 0o644 })
     assert.match((await loadEndpoint({ DSH_HOME: loose })).error, /no token file/u)
+  }
+})
+
+test('never uses a stale endpoint file whose DSH process is gone', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-mcp-stale-'))
+  try {
+    await writeFile(join(dir, 'browser-mcp-token'), 'x'.repeat(64), { mode: 0o600 })
+    await writeFile(join(dir, 'browser-mcp.json'), JSON.stringify({ url: 'http://127.0.0.1:9/mcp', pid: 424242 }), { mode: 0o600 })
+    assert.match((await loadEndpoint({ DSH_HOME: dir }, () => false)).error, /stale/u)
+    assert.equal((await loadEndpoint({ DSH_HOME: dir }, () => true)).url, 'http://127.0.0.1:9/mcp')
+    await writeFile(join(dir, 'browser-mcp.json'), JSON.stringify({ url: 'http://127.0.0.1:9/mcp', pid: 'x' }), { mode: 0o600 })
+    assert.match((await loadEndpoint({ DSH_HOME: dir }, () => true)).error, /stale/u)
+    assert.equal(pidAlive(process.pid), true)
+    assert.equal(pidAlive(1, () => { throw Object.assign(new Error('perm'), { code: 'EPERM' }) }), true)
+    assert.equal(pidAlive(2, () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) }), false)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
   }
 })
