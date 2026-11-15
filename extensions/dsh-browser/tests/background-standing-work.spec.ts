@@ -399,6 +399,30 @@ describe('kill switch', () => {
 })
 
 describe('a watcher hit while the bridge is reconnecting', () => {
+  it('with dsh unreachable: one bounded attempt, a prompt miss, and later hits do not probe again', async () => {
+    const mock = mockChrome({
+      settings: { allowPageWatchers: true },
+      session: { dshRuntimeLease: { activeUntil: Date.now() - 60_000, url: LOCAL }, dshPageWatchers: [watcher()] },
+    })
+    const fetchMock = unreachable()
+    await boot()
+    await vi.waitFor(() => { expect(mock.session.data.dshStandingRetry).toMatchObject({ failures: 1 }) })
+    const sender = { id: 'test-extension', tab: { id: 7, url: WATCHED_PAGE } as chrome.tabs.Tab, url: WATCHED_PAGE, frameId: 0 }
+    const first = vi.fn()
+    const startedAt = Date.now()
+    mock.onMessage.emit({ type: 'DSH_WATCH_HIT', watchId: 'w-1', matched: 'In stock' }, sender, first)
+    await vi.waitFor(() => { expect(first).toHaveBeenCalledWith({ accepted: false, reason: 'bridge' }) })
+    // The failed attempt answers the hit; it does not sit out the whole wait.
+    expect(Date.now() - startedAt).toBeLessThan(4_000)
+    expect(mock.session.data.dshStandingRetry).toMatchObject({ failures: 2 })
+    const probes = fetchMock.mock.calls.length
+    const second = vi.fn()
+    mock.onMessage.emit({ type: 'DSH_WATCH_HIT', watchId: 'w-1', matched: 'In stock' }, sender, second)
+    await vi.waitFor(() => { expect(second).toHaveBeenCalledWith(expect.objectContaining({ accepted: false })) })
+    expect(fetchMock.mock.calls.length).toBe(probes)
+    expect(FakeWebSocket.instances).toHaveLength(0)
+  })
+
   it('waits for the headless connection and then wakes the session instead of recording a miss', async () => {
     const mock = mockChrome({
       settings: { allowPageWatchers: true },

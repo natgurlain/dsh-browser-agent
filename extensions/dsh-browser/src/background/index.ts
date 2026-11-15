@@ -1635,6 +1635,8 @@ function parkStandingReconnect(): void {
   connectedAddress = undefined
   parked?.stop()
   armBridgeKeepalive()
+  // A watcher hit waiting for this attempt has its answer now.
+  for (const resolve of [...bridgeWaiters]) resolve()
 }
 
 /** Resolvers of watcher hits waiting for the bridge to come back. */
@@ -1657,6 +1659,10 @@ async function bridgeForWatchHit(): Promise<void> {
   if (connected()) return
   await runtimeRestored
   if (connected() || killSwitchEngaged || !runtimeWantsBridge()) return
+  // Wait only for an attempt that is running or that this hit may start.
+  const attempting = bridge?.active === true
+  const mayStart = !attempting && panelPorts.size === 0 && Date.now() >= hitReconnectAt
+  if (!attempting && !mayStart) return
   const waited = new Promise<void>((resolve) => {
     const done = (): void => {
       clearTimeout(timer)
@@ -1666,7 +1672,7 @@ async function bridgeForWatchHit(): Promise<void> {
     const timer = setTimeout(done, WATCH_HIT_CONNECT_WAIT_MS)
     bridgeWaiters.add(done)
   })
-  if ((bridge === null || bridge.state === 'stopped') && panelPorts.size === 0 && Date.now() >= hitReconnectAt) {
+  if (mayStart) {
     hitReconnectAt = Date.now() + STANDING_RETRY_BASE_MS
     void settingsReady.then(() => startBridge()).catch(() => {})
   }

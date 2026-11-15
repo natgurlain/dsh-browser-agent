@@ -203,6 +203,11 @@ export class BridgeClient {
     return this.send({ t: 'pong' })
   }
 
+  /** Whether the connect loop is running (connecting, connected, or waiting to retry). */
+  get active(): boolean {
+    return this.running
+  }
+
   /** Whether a frame can be sent right now (an authenticated, open socket). */
   get connected(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN && this.channel !== undefined
