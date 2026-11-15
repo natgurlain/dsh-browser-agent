@@ -22,6 +22,7 @@ const { startScriptedModel } = await import(pathToFileURL(join(root, 'scripts/fi
 const { runAgentUxSmoke, assertKillSwitchAudited } = await import(pathToFileURL(join(root, 'scripts/fixtures/agent-ux-smoke.mjs')).href)
 const { runPhase3Smoke } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-smoke.mjs')).href)
 const { phase3Reply, streamReply } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-model.mjs')).href)
+const { handleLearningRequest, runLearningSmoke } = await import(pathToFileURL(join(root, 'scripts/fixtures/learning-smoke.mjs')).href)
 const artifacts = process.env.DSH_SMOKE_ARTIFACTS ?? join(root, '.artifacts/browser-smoke')
 await mkdir(artifacts, { recursive: true })
 const directory = await mkdtemp(join(artifacts, 'run-'))
@@ -259,6 +260,7 @@ const server = createServer((request, response) => {
     response.end('<!doctype html><title>Stock</title><body><h1>Item 42</h1><p id="stock">Sold out</p></body>')
     return
   }
+  if (handleLearningRequest(request, response)) return
   if (request.url.startsWith('/strict-submit')) {
     let body = ''
     request.on('data', chunk => { body += chunk })
@@ -1211,6 +1213,13 @@ try {
     browser, page, panel, extensionId, directory, origin, bridge, env, tool, succeed, settings, waitFor, results, delay,
     hostRpc, bridgeRpc, phase3State,
   }))
+
+  // ---- Phase 3 learning: workflows, schedules, fixtures, site drivers, Watch me ----
+  await runLearningSmoke({
+    page, panel, origin, workspace, tool, succeed, settings, waitFor, delay, results, tabId, root,
+    knownSessions: [conversation.sessionId, secondConversation.sessionId],
+    toolNames: async () => (await fetch(probe, { headers })).json(),
+  })
 
   // ---- Kill switch (last: it drops the bridge) ----
   const badge = tab => panel.evaluate(tab => chrome.action.getBadgeText(tab === undefined ? {} : { tabId: tab }), tab)
