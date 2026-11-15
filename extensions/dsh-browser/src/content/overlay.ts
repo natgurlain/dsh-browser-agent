@@ -28,27 +28,9 @@
  * @module
  */
 
-/** Localized overlay copy, sent by the background with each command. */
-export interface OverlayCopy {
-  controlling: string
-  stop: string
-  stopHint: string
-  typing: string
-  takeoverTitle: string
-  takeoverBody: string
-  resume: string
-}
+import { OVERLAY_COPY_EN, type OverlayCopy } from '../shared/overlay-copy.ts'
 
-/** Default (English) copy for tests and a missing message field. */
-export const OVERLAY_COPY_EN: OverlayCopy = {
-  controlling: 'AI controlling',
-  stop: 'Stop',
-  stopHint: 'Stop the agent now (kill switch)',
-  typing: 'typing…',
-  takeoverTitle: 'You\'re in control',
-  takeoverBody: 'The agent is paused. Resume when done.',
-  resume: 'Resume',
-}
+export { OVERLAY_COPY_EN, type OverlayCopy }
 
 /** What the agent is about to do to a target. */
 export type PointKind = 'click' | 'hover' | 'drag' | 'type' | 'select' | 'press' | 'upload' | 'scroll'
