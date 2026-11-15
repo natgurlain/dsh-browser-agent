@@ -105,7 +105,7 @@ export interface BridgeSinks {
 }
 
 /** Client-side hello caps beyond the snapshot contract. */
-export type BridgeClientCaps = Pick<BridgeCaps, 'devTools' | 'client'>
+export type BridgeClientCaps = Pick<BridgeCaps, 'devTools' | 'client' | 'standingUpdates'>
 
 /** Resolve whether opening a WebSocket is expected to succeed. */
 type BridgeProbe = (url: string) => Promise<boolean>

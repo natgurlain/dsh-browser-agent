@@ -18,7 +18,7 @@ import { SitePolicySettings } from './SitePolicySettings.tsx'
 import { DevLoopSettings } from './DevLoopSettings.tsx'
 import { TaintBanner } from './TaintBanner.tsx'
 import { WatchersCard } from './WatchersCard.tsx'
-import { connectPanel, PanelRpcError, type AgentPauseState, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type PanelApi, type PanelSettings } from './api.ts'
+import { connectPanel, PanelRpcError, type AgentPauseState, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type StandingStatus, type PanelApi, type PanelSettings } from './api.ts'
 import { StepTimeline } from './StepTimeline.tsx'
 import { AgentControls } from './AgentControls.tsx'
 import { LearningPanel } from './LearningPanel.tsx'
@@ -1168,6 +1168,7 @@ export function App(): React.JSX.Element {
   // current panel lease, so the status chip can say so instead of "未连接".
   const [discovery, setDiscovery] = useState<DiscoveryStatus>('idle')
   const [bridgeAddress, setBridgeAddress] = useState<string | null>(null)
+  const [standing, setStanding] = useState<StandingStatus | null>(null)
   const [bridgeFailure, setBridgeFailure] = useState<BridgeFailure | null>(null)
   // Manual scan from the settings page: the only writer of this list.
   const [detecting, setDetecting] = useState(false)
@@ -1209,8 +1210,9 @@ export function App(): React.JSX.Element {
   const [sessionEpoch, setSessionEpoch] = useState(0)
   const lastStateRef = useRef<BridgeState | null>(null)
   useEffect(() => {
-    const offStatus = api.onStatus((next, nextCaps, nextDiscovery, nextAddress, nextFailure) => {
+    const offStatus = api.onStatus((next, nextCaps, nextDiscovery, nextAddress, nextFailure, nextStanding) => {
       setState(next)
+      setStanding(nextStanding ?? null)
       setBridgeFailure(nextFailure ?? null)
       setCaps(nextCaps)
       setDiscovery(nextDiscovery)
@@ -2852,6 +2854,9 @@ export function App(): React.JSX.Element {
             {bridgeAddress === null || state !== 'connected'
               ? null
               : <small className="device-connected">{copy.settings.detectConnected(bridgeAddress)}</small>}
+            {standing === null
+              ? null
+              : <small className="device-connected" data-testid="standing-work">{copy.settings.staysConnected(standing)}</small>}
           </div>
           <label>
             <span>Token</span>

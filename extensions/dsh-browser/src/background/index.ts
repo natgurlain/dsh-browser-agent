@@ -39,7 +39,7 @@
  *   bg → panel: { type: 'settings.result', id, ok, error? }
  *   bg → panel: { type: 'devtools.status', supported, enabled, attached, tabId?, error? }
  *   bg → panel: { type: 'devtools.detach.result', id, ok, error? }
- *   bg → panel: { type: 'status', state: BridgeState, caps, discovery, address?, failure?, killSwitch }
+ *   bg → panel: { type: 'status', state: BridgeState, caps, discovery, address?, failure?, killSwitch, standing }
  *   bg → panel: { type: 'event', frame: ServerFrame }
  *   bg → panel: { type: 'approval.request', request }
  *   bg → panel: { type: 'approval.resolved', id }
@@ -72,6 +72,10 @@ import {
   BRIDGE_APPROVAL_ASK_METHOD,
   BRIDGE_APPROVAL_WITHDRAW_METHOD,
   BRIDGE_AUDIT_RECORD_METHOD,
+  BRIDGE_STANDING_EVENT_METHOD,
+  STANDING_WORK_CAPS_VERSION,
+  isStandingWork,
+  type StandingWork,
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_TOOL_HOLD_METHOD,
   HOST_APPROVALS_CAPS_VERSION,
@@ -139,7 +143,15 @@ import {
   approvalNotificationOptions,
   hostApprovalReason,
 } from './approval-notifications.ts'
-import { RUNTIME_LEASE_STORAGE_KEY, RuntimeKeeper, RuntimeLease } from './runtime-lifecycle.ts'
+import { RUNTIME_LEASE_STORAGE_KEY, RuntimeKeeper, RuntimeLease, STANDING_RETRY_BASE_MS, STANDING_RETRY_STORAGE_KEY, StandingBackoff } from './runtime-lifecycle.ts'
+import {
+  NO_HOST_STANDING,
+  STANDING_HOST_STORAGE_KEY,
+  parseStoredStandingHost,
+  standingCount,
+  storedStandingHost,
+  type StandingSummary,
+} from './standing-work.ts'
 import { loadClientIdentity } from './client-identity.ts'
 import type { BridgeClientIdentity } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { ExternalRequesters, isExternalSessionId } from './external-requesters.ts'
@@ -461,6 +473,12 @@ let bridge: BridgeClient | null = null
 let rpc: ReturnType<typeof createRpc> | null = null
 const panelPorts = new Set<chrome.runtime.Port>()
 const BRIDGE_KEEPALIVE_ALARM = 'bridge-keepalive'
+/** What the bridge last said the Host holds for this install; restored from storage.local on boot (standing-work.ts). */
+let hostStanding: StandingWork = NO_HOST_STANDING
+/** Whether storage.local may hold a host hint (so "none" has something to clear). */
+let hostStandingStored = false
+/** Spacing of reconnect attempts while only standing work wants an unreachable bridge. */
+const standingRetry = new StandingBackoff()
 /** Invalidates an asynchronous discovery attempt when its panel lease ends. */
 let bridgeStartRevision = 0
 const interactionResponses = new InteractionResponseRouter()
@@ -672,6 +690,9 @@ const pageWatchers = new PageWatcherRuntime({
   pageHidden: (url) => policyRuntime.pageHidden(url),
   rpc: (method, payload) => gatewayRpc(method, payload),
   noteTaint: (sessionId, origin) => { policyRuntime.recordInjection(sessionId, origin) },
+  connected: () => bridgeForWatchHit(),
+  // Live watchers are standing work: the runtime lease follows them.
+  changed: () => { onStandingWorkChanged() },
 })
 /** Tool calls that are either withdrawable or completing an already-dispatched action. */
 /** One in-flight agent call; its audit fields live in audit.ts. */
@@ -884,7 +905,16 @@ const settingsReady = policyRuntime.ready.then(() => loadSettings()).then((loade
   settingsLoaded = true
 })
 
+/**
+ * Arm the alarm that restarts the worker and the connection: every half
+ * minute normally; one shot at the next retry time while a standing-work
+ * reconnect is parked (creating an alarm replaces the one with the same name).
+ */
 function armBridgeKeepalive(): void {
+  if (standingRetry.parked && panelPorts.size === 0) {
+    chrome.alarms.create(BRIDGE_KEEPALIVE_ALARM, { when: Math.max(standingRetry.retryAt, Date.now() + STANDING_RETRY_BASE_MS) })
+    return
+  }
   chrome.alarms.create(BRIDGE_KEEPALIVE_ALARM, { periodInMinutes: 0.5 })
 }
 
@@ -901,6 +931,8 @@ function statusPayload(): {
   address?: string
   failure?: BridgeFailure
   killSwitch: boolean
+  /** Unattended work that keeps this browser connected with no panel open. */
+  standing: StandingSummary
 } {
   return {
     type: 'status',
@@ -908,6 +940,7 @@ function statusPayload(): {
     caps,
     discovery: discoveryState,
     killSwitch: killSwitchEngaged,
+    standing: standingSummary(),
     ...(connectedAddress === undefined ? {} : { address: connectedAddress }),
     ...(bridge?.failure === undefined || bridge.state === 'connected' ? {} : { failure: bridge.failure }),
   }
@@ -1066,6 +1099,11 @@ async function engageKillSwitch(): Promise<void> {
   rpc = null
   caps = null
   connectedAddress = undefined
+  // Standing work ends with the switch: the Host hint is forgotten (stored
+  // copy included), so nothing reconnects for it behind the switch.
+  hostStandingStored = true
+  setHostStanding(NO_HOST_STANDING)
+  clearStandingRetry()
   disarmBridgeKeepalive()
   refreshActionBadges()
   broadcastStatus()
@@ -1520,7 +1558,119 @@ const runtimeLease = new RuntimeLease({
   panels: () => panelPorts.size,
   toolCalls: () => activeToolCalls.size,
   approvals: () => approvals.size,
+  standing: () => standingCount(standingSummary()),
 })
+
+// ---- Standing work (standing-work.ts) ----
+
+/**
+ * Unattended work that wants the connection. Zero while the kill switch is
+ * engaged or not yet read, and watchers count only while their setting is on.
+ */
+function standingSummary(): StandingSummary {
+  if (!killSwitchLoaded || killSwitchEngaged) return { watchers: 0, schedules: 0, mcp: false }
+  return {
+    watchers: settingsLoaded && settings.allowPageWatchers ? pageWatchers.registry.list().length : 0,
+    schedules: hostStanding.schedules,
+    mcp: hostStanding.mcp,
+  }
+}
+
+/** A watcher, the watcher setting, or the Host hint changed. */
+function onStandingWorkChanged(): void {
+  runtimeKeeper.update()
+  broadcastStatus()
+}
+
+/** Adopt the bridge's hint and mirror it (with the address it came from) for the next browser start. */
+function setHostStanding(work: StandingWork): void {
+  const changed = work.schedules !== hostStanding.schedules || work.mcp !== hostStanding.mcp
+  hostStanding = { schedules: work.schedules, mcp: work.mcp }
+  const stored = storedStandingHost(hostStanding, connectedAddress)
+  const area = (chrome.storage as { local?: chrome.storage.StorageArea }).local
+  if (area !== undefined && (stored !== undefined || hostStandingStored)) {
+    hostStandingStored = stored !== undefined
+    void Promise.resolve(stored === undefined
+      ? area.remove(STANDING_HOST_STORAGE_KEY)
+      : area.set({ [STANDING_HOST_STORAGE_KEY]: stored })).catch(() => {})
+  }
+  if (changed) onStandingWorkChanged()
+}
+
+function persistStandingRetry(): void {
+  const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
+  if (area === undefined) return
+  const state = standingRetry.snapshot()
+  void Promise.resolve(state === undefined
+    ? area.remove(STANDING_RETRY_STORAGE_KEY)
+    : area.set({ [STANDING_RETRY_STORAGE_KEY]: state })).catch(() => {})
+}
+
+/**
+ * Back to the normal reconnect cadence (connected, a panel opened, or nothing left to wait for).
+ * @returns whether a reconnect was parked.
+ */
+function clearStandingRetry(): boolean {
+  if (!standingRetry.parked) return false
+  standingRetry.reset()
+  persistStandingRetry()
+  return true
+}
+
+/**
+ * A headless attempt failed while only standing work wants the bridge: stop
+ * retrying in a loop, let the worker sleep, and try again after a growing
+ * delay (one-shot alarm). Never used while a panel, a call, or recent
+ * activity wants the connection.
+ */
+function parkStandingReconnect(): void {
+  standingRetry.fail()
+  persistStandingRetry()
+  bridgeStartRevision += 1
+  const parked = bridge
+  bridge = null
+  rpc = null
+  caps = null
+  connectedAddress = undefined
+  parked?.stop()
+  armBridgeKeepalive()
+}
+
+/** Resolvers of watcher hits waiting for the bridge to come back. */
+const bridgeWaiters = new Set<() => void>()
+/** How long a watcher hit waits for a reconnecting bridge before it is recorded as a miss. */
+const WATCH_HIT_CONNECT_WAIT_MS = 8_000
+/** Earliest time another watcher hit may start a reconnect attempt of its own. */
+let hitReconnectAt = 0
+
+/**
+ * A watcher hit passed its checks but the bridge is not connected: start a
+ * headless attempt if none is running (at most one per
+ * {@link STANDING_RETRY_BASE_MS}), and wait up to
+ * {@link WATCH_HIT_CONNECT_WAIT_MS} for the connection. `startBridge` keeps
+ * all its rules (kill switch, no headless discovery); the caller re-checks
+ * the hit afterwards.
+ */
+async function bridgeForWatchHit(): Promise<void> {
+  const connected = (): boolean => bridge?.connected === true
+  if (connected()) return
+  await runtimeRestored
+  if (connected() || killSwitchEngaged || !runtimeWantsBridge()) return
+  const waited = new Promise<void>((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer)
+      bridgeWaiters.delete(done)
+      resolve()
+    }
+    const timer = setTimeout(done, WATCH_HIT_CONNECT_WAIT_MS)
+    bridgeWaiters.add(done)
+  })
+  if ((bridge === null || bridge.state === 'stopped') && panelPorts.size === 0 && Date.now() >= hitReconnectAt) {
+    hitReconnectAt = Date.now() + STANDING_RETRY_BASE_MS
+    void settingsReady.then(() => startBridge()).catch(() => {})
+  }
+  await waited
+}
 
 /** The address a headless reconnect uses (the last connected one). */
 let headlessBridgeUrl: string | undefined
@@ -1528,6 +1678,9 @@ let headlessBridgeUrl: string | undefined
 const runtimeKeeper = new RuntimeKeeper(runtimeLease, {
   heartbeat: () => {
     bridge?.heartbeat()
+    // Standing work alone does not keep a disconnected worker awake: the
+    // retry alarm wakes it instead (parkStandingReconnect).
+    if (runtimeLease.standingOnly() && bridge?.connected !== true) return
     // An extension API call also resets the worker's idle timer.
     try {
       void Promise.resolve(chrome.runtime.getPlatformInfo()).catch(() => {})
@@ -1538,6 +1691,7 @@ const runtimeKeeper = new RuntimeKeeper(runtimeLease, {
     if (panelPorts.size > 0) return
     bridgeStartRevision += 1
     bridge?.stop()
+    clearStandingRetry()
     disarmBridgeKeepalive()
   },
   persist: (activeUntil) => {
@@ -1565,22 +1719,63 @@ function runtimeWantsBridge(): boolean {
   return panelPorts.size > 0 || runtimeLease.active()
 }
 
-/** Restore a lease left by the previous worker instance, and reconnect headlessly. */
-const runtimeRestored = (async () => {
+/** The session lease (and address) left by the previous worker instance. */
+async function restoreRuntimeLease(): Promise<void> {
   const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
   if (area === undefined) return
   try {
-    const stored = (await area.get(RUNTIME_LEASE_STORAGE_KEY))?.[RUNTIME_LEASE_STORAGE_KEY] as
-      { activeUntil?: unknown; url?: unknown } | undefined
-    if (typeof stored?.activeUntil !== 'number' || typeof stored.url !== 'string') return
-    runtimeLease.restore(stored.activeUntil)
-    headlessBridgeUrl = stored.url
-  } catch {
-    return
-  }
+    const stored = await area.get([RUNTIME_LEASE_STORAGE_KEY, STANDING_RETRY_STORAGE_KEY])
+    standingRetry.restore(stored?.[STANDING_RETRY_STORAGE_KEY])
+    const lease = stored?.[RUNTIME_LEASE_STORAGE_KEY] as { activeUntil?: unknown; url?: unknown } | undefined
+    if (typeof lease?.activeUntil !== 'number' || typeof lease.url !== 'string') return
+    runtimeLease.restore(lease.activeUntil)
+    headlessBridgeUrl = lease.url
+  } catch { /* unreadable: no lease */ }
+}
+
+/**
+ * The Host hint left in storage.local: the only standing work that outlives
+ * the browser session (watchers are session-bound by design). Dropped,
+ * stored copy included, while the kill switch is engaged.
+ */
+async function restoreHostStanding(): Promise<void> {
+  const area = (chrome.storage as { local?: chrome.storage.StorageArea }).local
+  if (area === undefined) return
+  try {
+    const raw = (await area.get(STANDING_HOST_STORAGE_KEY))?.[STANDING_HOST_STORAGE_KEY]
+    if (raw === undefined) return
+    // A connection made meanwhile already delivered (and stored) a fresher hint.
+    if (caps !== null && hostStandingStored) return
+    const stored = killSwitchEngaged || caps !== null ? undefined : parseStoredStandingHost(raw)
+    if (stored === undefined) {
+      await area.remove(STANDING_HOST_STORAGE_KEY)
+      return
+    }
+    hostStandingStored = true
+    hostStanding = { schedules: stored.schedules, mcp: stored.mcp }
+    headlessBridgeUrl ??= stored.url
+  } catch { /* unreadable: no hint */ }
+}
+
+/**
+ * Restore what the previous worker instance (or, for the Host hint, the
+ * previous browser session) left, and reconnect headlessly when the lease is
+ * still held. The kill switch, the settings and the watcher registry are
+ * read first: standing work depends on all three.
+ */
+const runtimeRestored = (async () => {
+  await Promise.allSettled([killSwitchReady, settingsReady, pageWatchers.registry.ready])
+  await restoreRuntimeLease()
+  await restoreHostStanding()
   runtimeKeeper.update()
   if (!runtimeLease.active() || panelPorts.size > 0) return
-  await settingsReady
+  if (runtimeLease.standingOnly() && !standingRetry.due()) {
+    // A parked reconnect is not due yet: this wake-up (a tab event, a
+    // message) does not shortcut the backoff. Boot cleared the alarm; re-arm it.
+    armBridgeKeepalive()
+    return
+  }
+  if (!settingsLoaded) return
   await startBridge()
 })()
 
@@ -2745,6 +2940,12 @@ async function startBridge(): Promise<void> {
     await discoveryMemory
     if (!lease()) return
     if (url === '') url = headlessBridgeUrl ?? lastBridgeUrl ?? ''
+    if (url === '' && runtimeLease.standingOnly()) {
+      // Nothing to dial for standing work yet: wait like after any failed attempt.
+      parkStandingReconnect()
+      broadcastStatus()
+      return
+    }
   } else if (url !== '') {
     if (isLocalBridgeAddress(url) && !await probeBridge(url)) {
       if (!lease()) return
@@ -2793,12 +2994,24 @@ async function startBridge(): Promise<void> {
           interactionResponses.failAll(responseMessages().disconnected)
           transientEvents.clear()
         }
+        // Only standing work wants this connection and the attempt failed:
+        // back off instead of retrying every few seconds (this client is done).
+        if (state === 'reconnecting' && client === bridge && runtimeLease.standingOnly()) {
+          parkStandingReconnect()
+          broadcastStatus()
+          return
+        }
         broadcastStatus()
         learning.onBridgeState(state)
         if (state === 'stopped') refreshPanelResumeHints()
         if (state === 'stopped' && !runtimeWantsBridge()) disarmBridgeKeepalive()
       },
       onFrame: (frame) => {
+        if (frame.t === 'event' && frame.frame.method === BRIDGE_STANDING_EVENT_METHOD) {
+          // The bridge's own sealed notice; never shown to panels. A malformed one changes nothing.
+          if (isStandingWork(frame.frame.payload)) setHostStanding(frame.frame.payload)
+          return
+        }
         if (frame.t === 'event') {
           // Traffic of a session that has used this browser keeps a panel-free
           // runtime alive while its agent works; other sessions never do.
@@ -2819,6 +3032,11 @@ async function startBridge(): Promise<void> {
       onHelloOk: (negotiated) => {
         caps = negotiated
         headlessBridgeUrl = connectedAddress
+        // Connected: normal cadence again, and the Host's standing work as of
+        // now (an older bridge sends none, which clears a stored hint).
+        if (clearStandingRetry()) armBridgeKeepalive()
+        setHostStanding(negotiated.standing ?? NO_HOST_STANDING)
+        for (const resolve of [...bridgeWaiters]) resolve()
         runtimeKeeper.update()
         // The address just became known: record it for a headless reconnect.
         runtimeKeeper.persistNow()
@@ -2834,6 +3052,8 @@ async function startBridge(): Promise<void> {
       // the developer-tools group; the user's setting and per-call approval
       // still gate every one of those calls.
       ...devToolsCapability ? { devTools: { version: DEVTOOLS_CAPS_VERSION } } : {},
+      // This build handles the bridge's standing-work events.
+      standingUpdates: STANDING_WORK_CAPS_VERSION,
       // One bridge connection per install: other browsers and profiles keep theirs.
       ...clientIdentity === undefined ? {} : { client: clientIdentity },
     }))
@@ -2976,6 +3196,8 @@ chrome.runtime.onConnect.addListener((port) => {
   // idempotent, but a double click must not race two acknowledgements.
   const tabAffinityReturns = new Set<string>()
   panelPorts.add(port)
+  // A panel restores the normal reconnect cadence.
+  clearStandingRetry()
   if (wasIdle) armBridgeKeepalive()
   runtimeKeeper.update()
   void settingsReady.then(syncSelectionWatch)
@@ -3560,6 +3782,11 @@ function onKeepaliveAlarm(): void {
       if (bridge === null || bridge.state !== 'connected') disarmBridgeKeepalive()
       return
     }
+    if (runtimeLease.standingOnly() && !standingRetry.due()) {
+      // A parked standing-work reconnect: not before its retry time.
+      armBridgeKeepalive()
+      return
+    }
     // Panel-free runtime: the worker was restarted, or the socket dropped.
     if (bridge === null || bridge.state === 'reconnecting') void settingsReady.then(() => startBridge())
     return
@@ -3618,6 +3845,11 @@ disarmBridgeKeepalive()
 
 // `settingsReady` intentionally has no bridge-start continuation: opening a
 // side panel is the first action allowed to claim the bridge connection.
+// The one exception is standing work the user opted into (runtimeRestored):
+// a Host hint stored by an earlier connection reconnects headlessly. Alarms
+// may not survive a browser restart, so this listener exists to have the
+// browser start the worker (and with it runtimeRestored) at startup.
+;(chrome.runtime as { onStartup?: { addListener(listener: () => void): void } }).onStartup?.addListener(() => {})
 
 // Dev loop: keep the error collector installed across navigations of a
 // linked tab, and end links when their tab closes.
