@@ -1,7 +1,5 @@
-﻿# Windows PowerShell 5.1 使用 UTF-8 BOM 读取中文。
-# dsh-browser 卸载入口。旁边有 uninstall.mjs 时直接使用；单独运行时，从发布版本下载
-# uninstall.mjs，并在其 SHA-256 与该版本的 SHA256SUMS 一致后才执行。
-# Uninstall entry point. It runs the uninstall.mjs next to it when there is one. On its own
+﻿# This file is UTF-8 with a BOM on purpose: Windows PowerShell 5.1 needs the BOM to read the Chinese text.
+# dsh-browser uninstall entry point. It runs the uninstall.mjs next to it when there is one. On its own
 # it downloads uninstall.mjs from a tagged release and runs it only after its SHA-256 matched
 # that release's SHA256SUMS.
 #
@@ -245,8 +243,8 @@ function Get-VerifiedRelease {
     }
   }
 
-  Write-Host ("已校验：{0} 的 {1} 个文件与 SHA256SUMS 一致。" -f $Tag, $Assets.Count)
-  Write-Host ("   Verified: {0} file(s) of {1} match SHA256SUMS." -f $Assets.Count, $Tag)
+  Write-Host ("Verified: {0} file(s) of {1} match SHA256SUMS." -f $Assets.Count, $Tag)
+  Write-Host ("   已校验：{0} 的 {1} 个文件与 SHA256SUMS 一致。" -f $Tag, $Assets.Count)
   return $Tag
 }
 # <<< release-fetch
@@ -287,13 +285,13 @@ try {
     } catch {
       # Anything Get-VerifiedRelease did not explain itself is a real error: let it surface.
       if (-not $script:ReleaseFailure) { throw }
-      [Console]::Error.WriteLine("错误：$($script:ReleaseFailure[0])")
       [Console]::Error.WriteLine("Error: $($script:ReleaseFailure[1])")
+      [Console]::Error.WriteLine("错误：$($script:ReleaseFailure[0])")
     }
   }
 
   if ($Engine) {
-    # 同时释放 runspace 与进程的当前目录。
+    # Release the current directory of both the runspace and the process.
     $ExecutionRoot = [System.IO.Path]::GetPathRoot($Engine)
     Set-Location -LiteralPath $ExecutionRoot
     [System.IO.Directory]::SetCurrentDirectory($ExecutionRoot)

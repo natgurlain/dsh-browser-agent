@@ -236,7 +236,7 @@ test('local checkout: no option means no download at all', { skip }, async (t) =
   // The build is not what this test is about: a pnpm that fails ends the run at step 1.
   const bin = join(box.base, 'bin')
   mkdirSync(bin)
-  writeFileSync(join(bin, 'pnpm'), '#!/bin/bash\nexit 3\n')
+  writeFileSync(join(bin, 'pnpm'), '#!/bin/bash\n[ "$1" = --version ] && exit 0\nexit 3\n')
   chmodSync(join(bin, 'pnpm'), 0o755)
   const server = await serve(t, { releases: { 'v9.9.9': stubRelease(box.base, 'v9.9.9') }, latest: 'v9.9.9' })
   const result = await run('bash', [join(checkout, 'scripts', 'install.sh')], {
@@ -247,6 +247,68 @@ test('local checkout: no option means no download at all', { skip }, async (t) =
   assert.match(result.stdout, /Installing from this local checkout; nothing is downloaded/)
   assert.deepEqual(server.requests, [])
   assert.equal(existsSync(box.managed), false)
+})
+
+/** A minimal checkout holding the real install.sh, plus a bin directory of stub commands. */
+function stubCheckout(box, stubs) {
+  const checkout = join(box.base, 'checkout')
+  for (const dir of ['scripts', 'extensions/dsh-browser', 'packages/browser/bridge-browser']) {
+    mkdirSync(join(checkout, dir), { recursive: true })
+  }
+  for (const name of ['pnpm-lock.yaml', 'extensions/dsh-browser/package.json',
+    'packages/browser/bridge-browser/package.json']) {
+    writeFileSync(join(checkout, name), '{}')
+  }
+  writeFileSync(join(checkout, 'package.json'), JSON.stringify({ packageManager: 'pnpm@11.7.0+sha512.abc' }))
+  writeFileSync(join(checkout, 'scripts', 'install.sh'), readFileSync(installer))
+  const bin = join(box.base, 'bin')
+  mkdirSync(bin)
+  for (const [name, body] of Object.entries(stubs)) {
+    writeFileSync(join(bin, name), `#!/bin/bash\n${body}\n`)
+    chmodSync(join(bin, name), 0o755)
+  }
+  return run('bash', [join(checkout, 'scripts', 'install.sh')], {
+    env: { ...box.env, PATH: `${bin}${delimiter}${process.env.PATH}`, STUB_RAN: box.ran },
+    cwd: box.base,
+  })
+}
+
+// A version-manager shim with no version set: present on PATH, exits 126 on every call.
+const BROKEN = 'echo "No version is set for command $(basename "$0")" >&2\nexit 126'
+// Answers --version, records every other call and fails it so the run ends at step 1.
+const RECORDING = '[ "$1" = --version ] && exit 0\nprintf \'%s %s\\n\' "$(basename "$0")" "$*" >>"$STUB_RAN"\nexit 7'
+
+test('broken pnpm on PATH: the install proceeds through corepack', { skip }, async (t) => {
+  const box = sandbox(t)
+  const result = await stubCheckout(box, { pnpm: BROKEN, corepack: RECORDING })
+  assert.equal(result.status, 7, result.stdout + result.stderr)
+  assert.match(result.stdout, /pnpm on PATH does not run with this Node; using Corepack instead\./)
+  assert.deepEqual(ranLines(box), ['corepack pnpm install --frozen-lockfile'])
+  assert.match(result.stderr, /Error: Installing dependencies failed \(exit code 7\)\./)
+})
+
+test('broken pnpm and corepack: the install proceeds through npx with the pinned pnpm', { skip }, async (t) => {
+  const box = sandbox(t)
+  const result = await stubCheckout(box, { pnpm: BROKEN, corepack: BROKEN, npx: RECORDING })
+  assert.equal(result.status, 7, result.stdout + result.stderr)
+  assert.match(result.stdout, /using npx pnpm@11\.7\.0 instead\./)
+  assert.deepEqual(ranLines(box), ['npx --yes pnpm@11.7.0 install --frozen-lockfile'])
+})
+
+test('broken pnpm with no usable corepack or npx stops before the build', { skip }, async (t) => {
+  const box = sandbox(t)
+  const result = await stubCheckout(box, { pnpm: BROKEN, corepack: BROKEN, npx: BROKEN })
+  assert.equal(result.status, 1, result.stdout + result.stderr)
+  assert.match(result.stderr, /Error: pnpm on PATH does not run, and neither Corepack nor npx is usable/)
+  assert.doesNotMatch(result.stdout, /\[1\/4\]/)
+})
+
+test('working pnpm on PATH is used as is, with no fallback notice', { skip }, async (t) => {
+  const box = sandbox(t)
+  const result = await stubCheckout(box, { pnpm: RECORDING, corepack: RECORDING })
+  assert.equal(result.status, 7, result.stdout + result.stderr)
+  assert.doesNotMatch(result.stdout, /instead/)
+  assert.deepEqual(ranLines(box), ['pnpm install --frozen-lockfile'])
 })
 
 test('branch opt-in: --unverified-branch installs a branch archive and says it is unverified', { skip }, async (t) => {
@@ -412,7 +474,7 @@ test('real artifacts: the packaged source archive verifies and unpacks to this w
   // The second stage is the real installer; a failing pnpm stops it at the build.
   const bin = join(box.base, 'bin')
   mkdirSync(bin)
-  writeFileSync(join(bin, 'pnpm'), '#!/bin/bash\nexit 3\n')
+  writeFileSync(join(bin, 'pnpm'), '#!/bin/bash\n[ "$1" = --version ] && exit 0\nexit 3\n')
   chmodSync(join(bin, 'pnpm'), 0o755)
   const server = await serve(t, { releases: { [tag]: release }, latest: tag })
   const result = await pipedInstall(box, server, [], { PATH: `${bin}${delimiter}${process.env.PATH}` })

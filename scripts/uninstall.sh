@@ -1,8 +1,6 @@
 #!/bin/bash
 # shellcheck disable=SC1111 # the typographic quotes in the user-facing text are intended
-# dsh-browser 卸载入口。在 checkout 或托管安装目录里运行时直接使用旁边的 uninstall.mjs；
-# 单独运行（例如通过管道）时，从发布版本下载 uninstall.mjs 并校验 SHA256SUMS 后才执行。
-# Uninstall entry point. Inside a checkout or the managed install it runs the uninstall.mjs
+# dsh-browser uninstall entry point. Inside a checkout or the managed install it runs the uninstall.mjs
 # next to it. On its own (piped in, for example) it downloads uninstall.mjs from a tagged
 # release and runs it only after its SHA-256 matched that release's SHA256SUMS.
 #
@@ -39,8 +37,8 @@ RELEASE_STATUS=""
 RELEASE_EFFECTIVE_URL=""
 
 release_fail() {
-  printf '\n错误：%s\n' "$1" >&2
-  printf 'Error: %s\n' "$2" >&2
+  printf '\nError: %s\n' "$2" >&2
+  printf '错误：%s\n' "$1" >&2
   exit 1
 }
 
@@ -273,8 +271,8 @@ release_fetch() {
     release_verify "$directory" "$name"
   done
   rm -f -- "$directory/.release.json" "$directory/.release-assets"
-  printf '已校验：%s 的 %d 个文件与 SHA256SUMS 一致。\n' "$RELEASE_TAG" "$#"
-  printf '   Verified: %d file(s) of %s match SHA256SUMS.\n' "$#" "$RELEASE_TAG"
+  printf 'Verified: %d file(s) of %s match SHA256SUMS.\n' "$#" "$RELEASE_TAG"
+  printf '   已校验：%s 的 %d 个文件与 SHA256SUMS 一致。\n' "$RELEASE_TAG" "$#"
 }
 # <<< release-fetch
 
@@ -304,7 +302,7 @@ main() {
   esac
 
   if ! command -v node >/dev/null; then
-    printf '%s\n' '需要 Node.js 24.9.0 或更新版本。 / Node.js 24.9.0 or newer is required.' >&2
+    printf '%s\n' 'Node.js 24.9.0 or newer is required. / 需要 Node.js 24.9.0 或更新版本。' >&2
     return 1
   fi
   if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then

@@ -1,13 +1,10 @@
 ﻿<#
 .SYNOPSIS
-dsh-browser 一键安装（Windows）：支持远程托管安装和本地 checkout 安装。
 dsh-browser one-command install (Windows): supports both managed remote installs and local checkout installs.
 
 .DESCRIPTION
-之后无需任何配置：扩展自动探测本机 dsh，并用安装时放入扩展目录的桥 token 完成双向认证。
 No further configuration is required: the extension discovers local dsh automatically and authenticates with the bridge token the installer places in its directory.
 
-这是 scripts/install.sh 的 Windows 对应版本，两者共享同一套托管目录与 install-info.json 约定。
 This is the Windows counterpart of scripts/install.sh; both share one managed-root and install-info.json contract.
 
 Where the files come from (same rules as install.sh):
@@ -276,30 +273,32 @@ function Get-VerifiedRelease {
     }
   }
 
-  Write-Host ("已校验：{0} 的 {1} 个文件与 SHA256SUMS 一致。" -f $Tag, $Assets.Count)
-  Write-Host ("   Verified: {0} file(s) of {1} match SHA256SUMS." -f $Assets.Count, $Tag)
+  Write-Host ("Verified: {0} file(s) of {1} match SHA256SUMS." -f $Assets.Count, $Tag)
+  Write-Host ("   已校验：{0} 的 {1} 个文件与 SHA256SUMS 一致。" -f $Tag, $Assets.Count)
   return $Tag
 }
 # <<< release-fetch
 
+# Messages are bilingual: English first, Chinese on the indented line below.
+# Callers pass the Chinese text first and the English text second.
 function Write-Step {
   param([int]$Number, [string]$Zh, [string]$En)
   Write-Host ''
-  Write-Host ("[{0}/4] {1}" -f $Number, $Zh)
-  Write-Host ("      {0}" -f $En)
+  Write-Host ("[{0}/4] {1}" -f $Number, $En)
+  Write-Host ("      {0}" -f $Zh)
 }
 
 function Write-Pair {
   param([string]$Zh, [string]$En)
-  Write-Host $Zh
-  Write-Host ("   {0}" -f $En)
+  Write-Host $En
+  Write-Host ("   {0}" -f $Zh)
 }
 
 function Stop-Install {
   param([string]$Zh, [string]$En)
   Write-Host ''
-  [Console]::Error.WriteLine("错误：$Zh")
   [Console]::Error.WriteLine("Error: $En")
+  [Console]::Error.WriteLine("错误：$Zh")
   exit 1
 }
 
@@ -876,23 +875,23 @@ if ($IsUpdate) {
     Write-Pair "请在 Chrome 扩展管理页完成以下操作：" "Complete these steps on the Chrome Extensions page:"
   }
   Write-Host ''
-  Write-Pair '1. 开启右上角的“开发者模式”' 'Enable “Developer mode” in the upper-right corner'
-  Write-Pair '2. 点击“加载已解压的扩展程序”' 'Click “Load unpacked”'
+  Write-Pair '开启右上角的“开发者模式”' '1. Enable “Developer mode” in the upper-right corner'
+  Write-Pair '点击“加载已解压的扩展程序”' '2. Click “Load unpacked”'
   if ($ClipboardReady) {
-    Write-Pair "3. 在路径栏粘贴以下路径（已复制到剪贴板）：" "Paste this path into the folder picker's address bar (already copied):"
+    Write-Pair "在路径栏粘贴以下路径（已复制到剪贴板）：" "3. Paste this path into the folder picker's address bar (already copied):"
   } else {
-    Write-Pair "3. 在路径栏复制并粘贴以下路径：" "Copy and paste this path into the folder picker's address bar:"
+    Write-Pair "在路径栏复制并粘贴以下路径：" "3. Copy and paste this path into the folder picker's address bar:"
   }
   Write-Host ("   {0}" -f $DistDir)
 }
 
 Write-Host ''
 Write-Pair "加载完成后：" "After loading the extension:"
-Write-Pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "Click the DeepSeek whale icon in the toolbar to open the side panel"
-Write-Pair "• 扩展会自动发现本机 dsh，无需填写地址或 token（已放入扩展目录）" "The extension discovers local dsh automatically; no address or token is required (it was placed in the extension directory)"
+Write-Pair "点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "• Click the DeepSeek whale icon in the toolbar to open the side panel"
+Write-Pair "扩展会自动发现本机 dsh，无需填写地址或 token（已放入扩展目录）" "• The extension discovers local dsh automatically; no address or token is required (it was placed in the extension directory)"
 $QuotedRoot = "'" + $Root.Replace("'", "''") + "'"
-Write-Host ("• 启动固定版本：cd {0}; pnpm start" -f $QuotedRoot)
-Write-Host ("   Start the pinned version: cd {0}; pnpm start" -f $QuotedRoot)
-Write-Pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.2.2-rc.2 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.2-rc.2 web"
+Write-Host ("• Start the pinned version: cd {0}; pnpm start" -f $QuotedRoot)
+Write-Host ("   启动固定版本：cd {0}; pnpm start" -f $QuotedRoot)
+Write-Pair "或直接启动固定版本：npx @deepseek-ai/dsh@0.2.2-rc.2 web" "• Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.2-rc.2 web"
 Write-Host ''
 Write-Pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/natgurlain/dsh-browser-agent" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/natgurlain/dsh-browser-agent"

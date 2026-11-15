@@ -19,12 +19,14 @@ const BRIDGE_HOME_FILES = [
 const KEPT_HOME_DATA = ['browser-audit', 'browser-sessions']
 const scriptRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
+// Messages are bilingual: English first, Chinese on the line below.
+// Callers pass the Chinese text first and the English text second.
 function fail(zh, en) {
-  throw new Error(`${zh}\n${en}`)
+  throw new Error(`${en}\n${zh}`)
 }
 
 function pair(zh, en) {
-  console.log(`${zh}\n   ${en}`)
+  console.log(`${en}\n   ${zh}`)
 }
 
 function stat(path) {
@@ -121,7 +123,8 @@ function inspect(home) {
   regular(token, 'file')
   const bridgeFiles = BRIDGE_HOME_FILES.map(name => join(home, name))
   for (const file of bridgeFiles) regular(file, 'file')
-  // 其他 profile 仍引用桥插件时，保留共享联接、源码、token 与桥状态文件。
+  // While another profile still references a bridge plugin, keep the shared junction,
+  // the source, the token and the bridge state files.
   const targets = [extension]
   if (otherProfiles.length === 0) {
     targets.push(sourceLink, token, ...bridgeFiles)
@@ -183,7 +186,8 @@ async function removeBridge(plan, runtime) {
   if (BRIDGES.some(name => Object.hasOwn(dependencies(after), name))) {
     fail('桥插件依赖仍然存在，停止清理文件。', 'Bridge dependencies remain; file cleanup stopped.')
   }
-  // 原生 remove 只整理本次删除的依赖；处理中断安装留下的独立 bundle 记录。
+  // The native remove only tidies the dependencies it deleted; also drop a stray bundle
+  // entry left behind by an interrupted install.
   const bundles = after.dsh?.profile?.bundles
   if (bundles?.some(name => BRIDGES.includes(name))) {
     after.dsh.profile.bundles = bundles.filter(name => !BRIDGES.includes(name))
@@ -195,7 +199,7 @@ function cleanup(plan) {
   for (const path of plan.targets) {
     const now = stat(path)
     if (!now) continue
-    // Node 的 rm 不遍历符号链接或 Windows junction 的目标。
+    // Node's rm does not descend into the target of a symlink or Windows junction.
     if (path === plan.managed) process.chdir(plan.home)
     rmSync(path, { recursive: now.isDirectory(), force: false })
   }

@@ -1,8 +1,6 @@
 #!/bin/bash
 # shellcheck disable=SC1111 # the typographic quotes in the user-facing text are intended
-# dsh-browser 一键安装：支持远程托管安装和本地 checkout 安装。
 # dsh-browser one-command install: supports both managed remote installs and local checkout installs.
-# 之后无需任何配置：扩展自动探测本机 dsh，并用安装时放入扩展目录的桥 token 完成双向认证。
 # No further configuration is required: the extension discovers local dsh automatically and authenticates with the bridge token the installer places in its directory.
 #
 # Where the files come from:
@@ -48,8 +46,8 @@ RELEASE_STATUS=""
 RELEASE_EFFECTIVE_URL=""
 
 release_fail() {
-  printf '\n错误：%s\n' "$1" >&2
-  printf 'Error: %s\n' "$2" >&2
+  printf '\nError: %s\n' "$2" >&2
+  printf '错误：%s\n' "$1" >&2
   exit 1
 }
 
@@ -282,8 +280,8 @@ release_fetch() {
     release_verify "$directory" "$name"
   done
   rm -f -- "$directory/.release.json" "$directory/.release-assets"
-  printf '已校验：%s 的 %d 个文件与 SHA256SUMS 一致。\n' "$RELEASE_TAG" "$#"
-  printf '   Verified: %d file(s) of %s match SHA256SUMS.\n' "$#" "$RELEASE_TAG"
+  printf 'Verified: %d file(s) of %s match SHA256SUMS.\n' "$#" "$RELEASE_TAG"
+  printf '   已校验：%s 的 %d 个文件与 SHA256SUMS 一致。\n' "$RELEASE_TAG" "$#"
 }
 # <<< release-fetch
 
@@ -346,6 +344,45 @@ workspace_root_from_script() {
   candidate="$(cd "$script_dir/.." && pwd)"
   has_workspace "$candidate" || return 1
   printf '%s\n' "$candidate"
+}
+
+# A pnpm on PATH can be present and still not run: a version-manager shim with no version
+# set for the active Node exits non-zero on every call. Use pnpm when it runs; otherwise
+# define a pnpm shell function (inherited by subshells and by run_quiet) that goes through
+# Corepack, or through npx with the version package.json pins.
+resolve_pnpm() {
+  local found=0
+  if command -v pnpm >/dev/null 2>&1; then
+    found=1
+    if pnpm --version >/dev/null 2>&1; then return 0; fi
+  fi
+  if corepack --version >/dev/null 2>&1; then
+    pnpm() { COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack pnpm "$@"; }
+    if [ "$found" -eq 1 ]; then
+      print_pair "PATH 上的 pnpm 无法在当前 Node 下运行，改用 Corepack。" "pnpm on PATH does not run with this Node; using Corepack instead."
+    else
+      print_pair "未找到 pnpm，改用 Corepack。" "pnpm was not found; using Corepack instead."
+    fi
+    return 0
+  fi
+  if npx --version >/dev/null 2>&1; then
+    PNPM_NPX_SPEC="$(node -e '
+      const pinned = String(require(process.argv[1]).packageManager ?? "").split("+")[0]
+      process.stdout.write(/^pnpm@[0-9A-Za-z.-]+$/.test(pinned) ? pinned : "pnpm")
+    ' "$ROOT/package.json" 2>/dev/null)" || PNPM_NPX_SPEC="pnpm"
+    [ -n "$PNPM_NPX_SPEC" ] || PNPM_NPX_SPEC="pnpm"
+    pnpm() { npx --yes "$PNPM_NPX_SPEC" "$@"; }
+    if [ "$found" -eq 1 ]; then
+      print_pair "PATH 上的 pnpm 无法在当前 Node 下运行，改用 npx $PNPM_NPX_SPEC。" "pnpm on PATH does not run with this Node; using npx $PNPM_NPX_SPEC instead."
+    else
+      print_pair "未找到 pnpm，改用 npx $PNPM_NPX_SPEC。" "pnpm was not found; using npx $PNPM_NPX_SPEC instead."
+    fi
+    return 0
+  fi
+  if [ "$found" -eq 1 ]; then
+    fail_pair "PATH 上的 pnpm 无法运行，也没有可用的 Corepack 或 npx；请先启用 Corepack 或重新安装 pnpm。" "pnpm on PATH does not run, and neither Corepack nor npx is usable; enable Corepack or reinstall pnpm first."
+  fi
+  fail_pair "未找到 pnpm；请先启用 Corepack 或安装 pnpm。" "pnpm was not found; enable Corepack or install pnpm first."
 }
 
 require_command() {
@@ -727,10 +764,10 @@ profile_has_dependency() {
   ' "$manifest" "$package_name"
 }
 
-require_command pnpm "未找到 pnpm；请先启用 Corepack 或安装 pnpm。" "pnpm was not found; enable Corepack or install pnpm first."
 require_command node "未找到 Node.js；请先安装受支持的 Node.js 版本。" "Node.js was not found; install a supported Node.js version first."
 node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 24 || (major === 24 && minor >= 9) ? 0 : 1)' ||
   fail_pair "需要 Node.js 24.9.0 或更新版本。" "Node.js 24.9.0 or newer is required."
+resolve_pnpm
 require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not found; install rsync first."
 
 print_step 1 "构建浏览器桥" "Build the browser bridge"
@@ -809,19 +846,19 @@ else
     print_pair "请在 Chrome 扩展管理页完成以下操作：" "Complete these steps on the Chrome Extensions page:"
   fi
   printf '\n'
-  print_pair "1. 开启右上角的“开发者模式”" "Enable “Developer mode” in the upper-right corner"
-  print_pair "2. 点击“加载已解压的扩展程序”" "Click “Load unpacked”"
+  print_pair "开启右上角的“开发者模式”" "1. Enable “Developer mode” in the upper-right corner"
+  print_pair "点击“加载已解压的扩展程序”" "2. Click “Load unpacked”"
   if is_macos; then
     if [ "$CLIPBOARD_READY" -eq 1 ]; then
-      print_pair "3. 按 Cmd+Shift+G，粘贴以下路径（已复制到剪贴板）：" "Press Cmd+Shift+G and paste this path (already copied):"
+      print_pair "按 Cmd+Shift+G，粘贴以下路径（已复制到剪贴板）：" "3. Press Cmd+Shift+G and paste this path (already copied):"
     else
-      print_pair "3. 按 Cmd+Shift+G，粘贴以下路径：" "Press Cmd+Shift+G and paste this path:"
+      print_pair "按 Cmd+Shift+G，粘贴以下路径：" "3. Press Cmd+Shift+G and paste this path:"
     fi
   else
     if [ "$CLIPBOARD_READY" -eq 1 ]; then
-      print_pair "3. 粘贴以下路径（已复制到剪贴板）：" "Paste this path (already copied):"
+      print_pair "粘贴以下路径（已复制到剪贴板）：" "3. Paste this path (already copied):"
     else
-      print_pair "3. 复制并粘贴以下路径：" "Copy and paste this path:"
+      print_pair "复制并粘贴以下路径：" "3. Copy and paste this path:"
     fi
   fi
   printf '   %s\n' "$DIST_DIR"
@@ -829,10 +866,10 @@ fi
 
 printf '\n'
 print_pair "加载完成后：" "After loading the extension:"
-print_pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "Click the DeepSeek whale icon in the toolbar to open the side panel"
-print_pair "• 扩展会自动发现本机 dsh，无需填写地址或 token（已放入扩展目录）" "The extension discovers local dsh automatically; no address or token is required (it was placed in the extension directory)"
+print_pair "点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "• Click the DeepSeek whale icon in the toolbar to open the side panel"
+print_pair "扩展会自动发现本机 dsh，无需填写地址或 token（已放入扩展目录）" "• The extension discovers local dsh automatically; no address or token is required (it was placed in the extension directory)"
 printf '• Start the pinned version: cd %q && pnpm start\n' "$ROOT"
 printf '   启动固定版本：cd %q && pnpm start\n' "$ROOT"
-print_pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.2.2-rc.2 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.2-rc.2 web"
+print_pair "或直接启动固定版本：npx @deepseek-ai/dsh@0.2.2-rc.2 web" "• Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.2-rc.2 web"
 printf '\n'
 print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/natgurlain/dsh-browser-agent" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/natgurlain/dsh-browser-agent"
