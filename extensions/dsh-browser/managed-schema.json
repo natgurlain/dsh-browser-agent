@@ -33,6 +33,16 @@
       "description": "The built-in read-only rules for banking, password managers, identity providers, and cloud consoles cannot be turned off.",
       "type": "boolean"
     },
+    "disableLocalTaintExemption": {
+      "title": "Treat local pages as untrusted content",
+      "description": "Pages served from this machine (localhost, 127.0.0.1, [::1]) restrict a session like any other page; the user cannot turn that off.",
+      "type": "boolean"
+    },
+    "disableTrustedTaintExemption": {
+      "title": "Treat trusted sites as untrusted content",
+      "description": "Pages from sites the user marked trusted restrict a session like any other page; the user cannot turn that off.",
+      "type": "boolean"
+    },
     "allowedOrigins": {
       "title": "Allowed web origins",
       "description": "When set, the agent may read, act on, and navigate to only these origins (https://app.example.com or *.example.com).",

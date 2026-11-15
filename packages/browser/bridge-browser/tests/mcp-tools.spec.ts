@@ -111,7 +111,7 @@ describe('MCP tool host', () => {
   it('records Host-side taint for the external session after a page-quoting call', async () => {
     const { host, taint } = harness({ text: 'Page text' })
     await host.call('browser_get_text', {}, caller, new AbortController().signal)
-    expect(taint).toHaveBeenCalledWith('mcp-1234', 'browser_get_text')
+    expect(taint).toHaveBeenCalledWith('mcp-1234', 'browser_get_text', expect.stringMatching(/^mcp-call-/))
     taint.mockClear()
     await host.call('browser_follow_tab', { tabId: 3 }, caller, new AbortController().signal)
     expect(taint).not.toHaveBeenCalled()
@@ -129,7 +129,7 @@ describe('MCP tool host', () => {
     requestTool.mockRejectedValueOnce(Object.assign(new Error('The user denied this browser action.'), { code: 'action-failed' }))
     const result = await host.call('browser_press', { key: 'Enter' }, caller, new AbortController().signal)
     expect(result).toEqual({ content: [{ type: 'text', text: 'The user denied this browser action. (action-failed)' }], isError: true })
-    expect(taint).toHaveBeenCalledWith('mcp-1234', 'browser_press')
+    expect(taint).toHaveBeenCalledWith('mcp-1234', 'browser_press', expect.stringMatching(/^mcp-call-/))
   })
 
   it('refuses workspace writes for external callers before touching the page', async () => {

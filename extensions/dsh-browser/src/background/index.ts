@@ -99,6 +99,7 @@ import {
   dispatchToolCall,
   isNavigationCandidateTool,
   isTabManagementTool,
+  callQuotedConsole,
   resetInputState,
   resetTabSnapshot,
   type InputRuntime,
@@ -178,9 +179,10 @@ import {
 } from './authorization.ts'
 import { nextDevToolsAllowance, readDevToolsAllowance } from './devtools-allowance.ts'
 import { DevToolsGrants } from './devtools-grants.ts'
-import { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD, isExtensionPageSender, PolicyRuntime } from './policy-runtime.ts'
+import { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD, isExtensionPageSender, PolicyRuntime, type TabProvenance } from './policy-runtime.ts'
+import { normalizeTaintLocalOrigins, normalizeTaintTrustedSites, reconcileTrustConfirmed, servesBridge } from '../security/taint-exempt.ts'
 import { splitSelectionMessage } from '../panel/selection.ts'
-import { callPolicyTargets, forcedApprovalPrompt, originFromUrl } from './authorization.ts'
+import { callPolicyTargets, forcedApprovalPrompt, originFromUrl, tabProvenanceOf } from './authorization.ts'
 import { normalizeSitePattern, normalizeSiteRules, type SiteRuleEntry } from '../security/site-policy.ts'
 import { CommitGate, STRICT_MODE_UNAVAILABLE } from './commit-gate.ts'
 import { fixtureAllowedFor, LearningRuntime } from './learning.ts'
@@ -249,6 +251,16 @@ export interface Settings {
   showAgentOverlay: boolean
   /** Let the agent create standing page watchers (browser_watch); each one still needs its own card. */
   allowPageWatchers: boolean
+  /** Pages served from this machine (loopback) do not taint a session (security/taint-exempt.ts). */
+  taintExemptLocalPages: boolean
+  /** Pages from sites the user marked trusted do not taint a session (security/taint-exempt.ts). */
+  taintExemptTrustedSites: boolean
+  /** Loopback origins the user said are their own pages (dev-loop links, the banner, Settings). */
+  taintLocalOrigins: string[]
+  /** Hosts whose pages are not treated as untrusted content: the banner's Trust. Relaxes no approval card. */
+  taintTrustedSites: string[]
+  /** Trusted site rules and always-allowed origins confirmed for the taint exemption (keys, taint-exempt.ts). */
+  taintTrustConfirmed: string[]
 }
 
 /** Current settings schema; see {@link Settings.settingsVersion}. */
@@ -273,6 +285,11 @@ const SETTINGS_DEFAULTS: Settings = {
   settingsVersion: SETTINGS_VERSION,
   showAgentOverlay: true,
   allowPageWatchers: false,
+  taintExemptLocalPages: true,
+  taintExemptTrustedSites: true,
+  taintLocalOrigins: [],
+  taintTrustedSites: [],
+  taintTrustConfirmed: [],
 }
 
 /** Longest no-panel approval window the bridge's hold can cover. */
@@ -459,6 +476,18 @@ const policyRuntime: PolicyRuntime = new PolicyRuntime({
   settings: () => settings,
   unrestricted: () => unrestrictedAccessEnabled(),
   clearBridgeTaint: async (sessionId) => { await gatewayRpc(BRIDGE_TAINT_CLEAR_METHOD, { sessionId: sessionId ?? null }) },
+  // The banner's choices save through the same path as Settings.
+  saveTaintTrust: async (change) => {
+    await settingsReady
+    await persistSettings({
+      taintTrustedSites: [...settings.taintTrustedSites, ...change.sites],
+      taintLocalOrigins: [...settings.taintLocalOrigins, ...change.localOrigins],
+    })
+  },
+  // Whatever serves the DSH host (its web UI shows every session's transcript) is never exempt.
+  neverExemptOrigin: (origin) => servesBridge(origin, [settings.bridgeUrl, discoveredBridgeUrl, lastBridgeUrl]),
+  // A class of exemption the connected bridge does not honour is off here too.
+  bridgeExemptions: () => caps?.taintExemptions,
   onManagedChange: (managed) => {
     // Managed values override user settings: re-apply them to what is loaded.
     if (!settingsLoaded) return
@@ -858,7 +887,12 @@ async function persistSettings(next: Partial<Settings>): Promise<void> {
   const revokesDevTools = changesDevTools && (settings.allowDevTools || devToolsGrants.hasAny()) && !updated.allowDevTools
   const togglesOverlay = settings.showAgentOverlay !== updated.showAgentOverlay
   const togglesWatchers = settings.allowPageWatchers !== updated.allowPageWatchers
+  // A trusted rule or always-allowed origin added now counts for the taint
+  // exemption at once; ones that predate it wait for the user's confirmation.
+  updated.taintTrustConfirmed = reconcileTrustConfirmed(settings, updated, next.taintTrustConfirmed ?? settings.taintTrustConfirmed)
   settings = updated
+  // Which taint sources the banner can offer to trust follows the site rules and exemption settings.
+  policyRuntime.broadcast()
   if (!updated.unrestrictedBrowserAccess) unrestrictedAccessActive = false
   if (revokesDevTools) devToolsGrants.clear()
   if (togglesOverlay) refreshActionBadges()
@@ -964,6 +998,13 @@ function normalizeUserSettings(candidate: Settings): Settings {
     settingsVersion: SETTINGS_VERSION,
     showAgentOverlay: candidate.showAgentOverlay !== false,
     allowPageWatchers: candidate.allowPageWatchers === true,
+    taintExemptLocalPages: candidate.taintExemptLocalPages !== false,
+    taintExemptTrustedSites: candidate.taintExemptTrustedSites !== false,
+    taintLocalOrigins: normalizeTaintLocalOrigins(candidate.taintLocalOrigins),
+    taintTrustedSites: normalizeTaintTrustedSites(candidate.taintTrustedSites),
+    taintTrustConfirmed: Array.isArray(candidate.taintTrustConfirmed)
+      ? [...new Set(candidate.taintTrustConfirmed.filter((key): key is string => typeof key === 'string'))].sort()
+      : [],
   }
 }
 
@@ -2352,7 +2393,8 @@ async function taintAttachedSelection(sessionId: string, payload: unknown): Prom
     const attached = splitSelectionMessage(text)
     if (attached === null) continue
     await policyRuntime.ready
-    policyRuntime.recordSelection(sessionId, originFromUrl(attached.selection.url))
+    // A selection made on an exempt page (local, or a site the user trusts) taints neither side.
+    if (policyRuntime.recordSelection(sessionId, originFromUrl(attached.selection.url), attached.selection.url).exempt) return
     await gatewayRpc(BRIDGE_TAINT_MARK_METHOD, { sessionId }).catch(() => { /* older bridge: extension taint still applies */ })
     return
   }
@@ -2379,6 +2421,8 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
     const budget = caps === null
       ? undefined
       : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
+    // The evaluator also collects which frames the snapshot read (taint exemption).
+    const provenance = policyRuntime.provenanceEvaluator(sessionId, unrestrictedAccess)
     const answer = await dispatchToolCall(
       { id: crypto.randomUUID(), name: 'browser_snapshot', args: {} },
       unrestrictedAccess ? 'auto' : settings.sharePageContent,
@@ -2389,14 +2433,24 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
       () => target.id !== undefined && tabAffinity.allowsTarget(target.id, sessionId),
       // Site rules, managed policy, and taint apply to the injected read too:
       // a blocked page is refused, an ask page shows its card.
-      { unrestrictedAccess, policy: policyRuntime.evaluator(sessionId, unrestrictedAccess) },
+      { unrestrictedAccess, policy: provenance.policy },
     )
     if (!answer.ok || controller.signal.aborted || !tabAffinity.allowsTarget(tabId, sessionId)) return
     if (typeof answer.result !== 'object' || answer.result === null) return
     const snapshot = (answer.result as { text?: unknown }).text
     if (typeof snapshot !== 'string' || snapshot.trim() === '') return
+    const origin = originFromUrl(target.url ?? '')
+    // Decided and recorded in one step, before the bridge is told: a snapshot
+    // of local or user-trusted pages only (every frame) taints neither side.
+    const frames = provenance.origins()
+    const urls = provenance.urls()
+    if (policyRuntime.injectionExempt(sessionId, origin, frames, urls) && policyRuntime.recordInjection(sessionId, origin, frames, urls).exempt) {
+      const local = policyRuntime.restsOnLocalPage([...origin === undefined ? [] : [origin], ...frames ?? []])
+      await gatewayRpc(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId, snapshot, taintExempt: true, ...local ? { taintExemptLocal: true } : {} })
+      return
+    }
     await gatewayRpc(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId, snapshot })
-    policyRuntime.recordInjection(sessionId, originFromUrl(target.url ?? ''))
+    policyRuntime.recordInjection(sessionId, origin, frames)
   } finally {
     activeRefresh.settle()
     if (activeFollowRefreshes.get(sessionId) === activeRefresh) activeFollowRefreshes.delete(sessionId)
@@ -2578,7 +2632,10 @@ const externalRequesters = new ExternalRequesters()
 const devLoop = new DevLoopController(chromeDevLoopBrowser())
 
 /** Panel dev-loop RPCs the background completes (dev-loop.ts). */
-const devLoopPanelRpc = createDevLoopPanelRpc(devLoop, gatewayRpc)
+const devLoopPanelRpc = createDevLoopPanelRpc(devLoop, gatewayRpc, undefined, (origin) => {
+  // Linking a tab into the dev loop says "this is my app": its pages are the user's own.
+  void settingsReady.then(() => persistSettings({ taintLocalOrigins: [...settings.taintLocalOrigins, origin] })).catch(() => {})
+})
 
 /** Learning features (workflows, site drivers, Watch me, failure fixtures); all default off. */
 const learning = new LearningRuntime({
@@ -2721,6 +2778,8 @@ function routeToolCall(call: ToolCall): void {
   const dispatch = (): Promise<ToolAnswer> => policyRuntime.ready.then(() => {
     // A subagent or fork of a tainted session: the Host says so on the call.
     if (call.tainted === true) policyRuntime.markHostTaint(call.sessionId)
+    // A fork or subagent of a session that read exempt pages may hold their content.
+    if (call.inheritedExemptReads === true) policyRuntime.noteInheritedExemptReads(call.sessionId)
   }).then(() => fleets.ready).then(() => {
     approvalSession = fleets.approvalSession(call.sessionId)
     fleetRefusal = fleets.refusal(call)
@@ -2820,8 +2879,15 @@ function routeToolCall(call: ToolCall): void {
   // policy check, or approval card, so nothing can approve or run it.
   void heldDispatch(call, activeCall, dispatch).then(
     async (answer) => {
-      // Untrusted page content entered the session: taint it (security/taint.ts).
-      policyRuntime.recordResult(call, answer.ok, policyTabOrigin)
+      // Untrusted page content entered the session: taint it (security/taint.ts),
+      // unless everything the call could have quoted is exempt (local pages,
+      // sites the user trusts). The tab is looked at again only when that is possible.
+      const after = policyRuntime.mayExempt(call.sessionId) ? await tabProvenanceAfter(activeCall.tabId) : undefined
+      // Sent on the result frame: the bridge then leaves the session's shell and file tools on.
+      const verdict = policyRuntime.recordResult(call, answer.ok, policyTabOrigin, after, { quotesConsole: callQuotedConsole(call) })
+      const taintExempt = verdict.exempt
+        ? { taintExempt: true as const, ...verdict.local === true ? { taintExemptLocal: true as const } : {} }
+        : {}
       learning.recordResult(call, answer, {
         ...(activeCall.tabId === undefined ? {} : { tabId: activeCall.tabId }),
         ...(activeCall.url === undefined ? {} : { url: activeCall.url }),
@@ -2854,12 +2920,12 @@ function routeToolCall(call: ToolCall): void {
           programStepDone = true
           programGrants.settle(call.program, true)
         }
-        socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
+        socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result, ...taintExempt })
       } else {
         const socket = bridge
         if (socket === null) return
         recordAuditNote(call, activeCall)
-        socket.send({ t: 'tool.result', id: call.id, ok: false, error: answer.error! })
+        socket.send({ t: 'tool.result', id: call.id, ok: false, error: answer.error!, ...taintExempt })
       }
     },
     (error: unknown) => {
@@ -2947,6 +3013,22 @@ async function navigationAfter(call: ToolCall, activeCall: ActiveToolCall): Prom
   try {
     const url = (await chrome.tabs.get(activeCall.tabId)).url
     return url !== undefined && url !== activeCall.url ? url : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The origins of the call's tab once the call settled (top page and every
+ * frame), for the taint exemption. Undefined when the tab or its frame tree
+ * cannot be read: the exemption then falls back to what the call itself named.
+ */
+async function tabProvenanceAfter(tabId: number | undefined): Promise<TabProvenance | undefined> {
+  if (tabId === undefined) return undefined
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId })
+    if (frames === null || frames === undefined || frames.length === 0) return undefined
+    return tabProvenanceOf(frames.map((frame) => ({ frameId: frame.frameId, parentFrameId: frame.parentFrameId, url: frame.url })))
   } catch {
     return undefined
   }

@@ -353,12 +353,48 @@ export interface PanelCopy {
     managedNoDevTools: string
     managedNoScreenshots: string
     managedAllowedOnly: (origins: readonly string[]) => string
+    /** The one sentence shown wherever a site is marked trusted (Settings and the banner's "Trust"). */
+    trustedNote: string
+    exemptLocal: string
+    exemptLocalHelp: string
+    exemptLocalMore: string
+    exemptTrusted: string
+    exemptTrustedHelp: string
+    exemptTrustedMore: string
+    managedNoLocalExemption: string
+    managedNoTrustedExemption: string
+    /** The user's own local pages (loopback origins). */
+    localOriginsLabel: string
+    localOriginInput: string
+    localOriginInvalid: string
+    noLocalOrigins: string
+    /** Sites whose pages are not treated as untrusted content (the banner's Trust). */
+    taintTrustedLabel: string
+    noTaintTrusted: string
+    /** Trusted rules and always-allowed origins from before the exemption existed. */
+    keepQuestion: (count: number) => string
+    keepAll: string
+    keepOne: string
   }
   /** Session taint banner (security/taint.ts). */
   taint: {
-    body: (sources: string) => string
+    /** `sites`: host names, comma-separated (at most three). */
+    body: (sites: string) => string
     unknownSource: string
+    more: (count: number) => string
     clear: string
+    trust: (site: string) => string
+    trustMany: string
+    /** Around the site name in the confirmation: "Trust <site>?". */
+    trustConfirmLead: string
+    trustConfirmEnd: string
+    /** What trusting does, in the confirmation. */
+    trustEffects: string
+    confirmTrust: string
+    cancel: string
+    /** A local page among the sources: "are these yours?". */
+    localQuestion: (host: string) => string
+    localYes: string
   }
   /** Active page watchers card. */
   watchers: {
@@ -979,11 +1015,39 @@ const EN: PanelCopy = {
     managedNoDevTools: 'Developer tools are disabled.',
     managedNoScreenshots: 'Screenshots are disabled.',
     managedAllowedOnly: (origins) => `Only these sites are allowed: ${origins.join(', ') || '(none)'}`,
+    trustedNote: 'Pages from trusted sites are not treated as untrusted content.',
+    exemptLocal: 'Don\'t restrict sessions that only read local pages',
+    exemptLocalHelp: 'Your own pages on this computer (localhost, 127.0.0.1) are not treated as untrusted content.',
+    exemptLocalMore: 'Only the local addresses listed here count: ones you linked for the dev loop, confirmed on the banner, or added below. A conversation that reads anything else is restricted as usual, and sending data to a local address then still asks. A local page that shows content you did not write (a mail or feed reader, a proxy) can still carry instructions aimed at the agent.',
+    exemptTrusted: 'Don\'t restrict sessions that only read sites I trust',
+    exemptTrustedHelp: 'Pages from sites you trust (https only) are not treated as untrusted content.',
+    exemptTrustedMore: 'Counts: the sites listed here (added with "Trust" on the banner), sites with a Trusted rule, and always-allowed domains, unless a stricter rule covers the site. A trusted site that shows other people\'s content (comments, tickets, mail) can still carry instructions aimed at the agent. Sending data to a trusted site from a restricted conversation still asks.',
+    managedNoLocalExemption: 'Local pages restrict a session like any other page.',
+    managedNoTrustedExemption: 'Trusted sites restrict a session like any other page.',
+    localOriginsLabel: 'My local pages',
+    localOriginInput: 'Local address',
+    localOriginInvalid: 'Enter a local address such as http://localhost:3000',
+    noLocalOrigins: 'No local pages yet.',
+    taintTrustedLabel: 'Sites not treated as untrusted content',
+    noTaintTrusted: 'None yet. Use "Trust" on the banner when a conversation is restricted.',
+    keepQuestion: (count) => `${String(count)} site${count === 1 ? '' : 's'} you trusted earlier will no longer restrict conversations. Keep?`,
+    keepAll: 'Keep all',
+    keepOne: 'Keep',
   },
   taint: {
-    body: (sources) => `This session has read untrusted page content (${sources}). Cross-site typing, clipboard and file writes, and data-carrying navigation need your approval; shell and file-writing tools are off.`,
+    body: (sites) => `This conversation read web pages that could contain instructions (${sites}), so risky actions ask first and shell and file tools are off.`,
     unknownSource: 'an unknown origin',
+    more: (count) => `+${String(count)} more`,
     clear: 'Clear',
+    trust: (site) => `Trust ${site}`,
+    trustMany: 'Trust these sites…',
+    trustConfirmLead: 'Trust ',
+    trustConfirmEnd: '?',
+    trustEffects: 'Pages from this site and its subdomains (https) will no longer restrict conversations. This conversation gets its shell and file tools back once every site it read is trusted. Approval cards for actions on the site do not change.',
+    confirmTrust: 'Trust',
+    cancel: 'Cancel',
+    localQuestion: (host) => `Treat pages from ${host} as yours?`,
+    localYes: 'Yes, they are mine',
   },
   watchers: {
     label: 'Page watchers',
@@ -1604,11 +1668,39 @@ const ZH: PanelCopy = {
     managedNoDevTools: '已禁用开发者工具。',
     managedNoScreenshots: '已禁用截图。',
     managedAllowedOnly: (origins) => `仅允许以下站点：${origins.join('、') || '（无）'}`,
+    trustedNote: '受信任站点的页面不会被当作不受信任的内容。',
+    exemptLocal: '只读取本地页面的会话不受限制',
+    exemptLocalHelp: '本机上你自己的页面（localhost、127.0.0.1）不会被当作不受信任的内容。',
+    exemptLocalMore: '只有此处列出的本地地址才算：为开发循环关联的、在横幅上确认的，或在下方添加的。读取其他内容的对话照常受限，此后向本地地址发送数据仍需询问。显示非你本人内容的本地页面（邮件或订阅阅读器、代理）仍可能带有针对助手的指令。',
+    exemptTrusted: '只读取受信任站点的会话不受限制',
+    exemptTrustedHelp: '你信任的站点（仅限 https）的页面不会被当作不受信任的内容。',
+    exemptTrustedMore: '包括：此处列出的站点（通过横幅上的「信任」添加）、设为「信任」的站点规则和永久免确认域名，除非有更严格的规则覆盖该站点。显示他人内容（评论、工单、邮件）的受信任站点仍可能带有针对助手的指令。受限的对话向受信任站点发送数据仍需询问。',
+    managedNoLocalExemption: '本地页面与其他页面一样会限制会话。',
+    managedNoTrustedExemption: '受信任站点与其他页面一样会限制会话。',
+    localOriginsLabel: '我的本地页面',
+    localOriginInput: '本地地址',
+    localOriginInvalid: '请输入本地地址，例如 http://localhost:3000',
+    noLocalOrigins: '暂无本地页面。',
+    taintTrustedLabel: '不被当作不受信任内容的站点',
+    noTaintTrusted: '暂无。对话受限时可在横幅上点「信任」。',
+    keepQuestion: (count) => `你之前信任的 ${String(count)} 个站点将不再限制对话。是否保留？`,
+    keepAll: '全部保留',
+    keepOne: '保留',
   },
   taint: {
-    body: (sources) => `本会话已读取不受信任的网页内容（${sources}）。跨站输入、剪贴板写入、文件写入和带数据的跳转需要您批准；命令行与文件写入工具已停用。`,
+    body: (sites) => `本对话读取了可能包含指令的网页（${sites}），因此高风险操作会先询问，命令行与文件工具已停用。`,
     unknownSource: '未知来源',
+    more: (count) => `另有 ${String(count)} 个`,
     clear: '清除',
+    trust: (site) => `信任 ${site}`,
+    trustMany: '信任这些站点…',
+    trustConfirmLead: '信任 ',
+    trustConfirmEnd: '？',
+    trustEffects: '该站点及其子域名（https）的页面今后不再限制对话。本对话读取的所有站点都受信任后，命令行与文件工具恢复可用。该站点上操作的审批卡片不变。',
+    confirmTrust: '信任',
+    cancel: '取消',
+    localQuestion: (host) => `把 ${host} 的页面当作你自己的页面？`,
+    localYes: '是，是我的',
   },
   watchers: {
     label: '页面监视',

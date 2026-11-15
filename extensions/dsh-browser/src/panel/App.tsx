@@ -18,6 +18,7 @@ import { readDevToolsAllowance } from '../background/devtools-allowance.ts'
 import { SitePolicySettings } from './SitePolicySettings.tsx'
 import { DevLoopSettings } from './DevLoopSettings.tsx'
 import { TaintBanner } from './TaintBanner.tsx'
+import { TaintExemptionSettings } from './TaintExemptionSettings.tsx'
 import { WatchersCard } from './WatchersCard.tsx'
 import { connectPanel, PanelRpcError, type AgentPauseState, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type StandingStatus, type PanelApi, type PanelSettings } from './api.ts'
 import { StepTimeline } from './StepTimeline.tsx'
@@ -1151,8 +1152,10 @@ export function App(): React.JSX.Element {
     setThemePreference(saveThemePreference(next))
   }
 
-  // Settings: seed from storage, then let the panel own the form.
-  useEffect(() => {
+  // Settings: seed from storage, then let the panel own the form. Read again
+  // after the background changed them on its own (the taint banner's "Trust"),
+  // so a later Save cannot write a stale copy over that change.
+  const loadStoredSettings = useCallback((): void => {
     void chrome.storage.local.get('dshSettings').then((stored) => {
       const raw = stored.dshSettings as Partial<PanelSettings> | undefined
       const seeded: PanelSettings = {
@@ -1173,11 +1176,17 @@ export function App(): React.JSX.Element {
         settingsVersion: raw?.settingsVersion ?? 1,
         showAgentOverlay: raw?.showAgentOverlay ?? true,
         allowPageWatchers: raw?.allowPageWatchers ?? false,
+        taintExemptLocalPages: raw?.taintExemptLocalPages ?? true,
+        taintExemptTrustedSites: raw?.taintExemptTrustedSites ?? true,
+        taintLocalOrigins: raw?.taintLocalOrigins ?? [],
+        taintTrustedSites: raw?.taintTrustedSites ?? [],
+        taintTrustConfirmed: raw?.taintTrustConfirmed ?? [],
       }
       setSettings(seeded)
       setSettingsBaseline(seeded)
     })
   }, [])
+  useEffect(() => { loadStoredSettings() }, [loadStoredSettings])
 
   // Developer-tools state lives in the background: it owns the debugger
   // attachment and reports every change here.
@@ -3083,6 +3092,21 @@ export function App(): React.JSX.Element {
                 checked={settings?.unrestrictedBrowserAccess ?? false}
                 onChange={(checked) => patch({ unrestrictedBrowserAccess: checked })}
               />
+              {settings !== null && (
+                <TaintExemptionSettings
+                  locale={locale}
+                  value={{
+                    taintExemptLocalPages: settings.taintExemptLocalPages,
+                    taintExemptTrustedSites: settings.taintExemptTrustedSites,
+                    taintLocalOrigins: settings.taintLocalOrigins,
+                    taintTrustedSites: settings.taintTrustedSites,
+                    taintTrustConfirmed: settings.taintTrustConfirmed,
+                    siteRules: settings.siteRules,
+                    trustedActionOrigins: settings.trustedActionOrigins,
+                  }}
+                  onChange={(next) => patch(next)}
+                />
+              )}
             </SettingsGroup>
             {settings !== null && (
               <SitePolicySettings
@@ -3091,7 +3115,7 @@ export function App(): React.JSX.Element {
                 onChange={(next) => patch(next)}
               >
                 <SettingRow className="trusted-origins" label={copy.settings.trustedOrigins}
-                  help={copy.settings.trustedOriginsHelp} more={<p>{copy.settings.trustedOriginsMore}</p>}>
+                  help={copy.settings.trustedOriginsHelp} more={<><p>{copy.settings.trustedOriginsMore}</p><p className="trusted-note">{copy.sitePolicy.trustedNote}</p></>}>
                   {(id) => (
                     <>
                       <EntryAdd
@@ -3381,7 +3405,7 @@ export function App(): React.JSX.Element {
             aria-label={copy.app.openSettings} title={copy.app.settings}><SettingsIcon /></button>
         </div>
       </header>
-      <TaintBanner sessionId={sessionRef.current} locale={locale} />
+      <TaintBanner sessionId={sessionRef.current} locale={locale} onTrusted={loadStoredSettings} />
       <WatchersCard locale={locale} />
       {firstPairing && !killSwitchEngaged
         // Keyed by the bridge address: a request is for one bridge, so a new address asks anew.

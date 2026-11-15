@@ -35,7 +35,7 @@ describe('managed policy', () => {
 
   it('ships a schema naming every key the parser reads, declared in the Chrome manifest only', async () => {
     const schema = JSON.parse(await readFile(`${process.cwd()}/managed-schema.json`, 'utf8')) as { properties: Record<string, unknown> }
-    expect(Object.keys(schema.properties).sort()).toEqual(['allowedOrigins', 'disableDevTools', 'disableScreenshots', 'disableUnrestricted', 'enforceSiteDefaults', 'siteRules'])
+    expect(Object.keys(schema.properties).sort()).toEqual(['allowedOrigins', 'disableDevTools', 'disableLocalTaintExemption', 'disableScreenshots', 'disableTrustedTaintExemption', 'disableUnrestricted', 'enforceSiteDefaults', 'siteRules'])
     const chromeManifest = JSON.parse(await readFile(`${process.cwd()}/manifest.json`, 'utf8')) as { storage?: { managed_schema?: string } }
     const firefoxManifest = JSON.parse(await readFile(`${process.cwd()}/manifest.firefox.json`, 'utf8')) as { storage?: unknown }
     expect(chromeManifest.storage?.managed_schema).toBe('managed-schema.json')

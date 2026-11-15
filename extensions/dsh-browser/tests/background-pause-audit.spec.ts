@@ -82,7 +82,7 @@ async function boot(extraSettings: Record<string, unknown> = {}, chromeExtras: R
 
   const portMessages = chromeEvent<[unknown]>()
   const port = {
-    name: 'dsh-panel', postMessage: vi.fn(), onMessage: portMessages, onDisconnect: chromeEvent<[]>(),
+    name: 'dsh-panel', postMessage: vi.fn(), disconnect: vi.fn(), onMessage: portMessages, onDisconnect: chromeEvent<[]>(),
     sender: { url: 'chrome-extension://test/panel/index.html' },
   } as unknown as chrome.runtime.Port
   onConnect.emit(port)

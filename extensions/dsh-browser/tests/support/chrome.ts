@@ -17,8 +17,18 @@ export function chromeEvent<T extends unknown[]>() {
   }
 }
 
-/** A connected extension-page port (the side panel by default). */
-export function panelPort(name = 'dsh-panel', sender?: chrome.runtime.MessageSender) {
+/** The sender of a port opened by one of this extension's own pages (the stubbed `chrome.runtime`). */
+function extensionPageSender(): chrome.runtime.MessageSender | undefined {
+  const runtime = (globalThis as { chrome?: { runtime?: { id?: string; getURL?: (path: string) => string } } }).chrome?.runtime
+  if (typeof runtime?.getURL !== 'function') return undefined
+  return { ...(runtime.id === undefined ? {} : { id: runtime.id }), url: runtime.getURL('panel/index.html') }
+}
+
+/**
+ * A connected extension-page port (the side panel by default). The worker
+ * accepts its ports from extension pages only, so the sender defaults to one.
+ */
+export function panelPort(name = 'dsh-panel', sender: chrome.runtime.MessageSender | undefined = extensionPageSender()) {
   const onMessage = chromeEvent<[unknown]>()
   const onDisconnect = chromeEvent<[]>()
   const postMessage = vi.fn()

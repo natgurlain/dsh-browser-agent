@@ -776,6 +776,14 @@ export interface BridgeCaps {
    */
   standing?: StandingWork
   /**
+   * Server only: which taint-exemption vouchers this bridge honours
+   * (session-taint.ts). `local: false` (the Host's `devLoop.trustLoopback:
+   * false`, or vouchers off altogether) means a read of a local page taints;
+   * `trusted: false` the same for sites the user trusts. The extension turns
+   * the matching exemption off so both sides agree. Absent on older bridges.
+   */
+  taintExemptions?: { local: boolean; trusted: boolean }
+  /**
    * Client only: the extension handles {@link BRIDGE_STANDING_EVENT_METHOD}
    * events at this wire version ({@link STANDING_WORK_CAPS_VERSION}). Absent
    * on older extensions; a version this bridge does not know is treated as
@@ -847,9 +855,16 @@ export type ClientFrame =
   | { t: 'rpc'; id: string; method: string; payload: unknown }
   /** Answer or cancel a pending Host interaction waterfall. */
   | { t: 'respond'; id: string; rpcId: string; result: RespondResult }
-  /** Result of a previously dispatched tool call. */
-  | { t: 'tool.result'; id: string; ok: true; result: unknown }
-  | { t: 'tool.result'; id: string; ok: false; error: ToolError }
+  /**
+   * Result of a previously dispatched tool call. `taintExempt: true` is the
+   * extension vouching that everything this result quotes came from pages
+   * exempt from session taint (the user's own loopback pages, or sites the
+   * user marked trusted) and that its own record of the session is untainted;
+   * absent means "taint as usual". It sits on the frame, never inside
+   * `result`, so neither a page nor the agent can set it.
+   */
+  | { t: 'tool.result'; id: string; ok: true; result: unknown; taintExempt?: true; taintExemptLocal?: true }
+  | { t: 'tool.result'; id: string; ok: false; error: ToolError; taintExempt?: true; taintExemptLocal?: true }
   /** Liveness reply. */
   | { t: 'pong' }
   /**
@@ -894,7 +909,7 @@ export type ServerFrame =
    * for this session id (a subagent's first call). Absent means "no Host
    * taint known", never "untainted" (the extension's own record still counts).
    */
-  | { t: 'tool.call'; id: string; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string; tainted?: true; program?: ProgramStepRef
+  | { t: 'tool.call'; id: string; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string; tainted?: true; inheritedExemptReads?: true; program?: ProgramStepRef
     /**
      * Who asked, when it is not a DSH Agent: the sanitized, self-reported
      * name of the external (MCP) client behind an external session. Shown on
@@ -968,6 +983,16 @@ export function isServerFrame(frame: BridgeFrame): frame is ServerFrame {
  * @param text - raw message text.
  * @returns the frame, or `undefined` when the message is not a valid frame.
  */
+/**
+ * The taint voucher of a `tool.result` frame: `taintExempt`, and
+ * `taintExemptLocal` when the exemption rests on a local (loopback) page,
+ * which a bridge may refuse on its own (`devLoop.trustLoopback: false`).
+ */
+function taintExemptFields(frame: Record<string, unknown>): { taintExempt?: true; taintExemptLocal?: true } {
+  if (frame.taintExempt !== true) return {}
+  return { taintExempt: true, ...(frame.taintExemptLocal === true ? { taintExemptLocal: true as const } : {}) }
+}
+
 export function parseBridgeFrame(text: string): BridgeFrame | undefined {
   let value: unknown
   try {
@@ -1009,10 +1034,10 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
     case 'tool.result':
       if (typeof frame.id !== 'string') return undefined
       if (frame.ok === true && 'result' in frame) {
-        return { t: 'tool.result', id: frame.id, ok: true, result: frame.result }
+        return { t: 'tool.result', id: frame.id, ok: true, result: frame.result, ...taintExemptFields(frame) }
       }
       return isToolError(frame.error)
-        ? { t: 'tool.result', id: frame.id, ok: false, error: frame.error }
+        ? { t: 'tool.result', id: frame.id, ok: false, error: frame.error, ...taintExemptFields(frame) }
         : undefined
     case 'pong':
       return { t: 'pong' }
@@ -1054,6 +1079,8 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
             expiresAt: frame.expiresAt,
             ...(typeof frame.sessionId === 'string' ? { sessionId: frame.sessionId } : {}),
             ...(frame.tainted === true ? { tainted: true as const } : {}),
+            // A session this one was spawned or forked from read taint-exempt pages (session-taint.ts).
+            ...(frame.inheritedExemptReads === true ? { inheritedExemptReads: true as const } : {}),
             ...(isProgramStepRef(frame.program) ? { program: frame.program } : {}),
             ...(typeof frame.requester === 'string' && isRequesterLabel(frame.requester) ? { requester: frame.requester } : {}),
           }
@@ -1112,8 +1139,15 @@ function isCaps(value: unknown): value is BridgeCaps {
     && (caps.client === undefined || isBridgeClientIdentity(caps.client))
     && (caps.hostApprovals === undefined || caps.hostApprovals === HOST_APPROVALS_CAPS_VERSION)
     && (caps.standing === undefined || isStandingWork(caps.standing))
+    && (caps.taintExemptions === undefined || isTaintExemptionCaps(caps.taintExemptions))
     // Any version is a valid claim; only the known one is acted on.
     && (caps.standingUpdates === undefined || (typeof caps.standingUpdates === 'number' && Number.isSafeInteger(caps.standingUpdates) && caps.standingUpdates > 0))
+}
+
+function isTaintExemptionCaps(value: unknown): value is { local: boolean; trusted: boolean } {
+  return typeof value === 'object' && value !== null
+    && typeof (value as Record<string, unknown>).local === 'boolean'
+    && typeof (value as Record<string, unknown>).trusted === 'boolean'
 }
 
 /** Validate the optional developer-tools capability; unknown versions are unusable. */
@@ -1307,4 +1341,24 @@ export function devLoopOrigin(url: string | undefined, extraOrigins: readonly st
 /** Whether an origin is a loopback (default dev-loop) origin. */
 export function isLoopbackDevOrigin(origin: string): boolean {
   return devLoopOrigin(origin) === origin
+}
+
+/**
+ * Whether `origin` is a page served from this machine: an http(s) origin
+ * whose host is `localhost`, a `*.localhost` name (browsers resolve those to
+ * loopback without DNS), `127.0.0.1` or `[::1]`, on any port. The host is
+ * compared exactly after URL parsing, so `localhost.evil.com`,
+ * `127.0.0.1.nip.io` or `localhost@evil.com` are not loopback. Only a bare
+ * origin qualifies (no path), which is what taint records hold.
+ */
+export function isLoopbackPageOrigin(origin: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(origin)
+  } catch {
+    return false
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+  if (parsed.origin !== origin) return false
+  return DEVLOOP_LOOPBACK_HOSTS.includes(parsed.hostname) || parsed.hostname.endsWith('.localhost')
 }
