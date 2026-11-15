@@ -140,12 +140,12 @@ describe('runFanout', () => {
 
   it('returns the fleet answers when the release throws synchronously (extension gone)', async () => {
     const h = harness()
-    const requestTool = h.deps.bridge.requestTool as unknown as ReturnType<typeof vi.fn>
+    const requestTool = h.deps.bridge.requestTool as unknown as ReturnType<typeof vi.fn<(...args: unknown[]) => unknown>>
     const original = requestTool.getMockImplementation()!
     // BridgeServer.requestTool throws (not rejects) when no extension is connected.
-    requestTool.mockImplementation((name: string, ...rest: unknown[]) => {
-      if (name === 'browser_fleet_release') throw new Error('no browser extension is connected to the bridge')
-      return original(name, ...rest)
+    requestTool.mockImplementation((...args: unknown[]) => {
+      if (args[0] === 'browser_fleet_release') throw new Error('no browser extension is connected to the bridge')
+      return original(...args)
     })
     const text = await runFanout(parent, { tasks, allowActions: false, closeTabs: true }, { signal }, h.deps, { toolTimeoutMs: 1000, provider: 'spawn' })
     expect(text).toMatch(/2 of 2 tasks completed/)

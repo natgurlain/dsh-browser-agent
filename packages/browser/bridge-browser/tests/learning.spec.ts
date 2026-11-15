@@ -297,9 +297,9 @@ describe('workflow schedules', () => {
     const workflow = validateWorkflow({ ...baseWorkflow(), params: [{ name: 'contact', default: 'Ada' }], steps: (baseWorkflow().steps as unknown[]).filter((_s, i) => i !== 2) })
     const stuck = await schedules.create('owned', workflow, { kind: 'every', every_seconds: 60 })
     await schedules.create('owned', workflow, { kind: 'every', every_seconds: 120 })
-    const edit = service.edit as ReturnType<typeof vi.fn>
+    const edit = service.edit as ReturnType<typeof vi.fn<(request: { id: string }) => Promise<unknown>>>
     const realEdit = edit.getMockImplementation()!
-    edit.mockImplementation(async (request: { id: string }) => {
+    edit.mockImplementation(async (request) => {
       if (request.id === stuck.id) throw new Error('host busy')
       return realEdit(request)
     })

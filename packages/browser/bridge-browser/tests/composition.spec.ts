@@ -19,7 +19,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
-import WebSocket from 'ws'
 import WebServer from '@deepseek-ai/dsh-host-webserver'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
@@ -37,14 +36,16 @@ import {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_TAINT_CLEAR_METHOD,
   BRIDGE_PATH,
-  BRIDGE_PROTOCOL_VERSION,
   PINNED_CHROME_EXTENSION_ID,
-  BridgeFrameChannel,
-  bridgeEndpointOfUrl,
-  computeBridgeProof,
-  createBridgeNonce,
   type BridgeFrame,
 } from '../src/protocol.ts'
+import {
+  openSocket,
+  sendFrame,
+  sendHello as sendHelloSupport,
+  waitFor as waitForSupport,
+  type TestSocket,
+} from './support/bridge-client.ts'
 import { BROWSER_CONTEXT_KIND } from '../src/browser-context.ts'
 
 const BRIDGE = '@natgurlain/dsh-bridge-browser'
@@ -199,6 +200,8 @@ async function loadComposition(options: { deferSessionCreate?: boolean } = {}): 
     // This spec drives the raw gateway chain (create → real session); the
     // deferred-creation behavior is covered by its focused wrapper spec.
     `    deferSessionCreate: ${String(options.deferSessionCreate ?? false)}`,
+    // Never bind the fixed discovery ports or advertise this test bridge to a real extension.
+    '    beacon: false',
     '',
   ].join('\n'))
 
@@ -239,67 +242,22 @@ async function loadComposition(options: { deferSessionCreate?: boolean } = {}): 
 /** Origin of the pinned (manifest-keyed) Chrome extension. */
 const EXT_ORIGIN = `chrome-extension://${PINNED_CHROME_EXTENSION_ID}`
 
-function connect(port: number): Promise<{
-  ws: WebSocket
-  frames: BridgeFrame[]
-  closed: Promise<{ code: number; reason: string }>
-}> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}${BRIDGE_PATH}`, { headers: { origin: EXT_ORIGIN } })
-    const frames: BridgeFrame[] = []
-    ws.on('message', (data) => {
-      const text = data.toString()
-      const channel = channels.get(ws)
-      const parsed = JSON.parse(text) as { t?: unknown }
-      if (channel !== undefined && parsed.t === 'sealed') {
-        const frame = channel.open(text)
-        if (frame === undefined) throw new Error('bridge sent a frame that does not verify')
-        frames.push(frame)
-        return
-      }
-      frames.push(parsed as BridgeFrame)
-    })
-    ws.on('error', reject)
-    ws.on('open', () => {
-      resolve({
-        ws,
-        frames,
-        closed: new Promise((doneResolve) => {
-          ws.on('close', (code, reason) => { doneResolve({ code, reason: reason.toString() }) })
-        }),
-      })
-    })
-  })
+/** Open a socket to the composed bridge as the pinned extension. */
+function connect(port: number): Promise<TestSocket> {
+  return openSocket(`ws://127.0.0.1:${String(port)}${BRIDGE_PATH}`, EXT_ORIGIN)
 }
 
-/** Frame channel each authenticated client derived in `sendHello`. */
-const channels = new WeakMap<WebSocket, BridgeFrameChannel>()
+const send = sendFrame
 
-function send(ws: WebSocket, frame: BridgeFrame): void {
-  const channel = channels.get(ws)
-  ws.send(channel === undefined ? JSON.stringify(frame) : channel.seal(frame))
-}
-
-async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
-  const start = Date.now()
-  while (!predicate()) {
-    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out')
-    await new Promise((resolve) => { setTimeout(resolve, 10) })
-  }
-}
+/** Composition boots are slower than a bare bridge. */
+const waitFor = (predicate: () => boolean, timeoutMs = 5_000): Promise<void> => waitForSupport(predicate, timeoutMs)
 
 /** Answer the bridge challenge with a proof of TOKEN, as the extension does. */
-async function sendHello(client: Awaited<ReturnType<typeof connect>>, caps: Record<string, unknown>): Promise<void> {
-  await waitFor(() => client.frames.some((f) => f.t === 'challenge'))
-  const challenge = client.frames.find((f) => f.t === 'challenge') as Extract<BridgeFrame, { t: 'challenge' }>
-  const nonce = createBridgeNonce()
-  const endpoint = bridgeEndpointOfUrl(client.ws.url)!
-  const mac = await computeBridgeProof(TOKEN, 'client', challenge.nonce, nonce, endpoint, { client: caps })
-  channels.set(client.ws, BridgeFrameChannel.derive(TOKEN, 'client', challenge.nonce, nonce, endpoint))
-  client.ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, mac, endpoint, caps }))
+async function sendHello(client: TestSocket, caps: Record<string, unknown>): Promise<void> {
+  await sendHelloSupport(client.ws, TOKEN, caps)
 }
 
-async function connectReady(port: number): Promise<Awaited<ReturnType<typeof connect>>> {
+async function connectReady(port: number): Promise<TestSocket> {
   const client = await connect(port)
   await sendHello(client, { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 })
   await Promise.race([
