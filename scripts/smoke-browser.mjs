@@ -1328,9 +1328,11 @@ try {
   await page.evaluate(() => { document.querySelector('#stock').textContent = 'Back in stock, at last.' })
   const standingWake = await waitFor(() => phase3State.wakes?.[wakesBefore], 'the watcher woke the session with no panel open', 60_000)
   assert.match(standingWake, new RegExp(`^\\[Page watcher ${standingWatchId} fired\\]`, 'u'))
-  const leaseAfterWake = (await currentWorker().evaluate(() => chrome.storage.session.get('dshRuntimeLease'))).dshRuntimeLease
-  assert.ok(leaseAfterWake.activeUntil < Date.now(), 'a watcher fire is not activity: the lease is still held by standing work alone')
-  results.push('with no panel open and the idle window passed, a live watcher reconnects the restarted worker headlessly and still wakes its session')
+  // That was the watcher's only fire: with it gone nothing holds the lease, so the connection is released.
+  await waitFor(async () => !(await connectedTools()) || undefined, 'connection released once the last watcher ended', 60_000)
+  const leaseAfterWake = (await currentWorker()?.evaluate(() => chrome.storage.session.get('dshRuntimeLease')))?.dshRuntimeLease
+  assert.equal(leaseAfterWake, undefined, 'no lease is left once standing work is gone')
+  results.push('with no panel open and the idle window passed, a live watcher reconnects the restarted worker headlessly and still wakes its session; the connection is released when the watcher ends')
   await writeFile(join(directory, 'results.json'), JSON.stringify(results, null, 2))
   await writeFile(join(directory, 'screenshots.json'), JSON.stringify(screenshots, null, 2))
   console.log(`Browser smoke passed: ${results.join('; ')}`)
