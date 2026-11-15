@@ -176,6 +176,9 @@ export function rpcValue(answer: unknown): unknown {
   return answer
 }
 
+/** Approval outcomes (audit `decision`) after which the user's page is never captured. */
+const NO_CAPTURE_DECISIONS: ReadonlySet<string> = new Set(['denied', 'timed-out', 'cancelled', 'unavailable'])
+
 /**
  * Classify a failed step for the flywheel; undefined means "do not capture".
  * A step the user denied or let time out is never captured: the user said no
@@ -184,9 +187,12 @@ export function rpcValue(answer: unknown): unknown {
 export function classifyFailure(answer: ToolAnswer, decision: string | undefined, policy: string | undefined, retried: boolean): 'not-found' | 'guard' | 'retried' | 'error' | undefined {
   if (answer.ok) return undefined
   if (policy === 'blocked' || decision === 'held-expired') return undefined
+  // The approval outcome is the fact; the message patterns below only add
+  // cases that reach here without one (they can only skip a capture).
+  if (decision !== undefined && NO_CAPTURE_DECISIONS.has(decision)) return undefined
   const message = answer.error?.message ?? ''
   if (/cancelled|kill switch|stopped/iu.test(message)) return undefined
-  if (decision === 'denied' || decision === 'timed-out' || answer.error?.code === 'timeout' || /denied|declined|not approved|timed out/iu.test(message)) return undefined
+  if (answer.error?.code === 'timeout' || /denied|declined|not approved|timed out/iu.test(message)) return undefined
   if (retried) return 'retried'
   if (/does not exist|no element matched|not found|no .*matching/iu.test(message)) return 'not-found'
   if (/covered by|changed|guard|strict mode|refused/iu.test(message)) return 'guard'

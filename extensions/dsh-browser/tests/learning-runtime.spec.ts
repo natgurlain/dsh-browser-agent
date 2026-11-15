@@ -207,6 +207,9 @@ describe('learning runtime', () => {
     expect(classifyFailure(fail('boom'), undefined, undefined, true)).toBe('retried')
     expect(classifyFailure(fail('blocked'), undefined, 'blocked', false)).toBeUndefined()
     expect(classifyFailure(fail('Tool call was cancelled'), undefined, undefined, false)).toBeUndefined()
+    // The approval outcome decides even when the message says nothing about it (M3).
+    for (const decision of ['denied', 'timed-out', 'cancelled', 'unavailable']) expect(classifyFailure(fail('No element matched selector: #x'), decision, undefined, false)).toBeUndefined()
+    expect(classifyFailure(fail('No element matched selector: #x'), 'allowed', undefined, false)).toBe('not-found')
     expect(normalizeLearningSettings({ siteDriverOrigins: ['https://a.example/path', 'nope'] }).siteDriverOrigins).toEqual(['https://a.example'])
     expect(rpcValue({ type: 'server-response', result: { ok: true, value: 3 } })).toBe(3)
   })

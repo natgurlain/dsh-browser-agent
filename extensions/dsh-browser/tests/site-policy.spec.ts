@@ -170,6 +170,11 @@ describe('evaluateCallPolicy', () => {
     const taint: TaintRecord = { sources: ['https://news.example'], firstTool: 'browser_snapshot', since: 0 }
     const typed = evaluateCallPolicy({ name: 'browser_type', args: { text: 'secret' }, targets: targets({ acts: ['https://mail.example'], typeTargetOrigin: 'https://mail.example' }), site, taint })
     expect(typed.kind).toBe('force')
+    // Why it is forced travels as data (the audit log reads it), not only as prose (M3).
+    expect(ask).toMatchObject({ causes: ['site-ask'] })
+    expect(typed).toMatchObject({ causes: ['taint'] })
+    const both = evaluateCallPolicy({ name: 'browser_type', args: { text: 'secret' }, targets: targets({ acts: ['https://ask.example'], typeTargetOrigin: 'https://ask.example' }), site, taint })
+    expect(both).toMatchObject({ kind: 'force', causes: ['site-ask', 'taint'] })
   })
 
   it('applies managed switches and the pinned origin allowlist', () => {

@@ -62,11 +62,17 @@ export interface CallPolicyInput {
   devTools?: boolean
 }
 
+/** What forced a fresh decision: a site `ask` rule, or session taint. */
+export type ForceCause = 'site-ask' | 'taint'
+
 export type CallPolicyDecision =
   /** Refuse without asking. */
   | { kind: 'deny'; message: string }
-  /** Ask, every time; no setting or grant covers it. */
-  | { kind: 'force'; reasons: string[] }
+  /**
+   * Ask, every time; no setting or grant covers it. `reasons` is shown on the
+   * card; `causes` says which rules forced it (audit log), in the same order.
+   */
+  | { kind: 'force'; reasons: string[]; causes?: ForceCause[] }
   /** Every origin involved is trusted by site policy: no prompt needed. */
   | { kind: 'trust' }
   /** The ordinary approval flow decides. */
@@ -137,8 +143,11 @@ export function evaluateCallPolicy(input: CallPolicyInput): CallPolicyDecision {
   }
   // Path-scoped rules (github.com/settings) need the full URL, not the origin.
   const destinationVerdict = destination === undefined ? undefined : resolveSiteRule(destination, input.site)
+  const involvedVerdict = (origin: string): SiteVerdict | undefined => (
+    origin === destinationOrigin && destinationVerdict !== undefined ? destinationVerdict : verdictFor(origin)
+  )
   for (const origin of involved) {
-    const verdict = origin === destinationOrigin && destinationVerdict !== undefined ? destinationVerdict : verdictFor(origin)
+    const verdict = involvedVerdict(origin)
     if (verdict?.rule === 'blocked') {
       return { kind: 'deny', message: `${origin} is blocked by ${describe(verdict)}: the agent may not read, change, or open it. ${SETTINGS_HINT}` }
     }
@@ -149,19 +158,20 @@ export function evaluateCallPolicy(input: CallPolicyInput): CallPolicyDecision {
       return { kind: 'deny', message: `${origin} is read-only by ${describe(verdict)}: the agent may read it but not click, type, or otherwise change it. ${SETTINGS_HINT}` }
     }
   }
+  const causes: ForceCause[] = []
   for (const origin of involved) {
-    const verdict = origin === destinationOrigin && destinationVerdict !== undefined ? destinationVerdict : verdictFor(origin)
+    const verdict = involvedVerdict(origin)
     if (verdict?.rule === 'ask') reasons.push(`Site policy asks before every agent call on ${origin} (${describe(verdict)}).`)
   }
-  reasons.push(...taintForcedReasons({
+  if (reasons.length > 0) causes.push('site-ask')
+  const tainted = taintForcedReasons({
     name: input.name,
     args: input.args,
     ...input.targets.typeTargetOrigin === undefined ? {} : { targetOrigin: input.targets.typeTargetOrigin },
-  }, input.taint))
-  if (reasons.length > 0) return { kind: 'force', reasons }
-  if (involved.length > 0 && involved.every((origin) => {
-    const verdict = origin === destinationOrigin && destinationVerdict !== undefined ? destinationVerdict : verdictFor(origin)
-    return verdict?.rule === 'trusted'
-  })) return { kind: 'trust' }
+  }, input.taint)
+  if (tainted.length > 0) causes.push('taint')
+  reasons.push(...tainted)
+  if (reasons.length > 0) return { kind: 'force', reasons, causes }
+  if (involved.length > 0 && involved.every((origin) => involvedVerdict(origin)?.rule === 'trusted')) return { kind: 'trust' }
   return { kind: 'default' }
 }

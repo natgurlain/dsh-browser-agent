@@ -558,12 +558,16 @@ chrome.tabs.onCreated?.addListener((tab) => {
 
 /** Run one agent call with the tab's commit gate armed and the agent turn marked. */
 async function withCommitGate(
+  activeCall: ActiveToolCall,
   target: { id?: number; url?: string; windowId?: number },
   sessionId: string | undefined,
   run: () => Promise<ToolAnswer>,
 ): Promise<ToolAnswer> {
   const refused = await prepareCommitGate(target, sessionId)
-  if (refused !== undefined) return refused
+  if (refused !== undefined) {
+    activeCall.strict = 'refused'
+    return refused
+  }
   if (target.id === undefined) return run()
   const tabId = target.id
   commitGate.callStarted(tabId, sessionId !== undefined)
@@ -2436,7 +2440,7 @@ function routeToolCall(call: ToolCall): void {
     : isTabManagementTool(call.name)
     ? managementDispatch()
     : isDevToolsTool(call.name)
-    ? dispatchDevToolsTool(call, controller.signal)
+    ? dispatchDevToolsTool(call, activeCall, controller.signal)
     : call.name === 'browser_watch' || call.name === 'browser_watches'
     ? pageWatchers.dispatch(call, {
         resolveTab: (sessionId) => resolveToolTab(sessionId),
@@ -2470,7 +2474,7 @@ function routeToolCall(call: ToolCall): void {
     : call.name === 'browser_site_driver'
     ? resolveToolTab(call.sessionId).then((target) => 'ok' in target
       ? target
-      : (policyTabOrigin = originFromUrl(target.url ?? ''), withCommitGate(target, call.sessionId, () => learning.dispatchSiteDriver(
+      : (policyTabOrigin = originFromUrl(target.url ?? ''), withCommitGate(activeCall, target, call.sessionId, () => learning.dispatchSiteDriver(
           call,
           noteCallTarget(activeCall, target, call.sessionId),
           policy,
@@ -2479,7 +2483,7 @@ function routeToolCall(call: ToolCall): void {
         ))))
     : resolveToolTab(call.sessionId).then((target) => 'ok' in target
       ? target
-      : (policyTabOrigin = originFromUrl(target.url ?? ''), withCommitGate(target, call.sessionId, () => dispatchToolCall(
+      : (policyTabOrigin = originFromUrl(target.url ?? ''), withCommitGate(activeCall, target, call.sessionId, () => dispatchToolCall(
           call,
           sharePageContent,
           budget,
@@ -2522,12 +2526,12 @@ function routeToolCall(call: ToolCall): void {
         if (activeToolCalls.get(call.id) !== activeCall) return
         const socket = bridge
         if (socket === null) return
-        recordAuditNote(call, activeCall, answer, navigatedTo)
+        recordAuditNote(call, activeCall, navigatedTo)
         socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
       } else {
         const socket = bridge
         if (socket === null) return
-        recordAuditNote(call, activeCall, answer)
+        recordAuditNote(call, activeCall)
         socket.send({ t: 'tool.result', id: call.id, ok: false, error: answer.error! })
       }
     },
@@ -2654,8 +2658,9 @@ function auditedPolicy(activeCall: ActiveToolCall, hook: CallPolicyHook): CallPo
       activeCall.policy = 'blocked'
       activeCall.policyReason = decision.message
     } else if (decision.kind === 'force') {
-      // Site "ask" rules phrase their reason this way; every other forced reason is taint.
-      activeCall.policy = decision.reasons.some((reason) => !reason.startsWith('Site policy asks')) ? 'tainted' : 'site-ask'
+      // Only a site "ask" rule is "site-ask"; any taint (or an unattributed force) is "tainted".
+      const causes = decision.causes ?? []
+      activeCall.policy = causes.length > 0 && causes.every((cause) => cause === 'site-ask') ? 'site-ask' : 'tainted'
       activeCall.policyReason = decision.reasons.join(' ')
     } else if (decision.kind === 'trust') {
       activeCall.policy = 'site-trusted'
@@ -2675,10 +2680,10 @@ async function navigationAfter(call: ToolCall, activeCall: ActiveToolCall): Prom
 }
 
 /** Annotate the bridge's audit entry for this call; sent ahead of its tool.result. */
-function recordAuditNote(call: ToolCall, activeCall: ActiveToolCall, answer: ToolAnswer, navigatedTo?: string): void {
+function recordAuditNote(call: ToolCall, activeCall: ActiveToolCall, navigatedTo?: string): void {
   if (rpc === null || bridge?.connected !== true) return
-  const decision = activeCall.decision ?? (isDevToolsTool(call.name) ? undefined : 'not-required')
-  const strict = activeCall.strict ?? (!answer.ok && /^Strict mode/u.test(answer.error?.message ?? '') ? 'refused' : undefined)
+  const decision = activeCall.decision ?? 'not-required'
+  const strict = activeCall.strict
   void rpc.request(BRIDGE_AUDIT_RECORD_METHOD, {
     callId: call.id,
     ...(decision === undefined ? {} : { decision }),
@@ -2702,23 +2707,25 @@ function cancelToolCall(id: string): void {
  * controller. Devtools calls take a dedicated path because they never touch the
  * content script and must not be satisfied by the page-sharing relaxations.
  */
-async function dispatchDevToolsTool(call: ToolCall, signal: AbortSignal): Promise<ToolAnswer> {
+async function dispatchDevToolsTool(call: ToolCall, activeCall: ActiveToolCall, signal: AbortSignal): Promise<ToolAnswer> {
   if (signal.aborted) return devToolsCancelled()
   const target = await resolveToolTab(call.sessionId)
   if ('ok' in target) return target
-  const activeCall = activeToolCalls.get(call.id)
-  if (activeCall !== undefined) activeCall.tabId = target.id
+  noteCallTarget(activeCall, target, call.sessionId)
   if (signal.aborted) return devToolsCancelled()
   const frames = await listTabFrames(target.id!, target.url)
   await policyRuntime.ready
-  const decision = policyRuntime.evaluate(call, callPolicyTargets(call, frames), false)
+  const policy = auditedPolicy(activeCall, (policyCall, targets) => policyRuntime.evaluate(policyCall, targets, false))
+  const decision = policy(call, callPolicyTargets(call, frames))
   if (decision.kind === 'deny') return { ok: false, error: { code: 'action-failed', message: decision.message } }
   // Devtools keep their own consent surface: site trust never skips it, but
   // an ask site or a taint rule makes every call ask.
   const prompt = decision.kind === 'force'
     ? forcedApprovalPrompt(call, frames, decision.reasons)
     : devToolsApprovalForCall(call, frames)
-  const authorization = await authorizeToolCall(prompt, signal, target.windowId ?? 0, call.sessionId, undefined, target.id, call.id)
+  const authorization = await auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(
+    shown, signal, target.windowId ?? 0, call.sessionId, undefined, target.id, call.id, onPrompt,
+  ))(prompt)
   if (signal.aborted) return devToolsCancelled()
   if (authorization !== 'approved') {
     return {
@@ -2746,7 +2753,7 @@ async function dispatchDevToolsTool(call: ToolCall, signal: AbortSignal): Promis
       }
     }
     // Page JavaScript can send requests too: strict mode guards devtools calls.
-    return await withCommitGate(target, call.sessionId, async () => ({
+    return await withCommitGate(activeCall, target, call.sessionId, async () => ({
       ok: true,
       result: await devTools.handle(call.name, call.args, call.sessionId, validate),
     }))

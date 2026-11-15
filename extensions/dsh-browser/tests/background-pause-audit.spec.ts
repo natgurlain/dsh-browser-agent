@@ -213,6 +213,14 @@ describe('audit notes and the pause gate', () => {
     expect(env.tabMessages.some(({ message }) => message.op === 'point' || message.action === 'browser_click')).toBe(false)
   })
 
+  it('audits developer-tools calls like every other route: policy outcome and page URL (M4)', async () => {
+    const env = await boot({ siteRules: [{ pattern: 'https://example.com', rule: 'blocked' }] })
+    env.socket.receive({ t: 'tool.call', id: 'eval', name: 'browser_console_eval', args: { expression: '1' }, expiresAt: Date.now() + 10_000, sessionId: 'session-live' })
+    await vi.waitFor(() => { expect(env.sent()).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'eval', ok: false })) })
+    expect(env.sent().find((frame) => frame.method === BRIDGE_AUDIT_RECORD_METHOD && frame.payload?.callId === 'eval')!.payload)
+      .toMatchObject({ policy: 'blocked', url: 'https://example.com/start', decision: 'not-required' })
+  })
+
   it('points at the target before a click and fires the kill switch from the page pill', async () => {
     const env = await boot()
     env.socket.receive({ t: 'tool.call', id: 'c', name: 'browser_click', args: { selector: 'h1' }, expiresAt: Date.now() + 10_000, sessionId: 'session-live' })
