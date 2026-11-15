@@ -181,3 +181,19 @@ export function cssEscape(value: string): string {
   if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value)
   return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`)
 }
+
+/**
+ * Elements an id-list attribute points at (`aria-controls`,
+ * `aria-describedby`, ...), resolved in the element's own tree first and then
+ * in the document.
+ * @param el - the referencing element.
+ * @param attributes - id-list attributes, read in order.
+ * @returns the referenced elements that exist.
+ */
+export function referencedElements(el: Element, ...attributes: string[]): HTMLElement[] {
+  const ids = attributes.flatMap((attribute) => (el.getAttribute(attribute) ?? '').split(/\s+/)).filter((id) => id !== '')
+  const root = el.getRootNode() as Document | ShadowRoot
+  return ids
+    .map((id) => ('getElementById' in root ? root.getElementById(id) : null) ?? document.getElementById(id))
+    .filter((found): found is HTMLElement => found !== null)
+}

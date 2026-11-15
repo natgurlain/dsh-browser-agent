@@ -55,7 +55,8 @@ function isCheckable(el: Element): el is HTMLInputElement {
 }
 
 /** Whether an element itself renders a box (no opacity exemption). */
-function rendersBox(el: Element): boolean {
+/** Whether an element draws a box: not display:none / hidden / transparent, and non-empty. */
+export function rendersBox(el: Element): boolean {
   const style = getComputedStyle(el)
   if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false
   const rect = el.getBoundingClientRect()

@@ -11,7 +11,7 @@
  * @module
  */
 
-import { querySelectorAllDeep } from './dom.ts'
+import { querySelectorAllDeep, referencedElements } from './dom.ts'
 import { accessibleName, clean, isVisible } from './extract.ts'
 
 /** What the caller wants selected. Exactly one of the forms is used. */
@@ -165,22 +165,13 @@ function optionChoices(listbox: Element): Choice[] {
     }))
 }
 
-/** Elements referenced by an id-list attribute, resolved in the element's tree and the document. */
-function referenced(el: Element, attribute: string): Element[] {
-  const ids = (el.getAttribute(attribute) ?? '').split(/\s+/).filter((id) => id !== '')
-  const root = el.getRootNode() as Document | ShadowRoot
-  return ids
-    .map((id) => ('getElementById' in root ? root.getElementById(id) : null) ?? document.getElementById(id))
-    .filter((found): found is HTMLElement => found !== null)
-}
-
 function visibleListboxes(): Element[] {
   return querySelectorAllDeep(document, '[role="listbox"]').filter(isVisible)
 }
 
 /** The popup a combobox controls: its referenced listbox, else a newly shown one. */
 function popupFor(combobox: Element, before: Set<Element>): Element | undefined {
-  for (const ref of [...referenced(combobox, 'aria-controls'), ...referenced(combobox, 'aria-owns')]) {
+  for (const ref of [...referencedElements(combobox, 'aria-controls'), ...referencedElements(combobox, 'aria-owns')]) {
     if (ref.getAttribute('role') === 'listbox') return ref
     const inner = querySelectorAllDeep(ref, '[role="listbox"]')[0]
     if (inner !== undefined) return inner

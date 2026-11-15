@@ -13,7 +13,7 @@
  */
 
 import { cssEscape, querySelectorAllDeep, resolveSelectorAll, SHADOW_PIERCE } from './dom.ts'
-import { accessibleName, isVisible } from './extract.ts'
+import { accessibleName, isVisible, rendersBox } from './extract.ts'
 
 /** One locator request as supplied by the model. */
 export interface LocatorQuery {
@@ -100,7 +100,7 @@ const INVENTORY_ROLES: Record<string, (el: Element) => boolean> = {
 /** Whether an element has a role, by its ARIA name or the inventory's name. */
 export function roleMatches(el: Element, wanted: string): boolean {
   if (roleOfElement(el) === wanted) return true
-  return INVENTORY_ROLES[wanted]?.(el) === true && (el.getAttribute('role') ?? '').trim() === ''
+  return Object.hasOwn(INVENTORY_ROLES, wanted) && INVENTORY_ROLES[wanted]!(el) && (el.getAttribute('role') ?? '').trim() === ''
 }
 
 /** Whether an element can take keyboard focus, even when it has no size (editor proxies). */
@@ -129,11 +129,7 @@ export function isEditableElement(el: Element): boolean {
  */
 function isRendered(el: Element): boolean {
   // Hidden-but-operable form controls (custom checkboxes) count as rendered.
-  if (el instanceof HTMLElement && isVisible(el)) return true
-  const style = getComputedStyle(el)
-  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false
-  const rect = el.getBoundingClientRect()
-  return rect.width > 0 && rect.height > 0
+  return (el instanceof HTMLElement && isVisible(el)) || rendersBox(el)
 }
 
 /** Escape an identifier for a CSS selector. */

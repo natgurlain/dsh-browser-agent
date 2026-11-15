@@ -45,6 +45,9 @@ describe('findElements role vocabulary', () => {
     // ARIA names keep working, including textbox for a number field as before.
     expect(ids('textbox')).toEqual(expect.arrayContaining(['q', 'n', 't']))
     expect(ids('combobox')).toEqual(['s'])
+    // A model-chosen role never reaches the prototype.
+    expect(ids('__proto__')).toEqual([])
+    expect(ids('constructor')).toEqual([])
   })
 })
 

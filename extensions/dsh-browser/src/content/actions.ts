@@ -13,7 +13,7 @@
  * @module
  */
 
-import { composedParent, deepActiveElement, querySelectorAllDeep, resolveSelector, resolveSelectorAll } from './dom.ts'
+import { composedParent, deepActiveElement, querySelectorAllDeep, referencedElements, resolveSelector, resolveSelectorAll } from './dom.ts'
 import { accessibleName, collectInteractive, isVisible, pageText } from './extract.ts'
 import { findElements, LocatorError, parseLocatorQuery, renderFound, roleOfElement } from './find.ts'
 import type { ElementIds } from './ids.ts'
@@ -1176,12 +1176,7 @@ function beginVerification(): VerificationProbe {
 
 /** The error text a field points at (aria-errormessage / aria-describedby). */
 function fieldErrorText(field: Element): string {
-  const root = field.getRootNode() as Document | ShadowRoot
-  const ids = `${field.getAttribute('aria-errormessage') ?? ''} ${field.getAttribute('aria-describedby') ?? ''}`
-    .split(/\s+/).filter((id) => id !== '')
-  return ids
-    .map((id) => ('getElementById' in root ? root.getElementById(id) : null) ?? document.getElementById(id))
-    .filter((el): el is HTMLElement => el !== null)
+  return referencedElements(field, 'aria-errormessage', 'aria-describedby')
     .map((el) => pageText(el))
     .filter((text) => text !== '')
     .join(' ')
