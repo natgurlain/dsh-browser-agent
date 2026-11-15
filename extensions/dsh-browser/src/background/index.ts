@@ -171,6 +171,7 @@ import {
   isDevToolsTool,
   resolveApprovalGate,
 } from './authorization.ts'
+import { nextDevToolsAllowance, readDevToolsAllowance } from './devtools-allowance.ts'
 import { DevToolsGrants } from './devtools-grants.ts'
 import { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD, PolicyRuntime } from './policy-runtime.ts'
 import { splitSelectionMessage } from '../panel/selection.ts'
@@ -205,6 +206,11 @@ export interface Settings {
    * raises its own approval prompt, and the origin allowlist never covers it.
    */
   allowDevTools: boolean
+  /**
+   * When the developer-tools allowance ends (epoch ms; 0 while off). Set by
+   * the worker when the setting is turned on, see devtools-allowance.ts.
+   */
+  allowDevToolsUntil: number
   /** Origins whose state-changing actions may run without another prompt. */
   trustedActionOrigins: string[]
   /** Show an OS notification when no side panel can display an approval. */
@@ -250,6 +256,7 @@ const SETTINGS_DEFAULTS: Settings = {
   sharePageContent: 'auto',
   unrestrictedBrowserAccess: false,
   allowDevTools: false,
+  allowDevToolsUntil: 0,
   trustedActionOrigins: [],
   approvalNotifications: true,
   catchPageDialogs: false,
@@ -822,6 +829,10 @@ async function loadSettings(): Promise<Settings> {
   // value, the new fields take their defaults in normalizeSettings, and the
   // built-in read-only rules now apply, also under unrestricted access. The
   // next settings save records settingsVersion 2.
+  // An allowance that ran out (or predates the time limit) is written back as
+  // off, so nothing reading storage later takes it for a live choice.
+  if (raw?.allowDevTools === true
+    && !readDevToolsAllowance(raw.allowDevTools, raw.allowDevToolsUntil, Date.now()).allowDevTools) migrate = true
   if (migrate) await chrome.storage.local.set({ [STORAGE_KEY]: loaded })
   return loaded
 }
@@ -829,9 +840,16 @@ async function loadSettings(): Promise<Settings> {
 async function persistSettings(next: Partial<Settings>): Promise<void> {
   const changesUnrestrictedAccess = typeof next.unrestrictedBrowserAccess === 'boolean'
   const accessRevision = changesUnrestrictedAccess ? ++unrestrictedAccessRevision : unrestrictedAccessRevision
-  const updated = normalizeSettings({ ...settings, ...next })
+  const updated = normalizeSettings({
+    ...settings,
+    ...next,
+    // The worker alone decides when the allowance ends; a save can only turn
+    // it on (opening a window) or off.
+    ...nextDevToolsAllowance(settings, typeof next.allowDevTools === 'boolean' ? next.allowDevTools : undefined, Date.now()),
+  })
   const revokesUnrestrictedAccess = settings.unrestrictedBrowserAccess && !updated.unrestrictedBrowserAccess
-  const changesDevTools = typeof next.allowDevTools === 'boolean'
+  // An allowance that ran out during an unrelated save is a change too.
+  const changesDevTools = typeof next.allowDevTools === 'boolean' || settings.allowDevTools !== updated.allowDevTools
   const revokesDevTools = changesDevTools && (settings.allowDevTools || devToolsGrants.hasAny()) && !updated.allowDevTools
   const togglesOverlay = settings.showAgentOverlay !== updated.showAgentOverlay
   const togglesWatchers = settings.allowPageWatchers !== updated.allowPageWatchers
@@ -885,6 +903,29 @@ async function persistSettings(next: Partial<Settings>): Promise<void> {
     }
     broadcastDevToolsState()
   }
+  armDevToolsExpiry()
+}
+
+/** Alarm that ends the developer-tools allowance when its window closes. */
+const DEVTOOLS_EXPIRY_ALARM = 'dsh-devtools-allowance'
+
+/** Schedule (or cancel) the end of the developer-tools allowance. */
+function armDevToolsExpiry(): void {
+  if (settings.allowDevTools) {
+    chrome.alarms.create(DEVTOOLS_EXPIRY_ALARM, { when: settings.allowDevToolsUntil })
+    return
+  }
+  void Promise.resolve(chrome.alarms.clear(DEVTOOLS_EXPIRY_ALARM)).catch(() => {})
+}
+
+/**
+ * Turn the developer-tools allowance off once its window has closed. This is
+ * a revocation like the user's own: grants are dropped, in-flight devtools
+ * calls are cancelled and the debugger is detached.
+ */
+function expireDevToolsAllowance(): void {
+  if (!settingsLoaded || !settings.allowDevTools || settings.allowDevToolsUntil > Date.now()) return
+  void persistSettings({ allowDevTools: false }).catch(() => {})
 }
 
 function normalizeUserSettings(candidate: Settings): Settings {
@@ -894,13 +935,15 @@ function normalizeUserSettings(candidate: Settings): Settings {
   const sharePageContent = candidate.sharePageContent === 'auto' || candidate.sharePageContent === 'off'
     ? candidate.sharePageContent
     : candidate.sharePageContent === 'ask' ? 'ask' : 'auto'
+  const allowance = readDevToolsAllowance(candidate.allowDevTools, candidate.allowDevToolsUntil, Date.now())
+  // A browser without a debugger API can never use the developer tools.
+  const allowDevTools = allowance.allowDevTools && devToolsCapability
   return {
     ...candidate,
     sharePageContent,
     unrestrictedBrowserAccess: candidate.unrestrictedBrowserAccess === true,
-    // A browser without a debugger API can never use the developer tools, so
-    // the persisted choice is kept but the runtime path stays disabled.
-    allowDevTools: candidate.allowDevTools === true && devToolsCapability,
+    allowDevTools,
+    allowDevToolsUntil: allowDevTools ? allowance.allowDevToolsUntil : 0,
     trustedActionOrigins: trusted,
     approvalNotifications: candidate.approvalNotifications !== false,
     catchPageDialogs: candidate.catchPageDialogs === true && devToolsCapability,
@@ -959,6 +1002,7 @@ const settingsReady = policyRuntime.ready.then(() => loadSettings()).then((loade
   settings = loaded
   unrestrictedAccessActive = loaded.unrestrictedBrowserAccess
   settingsLoaded = true
+  armDevToolsExpiry()
 })
 
 /**
@@ -1338,7 +1382,7 @@ function postDevToolsState(port: chrome.runtime.Port): void {
     port.postMessage({
       type: 'devtools.status',
       supported: state.supported,
-      enabled: settingsLoaded && settings.allowDevTools,
+      enabled: devToolsAllowed(),
       attached: state.attached,
       ...(state.tabId === undefined ? {} : { tabId: state.tabId }),
       ...(state.error === undefined ? {} : { error: state.error }),
@@ -1419,7 +1463,12 @@ function unrestrictedAccessEnabled(): boolean {
  * reports only the persisted setting.
  */
 function devToolsAllowed(): boolean {
-  return settingsLoaded && settings.allowDevTools
+  if (!settingsLoaded || !settings.allowDevTools) return false
+  if (settings.allowDevToolsUntil > Date.now()) return true
+  // The window closed before its alarm ran (a sleeping machine, a throttled
+  // alarm): refuse now and run the revocation.
+  expireDevToolsAllowance()
+  return false
 }
 
 /** Page selections are captured only in a window with an open panel. */
@@ -3874,6 +3923,10 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 // ---- Keepalive ----
 
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === DEVTOOLS_EXPIRY_ALARM) {
+    void settingsReady.then(expireDevToolsAllowance)
+    return
+  }
   if (alarm.name !== BRIDGE_KEEPALIVE_ALARM) return
   void runtimeRestored.then(onKeepaliveAlarm)
 })

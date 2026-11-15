@@ -14,6 +14,7 @@ import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts
 import { isExternalSessionId } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeFailure, BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
+import { readDevToolsAllowance } from '../background/devtools-allowance.ts'
 import { SitePolicySettings } from './SitePolicySettings.tsx'
 import { DevLoopSettings } from './DevLoopSettings.tsx'
 import { TaintBanner } from './TaintBanner.tsx'
@@ -1099,7 +1100,8 @@ export function App(): React.JSX.Element {
         token: raw?.token ?? '',
         sharePageContent: raw?.sharePageContent ?? 'auto',
         unrestrictedBrowserAccess: raw?.unrestrictedBrowserAccess ?? false,
-        allowDevTools: raw?.allowDevTools ?? false,
+        // Shown as on only while its time window is open (devtools-allowance.ts).
+        ...readDevToolsAllowance(raw?.allowDevTools, raw?.allowDevToolsUntil, Date.now()),
         trustedActionOrigins: raw?.trustedActionOrigins ?? [],
         approvalNotifications: raw?.approvalNotifications ?? true,
         catchPageDialogs: raw?.catchPageDialogs ?? false,
@@ -1119,6 +1121,16 @@ export function App(): React.JSX.Element {
   // attachment and reports every change here.
   const [devToolsStatus, setDevToolsStatus] = useState<DevToolsStatus | null>(null)
   useEffect(() => api.onDevToolsStatus(setDevToolsStatus), [api])
+  // When the allowance ends in the worker (its time ran out, or policy turned
+  // it off), untick the form too: saving a stale tick would turn it back on.
+  const devToolsWasEnabled = useRef(false)
+  useEffect(() => {
+    const enabled = devToolsStatus?.enabled === true
+    if (devToolsWasEnabled.current && !enabled) {
+      setSettings((current) => current === null || !current.allowDevTools ? current : { ...current, allowDevTools: false })
+    }
+    devToolsWasEnabled.current = enabled
+  }, [devToolsStatus])
   // Kill switch: the toolbar button and Ctrl+Shift+K stop the agent at once.
   const [killSwitchEngaged, setKillSwitchEngaged] = useState(false)
   useEffect(() => api.onKillSwitch(setKillSwitchEngaged), [api])
