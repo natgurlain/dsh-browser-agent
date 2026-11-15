@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { describeElement, probeRows, rowCells, sanitizedDom, sensitiveFieldCount, setWatching, pageTokens, siteDriverFetch } from '../src/content/learning.ts'
+import { describeElement, handleLearningMessage, probeRows, rowCells, sanitizedDom, sensitiveFieldCount, setWatching, pageTokens, siteDriverFetch } from '../src/content/learning.ts'
+import { ElementIds } from '../src/content/ids.ts'
 import { buildDriverRequest, validateSiteDriver } from '@natgurlain/dsh-bridge-browser/src/learning/site-drivers.ts'
 
 beforeEach(() => {
@@ -82,5 +83,66 @@ describe('learning content helpers', () => {
     expect(init.redirect).toBe('error')
     expect(String(init.body)).not.toMatch(/SECRET|meta-token/)
     vi.unstubAllGlobals()
+  })
+})
+
+describe('handleLearningMessage', () => {
+  const ids = new ElementIds()
+  const handle = (message: Record<string, unknown>): { sync: boolean | undefined; responses: unknown[] } => {
+    const responses: unknown[] = []
+    const sync = handleLearningMessage(message as { type?: string } & Record<string, unknown>, ids, (response) => { responses.push(response) })
+    return { sync, responses }
+  }
+
+  it('describes the focused element, or the selector target, and reports a missing target as a failure', () => {
+    ;(document.querySelector('#name') as HTMLInputElement).focus()
+    expect(handle({ type: 'DSH_LEARN_DESCRIBE' })).toEqual({ sync: false, responses: [{ ok: true, result: expect.objectContaining({ css: '#name', role: 'textbox' }) }] })
+    expect(handle({ type: 'DSH_LEARN_DESCRIBE', args: { selector: '#pw' } }).responses[0]).toMatchObject({ ok: true, result: { sensitive: true, password: true } })
+    expect(handle({ type: 'DSH_LEARN_DESCRIBE', args: { selector: '#gone' } }).responses[0]).toMatchObject({ ok: false, error: { code: 'action-failed' } })
+  })
+
+  it('answers token and fixture requests; a probe carries no HTML', () => {
+    ;(document.querySelector('#pw') as HTMLInputElement).value = 'hunter2'
+    expect(handle({ type: 'DSH_LEARN_TOKENS' }).responses[0]).toMatchObject({ ok: true, result: { metas: [{ name: 'csrf-token', value: 'meta-token-1234' }], filledSensitive: 1 } })
+    expect(handle({ type: 'DSH_LEARN_FIXTURE', probe: true }).responses[0]).toEqual({ ok: true, result: { sensitiveCount: 1 } })
+    const full = handle({ type: 'DSH_LEARN_FIXTURE' }).responses[0] as { ok: boolean; result: { html: string; sensitiveCount: number } }
+    expect(full.ok).toBe(true)
+    expect(full.result.html).toContain('dsh-browser fixture')
+    expect(full.result.html).not.toContain('hunter2')
+  })
+
+  it('arms and disarms Watch me, and probes only well-formed selector sets', () => {
+    const add = vi.spyOn(document, 'addEventListener')
+    const remove = vi.spyOn(document, 'removeEventListener')
+    expect(handle({ type: 'DSH_WATCH', enabled: true })).toEqual({ sync: false, responses: [{ ok: true }] })
+    expect(add).toHaveBeenCalledWith('click', expect.any(Function), true)
+    handle({ type: 'DSH_WATCH', enabled: false })
+    expect(remove).toHaveBeenCalledWith('click', expect.any(Function), true)
+    add.mockRestore()
+    remove.mockRestore()
+    const probe = handle({ type: 'DSH_WATCH_PROBE', selectors: [['#people > tbody > tr:nth-child(2) > td:nth-child(4) > button'], 'junk', [1]] })
+    expect(probe.responses[0]).toEqual({ ok: true, result: { rows: [['2', 'Grace', '', 'Invite']] } })
+  })
+
+  it('runs a site-driver fetch asynchronously and refuses another origin', async () => {
+    const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const responses: unknown[] = []
+    const sync = handleLearningMessage({ type: 'DSH_SITE_DRIVER_FETCH', request: { method: 'GET', url: 'https://elsewhere.example/api', headers: {}, tokenHeaders: [] } }, ids, (response) => { responses.push(response) })
+    expect(sync).toBe(true)
+    await vi.waitFor(() => { expect(responses).toHaveLength(1) })
+    expect(responses[0]).toMatchObject({ ok: false, error: { message: expect.stringMatching(/own origin/u) } })
+    expect(fetchMock).not.toHaveBeenCalled()
+    // A response that ended up on another origin is refused too.
+    vi.stubGlobal('fetch', vi.fn(async () => ({ url: 'https://elsewhere.example/landing', status: 200, ok: true, headers: new Headers(), text: async () => 'secret' })))
+    const redirected: unknown[] = []
+    handleLearningMessage({ type: 'DSH_SITE_DRIVER_FETCH', request: { method: 'GET', url: `${location.origin}/api`, headers: {}, tokenHeaders: [] } }, ids, (response) => { redirected.push(response) })
+    await vi.waitFor(() => { expect(redirected).toHaveLength(1) })
+    expect(redirected[0]).toMatchObject({ ok: false, error: { message: expect.stringMatching(/redirected to another origin/u) } })
+    vi.unstubAllGlobals()
+  })
+
+  it('leaves other messages alone', () => {
+    expect(handle({ type: 'DSH_ACTION' })).toEqual({ sync: undefined, responses: [] })
   })
 })

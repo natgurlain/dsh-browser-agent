@@ -71,7 +71,18 @@ describe('AgentOverlay (content)', () => {
       expect(done).toBe(false)
       await vi.advanceTimersByTimeAsync(400)
       expect(done).toBe(true)
+      overlay.dispose()
+
+      // Reduced motion: the same point resolves without waiting for the glide.
+      Object.defineProperty(window, 'matchMedia', { configurable: true, value: (query: string) => ({ matches: query.includes('reduce') }) })
+      const still = new AgentOverlay({ killSwitch: vi.fn(), resume: vi.fn() })
+      let instant = false
+      void still.point('hover', [document.querySelector('#go')!], '#2').then(() => { instant = true })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(instant).toBe(true)
+      still.dispose()
     } finally {
+      Reflect.deleteProperty(window, 'matchMedia')
       vi.useRealTimers()
     }
   })
