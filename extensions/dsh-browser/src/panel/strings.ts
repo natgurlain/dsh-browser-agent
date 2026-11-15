@@ -8,7 +8,31 @@ export interface PanelCopy {
   /** Status shown when the startup pass found no local dsh at all. */
   statusNotFound: string
   /** Specific refusals reported by the bridge (shown instead of the transport state). */
-  bridgeFailure: Record<'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy', string>
+  bridgeFailure: Record<'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy' | 'no-token' | 'token-unreadable', string>
+  /** One-step pairing with the DSH host (PairingCard). */
+  pairing: {
+    title: string
+    /** Lead shown when this install has no token yet. */
+    needed: string
+    /** What pairing is, shown before a request was made. */
+    help: string
+    start: string
+    retry: string
+    asking: string
+    codeLabel: string
+    /** The call to action under the code. */
+    enter: string
+    enterHelp: string
+    paired: string
+    /** For an install that already holds a token: the button, what it is for, and the confirmation. */
+    again: string
+    againHelp: string
+    againWarning: string
+    againConfirm: string
+    cancel: string
+    /** One message per `PairingFailure` of the background. */
+    failure: Record<'wrong-code' | 'expired' | 'replaced' | 'busy' | 'paused' | 'unreachable' | 'unsupported' | 'version-mismatch' | 'untrusted' | 'cancelled' | 'has-token' | 'auto-limit', string>
+  }
   approval: {
     eyebrow: string
     readTitle: string
@@ -536,10 +560,43 @@ const EN: PanelCopy = {
   },
   statusNotFound: 'No service found',
   bridgeFailure: {
-    'token-mismatch': 'Token mismatch or untrusted bridge: check the bridge token in Settings',
+    'token-mismatch': 'Token mismatch or untrusted bridge: check that DSH is running, or pair again in Settings',
     'version-mismatch': 'Version mismatch: update the dsh plugin and the extension together',
-    'origin-rejected': 'Unrecognized extension ID: add it to allowedChromeExtensionIds',
+    'origin-rejected': 'DSH refused this extension: check that DSH is running, or pair again in Settings',
     busy: 'Bridge busy, retrying…',
+    'no-token': 'Not paired with DSH yet',
+    'token-unreadable': 'The installed bridge token could not be read; retrying',
+  },
+  pairing: {
+    title: 'Pair with DSH',
+    needed: 'This browser is not connected to DSH yet.',
+    help: 'Connect this browser to the DSH on this computer. It shows a short code that you type into DSH once; there is no token to copy.',
+    start: 'Pair with DSH',
+    retry: 'Ask again',
+    asking: 'Asking DSH…',
+    codeLabel: 'Pairing code',
+    enter: 'Enter this code in DeepSeek Harness',
+    enterHelp: 'DeepSeek Harness now shows "A browser wants to connect". Type the code there and press Enter. The same field is under Settings → General → Pair a browser; in a terminal session, run /browser-pair followed by the code. Type the code only into DeepSeek Harness itself.',
+    paired: 'Paired. Connecting…',
+    again: 'Pair again…',
+    againHelp: 'This browser has been connected to DSH before. If it cannot connect, first check that DSH is running.',
+    againWarning: 'Pair again only if you reinstalled DSH or reset its bridge token. If you did neither, do not continue: check that DSH is running, because something else may be answering in its place.',
+    againConfirm: 'Pair again',
+    cancel: 'Cancel',
+    failure: {
+      'wrong-code': 'The code entered in DSH was not this one. A code works for one try: ask again for a new code.',
+      expired: 'No code was entered in time. Open DSH, then ask again.',
+      replaced: 'Another request took this one\'s place: something else on this computer is asking to pair. Ask again, and in DSH enter only the code shown here.',
+      'auto-limit': 'Pairing was asked several times without success. Check that DSH is open, then ask again.',
+      busy: 'DSH is receiving too many pairing requests. Wait a minute, then ask again.',
+      paused: 'Pairing is paused in DSH. Resume it there (Settings → General → Pair a browser, or /browser-pair resume), then ask again.',
+      unreachable: 'No DSH was found on this computer. Start DSH, then ask again.',
+      unsupported: 'This DSH browser plugin cannot pair (it is too old, or pairing is switched off). Update it, or paste the token instead.',
+      'version-mismatch': 'The DSH plugin and this extension are different versions. Update them together.',
+      untrusted: 'The other side did not prove that it was given this code, so nothing was saved. Check that DSH itself is running on this computer, then ask again.',
+      cancelled: 'Pairing was cancelled.',
+      'has-token': 'This browser already holds a DSH token. Use "Pair again…" in Settings only if you reinstalled DSH or reset its token.',
+    },
   },
   approval: {
     eyebrow: 'Security check',
@@ -1128,10 +1185,43 @@ const ZH: PanelCopy = {
   },
   statusNotFound: '未找到服务',
   bridgeFailure: {
-    'token-mismatch': '令牌不匹配或桥接不可信：请在设置中检查桥接令牌',
+    'token-mismatch': '令牌不匹配或桥接不可信：请确认 DSH 正在运行，或在设置中重新配对',
     'version-mismatch': '版本不匹配：请同时更新 dsh 插件和扩展',
-    'origin-rejected': '扩展 ID 未被允许：请将其加入 allowedChromeExtensionIds',
+    'origin-rejected': 'DSH 拒绝了此扩展：请确认 DSH 正在运行，或在设置中重新配对',
     busy: '桥接繁忙，正在重试…',
+    'no-token': '尚未与 DSH 配对',
+    'token-unreadable': '无法读取已安装的桥接令牌，正在重试',
+  },
+  pairing: {
+    title: '与 DSH 配对',
+    needed: '此浏览器尚未连接到 DSH。',
+    help: '将此浏览器连接到本机的 DSH。这里会显示一个简短的配对码，只需在 DSH 中输入一次，无需复制令牌。',
+    start: '与 DSH 配对',
+    retry: '重新请求',
+    asking: '正在请求 DSH…',
+    codeLabel: '配对码',
+    enter: '请在 DeepSeek Harness 中输入此配对码',
+    enterHelp: 'DeepSeek Harness 此时会显示「有浏览器请求连接」。在那里输入配对码并按回车。同样的输入框也在 设置 → 通用 → 配对浏览器 中；在终端会话中，可运行 /browser-pair 加上配对码。配对码只能输入到 DeepSeek Harness 本身。',
+    paired: '配对成功，正在连接…',
+    again: '重新配对…',
+    againHelp: '此浏览器之前已连接过 DSH。如果无法连接，请先确认 DSH 正在运行。',
+    againWarning: '仅当你重新安装了 DSH 或重置了它的桥接令牌时才需要重新配对。如果都没有，请不要继续：请确认 DSH 正在运行，因为可能有其他程序在冒充它应答。',
+    againConfirm: '重新配对',
+    cancel: '取消',
+    failure: {
+      'wrong-code': '在 DSH 中输入的不是这个配对码。一个配对码只能尝试一次：请重新请求以获取新的配对码。',
+      expired: '未在有效时间内输入配对码。请打开 DSH 后重新请求。',
+      replaced: '另一个请求占用了此请求的位置：本机上有其他程序在请求配对。请重新请求，并且只在 DSH 中输入这里显示的配对码。',
+      'auto-limit': '已多次自动请求配对但未成功。请确认 DSH 已打开，然后重新请求。',
+      busy: 'DSH 收到的配对请求过多。请等待一分钟后重新请求。',
+      paused: 'DSH 中的配对已暂停。请在那里恢复（设置 → 通用 → 配对浏览器，或 /browser-pair resume），然后重新请求。',
+      unreachable: '未在本机找到 DSH。请启动 DSH 后重新请求。',
+      unsupported: '此 DSH 浏览器插件无法配对（版本过旧或已关闭配对）。请更新插件，或改为粘贴令牌。',
+      'version-mismatch': 'DSH 插件与此扩展的版本不一致，请同时更新两者。',
+      untrusted: '对方未能证明它收到了这个配对码，因此未保存任何内容。请确认本机上运行的确实是 DSH，然后重新请求。',
+      cancelled: '配对已取消。',
+      'has-token': '此浏览器已持有 DSH 令牌。仅当你重新安装了 DSH 或重置了令牌时，才在设置中使用「重新配对…」。',
+    },
   },
   approval: {
     eyebrow: '安全检查',

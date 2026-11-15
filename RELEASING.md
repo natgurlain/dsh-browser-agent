@@ -90,17 +90,22 @@ one definition of these names; the installers derive the same names from the tag
 
 ### Extension IDs and the bridge Origin check
 
-The bridge accepts a `chrome-extension://` Origin only for IDs in the plugin config
+The bridge lets a `chrome-extension://` Origin authenticate only for IDs in the plugin config
 `allowedChromeExtensionIds` (default: the ID pinned by the manifest `key`,
-`klmdgljhcjbbpjcplbanjeclilghnaoh`). The release zips have the `key` stripped, so:
+`klmdgljhcjbbpjcplbanjeclilghnaoh`) and for IDs the user paired
+(`~/.dsh/browser-paired-extensions.json`). The release zips have the `key` stripped, so:
 
 - **Loading a release zip unpacked** (`chrome://extensions` → Load unpacked) gives the
-  extension a path-derived ID. The bridge closes it with code 4004 ("origin not allowed")
-  and the panel cannot connect. Either install with the installer (which keeps the key),
-  or add the ID shown on `chrome://extensions` to `allowedChromeExtensionIds`.
-- **Chrome Web Store builds** get the store-assigned ID. Once the listing exists, add that
-  ID to `allowedChromeExtensionIds` (and to the default in the plugin) before announcing it.
-- Firefox (`moz-extension://`) has per-install UUIDs; it is admitted by token alone.
+  extension a path-derived ID and no token. Its side panel asks to pair and shows a code;
+  typing that code into DSH connects it
+  ([docs/store/README.md](docs/store/README.md#pairing-a-store-installed-extension)).
+  Installing with the installer (which keeps the key and writes the token) needs no pairing.
+- **Chrome Web Store builds** get the store-assigned ID and pair the same way; nothing has
+  to be added to `allowedChromeExtensionIds`.
+- An ID that is neither allowed nor paired can only ask to pair: its `hello` is closed
+  with code 4004 ("origin not allowed").
+- Firefox (`moz-extension://`) has per-install UUIDs; it is admitted by token alone, and
+  obtains the token by pairing or by pasting it.
 
 ### Bridge token copies
 

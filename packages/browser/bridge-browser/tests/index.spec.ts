@@ -91,6 +91,7 @@ describe('config', () => {
       beacon: true,
       beaconPorts: [...BEACON_PORTS],
       allowedChromeExtensionIds: [PINNED_CHROME_EXTENSION_ID],
+      pairing: true,
       allowDangerFullAccess: false,
       safePermissionPresets: [],
       forwardedPorts: [],
@@ -128,6 +129,7 @@ describe('config', () => {
       beacon: false,
       beaconPorts: [...BEACON_PORTS],
       allowedChromeExtensionIds: [PINNED_CHROME_EXTENSION_ID],
+      pairing: true,
       allowDangerFullAccess: false,
       safePermissionPresets: [],
       forwardedPorts: [],
@@ -176,6 +178,73 @@ describe('apply', () => {
     await apply(ctx, { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
     expect(registerUpgrade).toHaveBeenCalledWith(expect.objectContaining({ path: BRIDGE_PATH }))
     await expect(stat(join(home, 'ext-bridge-token'))).rejects.toThrow()
+  })
+
+  /** A context whose composition has dsh's exact-route registry and the command registry. */
+  function pairingContext() {
+    const ctx = stubContext()
+    const get = ctx.get.bind(ctx)
+    const routes: Array<{ path: string; methods: string[]; fetch: (request: Request) => Promise<Response> }> = []
+    const commands: Array<{ name: string }> = []
+    const disposeRoute = vi.fn()
+    vi.spyOn(ctx, 'get').mockImplementation((key) => {
+      if (key === 'connection') {
+        return { ...(get(key) as object), fetch: { register: (route: typeof routes[number]) => { routes.push(route); return disposeRoute } } }
+      }
+      if ((key as string) === 'commands') return { register: (definition: { name: string }) => { commands.push(definition); return () => {} } }
+      return get(key)
+    })
+    return { ctx, routes, commands, disposeRoute }
+  }
+
+  it('mounts the pairing controls behind dsh\'s own registries, and nothing public', async () => {
+    const { ctx, routes, commands, disposeRoute } = pairingContext()
+    const register = vi.spyOn(ctx.webServer, 'register')
+    await apply(ctx, { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
+    expect(routes.map(route => `${route.methods.join(',')} ${route.path}`)).toEqual(['POST /api/bridge-browser.pairing'])
+    expect(commands.map(command => command.name)).toEqual(['browser-pair'])
+    // Nothing waits and nothing is paired on a fresh bridge.
+    const status = await routes[0]!.fetch(new Request('http://127.0.0.1/api/bridge-browser.pairing', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"action":"status"}',
+    }))
+    // The token is pinned in this configuration, so it cannot be reset from the app.
+    expect(await status.json()).toEqual({ ok: true, paused: false, waiting: 0, requests: [], failures: 0, pairedOrigins: [], canResetToken: false })
+    // The unauthenticated web server gets no pairing route.
+    expect(register.mock.calls.map(call => (call[0] as { path: string }).path).filter(path => /pair/iu.test(path))).toEqual([])
+    for (const dispose of disposers.splice(0).reverse()) await dispose()
+    expect(disposeRoute).toHaveBeenCalledOnce()
+  })
+
+  it('regression (review 2, M1): "Reset bridge token" writes a new token privately and is offered only for a generated token', async () => {
+    const { ctx, routes } = pairingContext()
+    // No token in the config: the bridge generates one into the dsh home.
+    await apply(ctx, { ...VALID, sessionWorkspacePath: '' })
+    const post = (body: object): Promise<Response> => routes[0]!.fetch(new Request('http://127.0.0.1/api/bridge-browser.pairing', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }))
+    const file = join(home, 'ext-bridge-token')
+    const before = (await readFile(file, 'utf8')).trim()
+    expect(await (await post({ action: 'status' })).json()).toMatchObject({ canResetToken: true })
+    const reset = await post({ action: 'reset-token' })
+    expect(reset.status).toBe(200)
+    const after = (await readFile(file, 'utf8')).trim()
+    expect(after).toMatch(/^[0-9a-f]{64}$/u)
+    expect(after).not.toBe(before)
+    if (process.platform !== 'win32') expect((await stat(file)).mode & 0o777).toBe(0o600)
+    // Unpairing something that never paired is reported, not silently accepted.
+    expect((await post({ action: 'unpair', origin: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop' })).status).toBe(404)
+  })
+
+  it('mounts no pairing control when pairing is switched off, and warns when the composition has none', async () => {
+    const off = pairingContext()
+    await apply(off.ctx, { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '', pairing: false })
+    expect(off.routes).toEqual([])
+    expect(off.commands).toEqual([])
+
+    const bare = stubContext()
+    const warn = vi.spyOn(bare.logger, 'warn')
+    await apply(bare, { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('no pairing control'))
   })
 
   it.each([undefined, {}, { wireStream: {} }])('rejects unsupported Gateway capabilities: %j', async (gateway) => {

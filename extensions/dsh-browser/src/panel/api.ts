@@ -111,6 +111,21 @@ interface DiscoveryResultMessage {
   error?: { code?: unknown; message?: unknown }
 }
 
+interface PairCodeMessage {
+  type: 'pair.code'
+  id: string
+  /** The code to display while the request waits for the user to enter it in DSH. */
+  code: string
+}
+
+interface PairResultMessage {
+  type: 'pair.result'
+  id: string
+  ok: boolean
+  /** A `PairingFailure` from the background (pairing.ts). */
+  reason?: unknown
+}
+
 interface EventMessage {
   type: 'event'
   frame: ServerFrame
@@ -211,7 +226,7 @@ interface DevToolsDetachResultMessage {
   error?: { message?: unknown }
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | TabAffinityReturnResultMessage | SelectionMessage | SessionResumeHintMessage | DevToolsStatusMessage | DevToolsDetachResultMessage | DiscoveryProgressMessage | DiscoveryResultMessage | KillSwitchMessage | PauseStateMessage
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | TabAffinityReturnResultMessage | SelectionMessage | SessionResumeHintMessage | DevToolsStatusMessage | DevToolsDetachResultMessage | DiscoveryProgressMessage | DiscoveryResultMessage | PairCodeMessage | PairResultMessage | KillSwitchMessage | PauseStateMessage
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -265,6 +280,18 @@ export interface PanelApi {
   /** Abort a running scan; the pending {@link startDiscovery} rejects as cancelled. */
   cancelDiscovery(): Promise<void>
   onDiscoveryProgress(callback: (progress: DiscoveryProgress) => void): () => void
+  /**
+   * Ask the local DSH host to pair. `onCode` receives the code to display
+   * while the request waits for the user to type it into DSH. Resolves once
+   * the token is stored; rejects with a {@link PanelRpcError} whose `code` is
+   * the background's `PairingFailure`. An install that already holds a token
+   * is refused (`has-token`) unless `again` is set, which the panel does only
+   * after the user confirmed "Pair again…". `auto` marks a request nobody
+   * clicked for; the background allows only a few of those per sitting.
+   */
+  pair(onCode: (code: string) => void, options?: { again?: boolean; auto?: boolean }): Promise<void>
+  /** Withdraw a pairing request that is still waiting. */
+  cancelPairing(): Promise<void>
   /** Scope this panel's selections to its own browser window. */
   registerWindow(windowId: number): Promise<void>
   setActiveSession(sessionId: string, isNew?: boolean): Promise<void>
@@ -309,6 +336,7 @@ export function connectPanel(): PanelApi {
   const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null, discovery: DiscoveryStatus, address?: string, failure?: BridgeFailure, standing?: StandingStatus) => void>()
   const discoveryProgressListeners = new Set<(progress: DiscoveryProgress) => void>()
   const pendingScans = new Map<string, { resolve: (instances: BridgeInstance[]) => void; reject: (error: Error) => void }>()
+  const pendingPairs = new Map<string, { resolve: () => void; reject: (error: Error) => void; onCode: (code: string) => void }>()
   const eventListeners = new Set<(frame: ServerFrame) => void>()
   const approvalListeners = new Set<(request: ApprovalRequest) => void>()
   const approvalResolvedListeners = new Set<(id: string) => void>()
@@ -391,6 +419,17 @@ export function connectPanel(): PanelApi {
             ? msg.error.message
             : (getUiLocale() === 'zh' ? '自动检测失败' : 'Detection failed'),
         ))
+        break
+      }
+      case 'pair.code':
+        if (typeof msg.code === 'string') pendingPairs.get(msg.id)?.onCode(msg.code)
+        break
+      case 'pair.result': {
+        const entry = pendingPairs.get(msg.id)
+        if (entry === undefined) return
+        pendingPairs.delete(msg.id)
+        if (msg.ok) entry.resolve()
+        else entry.reject(new PanelRpcError(typeof msg.reason === 'string' ? msg.reason : 'unreachable', 'pairing failed'))
         break
       }
       case 'event':
@@ -501,6 +540,11 @@ export function connectPanel(): PanelApi {
       if (preserve?.kind === 'devtools' && preserve.id === id) continue
       entry.reject(error)
       pendingDetaches.delete(id)
+    }
+    // A pairing cut off with its port is not replayed: the user asks again.
+    for (const [id, entry] of pendingPairs) {
+      entry.reject(error)
+      pendingPairs.delete(id)
     }
     for (const [id, entry] of pendingScans) {
       if (preserve?.kind === 'scan' && preserve.id === id) continue
@@ -772,6 +816,21 @@ export function connectPanel(): PanelApi {
     onDiscoveryProgress(callback) {
       discoveryProgressListeners.add(callback)
       return () => { discoveryProgressListeners.delete(callback) }
+    },
+    pair(onCode, options) {
+      const id = crypto.randomUUID()
+      return new Promise<void>((resolve, reject) => {
+        const entry = { resolve, reject, onCode }
+        pendingPairs.set(id, entry)
+        void send({ type: 'pair.start', id, ...(options?.again === true ? { again: true } : {}), ...(options?.auto === true ? { auto: true } : {}) }).catch((cause: unknown) => {
+          if (pendingPairs.get(id) !== entry) return
+          pendingPairs.delete(id)
+          reject(connectionError(cause))
+        })
+      })
+    },
+    cancelPairing() {
+      return send({ type: 'pair.cancel' })
     },
   }
 }

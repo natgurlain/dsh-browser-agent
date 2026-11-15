@@ -26,6 +26,10 @@
  *   panel → bg: { type: 'request-status' }
  *   panel → bg: { type: 'discovery.start', id }
  *   panel → bg: { type: 'discovery.cancel' }
+ *   panel → bg: { type: 'pair.start', id, again?, auto? }
+ *   panel → bg: { type: 'pair.cancel' }
+ *   bg → panel: { type: 'pair.code', id, code, answerTimeoutMs }
+ *   bg → panel: { type: 'pair.result', id, ok, reason? }
  *   panel → bg: { type: 'kill-switch.engage' }
  *   panel → bg: { type: 'kill-switch.release' }
  *   panel → bg: { type: 'agent.pause', mode: 'after-step' | 'take-over' }
@@ -85,9 +89,10 @@ import {
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { BRIDGE_CONFIG_PATH, BRIDGE_PATH, DEVTOOLS_CAPS_VERSION, parseBridgeConfigPayload } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import { BridgeClient, type BridgeFailure, type BridgeState } from './bridge.ts'
+import { BridgeClient, InstalledTokenUnreadableError, loadInstalledToken, type BridgeFailure, type BridgeState } from './bridge.ts'
 import { createRpc } from './rpc.ts'
 import { discoverInstances, planDiscovery, portOfUrl, readBridgeConfig } from './discovery.ts'
+import { browserName, extensionOrigin, pairWithBridge, type PairingFailure } from './pairing.ts'
 import { frameDocumentKey, listTabFrames } from './frames.ts'
 import {
   dispatchOpenTab,
@@ -173,7 +178,7 @@ import {
 } from './authorization.ts'
 import { nextDevToolsAllowance, readDevToolsAllowance } from './devtools-allowance.ts'
 import { DevToolsGrants } from './devtools-grants.ts'
-import { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD, PolicyRuntime } from './policy-runtime.ts'
+import { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD, isExtensionPageSender, PolicyRuntime } from './policy-runtime.ts'
 import { splitSelectionMessage } from '../panel/selection.ts'
 import { callPolicyTargets, forcedApprovalPrompt, originFromUrl } from './authorization.ts'
 import { normalizeSitePattern, normalizeSiteRules, type SiteRuleEntry } from '../security/site-policy.ts'
@@ -3241,6 +3246,83 @@ async function startBridge(): Promise<void> {
   bridge.start(url, settings.token)
 }
 
+/** The pairing request in flight, if any: one at a time, and a new one withdraws the old. */
+let activePairing: AbortController | undefined
+
+/** Pairing requests the panel may start by itself (not on a click) while panels stay open. */
+const MAX_AUTOMATIC_PAIRINGS = 3
+/** How many it has started since the first panel of this sitting opened. */
+let automaticPairings = 0
+
+/**
+ * One-step pairing (pairing.ts): ask the DSH host for the bridge token, show
+ * the code the user types there, and once the exchange verified store the
+ * token like a typed one and connect. The request goes to the bridge this install
+ * is already trying to reach: the address in use, else the filled-in one,
+ * else the first local instance discovery finds.
+ * @param onCode - receives the code to display while the request waits.
+ * @returns the failure, or `undefined` once the token is stored.
+ */
+async function pairWithHost(
+  onCode: (code: string, answerTimeoutMs: number) => void,
+  options: { again: boolean; auto: boolean },
+): Promise<PairingFailure | undefined> {
+  const { again } = options
+  await settingsReady
+  // What nobody clicked for is bounded: each request shows a code a wrong
+  // peer may guess at once, and a panel that keeps asking by itself would
+  // hand out guesses without the user doing anything.
+  if (options.auto) {
+    if (automaticPairings >= MAX_AUTOMATIC_PAIRINGS) return 'auto-limit'
+    automaticPairings += 1
+  }
+  // An install that already holds a token pairs only when the user explicitly
+  // asked to pair again: a connection that merely fails (a process answering
+  // on the bridge's port, a bridge that is down) must never start a pairing
+  // by itself, and whatever happens the old token stays until a new one verified.
+  // A token file that is there but unreadable right now counts as a token held.
+  const installed = await loadInstalledToken().catch((error: unknown) => error instanceof InstalledTokenUnreadableError ? 'unreadable' : '')
+  if (!again && (settings.token !== '' || installed !== '')) return 'has-token'
+  activePairing?.abort()
+  const controller = new AbortController()
+  activePairing = controller
+  try {
+    await settingsReady
+    const filledIn = settings.bridgeUrl === '' ? undefined : normalizeBridgeUrl(settings.bridgeUrl, BRIDGE_PATH)
+    let url = connectedAddress ?? filledIn
+    if (url === undefined) {
+      await discoveryMemory
+      url = (await discoverInstances(planDiscovery({
+        ...(lastBridgeUrl === undefined ? {} : { rememberedUrl: lastBridgeUrl }),
+        excludeUrls: [...rejectedBridgeUrls],
+      }), {
+        probe: (port, timeoutMs) => readBridgeConfig(port, timeoutMs),
+        shouldContinue: () => !controller.signal.aborted,
+      }, { stopAtFirstHit: true }))[0]?.wsUrl
+    }
+    if (controller.signal.aborted) return 'cancelled'
+    if (url === undefined) return 'unreachable'
+    const paired = await pairWithBridge(url, { origin: extensionOrigin(), name: browserName(), onCode, signal: controller.signal })
+    if (!paired.ok) return paired.reason
+    await persistSettings({ token: paired.token })
+    // A new token is a new connection: drop what belonged to the old one.
+    forgetStandingHost()
+    setBridgeRefusal(undefined)
+    rejectedBridgeUrls.clear()
+    discoveryLatch = 'idle'
+    persistDiscoveryLatch('idle')
+    // This bridge proved it was given the code the user read here: prefer it next time.
+    if (url !== filledIn) rememberBridgeUrl(url)
+    if (panelPorts.size > 0) {
+      await startBridge()
+      broadcastStatus()
+    }
+    return undefined
+  } finally {
+    if (activePairing === controller) activePairing = undefined
+  }
+}
+
 /**
  * Enumerate every local instance for the settings picker.
  *
@@ -3365,7 +3447,15 @@ chrome.runtime.onConnect.addListener((port) => {
   if (pageWatchers.connect(port)) return
   if (learning.connect(port)) return
   if (port.name !== 'dsh-panel') return
+  // Content scripts run beside untrusted pages and can open ports too: the
+  // panel port (settings, approvals, pairing) is for this extension's own pages only.
+  if (!isExtensionPageSender(port.sender)) {
+    port.disconnect()
+    return
+  }
   const wasIdle = panelPorts.size === 0
+  // A new sitting: the panel may ask to pair by itself a few times again.
+  if (wasIdle) automaticPairings = 0
   const tabAffinityRebinds = new Map<string, {
     controller: AbortController
     timer: ReturnType<typeof setTimeout>
@@ -3481,6 +3571,8 @@ chrome.runtime.onConnect.addListener((port) => {
             const connectionChanged = settings.bridgeUrl !== previousConnection.bridgeUrl
               || settings.token !== previousConnection.token
             if (connectionChanged) {
+              // A pairing request still waiting was addressed to the previous bridge.
+              activePairing?.abort()
               // The hint and the headless address belong to the previous connection.
               forgetStandingHost()
               setBridgeRefusal(undefined)
@@ -3569,6 +3661,24 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       case 'discovery.cancel': {
         activeScan?.controller.abort()
+        break
+      }
+      case 'pair.start': {
+        // Only the extension's own panel reaches this port. The panel gets the code to display, never the token.
+        const request = message as { id?: unknown; again?: unknown; auto?: unknown }
+        if (typeof request.id !== 'string') break
+        const id = request.id
+        const post = (reply: unknown): void => { try { port.postMessage(reply) } catch { /* panel closed */ } }
+        void pairWithHost((code, answerTimeoutMs) => { post({ type: 'pair.code', id, code, answerTimeoutMs }) }, { again: request.again === true, auto: request.auto === true }).then(
+          reason => reason,
+          (): PairingFailure => 'unreachable',
+        ).then((reason) => {
+          post(reason === undefined ? { type: 'pair.result', id, ok: true } : { type: 'pair.result', id, ok: false, reason })
+        })
+        break
+      }
+      case 'pair.cancel': {
+        activePairing?.abort()
         break
       }
       case 'kill-switch.engage':
@@ -3770,6 +3880,8 @@ chrome.runtime.onConnect.addListener((port) => {
     const panelSessionId = panelActiveSessions.get(port)
     panelActiveSessions.delete(port)
     panelPorts.delete(port)
+    // Nobody is left to read the code: withdraw a pairing request that is still waiting.
+    if (panelPorts.size === 0) activePairing?.abort()
     if (panelSessionId !== undefined) void checkpointSessionPage(panelSessionId)
     interactionResponses.removePort(port)
     if (panelWindowId !== undefined && !hasPanelInWindow(panelWindowId)) {

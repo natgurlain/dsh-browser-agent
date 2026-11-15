@@ -21,6 +21,7 @@ const { startScriptedModel } = await import(pathToFileURL(join(root, 'scripts/fi
 const { runAgentUxSmoke, assertKillSwitchAudited } = await import(pathToFileURL(join(root, 'scripts/fixtures/agent-ux-smoke.mjs')).href)
 const { runPhase3Smoke } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-smoke.mjs')).href)
 const { phase3Reply } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-model.mjs')).href)
+const { runPairingSmoke } = await import(pathToFileURL(join(root, 'scripts/fixtures/pairing-browser-smoke.mjs')).href)
 const { handleLearningRequest, runLearningSmoke } = await import(pathToFileURL(join(root, 'scripts/fixtures/learning-smoke.mjs')).href)
 const artifacts = process.env.DSH_SMOKE_ARTIFACTS ?? join(root, '.artifacts/browser-smoke')
 await mkdir(artifacts, { recursive: true })
@@ -1386,6 +1387,23 @@ try {
   const leaseAfterWake = (await currentWorker()?.evaluate(() => chrome.storage.session.get('dshRuntimeLease')))?.dshRuntimeLease
   assert.equal(leaseAfterWake, undefined, 'no lease is left once standing work is gone')
   results.push('with no panel open and the idle window passed, a live watcher reconnects the restarted worker headlessly and still wakes its session; the connection is released when the watcher ends')
+  // ---- One-step pairing: a store-style build in its own browser profile (last: it adds a second install) ----
+  screenshots.push(...await runPairingSmoke({
+    chromium, builtExtension, directory, runtimeTmp, waitFor, results,
+    wsUrl: `ws://127.0.0.1:${String(hostPort)}/ext/bridge`,
+    appUrl: host.log.match(/dsh web: (http:\/\/127\.0\.0\.1:\d+\/\S*)/)?.[1] ?? base,
+    home: env.DSH_HOME,
+    token,
+    pinnedId: PINNED_CHROME_EXTENSION_ID,
+    ownerPairing: async (body) => {
+      const response = await fetch(probe, {
+        method: 'POST', headers, body: JSON.stringify({ api: { path: '/api/bridge-browser.pairing', body } }),
+        signal: AbortSignal.timeout(35_000),
+      })
+      assert.equal(response.status, 200)
+      return response.json()
+    },
+  }))
   await writeFile(join(directory, 'results.json'), JSON.stringify(results, null, 2))
   await writeFile(join(directory, 'screenshots.json'), JSON.stringify(screenshots, null, 2))
   console.log(`Browser smoke passed: ${results.join('; ')}`)

@@ -57,6 +57,7 @@ import { canReturnToControlledTab } from './tab-handoff.ts'
 import { QuestionCard } from './QuestionCard.tsx'
 import { UpdateCard } from './UpdateCard.tsx'
 import { UninstallCard } from './UninstallCard.tsx'
+import { PairingCard } from './PairingCard.tsx'
 import { MessageImages } from './MessageImages.tsx'
 import type { QuestionAnswer } from './questions.ts'
 import {
@@ -2776,6 +2777,20 @@ export function App(): React.JSX.Element {
       : { ...current, trustedActionOrigins: current.trustedActionOrigins.filter((candidate) => candidate !== origin) })
   }
 
+  // Pairing stores the token in the background; mirror it into the form so a
+  // later Save does not write the old (empty) field back over it.
+  const adoptPairedToken = (): void => {
+    void chrome.storage.local.get('dshSettings').then((stored) => {
+      const token = (stored.dshSettings as Partial<PanelSettings> | undefined)?.token
+      if (typeof token === 'string') setSettings((prev) => prev === null ? prev : { ...prev, token })
+    }).catch(() => {})
+  }
+  // A bridge answers and this install has never held a token: pairing starts by
+  // itself. An install that holds a token never pairs by itself, whatever the
+  // connection says (a process answering on the bridge's port can produce any
+  // refusal): there, pairing again is an explicit action in Settings.
+  const firstPairing = state !== 'connected' && bridgeFailure === 'no-token'
+
   // The status bar shows only the connection status; the snapshot limit is a technical detail explained on the settings page (see hint).
   // Discovery can end in a confirmed miss; that is more useful than "Disconnected".
   // A refusal only the user can fix outranks the generic transport state.
@@ -2986,6 +3001,9 @@ export function App(): React.JSX.Element {
                   <button type="button" className="secondary" onClick={() => { void saveSettings() }}>{copy.settings.reconnect}</button>
                 )}
               </div>
+            </SettingsGroup>
+            <SettingsGroup label={copy.pairing.title}>
+              <PairingCard api={api} copy={copy.pairing} titled={false} mode={bridgeFailure === 'no-token' ? 'first' : 'again'} onPaired={adoptPairedToken} />
             </SettingsGroup>
           </SettingsSection>
 
@@ -3365,6 +3383,10 @@ export function App(): React.JSX.Element {
       </header>
       <TaintBanner sessionId={sessionRef.current} locale={locale} />
       <WatchersCard locale={locale} />
+      {firstPairing && !killSwitchEngaged
+        // Keyed by the bridge address: a request is for one bridge, so a new address asks anew.
+        ? <PairingCard key={bridgeAddress ?? ''} api={api} copy={copy.pairing} mode="first" needed autoStart onPaired={adoptPairedToken} />
+        : null}
       {showTextSize && (
         <TextSizePanel scale={uiScale} copy={copy}
           onStep={(direction) => changeUiScale(stepUiScale(uiScaleRef.current, direction))}
