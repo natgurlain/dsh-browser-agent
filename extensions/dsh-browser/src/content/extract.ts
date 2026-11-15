@@ -10,7 +10,8 @@
  * @module
  */
 
-import { cssEscape, querySelectorAllDeep } from './dom.ts'
+import { MAX_REPORTS, QUERY_EVENT, REPORT_EVENT_PREFIX } from '../shared/listener-probe.ts'
+import { composedParent, cssEscape, querySelectorAllDeep } from './dom.ts'
 
 /**
  * Elements that are interactive by their own semantics. A match here always
@@ -210,18 +211,212 @@ export function labelControl(label: Element): HTMLElement | null {
 }
 
 /**
- * Collect the page's interactive elements in document order (open shadow
- * roots included), deduplicated and visibility-filtered.
+ * Attributes through which frameworks and hand-written delegation declare a
+ * click action in the DOM itself (readable from the isolated world).
+ */
+const ACTION_ATTRIBUTES = [
+  'jsaction', 'ng-click', 'data-ng-click', 'v-on:click', '@click', 'x-on:click', 'on:click', 'wire:click',
+  'hx-get', 'hx-post', 'hx-put', 'hx-patch', 'hx-delete',
+  'data-action', 'data-click', 'data-onclick', 'data-toggle', 'data-bs-toggle', 'data-dismiss', 'data-bs-dismiss',
+]
+
+/** Elements examined for cursor and action-attribute hints per collection. */
+const MAX_HINT_SCAN = 15_000
+
+/** Inferred click targets one collection may add to the inventory. */
+export const MAX_INFERRED_ITEMS = 100
+
+/** An inferred target with more element descendants than this is a container, not a control. */
+const MAX_INFERRED_DESCENDANTS = 40
+
+/** Share of the viewport (both axes) above which an inferred target is a page-level surface. */
+const PAGE_SURFACE_RATIO = 0.9
+
+/** The interactive inventory plus which of its members were only inferred. */
+export interface Inventory {
+  /** Semantic controls in document order, then inferred click targets in document order. */
+  elements: Element[]
+  /**
+   * Members with no interactive semantics of their own: a script listener, a
+   * framework handler, an action attribute or a pointer cursor says they are
+   * clickable. They are hints from the page, never trusted.
+   */
+  inferred: ReadonlySet<Element>
+}
+
+/** Whether `el` declares a click action through a framework/delegation attribute. */
+function hasActionAttribute(el: Element): boolean {
+  if (el.attributes.length === 0) return false
+  for (const name of ACTION_ATTRIBUTES) {
+    const value = el.getAttribute(name)
+    if (value === null) continue
+    // jsaction lists `event:handler` pairs; a bare handler means click.
+    if (name === 'jsaction' && value.includes(':') && !/(^|[;\s])(click|dblclick|mousedown|pointerdown)\s*:/.test(value)) continue
+    return true
+  }
+  return false
+}
+
+function queryNonce(): string {
+  const bytes = new Uint8Array(12)
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') crypto.getRandomValues(bytes)
+  else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256)
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * Ask the page-world listener shim which elements a script made clickable
+ * (protocol: `shared/listener-probe.ts`). The exchange is synchronous; without
+ * a shim (a tab opened before the extension loaded, a browser that ignores
+ * `world: "MAIN"`) nothing answers and the set stays empty.
  *
- * Generic candidates (focusable or `onclick` containers, labels) are kept only
- * when they add something: a wrapper around a core control, or a label whose
- * control is itself listed, would only duplicate that control and spend the
- * inventory cap.
+ * Whatever answers runs in the page's world, so the result is untrusted: it is
+ * only ever a set of elements, capped, and filtered like any other hint.
+ *
+ * @returns elements reported as click-activated.
+ */
+function scriptActivatedElements(): Set<Element> {
+  const reported = new Set<Element>()
+  if (typeof window === 'undefined' || typeof CustomEvent !== 'function') return reported
+  const nonce = queryNonce()
+  const reportType = `${REPORT_EVENT_PREFIX}${nonce}`
+  const onReport = (event: Event): void => {
+    event.stopImmediatePropagation()
+    if (reported.size >= MAX_REPORTS) return
+    // Reports from inside an open shadow root arrive retargeted to the host.
+    const target = event.composedPath()[0] ?? event.target
+    if (target instanceof Element) reported.add(target)
+  }
+  window.addEventListener(reportType, onReport, true)
+  try {
+    window.dispatchEvent(new CustomEvent(QUERY_EVENT, { detail: nonce }))
+  } catch {
+    // A page listener that threw must not fail the snapshot.
+  } finally {
+    window.removeEventListener(reportType, onReport, true)
+  }
+  return reported
+}
+
+/** Whether `el` is `root` or inside it, crossing shadow boundaries. */
+function composedContains(root: Document | Element, el: Element): boolean {
+  if (!el.isConnected) return false
+  if (!(root instanceof Element)) return el.ownerDocument === root
+  for (let node: Element | null = el; node !== null; node = composedParent(node)) {
+    if (node === root) return true
+  }
+  return false
+}
+
+/**
+ * Click targets with no interactive semantics, in document order.
+ *
+ * Sources: the page-world shim (script listeners, handler properties,
+ * framework handlers), action attributes, and the element where a
+ * `cursor: pointer` starts. All three are statements by the page; the filters
+ * below decide what is worth a slot:
+ *
+ * - elements the semantic pass already considered are skipped (listed, or
+ *   deliberately dropped as a duplicate of a control);
+ * - a pointer cursor inside a listed control is that control's styling;
+ * - page-level surfaces and large containers (delegation roots, backdrops)
+ *   are not controls;
+ * - of nested candidates only the innermost stays, and a candidate wrapping a
+ *   listed control goes (same rule as for `onclick` wrappers);
+ * - at most {@link MAX_INFERRED_ITEMS} are returned, viewport first.
+ *
+ * @param root - scan scope.
+ * @param considered - every element the semantic pass matched.
+ * @param listed - the semantic inventory.
+ * @returns inferred click targets.
+ */
+function collectInferred(root: Document | Element, considered: ReadonlySet<Element>, listed: readonly Element[]): Element[] {
+  const scripted = scriptActivatedElements()
+  /** Candidate → whether a pointer cursor is its only evidence. */
+  const hints = new Map<Element, boolean>()
+  const cursors = new Map<Element, string>()
+  const cursorOf = (el: Element): string => {
+    let cursor = cursors.get(el)
+    if (cursor === undefined) {
+      cursor = getComputedStyle(el).cursor
+      cursors.set(el, cursor)
+    }
+    return cursor
+  }
+  const eligible = (el: Element): el is HTMLElement => el instanceof HTMLElement
+    && el !== document.body && el !== document.documentElement && !considered.has(el)
+  let scanned = 0
+  for (const el of querySelectorAllDeep(root, '*')) {
+    scanned += 1
+    if (scanned > MAX_HINT_SCAN) break
+    if (!eligible(el)) continue
+    if (scripted.has(el) || hasActionAttribute(el)) {
+      hints.set(el, false)
+      continue
+    }
+    if (cursorOf(el) !== 'pointer') continue
+    // `cursor` inherits: only the element that introduces it is the target.
+    const parent = composedParent(el)
+    if (parent === null || cursorOf(parent) !== 'pointer') hints.set(el, true)
+  }
+  // Reported elements past the scan cap still count.
+  for (const el of scripted) {
+    if (!hints.has(el) && eligible(el) && composedContains(root, el)) hints.set(el, false)
+  }
+  if (hints.size === 0) return []
+
+  const listedSet = new Set(listed)
+  const insideListed = (el: Element): boolean => {
+    for (let node = composedParent(el); node !== null; node = composedParent(node)) {
+      if (listedSet.has(node)) return true
+    }
+    return false
+  }
+  const candidates: Element[] = []
+  for (const [el, cursorOnly] of hints) {
+    if (el.closest('[inert], [aria-hidden="true"]') !== null || !isVisible(el)) continue
+    if (cursorOnly && insideListed(el)) continue
+    if (el.getElementsByTagName('*').length > MAX_INFERRED_DESCENDANTS) continue
+    const rect = el.getBoundingClientRect()
+    if (rect.width >= window.innerWidth * PAGE_SURFACE_RATIO && rect.height >= window.innerHeight * PAGE_SURFACE_RATIO) continue
+    candidates.push(el)
+  }
+
+  // Innermost wins: anything that wraps a listed control or another candidate is a container.
+  const wrappers = new Set<Element>()
+  for (const el of [...listed, ...candidates]) {
+    for (let node = composedParent(el); node !== null && !wrappers.has(node); node = composedParent(node)) {
+      wrappers.add(node)
+    }
+  }
+  const kept = candidates.filter((el) => !wrappers.has(el))
+  if (kept.length <= MAX_INFERRED_ITEMS) return kept
+  const chosen = new Set<Element>()
+  for (const visible of [true, false]) {
+    for (const el of kept) {
+      if (chosen.size >= MAX_INFERRED_ITEMS) break
+      if (isInViewport(el) === visible) chosen.add(el)
+    }
+  }
+  return kept.filter((el) => chosen.has(el))
+}
+
+/**
+ * Collect the page's interactive elements (open shadow roots included),
+ * deduplicated and visibility-filtered.
+ *
+ * Semantic candidates come first, in document order. Generic ones (focusable
+ * or `onclick` containers, labels) are kept only when they add something: a
+ * wrapper around a core control, or a label whose control is itself listed,
+ * would only duplicate that control and spend the inventory cap.
+ *
+ * Inferred click targets (see {@link collectInferred}) follow, so adding them
+ * never changes the order of the semantic ones.
  *
  * @param root - document or element to scan.
- * @returns the interactive inventory.
+ * @returns the inventory and which members were inferred.
  */
-export function collectInteractive(root: Document | Element): Element[] {
+export function collectInventory(root: Document | Element): Inventory {
   const seen = new Set<Element>()
   const candidates: Element[] = []
   for (const el of querySelectorAllDeep(root, INTERACTIVE_SELECTOR)) {
@@ -232,7 +427,7 @@ export function collectInteractive(root: Document | Element): Element[] {
   const listed = new Set(candidates)
   const core = candidates.filter((el) => el.matches(CORE_INTERACTIVE_SELECTOR))
   const coreSet = new Set(core)
-  return candidates.filter((el) => {
+  const semantic = candidates.filter((el) => {
     if (coreSet.has(el)) return true
     if (el instanceof HTMLLabelElement) {
       // A label is the click target only when its control is not listed itself
@@ -243,6 +438,17 @@ export function collectInteractive(root: Document | Element): Element[] {
     // Focusable or clickable wrappers around a real control add nothing.
     return !core.some((control) => control !== el && el.contains(control))
   })
+  const inferred = collectInferred(root, seen, semantic)
+  return { elements: [...semantic, ...inferred], inferred: new Set(inferred) }
+}
+
+/**
+ * The interactive inventory as a plain list (see {@link collectInventory}).
+ * @param root - document or element to scan.
+ * @returns semantic controls, then inferred click targets.
+ */
+export function collectInteractive(root: Document | Element): Element[] {
+  return collectInventory(root).elements
 }
 
 /** Tags whose content never belongs to the readable page text. */

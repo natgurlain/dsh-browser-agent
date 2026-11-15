@@ -1,7 +1,7 @@
 import { DevToolsError, type CdpClient, type FrameExecutionContext } from './debugger-session.ts'
 import type { TabFrame } from './frames.ts'
 
-// 用目标文档上的一次性标记关联 Chrome frameId 与 CDP execution context。
+// Associate the Chrome frameId with the CDP execution context through a one-time marker on the target document.
 export async function resolveDebuggerFrame(client: CdpClient, tabId: number, frame: TabFrame): Promise<FrameExecutionContext> {
   if (client.executionContexts === undefined || frame.documentId === undefined) {
     throw new DevToolsError('devtools-unavailable', 'The browser cannot resolve the target document for debugging.')

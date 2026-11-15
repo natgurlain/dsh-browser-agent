@@ -114,7 +114,7 @@ interface DiscoveryResultMessage {
 interface PairCodeMessage {
   type: 'pair.code'
   id: string
-  /** The code to display while the request waits for the user's answer in DSH. */
+  /** The code to display while the request waits for the user to enter it in DSH. */
   code: string
 }
 
@@ -282,11 +282,13 @@ export interface PanelApi {
   onDiscoveryProgress(callback: (progress: DiscoveryProgress) => void): () => void
   /**
    * Ask the local DSH host to pair. `onCode` receives the code to display
-   * while the request waits for the user's approval in DSH. Resolves once the
-   * token is stored; rejects with a {@link PanelRpcError} whose `code` is the
-   * background's `PairingFailure`.
+   * while the request waits for the user to type it into DSH. Resolves once
+   * the token is stored; rejects with a {@link PanelRpcError} whose `code` is
+   * the background's `PairingFailure`. An install that already holds a token
+   * is refused (`has-token`) unless `again` is set, which the panel does only
+   * after the user confirmed "Pair again…".
    */
-  pair(onCode: (code: string) => void): Promise<void>
+  pair(onCode: (code: string) => void, options?: { again?: boolean }): Promise<void>
   /** Withdraw a pairing request that is still waiting. */
   cancelPairing(): Promise<void>
   /** Scope this panel's selections to its own browser window. */
@@ -814,12 +816,12 @@ export function connectPanel(): PanelApi {
       discoveryProgressListeners.add(callback)
       return () => { discoveryProgressListeners.delete(callback) }
     },
-    pair(onCode) {
+    pair(onCode, options) {
       const id = crypto.randomUUID()
       return new Promise<void>((resolve, reject) => {
         const entry = { resolve, reject, onCode }
         pendingPairs.set(id, entry)
-        void send({ type: 'pair.start', id }).catch((cause: unknown) => {
+        void send({ type: 'pair.start', id, ...(options?.again === true ? { again: true } : {}) }).catch((cause: unknown) => {
           if (pendingPairs.get(id) !== entry) return
           pendingPairs.delete(id)
           reject(connectionError(cause))

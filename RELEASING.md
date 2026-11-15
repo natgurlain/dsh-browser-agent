@@ -92,17 +92,17 @@ one definition of these names; the installers derive the same names from the tag
 
 The bridge lets a `chrome-extension://` Origin authenticate only for IDs in the plugin config
 `allowedChromeExtensionIds` (default: the ID pinned by the manifest `key`,
-`klmdgljhcjbbpjcplbanjeclilghnaoh`) and for IDs the user approved through pairing
+`klmdgljhcjbbpjcplbanjeclilghnaoh`) and for IDs the user paired
 (`~/.dsh/browser-paired-extensions.json`). The release zips have the `key` stripped, so:
 
 - **Loading a release zip unpacked** (`chrome://extensions` → Load unpacked) gives the
   extension a path-derived ID and no token. Its side panel asks to pair and shows a code;
-  approving the prompt with the same code in DSH connects it
+  typing that code into DSH connects it
   ([docs/store/README.md](docs/store/README.md#pairing-a-store-installed-extension)).
   Installing with the installer (which keeps the key and writes the token) needs no pairing.
 - **Chrome Web Store builds** get the store-assigned ID and pair the same way; nothing has
   to be added to `allowedChromeExtensionIds`.
-- An ID that is neither allowed nor approved can only ask to pair: its `hello` is closed
+- An ID that is neither allowed nor paired can only ask to pair: its `hello` is closed
   with code 4004 ("origin not allowed").
 - Firefox (`moz-extension://`) has per-install UUIDs; it is admitted by token alone, and
   obtains the token by pairing or by pasting it.
@@ -181,7 +181,18 @@ It does not cover:
 
 ## DSH compatibility
 
-The DSH runtime is pinned exactly (see root `package.json`, enforced by
-`scripts/check-runtime.mjs`). `.github/workflows/dsh-matrix.yml` runs nightly against the
-pin plus the `latest` and `next` dist-tags via `node scripts/dsh-matrix.mjs <target>`;
-non-pin rows only report. Check its job summary before moving the pin.
+The workspace installs one exact DSH release (root `package.json`, enforced by
+`scripts/check-runtime.mjs`). The bridge declares a wider range (`engines.dsh` and its DSH
+peers) that covers the releases with an all-pass row in `docs/dsh-matrix.md`. Before a
+release, and before changing the default release or the range, refresh that record:
+
+```sh
+node scripts/dsh-matrix.mjs tested latest next --record
+```
+
+It needs the npm registry and takes a few minutes per release. Add a release to
+`TESTED_DSH_VERSIONS` (`packages/browser/bridge-browser/src/dsh-support.ts`) only when its
+row passes every step; `pnpm test:scripts` fails when the list, the record, the manifests
+and the printed start hints disagree. `.github/workflows/dsh-matrix.yml` would run the same
+script nightly (the `tested` row must pass, `latest` and `next` only report), but Actions
+has never run for this repository.

@@ -1,30 +1,29 @@
 /**
- * Where the user answers a pairing request: the two host-side controls that
- * can approve or deny one (pairing-host.ts).
+ * Where the user pairs a browser: the two host-side controls that can enter
+ * a pairing code, pause pairing, or unpair an extension (pairing-host.ts).
  *
  * - `POST /api/bridge-browser.pairing` — an exact route on dsh's shared `/api`
- *   channel, used by the bridge's row in DSH settings (client.js). dsh admits
- *   a request there only from an authenticated owner that passed its
- *   Host/Origin checks, so a web page, another extension or a local process
- *   that merely reaches the port gets 401/403: it can neither see the waiting
- *   requests nor approve one.
+ *   channel, used by the bridge's card and settings row in the DSH app
+ *   (client.js). dsh admits a request there only from an authenticated owner
+ *   that passed its Host/Origin checks, so a web page, another extension or
+ *   a local process that merely reaches the port gets 401/403.
  * - `/browser-pair` — a human slash command, for the CLI and for shells that
- *   do not load the settings row. Commands run only for an authenticated
- *   owner as well, and their result never becomes a model message.
+ *   do not load the card. It is refused when it arrives through the browser
+ *   bridge itself (bridge-policy.ts): a paired extension cannot pair another.
  *
  * Neither is reachable from the unauthenticated `/ext/bridge` socket, and the
- * public discovery route says nothing about pairing.
+ * public discovery route says nothing about pairing. Neither ever shows a
+ * code: the code exists only in the extension's panel and in what the user types.
  *
  * @module
  */
 
-import { formatPairingCode } from './pairing.ts'
-import type { PairedNotice, PairingRequests, PendingPairing } from './pairing-host.ts'
+import type { PairingDesk, PairingDeskStatus, PairingEnterResult } from './pairing-host.ts'
 
 /** Path of the pairing control route on dsh's authenticated `/api` channel. */
 export const PAIRING_API_PATH = '/api/bridge-browser.pairing'
 
-/** Name of the slash command that lists and answers pairing requests. */
+/** Name of the slash command that enters a pairing code. */
 export const PAIRING_COMMAND_NAME = 'browser-pair'
 
 /** The slice of `ctx.connection.fetch` this module uses. */
@@ -37,23 +36,34 @@ export interface PairingFetchRegistry {
   }): () => unknown
 }
 
+/** A slash command's outcome. */
+export type PairingCommandResult = { kind: 'success'; text: string } | { kind: 'error'; text: string }
+
 /** The slice of `ctx.commands` this module uses. */
 export interface PairingCommandRegistry {
   register(definition: {
     name: string
     description: string
     input?: { hint: string }
-    handler: (invocation: { rawInput: string }) => { kind: 'success'; text?: string } | { kind: 'error'; text: string }
+    /** False keeps the typed code out of the session log. */
+    recordInput?: boolean
+    handler: (invocation: { rawInput: string }) => Promise<PairingCommandResult>
   }): () => unknown
 }
 
-/** One waiting request as the control route reports it (the code is formatted for display). */
-export type PairingRequestView = Omit<PendingPairing, 'expiresAt'> & { expiresInMs: number }
+/** What the controls act on. */
+export interface PairingControls {
+  desk: PairingDesk
+  /** Chrome extension IDs that paired (the ones the user can unpair). */
+  pairedIds: () => string[]
+  /** Take one paired ID off the allowlist. @returns whether it was paired. */
+  unpair: (id: string) => Promise<boolean>
+}
 
-/** What the control route answers. */
+/** What the control route answers: the desk's state and the paired IDs, never a code. */
 export type PairingControlReply =
-  | { ok: true; requests: PairingRequestView[]; paired?: PairedNotice }
-  | { ok: false; error: 'bad-request' | 'gone'; requests?: PairingRequestView[] }
+  | ({ ok: true; result?: PairingEnterResult; pairedIds: string[] } & PairingDeskStatus)
+  | { ok: false; error: 'bad-request' | 'not-paired' }
 
 function json(body: PairingControlReply, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -62,98 +72,107 @@ function json(body: PairingControlReply, status = 200): Response {
   })
 }
 
-function view(requests: PairingRequests, now: () => number): { requests: PairingRequestView[]; paired?: PairedNotice } {
-  const paired = requests.lastPaired()
-  return {
-    requests: requests.list().map(({ expiresAt, code, ...request }) => ({
-      ...request, code: formatPairingCode(code), expiresInMs: Math.max(0, expiresAt - now()),
-    })),
-    ...(paired === undefined ? {} : { paired }),
-  }
-}
+const view = (controls: PairingControls): { pairedIds: string[] } & PairingDeskStatus =>
+  ({ ...controls.desk.status(), pairedIds: controls.pairedIds() })
 
 /**
  * Handle one request of the pairing control route. dsh has already
  * authenticated the caller as the host's owner.
- * @param requests - the bridge's pairing requests.
- * @param request - a POST whose JSON body is `{ action: 'list' }` or `{ action: 'approve' | 'deny', id }`.
- * @param now - clock (for the remaining time of each request).
+ * @param controls - the desk and the paired-extension record.
+ * @param request - a POST with a JSON body: `{ action: 'status' | 'pause' | 'resume' }`,
+ *   `{ action: 'enter', code }` or `{ action: 'unpair', id }`.
  */
-export async function handlePairingControl(requests: PairingRequests, request: Request, now: () => number = Date.now): Promise<Response> {
-  let body: { action?: unknown; id?: unknown } | null
+export async function handlePairingControl(controls: PairingControls, request: Request): Promise<Response> {
+  // A JSON content type is not a "simple" cross-origin request: a page cannot send it without a preflight.
+  if (!/^application\/json\b/iu.test(request.headers.get('content-type') ?? '')) return json({ ok: false, error: 'bad-request' }, 415)
+  let body: { action?: unknown; code?: unknown; id?: unknown } | null
   try {
-    body = (await request.json()) as { action?: unknown; id?: unknown } | null
+    body = (await request.json()) as { action?: unknown; code?: unknown; id?: unknown } | null
   } catch {
     return json({ ok: false, error: 'bad-request' }, 400)
   }
   const action = body?.action
-  if (action === 'list') return json({ ok: true, ...view(requests, now) })
-  if ((action === 'approve' || action === 'deny') && typeof body?.id === 'string') {
-    const done = action === 'approve' ? requests.approve(body.id) : requests.deny(body.id)
-    // Gone: answered elsewhere, expired, or the browser closed its request.
-    return done ? json({ ok: true, ...view(requests, now) }) : json({ ok: false, error: 'gone', requests: view(requests, now).requests }, 409)
+  if (action === 'status') return json({ ok: true, ...view(controls) })
+  if (action === 'enter' && typeof body?.code === 'string' && body.code.length <= 64) {
+    const result = await controls.desk.enter(body.code)
+    return json({ ok: true, result, ...view(controls) })
+  }
+  if (action === 'pause') {
+    controls.desk.pausePairing('user')
+    return json({ ok: true, ...view(controls) })
+  }
+  if (action === 'resume') {
+    controls.desk.resumePairing()
+    return json({ ok: true, ...view(controls) })
+  }
+  if (action === 'unpair' && typeof body?.id === 'string') {
+    return await controls.unpair(body.id) ? json({ ok: true, ...view(controls) }) : json({ ok: false, error: 'not-paired' }, 404)
   }
   return json({ ok: false, error: 'bad-request' }, 400)
 }
 
-function describe(request: PendingPairing): string {
-  return `${request.name}${request.origin === '' ? '' : ` (${request.origin})`} wants to connect, code ${formatPairingCode(request.code)}`
+/** One sentence per outcome of entering a code. */
+export function describeEnterResult(result: PairingEnterResult): PairingCommandResult {
+  switch (result) {
+    case 'paired': return { kind: 'success', text: 'Paired. The browser connects by itself now.' }
+    case 'unconfirmed': return { kind: 'success', text: 'The code matched and the browser was sent what it needs, but it did not confirm. If its panel does not connect, ask again from the browser.' }
+    case 'no-match': return { kind: 'error', text: 'No waiting browser shows that code. The browser now shows a new code: enter that one.' }
+    case 'none-waiting': return { kind: 'error', text: 'No browser is waiting. Open the DSH browser extension first; it shows the code to enter here.' }
+    case 'invalid': return { kind: 'error', text: 'A pairing code has 6 letters and digits, like ABC-DEF.' }
+    case 'paused': return { kind: 'error', text: `Pairing is paused. Run /${PAIRING_COMMAND_NAME} resume to allow it again.` }
+    case 'busy': return { kind: 'error', text: 'Another code is being checked. Try again in a moment.' }
+  }
 }
 
 /**
- * Run `/browser-pair`, `/browser-pair approve <code>`, `/browser-pair deny`.
- * Approving by code makes the user read the code off their browser.
- * @param requests - the bridge's pairing requests.
+ * Run `/browser-pair [<code> | pause | resume | unpair <extension id>]`.
+ * @param controls - the desk and the paired-extension record.
  * @param rawInput - everything after the command name.
  */
-export function runPairingCommand(
-  requests: PairingRequests,
-  rawInput: string,
-): { kind: 'success'; text: string } | { kind: 'error'; text: string } {
+export async function runPairingCommand(controls: PairingControls, rawInput: string): Promise<PairingCommandResult> {
   const words = rawInput.trim().split(/\s+/u).filter(word => word !== '')
-  const usage = `Usage: /${PAIRING_COMMAND_NAME} | /${PAIRING_COMMAND_NAME} approve <code> | /${PAIRING_COMMAND_NAME} deny`
+  const verb = (words[0] ?? '').toLowerCase()
   if (words.length === 0) {
-    const waiting = requests.list()
-    if (waiting.length === 0) {
-      return { kind: 'success', text: 'No browser is asking to connect. Open the DSH browser extension; it shows a code and asks here.' }
-    }
+    const status = controls.desk.status()
+    const waiting = status.waiting === 0
+      ? 'No browser is waiting. Open the DSH browser extension; it shows a code.'
+      : `${String(status.waiting)} browser${status.waiting === 1 ? ' is' : 's are'} waiting. Enter the code your browser shows: /${PAIRING_COMMAND_NAME} <code>.`
+    const paired = controls.pairedIds()
     return {
       kind: 'success',
-      text: `${waiting.map(describe).join('\n')}\n`
-        + `Approve only a code that your own browser shows: /${PAIRING_COMMAND_NAME} approve <code>. `
-        + `/${PAIRING_COMMAND_NAME} deny refuses every request.`,
+      text: [
+        status.paused
+          ? `Pairing is paused${status.pauseReason === 'failures' ? ' after too many wrong codes' : ''}. /${PAIRING_COMMAND_NAME} resume allows it again.`
+          : waiting,
+        paired.length === 0 ? 'No extension has been paired.' : `Paired extensions: ${paired.join(', ')} (/${PAIRING_COMMAND_NAME} unpair <id> removes one).`,
+      ].join('\n'),
     }
   }
-  const verb = words[0]!.toLowerCase()
-  if (verb === 'deny' && words.length === 1) {
-    const count = requests.list().length
-    requests.denyAll()
-    return { kind: 'success', text: count === 0 ? 'No browser was asking to connect.' : `Denied ${String(count)} pairing request${count === 1 ? '' : 's'}.` }
+  if (verb === 'pause' && words.length === 1) {
+    controls.desk.pausePairing('user')
+    return { kind: 'success', text: `Pairing is paused: no browser can ask to pair until /${PAIRING_COMMAND_NAME} resume.` }
   }
-  if (verb === 'approve' && words.length >= 2) {
-    const outcome = requests.approveCode(words.slice(1).join(''))
-    if (outcome === 'approved') {
-      const paired = requests.lastPaired()
-      return { kind: 'success', text: `Paired with ${paired?.name ?? 'the browser'}. It connects by itself now.` }
-    }
-    return {
-      kind: 'error',
-      text: outcome === 'ambiguous'
-        ? 'More than one request shows that code, so none was approved. Deny them and ask again from the browser.'
-        : 'No waiting request shows that code. Check the code in the browser extension (requests expire after 2 minutes).',
-    }
+  if (verb === 'resume' && words.length === 1) {
+    controls.desk.resumePairing()
+    return { kind: 'success', text: 'Pairing is allowed again.' }
   }
-  return { kind: 'error', text: usage }
+  if (verb === 'unpair' && words.length === 2) {
+    return await controls.unpair(words[1]!)
+      ? { kind: 'success', text: 'Unpaired. That extension can no longer connect; it still holds the bridge token, so reset the token (delete ~/.dsh/ext-bridge-token and restart DSH) if the browser is not yours any more.' }
+      : { kind: 'error', text: 'That is not a paired extension ID.' }
+  }
+  // Anything else is a code; what cannot be one is answered as such, without echoing the input.
+  return describeEnterResult(await controls.desk.enter(words.join('')))
 }
 
 /**
  * Register the host-side pairing controls that this composition supports.
- * @param requests - the bridge's pairing requests.
+ * @param controls - the desk and the paired-extension record.
  * @param services - the route and command registries, when present.
  * @returns disposers, in registration order.
  */
 export function mountPairingControls(
-  requests: PairingRequests,
+  controls: PairingControls,
   services: { fetch?: PairingFetchRegistry; commands?: PairingCommandRegistry },
 ): Array<() => unknown> {
   const disposers: Array<() => unknown> = []
@@ -162,15 +181,16 @@ export function mountPairingControls(
       path: PAIRING_API_PATH,
       methods: ['POST'],
       requestBody: 'buffered',
-      fetch: request => handlePairingControl(requests, request),
+      fetch: request => handlePairingControl(controls, request),
     }))
   }
   if (typeof services.commands?.register === 'function') {
     disposers.push(services.commands.register({
       name: PAIRING_COMMAND_NAME,
-      description: 'Approve or deny a DSH browser extension that asks to connect to this host',
-      input: { hint: '[approve <code> | deny]' },
-      handler: invocation => runPairingCommand(requests, invocation.rawInput),
+      description: 'Pair a DSH browser extension: enter the code its panel shows',
+      input: { hint: '<code>' },
+      recordInput: false,
+      handler: invocation => runPairingCommand(controls, invocation.rawInput),
     }))
   }
   return disposers

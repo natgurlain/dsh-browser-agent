@@ -38,7 +38,7 @@ describe('token', () => {
   it('compares non-hex configured tokens as UTF-8 bytes (no hex truncation)', () => {
     expect(verifyToken('fixed-token', 'fixed-token')).toBe(true)
     expect(verifyToken('fixed-token', 'fixed-token ')).toBe(false)
-    // hex 解码会把 deadbeef-team 截断成 deadbeef；UTF-8 比较不会
+    // Hex decoding would truncate deadbeef-team to deadbeef; a UTF-8 comparison does not
     expect(verifyToken('deadbeef-team', 'deadbeef')).toBe(false)
     expect(verifyToken('deadbeef-team', 'deadbeef-team')).toBe(true)
   })

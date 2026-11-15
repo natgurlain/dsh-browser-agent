@@ -21,7 +21,7 @@ Everything needed to list the extension on the Chrome Web Store and on addons.mo
 
 - [ ] Bump the version in `extensions/dsh-browser/manifest.json`, `manifest.firefox.json` and `package.json`. Store versions must strictly increase.
 - [ ] Chrome: upload `dsh-browser-chrome-<tag>.zip` from the GitHub release ([RELEASING.md](../../RELEASING.md)); `scripts/package-release.mjs` already strips the manifest `key`, which the Web Store rejects. Without a release, `pnpm --filter dsh-browser-extension run build:store` produces the same key-less build in `dist-store/`; zip the **contents** of that directory.
-  - The store assigns a **new extension ID**, and a store build has **no bridge token** (the installer writes the token into the unpacked extension's own directory; a store-installed extension has no such file). Neither needs manual setup any more: the user pairs once, as described in [Pairing a store-installed extension](#pairing-a-store-installed-extension). Pairing delivers the token and records the extension ID on the bridge. Put those steps in the listing's setup instructions and in the reviewer notes.
+  - The store assigns a **new extension ID**, and a store build has **no bridge token** (the installer writes the token into the unpacked extension's own directory; a store-installed extension has no such file). Neither needs manual setup any more: the user types one short code, as described in [Pairing a store-installed extension](#pairing-a-store-installed-extension). Pairing delivers the token and records the extension ID on the bridge. Put those steps in the listing's setup instructions and in the reviewer notes.
 - [ ] Firefox: run `pnpm --filter dsh-browser-extension run build:firefox` and zip it. Keep `browser_specific_settings.gecko.id` stable (`dsh-browser-agent@natgurlain.github.io`, or your own domain).
 - [ ] AMO requires **source code** whenever the upload is bundled or minified (Vite output is). Upload a source zip with build instructions: `pnpm install && pnpm --filter dsh-browser-extension run build:firefox`, with Node and pnpm versions pinned.
 - [ ] Decide whether store builds keep the GitHub update check (`api.github.com` in `connect-src`, the update card). Stores update extensions themselves. If you remove it, update `permissions.md` and the privacy policy.
@@ -50,36 +50,46 @@ Everything needed to list the extension on the Chrome Web Store and on addons.mo
 
 - [ ] Update the README install instructions with the store links.
 - [ ] Optionally record the store extension ID in the bridge defaults (`PINNED_CHROME_EXTENSION_ID` or `allowedChromeExtensionIds`). Pairing makes this unnecessary; with the ID in the defaults a store user would still need the token, so it does not replace pairing.
-- [ ] Native messaging, the planned long-term answer, would remove even the one approval. It is not built.
+- [ ] Native messaging, the planned long-term answer, would remove even the one typed code. It is not built.
 - [ ] Watch the developer dashboards for policy emails. Unanswered emails can lead to takedown.
 
 ## Pairing a store-installed extension
 
-A store build (Chrome Web Store, Brave, Edge, or Firefox) connects to DSH after one approval. Nothing is copied, typed, or edited in a config file.
+A store build (Chrome Web Store, Brave, Edge, or Firefox) connects to DSH after the user types one short code. No token is copied and no config file is edited.
 
 What the user does:
 
-1. Open the extension's side panel. It finds the local DSH, shows "This browser is not connected to DSH yet" and a six-character code such as `4F7-K2Q`, with "Approve in DeepSeek Harness".
-2. Look at DeepSeek Harness. A prompt appears over the app: "Brave wants to connect", the same code, and **Approve** / **Deny**. (The same prompt is in Settings → General → "Pair a browser".)
-3. Check that the two codes are the same and click **Approve**. The side panel connects by itself.
+1. Open the extension's side panel. It finds the local DSH, shows "This browser is not connected to DSH yet" and a six-character code such as `4F7-K2Q`, with "Enter this code in DeepSeek Harness".
+2. Look at DeepSeek Harness. A card appears over the app: "A browser wants to connect — enter the code it shows", with one input. (The same input is in Settings → General → "Pair a browser".)
+3. Type the code and press Enter. The side panel connects by itself.
 
-That is one click, and it is needed once per browser profile. The bridge remembers the extension ID in `~/.dsh/browser-paired-extensions.json`, and the extension keeps the token in its own storage.
+This is needed once per browser profile. The bridge remembers the extension ID in `~/.dsh/browser-paired-extensions.json`, and the extension keeps the token in its own storage.
 
-In a terminal-only DSH session, step 2 and 3 are a command: `/browser-pair` lists the waiting requests, and `/browser-pair approve 4F7-K2Q` approves the one whose code the browser shows. `/browser-pair deny` refuses all of them.
+In a terminal-only DSH session, steps 2 and 3 are one command: `/browser-pair 4F7-K2Q`. `/browser-pair` alone says whether a browser is waiting.
+
+DSH never shows a code. The code exists only in the extension's panel and in what the user types, so enter a code only when you opened the extension yourself and it is showing one.
 
 ### What protects it
 
-- **Only the DSH owner can approve.** The prompt and the command go through DSH's own authenticated channel. A web page, another extension, or a local process that merely reaches the bridge port can ask to pair, but it cannot see the waiting requests and cannot approve one.
-- **Nothing is released before approval.** A request that is not approved gets no token and no allowlist entry. It expires after two minutes, and it disappears as soon as the browser closes its request.
-- **The code ties the approval to the right browser.** Both sides compute the code from a key agreement, and the extension commits to its key share before it sees the bridge's. Something in the middle (a process squatting on a local port, another extension relaying frames) ends up with a different code on the DSH side, so the code the user sees there does not match their browser. The code also covers the extension's origin and the port it dialed.
-- **The token is encrypted to the approved request.** It travels under a key that only the two ends of the approved exchange hold. An observer of loopback traffic reads nothing, and no other socket can use the approval.
-- **The queue is bounded.** At most 4 requests wait at once and at most 12 exchanges start per minute. Web pages are refused before any frame is read.
+- **The code is the only way in.** The extension picks the code at random and never sends it. Both sides run a password-authenticated key exchange keyed by it. The token is released only to a requester that proves it holds the code the user typed, and the extension stores a token only from a bridge that proves the same.
+- **Nothing can be approved by a click.** DSH shows no list of requesters to accept. A local process or another extension can ask to pair (even under a forged extension ID), but without the code on the user's screen it receives nothing it can use, not even something to guess against offline.
+- **A fake bridge gets nothing either.** A process that answers on DSH's port cannot make the extension accept a token, because it was never given the code. An extension that already holds a token never starts pairing by itself, whatever the connection error says; pairing again is an explicit action in the extension's Settings, behind a warning.
+- **Only the DSH owner can enter a code.** The input and the command go through DSH's own authenticated channel. A paired browser cannot run `/browser-pair` through the bridge.
+- **The exchange cannot be relayed.** It is bound to the extension's origin as the browser reports it and to the port the extension dialed.
+- **Guesses are counted.** A code is tried once against every waiting request, and each request sees one code only. A wrong guess succeeds with probability 2^-30 (about one in a billion). After 5 failed attempts within 10 minutes pairing pauses until the user resumes it, and DSH says so. At most 8 requests wait at once (2 per extension ID), for 2 minutes each.
 
-The one thing the user must do is compare the code. An approval given without looking would pair whatever asked. When more than one request is waiting, the prompt says so and lists each with its own code: approve the one your browser shows and deny the rest.
+### Pausing, unpairing, revoking
+
+Settings → General → "Pair a browser" also has:
+
+- **Pause pairing / Resume pairing.** While paused, no browser can ask to pair. Pairing also pauses by itself after several wrong codes.
+- **Paired extensions**, each with **Unpair**. Unpairing removes the extension ID from the allowlist, so that extension can no longer connect. It still holds the bridge token. If the browser is no longer yours, also reset the token: delete `~/.dsh/ext-bridge-token` and restart DSH. DSH generates a new token and rewrites the developer install's copy; other paired browsers pair again.
+
+`pairing: false` in the bridge plugin config switches pairing off entirely.
 
 ### Manual fallback
 
-Pairing needs a bridge plugin that includes it and a DSH surface that can show the prompt or run the command. Without either, set the connection up by hand, as before:
+Pairing needs a bridge plugin that includes it and a DSH surface that can show the card or run the command. Without either, set the connection up by hand, as before:
 
 1. Copy the token from `~/.dsh/ext-bridge-token` (the dsh startup log prints that file's path) into the extension's Settings → Token. The field accepts a pasted token only; nothing in the extension can read the file for the user.
 2. Chrome-family browsers only: add the extension ID shown on `chrome://extensions` to the bridge plugin's `allowedChromeExtensionIds`, then restart DSH.

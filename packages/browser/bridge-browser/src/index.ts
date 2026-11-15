@@ -30,6 +30,7 @@ import type {} from '@deepseek-ai/dsh-experimental-worktree'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { BridgeServer, DEFAULT_MAX_APPROVAL_HOLD_MS } from './server.ts'
+import { detectDshVersion, dshSupport, unsupportedDshError, untestedDshWarning } from './dsh-support.ts'
 import { createHostApprovalRequester, type AgentLookup, type ApprovalServiceLike } from './host-approval.ts'
 import { BrowserContextInjector } from './browser-context.ts'
 import { AuditLog, ToolCallAuditor } from './audit-log.ts'
@@ -75,7 +76,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { DEVLOOP_CAPTURE_TIMEOUT_MS, DevLoop, withDevLoopMethods } from './dev-loop.ts'
 import { mountLearning, type LearningMount } from './learning/index.ts'
 import { errorMessage } from './host-api.ts'
-import { PAIRED_EXTENSIONS_FILE_NAME, PairingRequests, readPairedExtensionIds, writePairedExtensionIds } from './pairing-host.ts'
+import { filePairedExtensions, PAIRED_EXTENSIONS_FILE_NAME, PairingDesk, type PairedExtensions } from './pairing-host.ts'
 import { mountPairingControls, PAIRING_COMMAND_NAME, type PairingCommandRegistry, type PairingFetchRegistry } from './pairing-mount.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -155,17 +156,17 @@ export interface Config {
   /**
    * Chrome extension IDs allowed to connect (`chrome-extension://<id>` Origin).
    * Defaults to the manifest-keyed ID; replace it for a differently keyed
-   * development build. Extensions the user approved through pairing (a Web
+   * development build. Extensions the user paired with a code (a Web
    * Store or Brave build) are allowed in addition, from
    * `<dsh home>/browser-paired-extensions.json`.
    */
   allowedChromeExtensionIds?: string[]
   /**
-   * Let an extension without a token ask to pair (the user approves each
-   * request in DSH after comparing a short code). Defaults to true. Set it to
-   * false to accept only the installer-provisioned or pasted token and the
-   * configured extension IDs: unknown extensions are then refused at the
-   * Origin check, and extensions approved earlier stay allowed.
+   * Let an extension without a token ask to pair (it shows a code, and the
+   * user types that code into DSH). Defaults to true. Set it to false to
+   * accept only the installer-provisioned or pasted token and the configured
+   * extension IDs: unknown extensions are then refused at the Origin check,
+   * and extensions paired earlier stay allowed.
    */
   pairing?: boolean
   /**
@@ -257,7 +258,7 @@ export const Config: z<Config, ResolvedConfig> = z.object({
  * set, and an optional system-prompt section, all effect-scoped for HMR.
  *
  * @param ctx - Cordis context.
- * @param resolved - Cordis 完成校验与默认值填充的配置。
+ * @param resolved - The configuration after Cordis validated it and filled in the defaults.
  */
 export async function apply(ctx: Context, resolved: ResolvedConfig): Promise<void> {
   if (resolved.beacon && resolved.beaconPorts.length === 0) {
@@ -266,11 +267,16 @@ export async function apply(ctx: Context, resolved: ResolvedConfig): Promise<voi
 
   const gateway = ctx.get('typertGateway') as unknown as GatewayCandidate | undefined
   const connection = ctx.get('connection') as unknown as HostConnectionLike | undefined
+  // DSH refuses the plugin outside engines.dsh; this covers what that leaves:
+  // a release inside the range that the matrix has not run, a host the user
+  // exempted with `dsh plugin allow-version`, and a host missing a needed API.
+  const dshVersion = detectDshVersion()
+  if (dshSupport(dshVersion) === 'untested') ctx.logger.warn(untestedDshWarning(dshVersion as string))
   if (gateway === undefined || !hasRemoteWireStream(gateway)) {
-    throw new Error('bridge-browser: dsh 0.2.2-rc.2 is required (Gateway wireStream unavailable)')
+    throw unsupportedDshError('Gateway wireStream', dshVersion)
   }
   if (connection === undefined || typeof connection.createPeer !== 'function') {
-    throw new Error('bridge-browser: dsh 0.2.2-rc.2 is required (connection.createPeer unavailable)')
+    throw unsupportedDshError('connection.createPeer', dshVersion)
   }
   const tokenRes = await resolveToken(resolved.token)
   // Zero-config Chrome: keep the installed extension's copy of the persisted
@@ -297,10 +303,9 @@ export async function apply(ctx: Context, resolved: ResolvedConfig): Promise<voi
   }
   const ledger = await fileSessionLedger(dshHomePath(SESSION_LEDGER_FILE_NAME), message => { ctx.logger.warn(message) })
   const watchRecords = await fileWatchRecords(dshHomePath(WATCH_RECORDS_FILE_NAME), message => { ctx.logger.warn(message) })
-  // Chrome extension IDs the user approved through pairing on an earlier run.
-  const pairedFile = dshHomePath(PAIRED_EXTENSIONS_FILE_NAME)
-  const pairedExtensionIds = await readPairedExtensionIds(pairedFile)
-  mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection), ledger, watchRecords, { file: pairedFile, ids: pairedExtensionIds })
+  // Chrome extension IDs the user paired on an earlier run.
+  const paired = await filePairedExtensions(dshHomePath(PAIRED_EXTENSIONS_FILE_NAME), message => { ctx.logger.warn(message) })
+  mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection), ledger, watchRecords, paired)
 }
 
 function mountBridge(
@@ -310,7 +315,7 @@ function mountBridge(
   hostApi: BrowserHostApi,
   ledger: SessionLedger,
   watchRecords: WatchRecordStore,
-  paired: { file: string; ids: string[] },
+  paired: PairedExtensions,
 ): void {
   // Workspace grouping wraps the gateway create; session deferral wraps the
   // result so materialization at first prompt still flows through grouping.
@@ -402,19 +407,14 @@ function mountBridge(
   ctx.on('agent/status', ({ agent, status }) => { void devLoop.noteStatus(String(agent.id), status) })
   const killSwitch = createKillSwitchHandler({ devLoop, learning: () => learning, info: (message) => { ctx.logger.info(message) } })
   // One-step pairing for extensions without a token (store builds, Firefox):
-  // they ask, and nothing is released until the user approves through dsh itself.
-  const pairing = new PairingRequests()
-  const pairedIds = [...paired.ids]
-  let pairedWrites: Promise<void> = Promise.resolve()
+  // they show a code, and nothing is released until the user types it into dsh itself.
+  const pairing = new PairingDesk(Date.now, (message) => { ctx.logger.info(`browser bridge: ${message}`) })
   server = new BridgeServer({
     token: tokenRes.token,
     ...(resolved.pairing ? { pairing } : {}),
-    onPaired: ({ origin, chromeExtensionId }) => {
-      ctx.logger.info(`browser bridge: paired ${origin === '' ? 'a client without an extension origin' : origin}`)
-      if (chromeExtensionId === undefined || pairedIds.includes(chromeExtensionId)) return
-      pairedIds.push(chromeExtensionId)
-      // Serialized: two pairings in a row must not interleave their writes.
-      pairedWrites = pairedWrites.then(() => writePairedExtensionIds(paired.file, pairedIds)).catch((error: unknown) => {
+    onPaired: ({ chromeExtensionId }) => {
+      if (chromeExtensionId === undefined) return
+      void paired.add(chromeExtensionId).catch((error: unknown) => {
         ctx.logger.warn(`browser bridge: could not record the paired extension (it stays allowed until dsh restarts): ${errorMessage(error)}`)
       })
     },
@@ -423,7 +423,7 @@ function mountBridge(
       ledger.external(sessionId) !== undefined || fenced.allowsSession(sessionId, signal, 'own')), devLoop),
     sessionScope: fenced,
     sessionLineage: taint,
-    allowedChromeExtensionIds: [...resolved.allowedChromeExtensionIds, ...paired.ids],
+    allowedChromeExtensionIds: [...resolved.allowedChromeExtensionIds, ...paired.list()],
     forwardedPorts: trustedForwardedPorts(resolved, message => { ctx.logger.warn(message) }),
     toolTimeoutMs: resolved.toolTimeoutMs,
     caps: {
@@ -490,7 +490,7 @@ function mountBridge(
     handler: (req, socket, head) => { server.handleUpgrade(req, socket, head) },
   }
   ctx.effect(() => ctx.webServer.registerUpgrade(route), 'bridge-browser: /ext/bridge upgrade route')
-  // 异步 disposer：HMR/卸载时先等桥完全关闭（socket/泵/acceptor 静默）再继续。
+  // Async disposer: on HMR/unload, wait until the bridge has fully closed (socket/pump/acceptor quiescent) before continuing.
   ctx.effect(() => () => server.close(), 'bridge-browser: bridge server')
 
   // Host-side pairing controls: both sit behind dsh's own authentication.
@@ -500,7 +500,17 @@ function mountBridge(
     try {
       const routes = optionalService<{ fetch?: PairingFetchRegistry }>(ctx, 'connection')?.fetch
       const commands = optionalService<PairingCommandRegistry>(ctx, 'commands')
-      disposers = mountPairingControls(pairing, {
+      disposers = mountPairingControls({
+        desk: pairing,
+        pairedIds: () => paired.list(),
+        unpair: async (id) => {
+          if (!await paired.remove(id)) return false
+          // An ID the plugin config also allows stays allowed: unpairing undoes pairing, not configuration.
+          if (!resolved.allowedChromeExtensionIds.includes(id)) server.revokeChromeExtensionId(id)
+          ctx.logger.info(`browser bridge: unpaired chrome-extension://${id}`)
+          return true
+        },
+      }, {
         ...routes === undefined ? {} : { fetch: routes },
         ...commands === undefined ? {} : { commands },
       })
@@ -508,10 +518,10 @@ function mountBridge(
       ctx.logger.warn(`browser bridge: could not register the pairing controls: ${errorMessage(error)}`)
     }
     if (disposers.length === 0) {
-      ctx.logger.warn(`browser bridge: this dsh offers no pairing control (neither the /api route nor /${PAIRING_COMMAND_NAME}); pairing requests cannot be approved, so extensions without a token must paste it`)
+      ctx.logger.warn(`browser bridge: this dsh offers no pairing control (neither the /api route nor /${PAIRING_COMMAND_NAME}); a pairing code cannot be entered, so extensions without a token must paste it`)
     }
     return async () => {
-      pairing.denyAll()
+      pairing.pausePairing('user')
       for (const dispose of disposers.reverse()) await dispose()
     }
   }, 'bridge-browser: pairing controls')

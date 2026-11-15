@@ -744,7 +744,7 @@ export async function apply(ctx, config = {}) {
     headless: config.headless !== false,
     args: ['--disable-background-networking', '--disable-component-update'],
   })
-  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: 'zh-CN', timezoneId: 'Asia/Shanghai' })
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: 'en-US', timezoneId: 'Asia/Shanghai' })
   const page = await context.newPage()
   const runner = createToolRunner(page, {
     maxItems: Number.isInteger(config.maxInteractiveItems) ? config.maxInteractiveItems : 60,

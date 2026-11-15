@@ -3,7 +3,7 @@ import type { PanelCopy } from './strings.ts'
 
 /** What the card needs from the panel API. */
 export interface PairingApi {
-  pair(onCode: (code: string) => void): Promise<void>
+  pair(onCode: (code: string) => void, options?: { again?: boolean }): Promise<void>
   cancelPairing(): Promise<void>
 }
 
@@ -17,6 +17,7 @@ export function pairingFailureText(cause: unknown, copy: PanelCopy['pairing']): 
 
 type View =
   | { kind: 'idle' }
+  | { kind: 'confirm-again' }
   | { kind: 'asking' }
   | { kind: 'code'; code: string }
   | { kind: 'paired' }
@@ -24,15 +25,20 @@ type View =
 
 /**
  * One-step pairing for installs without a bridge token (Web Store, Brave,
- * Firefox). The extension asks the local DSH host and shows a short code; the
- * user approves in DSH, where the same code is shown. Nothing is typed.
- * @param props.needed - the install cannot authenticate: say so above the card.
- * @param props.autoStart - ask as soon as the card appears instead of waiting for a click.
+ * Firefox). The extension shows a short code; the user types it into DSH.
+ *
+ * @param props.mode - `first`: this install has never held a token; it may
+ *   ask by itself (`autoStart`). `again`: it holds one (the connection is
+ *   failing for some other reason), so nothing is asked without an explicit
+ *   "Pair again…" and a confirmation that says when that is the right thing to do.
+ * @param props.needed - say above the card that this browser is not connected.
+ * @param props.autoStart - with `first`: ask as soon as the card appears.
  * @param props.onPaired - called once the token is stored.
  */
-export function PairingCard({ api, copy, needed = false, autoStart = false, onPaired }: {
+export function PairingCard({ api, copy, mode, needed = false, autoStart = false, onPaired }: {
   api: PairingApi
   copy: PanelCopy['pairing']
+  mode: 'first' | 'again'
   needed?: boolean
   autoStart?: boolean
   onPaired?: () => void
@@ -40,11 +46,12 @@ export function PairingCard({ api, copy, needed = false, autoStart = false, onPa
   const [view, setView] = useState<View>({ kind: 'idle' })
   // The request in flight; a late answer for an older one is ignored.
   const run = useRef(0)
+  const again = mode === 'again'
 
   const ask = (): void => {
     const current = ++run.current
     setView({ kind: 'asking' })
-    void api.pair((code) => { if (run.current === current) setView({ kind: 'code', code }) }).then(() => {
+    void api.pair((code) => { if (run.current === current) setView({ kind: 'code', code }) }, again ? { again: true } : {}).then(() => {
       if (run.current !== current) return
       setView({ kind: 'paired' })
       onPaired?.()
@@ -53,11 +60,11 @@ export function PairingCard({ api, copy, needed = false, autoStart = false, onPa
     })
   }
 
-  // An install that cannot connect asks as soon as the card appears: the
-  // user's first step is then to look at the code, not to find a button.
-  // Leaving the card withdraws a request that is still waiting.
+  // A first-time install asks as soon as the card appears: the user's first
+  // step is then to read the code, not to find a button. Leaving the card
+  // withdraws a request that is still waiting.
   useEffect(() => {
-    if (autoStart) ask()
+    if (autoStart && !again) ask()
     return () => {
       run.current += 1
       void api.cancelPairing().catch(() => {})
@@ -68,24 +75,33 @@ export function PairingCard({ api, copy, needed = false, autoStart = false, onPa
   return (
     <section className={needed ? 'pairing-card needed' : 'pairing-card'} data-testid="pairing-card">
       <strong>{copy.title}</strong>
-      {needed ? <p className="pairing-needed">{copy.needed}</p> : null}
+      {needed && !again ? <p className="pairing-needed">{copy.needed}</p> : null}
       {view.kind === 'code' ? (
         <>
           <output className="pairing-code" aria-label={copy.codeLabel} data-testid="pairing-code">{view.code}</output>
-          <p className="pairing-approve">{copy.approve}</p>
-          <p>{copy.approveHelp}</p>
+          <p className="pairing-enter">{copy.enter}</p>
+          <p>{copy.enterHelp}</p>
         </>
       ) : view.kind === 'asking' ? (
         <p role="status">{copy.asking}</p>
+      ) : view.kind === 'confirm-again' ? (
+        <>
+          <p className="pairing-warning" role="alert">{copy.againWarning}</p>
+          <div className="pairing-actions">
+            <button type="button" className="secondary" onClick={() => setView({ kind: 'idle' })}>{copy.cancel}</button>
+            <button type="button" className="primary" onClick={ask}>{copy.againConfirm}</button>
+          </div>
+        </>
       ) : (
         <>
-          {view.kind === 'idle' ? <p>{copy.help}</p> : null}
+          {view.kind === 'idle' ? <p>{again ? copy.againHelp : copy.help}</p> : null}
           <span role="status" aria-live="polite" className={view.kind === 'failed' ? 'pairing-status settings-error' : 'pairing-status'}>
             {view.kind === 'failed' ? view.text : view.kind === 'paired' ? copy.paired : ''}
           </span>
           {view.kind === 'paired' ? null : (
-            <button type="button" className="primary pairing-start" onClick={ask}>
-              {view.kind === 'failed' ? copy.retry : copy.start}
+            <button type="button" className={again ? 'secondary pairing-start' : 'primary pairing-start'}
+              onClick={again ? () => setView({ kind: 'confirm-again' }) : ask}>
+              {again ? copy.again : view.kind === 'failed' ? copy.retry : copy.start}
             </button>
           )}
         </>

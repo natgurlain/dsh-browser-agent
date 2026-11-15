@@ -13,7 +13,7 @@ Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to t
 Pages become structured text with a numbered inventory of interactive elements. Tools address elements by number or selector; `browser_screenshot` captures the controlled tab's viewport after approval. The side panel also accepts PNG, JPEG, WebP, and GIF attachments when the host advertises image support.
 
 > [!IMPORTANT]
-> The workspace is pinned to DSH 0.2.2-rc.2.
+> The bridge supports DSH 0.2.2-rc.1 through 0.2.2-rc.3 (tested; see [docs/dsh-matrix.md](docs/dsh-matrix.md)). The workspace installs 0.2.2-rc.2 by default. On 0.2.2-rc.1, the release the desktop app ships, Continue after a failed turn and the wait for worktree cleanup on delete are unavailable.
 
 ## Quick install
 
@@ -135,7 +135,13 @@ Requirements: Node.js `>=24.9.0`, Corepack/pnpm, and Chrome 125+ or Firefox 140+
 
 ### Install or update
 
-Run the [quick install commands](#quick-install) to install. The installer opens `chrome://extensions`; load `~/.dsh/browser-extension` as an unpacked extension the first time, or click **Reload** after an update. Restart dsh if it is already running.
+Run the [quick install commands](#quick-install) to install. It is one command on macOS and Linux; the installer does the rest:
+
+- **DeepSeek Harness desktop app.** When the app is installed (`/Applications` or `~/Applications` on macOS; `DSH_DESKTOP_APP=<path>` for another location, `DSH_DESKTOP_APP=none` to skip it), the bridge is registered with the app's own `desktop` profile through the CLI bundled in the app, in addition to the `web` profile. Quit and reopen the app afterwards. If the app's DSH version is outside the range the plugin supports, the installer says so, registers the `web` profile only, and asks you to update the app and run it again; it never overrides the version check.
+- **Node.js and pnpm.** When `node` on PATH is missing or older than 24.9.0, the installer uses one that is already installed: the app's bundled Node, then a suitable version from asdf, nvm, fnm, volta or mise. When `pnpm` on PATH does not run, it uses the app's bundled pnpm, then Corepack, then `npx`. Nothing is installed for you; if no suitable Node exists, the installer prints the command for the tools it found.
+- **Browser.** It opens the extensions page of the Chromium browser you have (Chrome, Chromium, Brave, Edge, Vivaldi or Arc; your default browser if it is one of them) and names that browser in its instructions. Load `~/.dsh/browser-extension` as an unpacked extension the first time, or click **Reload** after an update.
+
+The summary at the end lists where the bridge was registered and what was skipped. `install.ps1` on Windows registers the `web` profile only and looks for Chrome or Chromium only. Restart dsh if it is already running.
 
 To update, open **Settings → Updates** in the side panel. The check compares the running version with the latest GitHub release and offers a command that installs exactly that release with the installer already on disk, for example:
 
@@ -150,7 +156,9 @@ Installer options:
 | `--release latest` or `--release vX.Y.Z` | `DSH_BROWSER_VERSION` | Download that tagged release and verify it against its `SHA256SUMS`. This is the default when the installer is not run from a checkout. |
 | `--unverified-branch <name>` | `DSH_BROWSER_UNVERIFIED_BRANCH` | Development only: install a branch archive. A branch has no checksum, so nothing is verified. |
 | | `DSH_BROWSER_GITHUB_TOKEN` | Token for a private repository. It is sent to `api.github.com` only and never printed. Without it the installer falls back to an authenticated `gh`. |
-| | `DSH_BROWSER_NO_LAUNCH=1` | Do not open Chrome or touch the clipboard. |
+| | `DSH_BROWSER_NO_LAUNCH=1` | Do not open the browser or touch the clipboard. |
+| | `DSH_DESKTOP_APP=<path>` or `none` | Where the DeepSeek Harness desktop app is, or `none` to leave it alone (`install.sh` and the uninstaller). |
+| `--lang en` or `--lang zh` | `DSH_BROWSER_LANG` | Language of the installer and uninstaller output. One language is printed per run: English by default, Chinese when the system locale is Chinese. |
 
 To install from a source checkout instead (nothing is downloaded; this is also the way to install while the repository is private):
 
@@ -180,6 +188,8 @@ On Windows:
 
 From a checkout, run `bash scripts/uninstall.sh` or `.\scripts\uninstall.ps1`.
 
+The uninstaller also removes the bridge from the desktop app's `desktop` profile, through the CLI bundled in the app (`--desktop-app <path>` or `DSH_DESKTOP_APP` when the app is not in `/Applications` or `~/Applications`). If the app cannot be found, that registration and the files it shares stay in place and the uninstaller says so.
+
 ### Firefox source build
 
 Firefox uses a separate MV3 manifest, event-page background, and sidebar. Build it from a checkout, then open `about:debugging#/runtime/this-firefox`, choose **Load Temporary Add-on**, and select `extensions/dsh-browser/dist-firefox/manifest.json`:
@@ -189,9 +199,11 @@ pnpm install
 pnpm --filter dsh-browser-extension run build:firefox
 ```
 
-The bridge address is still auto-discovered. Firefox add-ons are not installed by the installer: open the side panel, and approve the pairing prompt that appears in DSH when it shows the same code as the panel (see [docs/store/README.md](docs/store/README.md#pairing-a-store-installed-extension)). Pasting the bridge token from `~/.dsh/ext-bridge-token` into the extension settings still works as a fallback. Signed distribution can package the same `dist-firefox/` output.
+The bridge address is still auto-discovered. Firefox add-ons are not installed by the installer: open the side panel, and type the code it shows into the card that appears in DSH (see [docs/store/README.md](docs/store/README.md#pairing-a-store-installed-extension)). Pasting the bridge token from `~/.dsh/ext-bridge-token` into the extension settings still works as a fallback. Signed distribution can package the same `dist-firefox/` output.
 
 ### Start and use
+
+With the DeepSeek Harness desktop app, open the app (restart it after installing). `pnpm start` and `dsh web` below start the separate `web` profile, which has none of the models configured in the app.
 
 Start the managed installation with:
 
@@ -199,7 +211,7 @@ Start the managed installation with:
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
-From a source checkout, run `pnpm start` in the repository root. The exact supported public runtime is:
+From a source checkout, run `pnpm start` in the repository root. The default tested public runtime is:
 
 ```sh
 npx @deepseek-ai/dsh@0.2.2-rc.2 web
@@ -213,7 +225,7 @@ Local Chrome use requires no configuration: the installer places the bridge toke
 
 - Make sure DSH is running. After installing or updating, restart DSH and reopen the side panel.
 - Open **Settings → Detect** and select your DSH instance.
-- A Firefox or store-installed build shows a pairing code in its side panel: approve the prompt with the same code in DSH (or run `/browser-pair approve <code>`). As a fallback, enter the token from `~/.dsh/ext-bridge-token` in Settings.
+- A Firefox or store-installed build shows a pairing code in its side panel: type it into the card that appears in DSH (or run `/browser-pair <code>`). As a fallback, enter the token from `~/.dsh/ext-bridge-token` in Settings.
 - For a remote DSH instance, enter its server address and bridge token in Settings.
 - If the plugin config pins its own `token`, paste that token into the extension settings; the installed copy only tracks `~/.dsh/ext-bridge-token`.
 - After updating, reload the extension and restart DSH together: the bridge handshake is versioned, and an older extension or plugin is refused with a "protocol version mismatch" close.
@@ -223,7 +235,7 @@ Local Chrome use requires no configuration: the installer places the bridge toke
 - Every client authenticates, loopback included, with a mutual HMAC challenge-response over the bridge token (handshake v3); the token itself never crosses the wire, and the extension refuses a bridge that cannot prove the token back.
 - Both proofs bind the address and port the extension dialed, and the bridge checks them against the socket it accepted, so a local process that relays the handshake from another port cannot complete it. Every later frame in both directions carries a MAC under a per-connection key and a strict sequence number; an unsealed, replayed, reordered, or altered frame closes the connection. Frames are authenticated, not encrypted: another local process able to observe loopback traffic can still read them. Because of the endpoint binding, a bridge reached through a port forward (Docker `-p`, SSH tunnels) on a different port is refused unless that loopback port is listed in the plugin config's `forwardedPorts` **and** `allowForwardedPorts: true` is set. Whatever listens on a forwarded port sits in the middle and can read every frame (session transcripts, page content), so list only forwards you control: a local process that binds a listed port while it is free can relay through it. The advertised capabilities are bound into both proofs too (protocol v4), so even a trusted forward cannot switch the developer-tools group on or change snapshot limits. A DNS name in the bridge URL is accepted only when the bridge listens on loopback; LAN or remote bridges must be dialed by IP address.
 - A token pinned in the plugin config must be at least 32 printable characters with real entropy (for example `openssl rand -hex 32`); a weaker token stops the plugin at startup, since a captured handshake would let a local observer guess it offline.
-- Chrome connections are accepted only from the extension ID fixed by the manifest key (`klmdgljhcjbbpjcplbanjeclilghnaoh`). Any other build (a Web Store or Brave install) is admitted once the user approves its pairing request in DSH, which records its ID in `~/.dsh/browser-paired-extensions.json`; `allowedChromeExtensionIds` in the bridge-browser plugin config remains for allowing a build without pairing. Build a store package with `pnpm --filter dsh-browser-extension run build:store`, which omits the `key` the store rejects.
+- Chrome connections are accepted only from the extension ID fixed by the manifest key (`klmdgljhcjbbpjcplbanjeclilghnaoh`). Any other build (a Web Store or Brave install) is admitted once the user types the code its panel shows into DSH, which records its ID in `~/.dsh/browser-paired-extensions.json`; `allowedChromeExtensionIds` in the bridge-browser plugin config remains for allowing a build without pairing. Build a store package with `pnpm --filter dsh-browser-extension run build:store`, which omits the `key` the store rejects.
 - The bridge forwards only the Host methods the extension uses. It acts only in sessions it created itself: `session.create` always mints a fresh session (any `sessionId`, `cwd`, or `workspaceId` from the extension is dropped), ownership is remembered in `~/.dsh/browser-bridge-sessions.json` and by the bridge workspace directory, and only those sessions can be prompted, changed, injected into, or deleted from the browser. Desktop and CLI sessions no longer appear in the panel's history picker; when one of them drives the browser, its history can still be shown (for an approval) and stopped, but not prompted. Subagent sessions are never reachable.
 - Full access stays out of the browser's reach: new browser sessions start on a restricted preset even when the Host default is full access; switching to a full-access preset, and prompting, injecting into, or running commands in a session that currently runs one, is refused. A preset counts as restricted only when the Host's preset table bundles a `read-only` or `workspace-write` sandbox (or you list it in `safePermissionPresets`); unknown presets, renamed full-access presets, and `custom` are refused, and `/permission` lines are accepted only in the exact `/permission <preset>` form. Set `allowDangerFullAccess: true` in the plugin config to lift these limits.
 - A stored relay key is spent only against the address it was saved for: model discovery with a different address needs the key re-entered, and changing a relay's address without re-entering its key clears the stored key.
@@ -253,7 +265,7 @@ pnpm --filter dsh-browser-extension run test
 Notes:
 
 - The bridge plugin must have a built `lib/` before startup because the loader consumes it; both `scripts/install.sh` and the root `pnpm run build` build the plugin before the extension.
-- The dependencies of `@deepseek-ai/dsh` and the bridge plugin are pinned to the same tested public release line. An upgrade must update the manifests and lockfile together and rerun the root checks.
+- The workspace installs one exact DSH release (the root `package.json`, the bridge's devDependencies and the lockfile agree on it). The bridge's `engines.dsh` and DSH peer ranges are wider and cover the releases that passed the compatibility matrix below. Changing the default release must update the manifests and lockfile together and rerun the root checks.
 
 `check:runtime` checks the resolved DSH dependencies and lockfile; `test:smoke` starts the real web host in a temporary DSH home and verifies the bridge and session reads after a restart, without model credentials.
 
@@ -286,6 +298,22 @@ It runs the steps below one after another, keeps going after a failure, prints a
 | `smoke-uninstall-ui` | `pnpm test:uninstall:ui` | yes |
 
 `.github/workflows/ci.yml` runs `pnpm gate` and nothing else, so it cannot drift from the local command; `uninstall.yml` adds `pnpm test:scripts` on macOS and Windows. Both are untested until Actions is available.
+
+### DSH compatibility matrix
+
+The gate runs against the default DSH release only. Other releases are checked by a separate command, because it installs each release from the npm registry into a temporary copy of the repository and takes a few minutes per release, so it is neither fast nor usable offline:
+
+```sh
+node scripts/dsh-matrix.mjs tested latest next --record   # the tested releases plus two dist-tags; refreshes docs/dsh-matrix.md
+node scripts/dsh-matrix.mjs 0.2.2-rc.4 --record           # one release
+node scripts/dsh-matrix.mjs 0.2.1-rc.5 --probe-outside-range   # a release engines.dsh excludes: measure the code, not the host's refusal
+```
+
+Each row runs install, `check:runtime`, typecheck, the bridge, extension and MCP unit tests, the bridge build and the runtime smoke; per-step logs go to `.artifacts/dsh-matrix/<version>/`. `--record` writes one row per release to [docs/dsh-matrix.md](docs/dsh-matrix.md), which also explains what is supported and why. The offline part is in the gate: `test-scripts` fails when the releases listed as tested (`TESTED_DSH_VERSIONS` in `packages/browser/bridge-browser/src/dsh-support.ts`) have no all-pass row in that record, or when `engines.dsh`, the peer ranges, the default release and the printed `npx @deepseek-ai/dsh@<version> web` hints disagree.
+
+To run the runtime smoke with a DSH installed somewhere else against this checkout's bridge (the layout of a linked checkout loaded by the desktop app or a global install), set `DSH_SMOKE_CLI` to that install's `lib/bin.js`: `DSH_SMOKE_CLI=<dir>/node_modules/@deepseek-ai/dsh/lib/bin.js pnpm test:smoke`.
+
+On a DSH release outside the tested list the bridge still loads if `engines.dsh` admits it, and logs a warning naming the tested releases and the command that starts one. Outside `engines.dsh`, DSH itself refuses the plugin with `Plugin @natgurlain/dsh-bridge-browser@<version> is incompatible with dsh <version>: requirements {"engines.dsh":"^0.2.2-rc.1"}`.
 
 What each phase gate rests on (the roadmap is not in this repository; the phases are the ones the tests name):
 

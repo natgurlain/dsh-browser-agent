@@ -7,6 +7,7 @@ import {
   relayTokenRef,
   withBridgePolicy,
   type BridgePolicyOptions,
+  isPairingCommand,
 } from '../src/bridge-policy.ts'
 import { withSessionDeferral } from '../src/session-deferral.ts'
 import { memorySessionLedger } from '../src/session-ledger.ts'
@@ -312,6 +313,38 @@ describe('full-access permission presets', () => {
     await call('session.create', {})
     expect(await call('commands.execute', { sessionId: 'created', line })).toMatchObject({ ok: false, error: { code: 'forbidden' } })
     expect(forwarded(inner, 'commands.execute')).toHaveLength(0)
+  })
+
+  it.each([
+    '/browser-pair',
+    '/browser-pair ABC-DEF',
+    '/browser-pair resume',
+    '/browser-pair unpair abcdefghijklmnopabcdefghijklmnop',
+    '/browser-pair\nABC-DEF',
+    // Anything that could be read as the command fails closed too.
+    ' /browser-pair ABC-DEF',
+    '/Browser-Pair ABC-DEF',
+    '／browser-pair ABC-DEF',
+    '/browser_pair ABC-DEF',
+    '/browser pair ABC-DEF',
+  ])('refuses the pairing command from the browser: %j (a paired extension cannot pair another)', async (line) => {
+    const { call, inner } = harness()
+    await call('session.create', {})
+    expect(await call('commands.execute', { sessionId: 'created', line })).toMatchObject({
+      ok: false, error: { code: 'forbidden', message: expect.stringContaining('/browser-pair') },
+    })
+    expect(forwarded(inner, 'commands.execute')).toHaveLength(0)
+    expect(isPairingCommand(line)).toBe(true)
+  })
+
+  it('leaves other commands alone', async () => {
+    const { call, inner } = harness()
+    await call('session.create', {})
+    for (const line of ['/plan', '/browser-pairing-notes', '/compact', 'please /browser-pair x']) {
+      expect(isPairingCommand(line), line).toBe(false)
+    }
+    expect(await call('commands.execute', { sessionId: 'created', line: '/plan' })).toMatchObject({ ok: true })
+    expect(forwarded(inner, 'commands.execute')).toHaveLength(1)
   })
 
   it('classifies /permission lines like the Host grammar and fails closed', () => {

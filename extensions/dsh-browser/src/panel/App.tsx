@@ -45,6 +45,14 @@ import {
   stepUiScale,
   uiScaleAtLimit,
 } from './ui-scale.ts'
+import {
+  applyTheme,
+  getThemePreference,
+  saveThemePreference,
+  watchSystemTheme,
+  watchThemePreference,
+  type ThemePreference,
+} from './theme.ts'
 import { canReturnToControlledTab } from './tab-handoff.ts'
 import { QuestionCard } from './QuestionCard.tsx'
 import { UpdateCard } from './UpdateCard.tsx'
@@ -893,6 +901,7 @@ interface HistoryPage {
 export function App(): React.JSX.Element {
   const [locale, setLocale] = useState<UiLocale>(() => getUiLocale())
   const [localePreference, setLocalePreference] = useState<UiLocalePreference>(() => getUiLocalePreference())
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => getThemePreference())
   const copy = PANEL_COPY[locale]
   const [api] = useState<PanelApi>(() => connectPanel())
   const [state, setState] = useState<BridgeState>('stopped')
@@ -1092,6 +1101,26 @@ export function App(): React.JSX.Element {
     setLocale(getUiLocale())
   }
 
+  // Colour theme: `theme.ts` owns the document attribute and the storage; this
+  // view only mirrors the preference for the Settings control. `main.tsx`
+  // applies the theme before React renders; applying it again here keeps a
+  // panel mounted any other way consistent. The storage watcher catches a
+  // change made from another side-panel window, and the system watcher keeps
+  // an `auto` panel in step with the browser/OS scheme.
+  useEffect(() => {
+    applyTheme(getThemePreference())
+    const stopPreference = watchThemePreference(setThemePreference)
+    const stopSystem = watchSystemTheme()
+    return () => {
+      stopPreference()
+      stopSystem()
+    }
+  }, [])
+
+  function changeTheme(next: ThemePreference): void {
+    setThemePreference(saveThemePreference(next))
+  }
+
   // Settings: seed from storage, then let the panel own the form.
   useEffect(() => {
     void chrome.storage.local.get('dshSettings').then((stored) => {
@@ -1178,7 +1207,7 @@ export function App(): React.JSX.Element {
   }
 
   // Discovery state reported by the background. 'not-found' is terminal for the
-  // current panel lease, so the status chip can say so instead of "未连接".
+  // current panel lease, so the status chip can say so instead of "Disconnected".
   const [discovery, setDiscovery] = useState<DiscoveryStatus>('idle')
   const [bridgeAddress, setBridgeAddress] = useState<string | null>(null)
   const [standing, setStanding] = useState<StandingStatus | null>(null)
@@ -1217,9 +1246,10 @@ export function App(): React.JSX.Element {
     }
   }
 
-  // 每次连接重启（连接配置变更/断线重连）都新建会话。状态消息逐条监听：
-  // React 会把 stopped/connecting 等瞬时状态合并进同一帧渲染，依赖渲染
-  // 状态无法可靠观察到"连接已重置"，因此在这里按消息粒度判定。
+  // Every connection restart (connection settings changed / reconnect after a drop) creates a new
+  // session. Status messages are listened to one by one: React batches transient states such as
+  // stopped/connecting into the same rendered frame, so render state cannot reliably observe
+  // "the connection was reset"; it is therefore decided here per message.
   const [sessionEpoch, setSessionEpoch] = useState(0)
   const lastStateRef = useRef<BridgeState | null>(null)
   useEffect(() => {
@@ -1272,7 +1302,7 @@ export function App(): React.JSX.Element {
         setSessionEpoch((epoch) => epoch + 1)
       }
       if (previous !== null && next !== previous && next === 'connected' && sessionRef.current !== null) {
-        // 重连后重新建立当前会话的订阅和历史基线。
+        // After a reconnect, re-establish the subscription and the history baseline of the current session.
         void refreshHistory(sessionRef.current)
         void refreshComposerDirectories(sessionRef.current)
       }
@@ -1523,7 +1553,7 @@ export function App(): React.JSX.Element {
       return
     }
     if (payload.event.type === 'tool/result') {
-      // 完成对应步骤（按 callId 匹配），再从审计日志补全审批结果与耗时。
+      // Complete the matching step (matched by callId), then fill in the approval outcome and duration from the audit log.
       const result = resultFromEvent(payload.event)
       setRows((prev) => completeToolStep(prev, result, nextSeq()))
       scheduleStepAudit(payload.sessionId)
@@ -1597,7 +1627,7 @@ export function App(): React.JSX.Element {
   function applyHistory(id: string, history: HistoryPage): void {
     if (sessionRef.current !== id) return
     const followed = followSnapshotsRef.current.get(id)
-    // 同一基线可能先通过事件到达，再由 RPC 返回；只发布一次以保留实时追加内容。
+    // The same baseline may arrive through an event first and then be returned by the RPC; publish it only once to keep what was appended live.
     if (history.snapshotId !== undefined && followed?.id === history.snapshotId && followed.applied) return
     // A newer history request may have replaced this follower while the RPC
     // response was travelling. Its older cut cannot replace the current view.
@@ -2036,7 +2066,7 @@ export function App(): React.JSX.Element {
     }
   }
 
-  /** 打开历史会话选择器：拉取持久化会话列表（已过滤空白会话），供恢复。 */
+  /** Open the session history picker: fetch the persisted session list (empty sessions filtered out) to resume from. */
   async function openSessionPicker(): Promise<void> {
     if (showSessionPicker) {
       setShowSessionPicker(false)
@@ -2058,7 +2088,7 @@ export function App(): React.JSX.Element {
     }
   }
 
-  /** 恢复历史会话：切换当前 session 并加载其历史。 */
+  /** Resume a past session: switch the current session and load its history. */
   async function resumeSession(entry: SessionPickerEntry): Promise<void> {
     if (sessionSwitchBlocked || sessionChangingRef.current) return
     const transition = beginSessionTransition()
@@ -2080,7 +2110,7 @@ export function App(): React.JSX.Element {
     }
   }
 
-  /** 删除历史会话：由桥接在存储锁内归档并清理，拒绝时保留重试入口。 */
+  /** Delete a past session: the bridge archives and purges it under the storage lock; when refused, the retry entry stays. */
   async function deleteSession(entry: SessionPickerEntry): Promise<void> {
     if (entry.running || sessionSwitchBlocked || sessionChangingRef.current) return
     const title = projectedSessionTitle(entry) ?? sessionDisplayTitle(entry)
@@ -2127,7 +2157,7 @@ export function App(): React.JSX.Element {
     }
   }
 
-  /** 新建会话：创建后由 session.active(isNew) 将其绑定到当前标签页。 */
+  /** New session: once created, session.active(isNew) binds it to the current tab. */
   async function startNewSession(): Promise<void> {
     if (sessionSwitchBlocked || sessionChangingRef.current) return
     const transition = beginSessionTransition()
@@ -2261,7 +2291,7 @@ export function App(): React.JSX.Element {
     // A quick-start prompt asks about the whole page, not about a quote.
     const submittedSelection = textOverride === undefined ? selection : null
     const id = sessionRef.current
-    // busy state 是异步的：连续回车可能都通过 state 检查——用 ref 同步锁。
+    // The busy state is asynchronous: consecutive Enter presses could all pass the state check, so a ref is used as a synchronous lock.
     if ((text === '' && submittedImages.length === 0 && submittedSelection === null)
       || busy || addingImagesRef.current || sendingRef.current || sessionChangingRef.current || id === null) return
 
@@ -2302,7 +2332,7 @@ export function App(): React.JSX.Element {
     setBusy(true)
     setWorking(true)
     setError(null)
-    // 不渲染乐观行：live user/message 事件即时回显，避免同一消息出现两行。
+    // No optimistic row is rendered: the live user/message event echoes it immediately, which avoids two rows for the same message.
     try {
       const clientTimeZone = browserTimeZone()
       await api.rpc('session.prompt', {
@@ -2685,12 +2715,14 @@ export function App(): React.JSX.Element {
       if (typeof token === 'string') setSettings((prev) => prev === null ? prev : { ...prev, token })
     }).catch(() => {})
   }
-  // The bridge is reachable but this install cannot authenticate: offer pairing up front.
-  const needsPairing = state !== 'connected'
-    && (bridgeFailure === 'no-token' || bridgeFailure === 'origin-rejected' || bridgeFailure === 'token-mismatch')
+  // A bridge answers and this install has never held a token: pairing starts by
+  // itself. An install that holds a token never pairs by itself, whatever the
+  // connection says (a process answering on the bridge's port can produce any
+  // refusal): there, pairing again is an explicit action in Settings.
+  const firstPairing = state !== 'connected' && bridgeFailure === 'no-token'
 
-  // 状态栏只显示连接状态；快照上限是技术细节，在设置页说明（见 hint）。
-  // Discovery can end in a confirmed miss; that is more useful than "未连接".
+  // The status bar shows only the connection status; the snapshot limit is a technical detail explained on the settings page (see hint).
+  // Discovery can end in a confirmed miss; that is more useful than "Disconnected".
   // A refusal only the user can fix outranks the generic transport state.
   const statusText = state !== 'connected' && bridgeFailure !== null
     ? copy.bridgeFailure[bridgeFailure]
@@ -2823,6 +2855,19 @@ export function App(): React.JSX.Element {
               <option value="zh">{copy.settings.languageChinese}</option>
             </select>
           </label>
+          <label>
+            <span>{copy.settings.theme}</span>
+            <small>{copy.settings.themeHelp}</small>
+            <select
+              className="theme-select"
+              value={themePreference}
+              onChange={(event) => changeTheme(event.target.value as ThemePreference)}
+            >
+              <option value="auto">{copy.settings.themeAuto}</option>
+              <option value="light">{copy.settings.themeLight}</option>
+              <option value="dark">{copy.settings.themeDark}</option>
+            </select>
+          </label>
         </div>
         <div className="settings-panel">
           <label>
@@ -2883,7 +2928,7 @@ export function App(): React.JSX.Element {
               ? null
               : <small className="device-connected" data-testid="standing-work">{copy.settings.staysConnected(standing)}</small>}
           </div>
-          <PairingCard api={api} copy={copy.pairing} needed={needsPairing} onPaired={adoptPairedToken} />
+          <PairingCard api={api} copy={copy.pairing} mode={bridgeFailure === 'no-token' ? 'first' : 'again'} onPaired={adoptPairedToken} />
           <label>
             <span>Token</span>
             <small>{copy.settings.tokenHelp}</small>
@@ -3170,10 +3215,9 @@ export function App(): React.JSX.Element {
       </header>
       <TaintBanner sessionId={sessionRef.current} locale={locale} />
       <WatchersCard locale={locale} />
-      {needsPairing && !killSwitchEngaged
-        // A token that stopped working may be a relay in the way: there the user asks, not the panel.
+      {firstPairing && !killSwitchEngaged
         // Keyed by the bridge address: a request is for one bridge, so a new address asks anew.
-        ? <PairingCard key={bridgeAddress ?? ''} api={api} copy={copy.pairing} needed autoStart={bridgeFailure !== 'token-mismatch'} onPaired={adoptPairedToken} />
+        ? <PairingCard key={bridgeAddress ?? ''} api={api} copy={copy.pairing} mode="first" needed autoStart onPaired={adoptPairedToken} />
         : null}
       {showTextSize && (
         <TextSizePanel scale={uiScale} copy={copy}
@@ -3418,7 +3462,7 @@ export function App(): React.JSX.Element {
               setSlashIndex(0)
             }}
             onKeyDown={(e) => {
-              // isComposing：输入法组词中的回车是确认选字，不是发送。
+              // isComposing: Enter while an IME is composing confirms the candidate; it does not send.
               if (e.nativeEvent.isComposing) return
               if (showSlashMenu && slashRows.length > 0) {
                 if (e.key === 'ArrowDown') {

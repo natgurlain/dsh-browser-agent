@@ -33,15 +33,17 @@
  * bridge-owned Host adapter.
  *
  * Pairing (pairing.ts, pairing-host.ts) is the one other thing an
- * unauthenticated socket may do: instead of `hello` the client sends
- * `pair.request` and runs a key agreement whose result both sides show as a
- * short code (`pair.request` → `pair.share` → `pair.reveal`). The request
- * then waits, bounded in number and time, for the user's answer on the host.
- * Nothing is released before that answer: only an approved request receives
- * `pair.ok` with the token encrypted under the exchange key, and only then
- * does its Chrome extension ID join the allowlist; it reconnects with the
- * ordinary handshake. A socket admitted only to ask (a Chrome extension that
- * is not on the allowlist) is refused the moment it sends `hello`.
+ * unauthenticated socket may do: instead of `hello` an extension sends
+ * `pair.request` with a key share made under the code it displays. The
+ * request then waits, bounded in number, rate and time, until the user types
+ * a code on the host. The bridge answers with its own share under the typed
+ * code (`pair.share`), and releases the token (`pair.ok`, encrypted, with
+ * its own key confirmation) only to a requester whose `pair.confirm`
+ * verifies, that is, one that holds the code the user typed. Its Chrome
+ * extension ID then joins the allowlist and it reconnects with the ordinary
+ * handshake. A requester without the code receives one group element and a
+ * close. A socket admitted only to ask (a Chrome extension that is not on the
+ * allowlist) is refused the moment it sends `hello`.
  * Methods the /api carrier pins to loopback (`PRIVILEGED_METHODS`)
  * stay loopback-only here regardless of the token, defense in depth for
  * `--host 0.0.0.0` deployments.
@@ -85,6 +87,7 @@ import {
   MAX_HOST_APPROVAL_REASON_CHARS,
   bridgeClientKey,
   isBridgeHex256,
+  isPairingOrigin,
   BRIDGE_PROTOCOL_VERSION,
   BRIDGE_SESSION_PURGE_METHOD,
   BRIDGE_STANDING_EVENT_METHOD,
@@ -118,13 +121,14 @@ import { handleAuditRpc } from './audit-rpc.ts'
 import { verifyToken } from './token.ts'
 import {
   createPairingShare,
-  derivePairingSession,
+  derivePairingKeys,
   isPairingShare,
   sealPairingToken,
-  verifyPairingCommitment,
+  verifyPairingClientConfirmation,
+  verifyPairingDone,
   type PairingContext,
 } from './pairing.ts'
-import { chromeExtensionIdOfOrigin, isPairableOrigin, PAIRING_REQUEST_TTL_MS, type PairingRequests } from './pairing-host.ts'
+import { chromeExtensionIdOfOrigin, PAIRING_REQUEST_TTL_MS, type PairingAttemptOutcome, type PairingDesk } from './pairing-host.ts'
 import { errorMessage } from './host-api.ts'
 
 /**
@@ -186,6 +190,9 @@ export const MAX_PENDING_SOCKETS = 16
 
 /** Authenticated connections kept at once; the least recently active is evicted beyond it. */
 export const MAX_READY_CONNECTIONS = 8
+
+/** How long a pairing requester may take to confirm, and then to acknowledge the token. */
+export const PAIRING_STEP_TIMEOUT_MS = 5_000
 
 /** Default ceiling on how long an approval may hold a tool call past its own budget. */
 export const DEFAULT_MAX_APPROVAL_HOLD_MS = 15 * 60_000
@@ -252,11 +259,13 @@ export interface BridgeServerDeps {
    */
   allowedChromeExtensionIds?: readonly string[]
   /**
-   * The pairing requests (pairing-host.ts). Absent: this bridge never pairs,
-   * and a Chrome extension that is not on the allowlist is refused at the
-   * Origin check.
+   * The pairing desk (pairing-host.ts). Absent: this bridge never pairs, and
+   * a Chrome extension that is not on the allowlist is refused at the Origin
+   * check.
    */
-  pairing?: PairingRequests
+  pairing?: PairingDesk
+  /** Milliseconds a pairing requester may take for each of its two answers; defaults to PAIRING_STEP_TIMEOUT_MS. */
+  pairingStepTimeoutMs?: number
   /**
    * Told after an extension paired, with its Origin and (for Chrome) the
    * extension ID that was just added to the allowlist, so the plugin can
@@ -754,7 +763,7 @@ export class BridgeServer {
     // A Chrome extension that is not on the allowlist may do one thing only:
     // ask to pair. Web pages (http/https Origins) are refused outright.
     const pairOnly = !isAllowedBridgeOrigin(origin, this.chromeExtensionIds)
-    if (pairOnly && !(isPairableOrigin(origin) && this.deps.pairing !== undefined)) {
+    if (pairOnly && !(isPairingOrigin(origin) && this.deps.pairing !== undefined)) {
       ws.close(BRIDGE_CLOSE_CODES.originRejected, 'origin not allowed')
       return
     }
@@ -778,16 +787,21 @@ export class BridgeServer {
     }, this.deps.helloTimeoutMs ?? HELLO_TIMEOUT_MS)
     const serverNonce = createBridgeNonce()
     let channel: BridgeFrameChannel | undefined
-    /** A pairing exchange on this socket: awaiting the client's reveal, then the user's answer. */
-    let pairing: { stage: 'reveal'; request: Extract<ClientFrame, { t: 'pair.request' }>; secret: bigint; share: string }
-      | { stage: 'waiting'; withdraw: () => void; timer: NodeJS.Timeout }
-      | undefined
-    /** The socket is going away: a request waiting on it must leave the user's prompt. */
+    /**
+     * A pairing request on this socket. `withdraw` takes it out of the queue;
+     * `expect` is the one frame the exchange is waiting for, if any.
+     */
+    let pairing: {
+      withdraw: () => void
+      timer: NodeJS.Timeout
+      expect?: { t: 'pair.confirm' | 'pair.done'; resolve: (mac: string | undefined) => void }
+    } | undefined
+    /** The socket is going away: its request leaves the queue, and a waiting step ends unanswered. */
     const abandonPairing = (): void => {
-      if (pairing?.stage === 'waiting') {
-        clearTimeout(pairing.timer)
-        pairing.withdraw()
-      }
+      if (pairing === undefined) return
+      clearTimeout(pairing.timer)
+      pairing.withdraw()
+      pairing.expect?.resolve(undefined)
       pairing = undefined
     }
 
@@ -813,30 +827,43 @@ export class BridgeServer {
           return
         }
         if (frame.t === 'pair.request' && pairing === undefined) {
-          const begun = this.beginPairing(ws, frame, serverNonce, origin ?? '', local)
-          if (begun !== undefined) pairing = { stage: 'reveal', request: frame, ...begun }
-          return
-        }
-        if (frame.t === 'pair.reveal' && pairing?.stage === 'reveal') {
-          const waiting = this.queuePairing(ws, pairing.request, frame, pairing, serverNonce, origin ?? '')
-          pairing = undefined
-          if (waiting === undefined) return
+          const queued = this.queuePairing(ws, frame, serverNonce, origin, local, (t, timeoutMs) => new Promise((resolve) => {
+            /* v8 ignore next 4 -- the socket's close handler ends the exchange first */
+            if (pairing === undefined) {
+              resolve(undefined)
+              return
+            }
+            const exchange = pairing
+            const timer = setTimeout(() => { settle(undefined) }, timeoutMs)
+            const settle = (mac: string | undefined): void => {
+              clearTimeout(timer)
+              if (exchange.expect?.resolve === settle) delete exchange.expect
+              resolve(mac)
+            }
+            exchange.expect = { t, resolve: settle }
+          }))
+          if (queued === undefined) return
           // The request now waits for the user, not for the handshake timer;
           // it is bounded by the pairing queue instead of the pending-socket pool.
           clearTimeout(helloTimer)
           leavePending()
           pairing = {
-            stage: 'waiting',
-            withdraw: waiting.withdraw,
+            withdraw: queued.withdraw,
             // Real-time backstop for the queue's own expiry.
             timer: setTimeout(() => {
-              waiting.withdraw()
+              // An exchange in progress is past the queue: its own step timeouts end it.
+              if (pairing?.expect !== undefined) return
+              queued.withdraw()
               ws.close(BRIDGE_CLOSE_CODES.pairingClosed, 'the pairing request expired')
             }, PAIRING_REQUEST_TTL_MS),
           }
           return
         }
-        if (frame.t === 'pair.request' || frame.t === 'pair.reveal') {
+        if ((frame.t === 'pair.confirm' || frame.t === 'pair.done') && pairing?.expect?.t === frame.t) {
+          pairing.expect.resolve(frame.mac)
+          return
+        }
+        if (frame.t === 'pair.request' || frame.t === 'pair.confirm' || frame.t === 'pair.done') {
           ws.close(1008, 'unexpected pairing frame')
           return
         }
@@ -896,94 +923,101 @@ export class BridgeServer {
   }
 
   /**
-   * First pairing step: check that the request describes this socket, count
-   * it against the rate limit, and answer with the bridge's share. The client
-   * is already committed to its own share, which it has not shown yet.
-   * @returns the bridge's secret and share, or `undefined` when the socket was closed.
-   */
-  private beginPairing(
-    ws: WebSocket,
-    frame: Extract<ClientFrame, { t: 'pair.request' }>,
-    serverNonce: string,
-    origin: string,
-    local: BridgeEndpoint | undefined,
-  ): { secret: bigint; share: string } | undefined {
-    const requests = this.deps.pairing
-    if (requests === undefined) {
-      ws.close(BRIDGE_CLOSE_CODES.pairingClosed, 'this bridge does not pair')
-      return undefined
-    }
-    // Same relay defenses as the handshake: the client names the endpoint it
-    // dialed and the origin it is, and both must describe this socket.
-    if (local === undefined || !this.endpointAccepted(frame.endpoint, local)) {
-      ws.close(BRIDGE_CLOSE_CODES.pairingFailed, 'pairing failed: endpoint mismatch')
-      return undefined
-    }
-    if (frame.origin !== origin || frame.nonce === serverNonce || !isPairableOrigin(origin)) {
-      ws.close(BRIDGE_CLOSE_CODES.pairingFailed, 'pairing failed: the request does not describe this connection')
-      return undefined
-    }
-    if (!requests.admit()) {
-      ws.close(BRIDGE_CLOSE_CODES.pairingClosed, 'too many pairing requests; try again in a minute')
-      return undefined
-    }
-    const own = createPairingShare()
-    sendHandshakeFrame(ws, { t: 'pair.share', share: own.share })
-    return own
-  }
-
-  /**
-   * Second pairing step: check the client's reveal against its commitment,
-   * derive the code, and put the request in front of the user. The token is
-   * sent from here only if the user approves.
+   * Take a pairing request: check that it describes this socket, apply the
+   * limits, and keep it until the user enters a code. Nothing is computed or
+   * sent for the requester here.
+   * @param awaitFrame - resolves with the MAC of the requester's next `pair.confirm` / `pair.done`, or undefined.
    * @returns how to withdraw the request when the socket goes away, or `undefined` when the socket was closed.
    */
   private queuePairing(
     ws: WebSocket,
     request: Extract<ClientFrame, { t: 'pair.request' }>,
-    reveal: Extract<ClientFrame, { t: 'pair.reveal' }>,
-    own: { secret: bigint; share: string },
     serverNonce: string,
-    origin: string,
+    origin: string | undefined,
+    local: BridgeEndpoint | undefined,
+    awaitFrame: (t: 'pair.confirm' | 'pair.done', timeoutMs: number) => Promise<string | undefined>,
   ): { withdraw: () => void } | undefined {
-    const requests = this.deps.pairing
-    const context: PairingContext = { serverNonce, clientNonce: request.nonce, endpoint: request.endpoint, origin, name: request.name }
-    const session = requests !== undefined && isPairingShare(reveal.share) && verifyPairingCommitment(request.commit, reveal.share, reveal.opening)
-      ? derivePairingSession(context, own.secret, reveal.share, own.share, 'server')
-      : undefined
-    if (requests === undefined || session === undefined) {
-      ws.close(BRIDGE_CLOSE_CODES.pairingFailed, 'pairing failed: the reveal does not match the request')
+    const desk = this.deps.pairing
+    if (desk === undefined) {
+      ws.close(BRIDGE_CLOSE_CODES.pairingClosed, 'this bridge does not pair')
       return undefined
     }
-    const queued = requests.submit({ code: session.code, origin, name: request.name }, (decision) => {
-      if (decision !== 'approved') {
-        if (decision === 'denied') ws.close(BRIDGE_CLOSE_CODES.pairingDenied, 'the pairing request was denied')
-        else ws.close(BRIDGE_CLOSE_CODES.pairingClosed, 'the pairing request expired')
-        return
+    // Only an extension may ask, under the Origin the browser gave its socket.
+    // The same relay defenses as the handshake apply: the request names the
+    // endpoint the client dialed and the origin it is, and both must describe this socket.
+    if (!isPairingOrigin(origin) || request.origin !== origin || request.nonce === serverNonce) {
+      ws.close(BRIDGE_CLOSE_CODES.pairingFailed, 'pairing failed: the request does not describe this connection')
+      return undefined
+    }
+    if (local === undefined || !this.endpointAccepted(request.endpoint, local)) {
+      ws.close(BRIDGE_CLOSE_CODES.pairingFailed, 'pairing failed: endpoint mismatch')
+      return undefined
+    }
+    const refusal = desk.admit(origin)
+    if (refusal !== undefined) {
+      if (refusal === 'paused') ws.close(BRIDGE_CLOSE_CODES.pairingPaused, 'pairing is paused on the host')
+      else ws.close(BRIDGE_CLOSE_CODES.pairingClosed, 'too many pairing requests; try again in a minute')
+      return undefined
+    }
+    // Checked after the rate limit: the subgroup test is the one costly step.
+    if (!isPairingShare(request.share)) {
+      ws.close(BRIDGE_CLOSE_CODES.pairingFailed, 'pairing failed: malformed share')
+      return undefined
+    }
+    const stepMs = this.deps.pairingStepTimeoutMs ?? PAIRING_STEP_TIMEOUT_MS
+    const attempt = async (code: string): Promise<PairingAttemptOutcome> => {
+      if (ws.readyState !== WebSocket.OPEN) return 'failed'
+      const context: PairingContext = { code, serverNonce, clientNonce: request.nonce, endpoint: request.endpoint, origin, name: request.name }
+      const own = createPairingShare(context)
+      const keys = derivePairingKeys(context, own.secret, request.share, own.share, 'server')
+      /* v8 ignore next 4 -- the share was validated above */
+      if (keys === undefined) {
+        ws.close(BRIDGE_CLOSE_CODES.pairingFailed, 'pairing failed')
+        return 'failed'
+      }
+      // The requester must confirm first. Until it does, it has been sent
+      // one group element and nothing keyed by the code.
+      const confirmation = awaitFrame('pair.confirm', stepMs)
+      sendHandshakeFrame(ws, { t: 'pair.share', share: own.share })
+      const mac = await confirmation
+      if (mac === undefined || !verifyPairingClientConfirmation(keys, mac)) {
+        ws.close(BRIDGE_CLOSE_CODES.pairingFailed, 'pairing failed: the code entered on the host is not this request\'s code')
+        return 'failed'
       }
       let sealed: { box: string; mac: string }
       try {
-        sealed = sealPairingToken(session, this.deps.token)
+        sealed = sealPairingToken(keys, this.deps.token)
       } catch {
         // A token too long to carry: pairing cannot deliver it (paste it instead).
         ws.close(BRIDGE_CLOSE_CODES.pairingFailed, 'pairing failed: this bridge token cannot be delivered by pairing')
-        return
+        return 'failed'
       }
-      /* v8 ignore next -- a closed socket withdraws its request, so an approval finds it open */
-      if (ws.readyState !== WebSocket.OPEN) return
       const chromeExtensionId = chromeExtensionIdOfOrigin(origin)
       if (chromeExtensionId !== undefined) this.chromeExtensionIds.add(chromeExtensionId)
       try {
         this.deps.onPaired?.({ origin, ...(chromeExtensionId === undefined ? {} : { chromeExtensionId }) })
       } catch { /* observer only */ }
+      const receipt = awaitFrame('pair.done', stepMs)
       sendHandshakeFrame(ws, { t: 'pair.ok', ...sealed })
+      const done = await receipt
       ws.close(1000, 'paired')
-    })
-    if (queued === undefined) {
-      ws.close(BRIDGE_CLOSE_CODES.pairingClosed, 'too many pairing requests; try again in a minute')
-      return undefined
+      return done !== undefined && verifyPairingDone(keys, done) ? 'paired' : 'unconfirmed'
     }
-    return queued
+    return desk.enqueue({ origin, name: request.name }, attempt, (reason) => {
+      if (reason === 'paused') ws.close(BRIDGE_CLOSE_CODES.pairingPaused, 'pairing is paused on the host')
+      else ws.close(BRIDGE_CLOSE_CODES.pairingClosed, reason === 'expired' ? 'the pairing request expired' : 'a newer pairing request took this one\'s place')
+    })
+  }
+
+  /**
+   * Take a Chrome extension ID off the allowlist (the user unpaired it). Its
+   * next handshake is refused at the Origin check; a connection it already
+   * has stays until it ends, and it still holds the token (rotate the token
+   * to cut it off completely).
+   * @returns whether the ID was allowed.
+   */
+  revokeChromeExtensionId(id: string): boolean {
+    return this.chromeExtensionIds.delete(id)
   }
 
   /** The dialed endpoint is this socket, or a configured loopback forward to it. */
@@ -1092,7 +1126,8 @@ export class BridgeServer {
       case 'ping':
       case 'error':
       case 'pair.request':
-      case 'pair.reveal':
+      case 'pair.confirm':
+      case 'pair.done':
       case 'pair.share':
       case 'pair.ok':
         // Protocol violations and unsolicited server-side shapes are ignored;

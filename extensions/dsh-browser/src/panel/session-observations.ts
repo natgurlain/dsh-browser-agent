@@ -16,7 +16,7 @@ export interface ProjectionChange {
   val: unknown
 }
 
-/** 保存打开会话期间收到的状态，并按每个投影的序号合并历史基线。 */
+/** Keeps the state received while a session is being opened, and merges the history baseline by each projection's sequence number. */
 export class SessionObservations {
   private readonly states = new Map<string, SessionState>()
   private readonly projections = new Map<string, Map<string, { seq: number; value: unknown }>>()

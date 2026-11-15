@@ -28,7 +28,7 @@ function harness(options: {
       return {
         async *[Symbol.asyncIterator]() {
           if (endpoint === 'session/observeProjections') yield { type: 'ready' }
-          // 保持状态读取未完成，检查历史与消息流可以独立交付。
+          // Keep the state read pending, to check that history and the message stream can be delivered independently.
           await abortWait(signal)
         },
       }

@@ -10,13 +10,17 @@
  * @module
  */
 
-import { accessibleName, collectInteractive, isInViewport, isVisible, labelControl, mainText, structuredText, truncate } from './extract.ts'
+import { accessibleName, collectInventory, isInViewport, isVisible, labelControl, mainText, structuredText, truncate } from './extract.ts'
 import { resolveSelector } from './dom.ts'
 import { ElementIds } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
 
-/** Role label per element kind (model-facing vocabulary). */
-function roleOf(el: Element): string {
+/**
+ * Role label per element kind (model-facing vocabulary).
+ * @param el - inventory element.
+ * @param inferred - elements listed only because a script made them clickable.
+ */
+function roleOf(el: Element, inferred: ReadonlySet<Element>): string {
   const role = el.getAttribute('role')
   if (role !== null && role !== '') return role
   if (el instanceof HTMLAnchorElement) return 'link'
@@ -40,8 +44,8 @@ function roleOf(el: Element): string {
   if (el.tagName === 'SUMMARY') return 'summary'
   // A label stands in for its hidden control (custom checkbox/toggle).
   const control = labelControl(el)
-  if (control !== null) return `${roleOf(control)} label`
-  if (el.hasAttribute('onclick') || el.hasAttribute('tabindex')) return 'clickable'
+  if (control !== null) return `${roleOf(control, inferred)} label`
+  if (el.hasAttribute('onclick') || el.hasAttribute('tabindex') || inferred.has(el)) return 'clickable'
   return el.tagName.toLowerCase()
 }
 
@@ -95,7 +99,7 @@ export interface SnapshotView {
   reindexed: boolean
   /** Budget accounting: characters cut from main text and items/forms dropped by count caps. */
   truncated: { mainChars: number; itemsDropped: number; formsDropped: number }
-  /** 总预算（渲染封顶用）。 */
+  /** Total budget (caps the rendered output). */
   budgetChars: number
 }
 
@@ -206,7 +210,7 @@ function openDialogOf(el: Element, isOpen: (dialog: Element) => boolean): Elemen
  * @returns the snapshot view.
  */
 export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: SnapshotView | null): SnapshotView {
-  const elements = collectInteractive(document)
+  const { elements, inferred } = collectInventory(document)
   const { added, removed } = ids.assign(elements)
   // A renumbering is only meaningful relative to a previous snapshot: the
   // first snapshot on a fresh document always adds everything.
@@ -223,6 +227,11 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   })).filter((view) => !viewportOnly || view.inViewport)
   const ordered = [...elementViews].sort((a, b) =>
     Number(b.inDialog) - Number(a.inDialog) || Number(b.inViewport) - Number(a.inViewport))
+  // Inferred click targets only use slots the semantic controls leave free:
+  // when the inventory is over its cap, they go first (least prominent first).
+  for (let index = ordered.length - 1; index >= 0 && ordered.length > options.budget.maxItems; index -= 1) {
+    if (inferred.has(ordered[index]!.element)) ordered.splice(index, 1)
+  }
   const names = new Map<Element, string>()
   const nameOf = (element: Element): string => {
     let name = names.get(element)
@@ -239,7 +248,7 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
     if (index === undefined) continue
     const item: InventoryItem = {
       index,
-      role: roleOf(el),
+      role: roleOf(el, inferred),
       name: nameOf(el),
       inViewport,
     }
@@ -311,7 +320,7 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   let mainDiff: SnapshotView['mainDiff']
   if (options.delta === true && last !== null) {
     if (last.main !== main.text || last.url !== location.href || last.title !== document.title) {
-      changed.add(-1) // -1 = 正文/标题/URL 变化（渲染时说明）
+      changed.add(-1) // -1 = body text/title/URL changed (explained when rendering)
     }
     if (last.main !== main.text) mainDiff = diffLines(last.main, main.text)
     for (const item of items) {
@@ -450,7 +459,7 @@ export function collapseRuns(items: InventoryItem[]): InventoryEntry[] {
   return entries
 }
 
-/** 渲染结果的整体预算：主文/清单之外的部分（标题、URL、包装行）也计入。 */
+/** Overall budget of the rendered result: the parts outside the main text/inventory (title, URL, wrapper lines) count too. */
 function capRendered(text: string, budgetChars: number): string {
   if (text.length <= budgetChars) return text
   return `${text.slice(0, budgetChars)}…(truncated to the snapshot character budget)`

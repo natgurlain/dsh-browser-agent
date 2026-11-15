@@ -101,7 +101,7 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
     const incoming = (message as { budget?: Partial<SnapshotBudget> }).budget
     if (incoming !== undefined) {
       budget = { ...budget, ...incoming }
-      sendResponse({ ok: true, result: { text: `快照预算已更新: ${JSON.stringify(budget)}` } })
+      sendResponse({ ok: true, result: { text: `Snapshot budget updated: ${JSON.stringify(budget)}` } })
     }
     return
   }

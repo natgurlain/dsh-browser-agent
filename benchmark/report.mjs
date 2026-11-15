@@ -103,14 +103,14 @@ function pairedAnalysis(records) {
     const playwrightRecords = pair.filter((record) => record.backend === 'playwright')
     const extensionRecords = pair.filter((record) => record.backend === 'extension')
     if (playwrightRecords.length > 1 || extensionRecords.length > 1) {
-      warnings.push(`配对 ${identifier.replace('\u0000', ' / ')} 有重复后端记录，已跳过。`)
+      warnings.push(`Pair ${identifier.replace('\u0000', ' / ')} has duplicate backend records; skipped.`)
       continue
     }
     const playwright = playwrightRecords[0]
     const extension = extensionRecords[0]
     if (playwright === undefined || extension === undefined) continue
     if (playwright.taskId !== extension.taskId) {
-      warnings.push(`配对 ${identifier.replace('\u0000', ' / ')} 的 taskId 不一致，已跳过。`)
+      warnings.push(`Pair ${identifier.replace('\u0000', ' / ')} has mismatched taskId values; skipped.`)
       continue
     }
 
@@ -169,7 +169,7 @@ function pairedAnalysis(records) {
     bothFailed: sum.bothFailed + value.bothFailed,
   }), { pairs: 0, bothSuccess: 0, playwrightOnly: 0, extensionOnly: 0, bothFailed: 0 })
   rows.push([
-    '总计',
+    'Total',
     totalCounts.pairs,
     totalCounts.bothSuccess,
     totalCounts.playwrightOnly,
@@ -177,14 +177,14 @@ function pairedAnalysis(records) {
     totalCounts.bothFailed,
     ci === undefined
       ? fixed(geometricMean(allRatios), 2)
-      : `${fixed(geometricMean(allRatios), 2)}（95% CI ${fixed(ci.low, 2)}–${fixed(ci.high, 2)}）`,
+      : `${fixed(geometricMean(allRatios), 2)} (95% CI ${fixed(ci.low, 2)}–${fixed(ci.high, 2)})`,
     fixed(geometricMean(allPenalized), 2),
   ])
 
   const orderRows = [...orderRatios.entries()]
     .sort(([left], [right]) => left - right)
     .map(([order, ratios]) => [
-      order === 1 ? '扩展先运行' : '扩展后运行',
+      order === 1 ? 'Extension ran first' : 'Extension ran second',
       ratios.length,
       fixed(geometricMean(ratios), 2),
     ])
@@ -193,14 +193,14 @@ function pairedAnalysis(records) {
 
 function failureCategory(record) {
   const reason = String(record.validationReason ?? record.infrastructureError ?? 'unknown')
-  if (record.infrastructureError !== undefined || reason.startsWith('runner error:')) return '基础设施错误'
-  if (record.timedOut === true || /timed out|timeout/iu.test(reason)) return '超时'
-  if (/forbidden tool|used forbidden tools/iu.test(reason)) return '使用禁用工具'
-  if (reason.startsWith('answer did not contain')) return '答案不匹配'
-  if (reason.startsWith('final page state did not match')) return '页面状态不匹配'
-  if (/approval/iu.test(reason)) return '意外审批请求'
-  if (record.turnReason?.kind !== undefined && record.turnReason.kind !== 'completed') return 'Turn 未正常完成'
-  return '其他'
+  if (record.infrastructureError !== undefined || reason.startsWith('runner error:')) return 'Infrastructure error'
+  if (record.timedOut === true || /timed out|timeout/iu.test(reason)) return 'Timeout'
+  if (/forbidden tool|used forbidden tools/iu.test(reason)) return 'Forbidden tool used'
+  if (reason.startsWith('answer did not contain')) return 'Answer mismatch'
+  if (reason.startsWith('final page state did not match')) return 'Page state mismatch'
+  if (/approval/iu.test(reason)) return 'Unexpected approval request'
+  if (record.turnReason?.kind !== undefined && record.turnReason.kind !== 'completed') return 'Turn did not complete normally'
+  return 'Other'
 }
 
 function failureRows(records) {
@@ -221,7 +221,7 @@ export function renderReport(records, { sourceName = 'benchmark.jsonl' } = {}) {
   const valid = records.filter((record) => record?.schemaVersion === 1 && typeof record.backend === 'string')
   const suiteVersions = [...new Set(valid.map((record) => record.benchmarkSuiteVersion ?? 'legacy/unknown'))]
   if (suiteVersions.length > 1) {
-    throw new Error(`不能汇总多个评测套件版本：${suiteVersions.join('、')}。请按 benchmarkSuiteVersion 分别生成报告。`)
+    throw new Error(`Cannot aggregate several benchmark suite versions: ${suiteVersions.join(', ')}. Generate a separate report per benchmarkSuiteVersion.`)
   }
   const benchmarkIds = [...new Set(valid.map((record) => record.benchmarkId).filter(Boolean))]
   const backendGroups = groupBy(valid, (record) => record.backend)
@@ -246,67 +246,67 @@ export function renderReport(records, { sourceName = 'benchmark.jsonl' } = {}) {
     timeoutMs: record.timeoutMs,
   }))).size
   const consistencyNotes = [
-    `有效记录 ${valid.length} 条，Benchmark ID ${benchmarkIds.length} 个。配对键同时包含 Benchmark ID，不会把追加到同一 JSONL 的多次运行交叉配对。`,
-    `评测套件版本：${suiteVersions.join('、')}。`,
-    ...(suiteVersions.includes('legacy/unknown') ? ['部分记录没有评测套件版本；它们属于旧结果，不应与修正成功标准后的结果直接比较。'] : []),
-    ...(configurationCount > 1 ? [`检测到 ${configurationCount} 套环境、模型或超时配置；不要把它们当成一个受控实验直接汇总。`] : []),
+    `Valid records: ${valid.length}; Benchmark IDs: ${benchmarkIds.length}. The pair key includes the Benchmark ID, so several runs appended to the same JSONL are never paired across each other.`,
+    `Benchmark suite version: ${suiteVersions.join(', ')}.`,
+    ...(suiteVersions.includes('legacy/unknown') ? ['Some records have no benchmark suite version; they are old results and should not be compared directly with results produced after the success criteria were corrected.'] : []),
+    ...(configurationCount > 1 ? [`Found ${configurationCount} distinct environment, model or timeout configurations; do not aggregate them as if they were one controlled experiment.`] : []),
     ...paired.warnings,
   ]
 
   const lines = [
-    '# DSH Browser 基准评测报告',
+    '# DSH Browser benchmark report',
     '',
-    `数据文件：\`${sourceName}\`  `,
-    `Benchmark ID：${benchmarkIds.length === 0 ? '—' : benchmarkIds.map((id) => `\`${id}\``).join('、')}  `,
-    `生成时间：${new Date().toISOString()}`,
+    `Data file: \`${sourceName}\`  `,
+    `Benchmark ID: ${benchmarkIds.length === 0 ? '—' : benchmarkIds.map((id) => `\`${id}\``).join(', ')}  `,
+    `Generated at: ${new Date().toISOString()}`,
     '',
-    '## 总览',
+    '## Overview',
     '',
-    table(['后端', '运行数', '成功数', '成功率', 'P50 完成耗时(ms)', 'P90*(ms)', '平均(ms)', '平均工具调用', '平均 prompt token（含缓存）', '平均输出 token'], overview),
+    table(['Backend', 'Runs', 'Successes', 'Success rate', 'P50 completion (ms)', 'P90* (ms)', 'Mean (ms)', 'Mean tool calls', 'Mean prompt tokens (incl. cache)', 'Mean output tokens'], overview),
     '',
-    '完成耗时从提交 `session.prompt` 前一刻计到对应 `turn/end` 被 runner 收到。耗时统计只包含成功运行；成功率必须与耗时一起解读。P90 仅在至少 10 个成功样本时展示，避免给小样本制造虚假精度。',
+    'Completion time is measured from just before `session.prompt` is submitted until the runner receives the matching `turn/end`. Timing statistics cover successful runs only; read the success rate together with the timings. P90 is shown only with at least 10 successful samples, to avoid false precision on small samples.',
     '',
-    '## 分任务',
+    '## By task',
     '',
-    table(['后端 / 任务', '运行数', '成功数', '成功率', 'P50 完成耗时(ms)', 'P90*(ms)', '平均(ms)', '平均工具调用', '平均 prompt token（含缓存）', '平均输出 token'], taskRows),
+    table(['Backend / task', 'Runs', 'Successes', 'Success rate', 'P50 completion (ms)', 'P90* (ms)', 'Mean (ms)', 'Mean tool calls', 'Mean prompt tokens (incl. cache)', 'Mean output tokens'], taskRows),
     '',
-    '## 成功运行的阶段与 token',
+    '## Phases and tokens of successful runs',
     '',
-    table(['后端', '成功数', '平均 TTFT(ms)', '平均状态达成(ms)', '平均 LLM(ms)', '平均工具墙钟(ms)', '平均工具调用', '平均新输入 token', '平均缓存读取 token', '平均缓存写入 token', '平均输出 token'], phaseRows),
+    table(['Backend', 'Successes', 'Mean TTFT (ms)', 'Mean state reached (ms)', 'Mean LLM (ms)', 'Mean tool wall clock (ms)', 'Mean tool calls', 'Mean new input tokens', 'Mean cache-read tokens', 'Mean cache-write tokens', 'Mean output tokens'], phaseRows),
     '',
-    '`状态达成`只对具有可外部验证页面状态的任务有值；该列是有值样本的均值。`LLM` 来自 DSH session projection，`工具墙钟`来自 runner 观察到的 tool call/result 区间，两者可能重叠，不能与完成耗时直接相加。',
+    '`State reached` has a value only for tasks with an externally verifiable page state; the column is the mean over samples that have one. `LLM` comes from the DSH session projection and `tool wall clock` from the tool call/result intervals the runner observed; the two may overlap and cannot simply be added up to the completion time.',
     '',
-    '## 配对对比',
+    '## Paired comparison',
     '',
-    table(['任务', '配对数', '双方成功', '仅 Playwright 成功', '仅扩展成功', '双方失败', 'Playwright / 扩展耗时比', '失败惩罚后耗时比'], paired.rows),
+    table(['Task', 'Pairs', 'Both succeeded', 'Only Playwright succeeded', 'Only extension succeeded', 'Both failed', 'Playwright / extension time ratio', 'Failure-penalized time ratio'], paired.rows),
     '',
-    '比值大于 1 表示扩展后端更快，小于 1 表示 Playwright 后端更快。“双方成功”列使用同 Benchmark ID、同任务、同 seed、同 trial 的成功配对并取几何均值；样本至少有两对时，总计给出固定随机种子的 bootstrap 95% 置信区间。“失败惩罚后”把失败运行计为 `2 × timeout`，用于降低只看成功样本造成的幸存者偏差。',
+    'A ratio above 1 means the extension backend is faster; below 1 means the Playwright backend is faster. The "Playwright / extension time ratio" column uses pairs with the same Benchmark ID, task, seed and trial in which both succeeded, and takes the geometric mean; with at least two such pairs, the Total row gives a bootstrap 95% confidence interval with a fixed random seed. "Failure-penalized" counts a failed run as `2 × timeout`, to reduce the survivorship bias of looking at successful samples only.',
     '',
     ...(paired.orderRows.length === 0 ? [] : [
-      '### 运行顺序敏感性',
+      '### Run-order sensitivity',
       '',
-      table(['配对顺序', '双方成功配对数', 'Playwright / 扩展耗时比'], paired.orderRows),
+      table(['Order within pair', 'Pairs where both succeeded', 'Playwright / extension time ratio'], paired.orderRows),
       '',
-      '若两行差异明显，结果可能仍受热身、缓存或时间漂移影响，应增加 trial 并随机化更大的运行块。',
+      'If the two rows differ noticeably, the results may still be affected by warm-up, caching or drift over time; add trials and randomize larger blocks of runs.',
       '',
     ]),
-    '## 失败摘要',
+    '## Failure summary',
     '',
     failures.length === 0
-      ? '无失败运行。'
-      : table(['后端', '类别', '次数', '示例'], failureRows(valid)),
+      ? 'No failed runs.'
+      : table(['Backend', 'Category', 'Count', 'Example'], failureRows(valid)),
     '',
-    '## 数据一致性',
+    '## Data consistency',
     '',
     ...consistencyNotes.map((note) => `- ${note}`),
     '',
-    '## 解释边界',
+    '## Limits of interpretation',
     '',
-    '- 两边使用相同 DSH profile、模型选择、任务提示词、seed、机器和本地网页；模型可见的工具名称、说明、参数与通用系统提示保持对齐。',
-    '- 这是完整浏览器后端的端到端比较，不是纯传输开销实验。两边的页面结构化表示、索引实现和浏览器动作执行仍不同，这些差异属于被测后端的一部分。',
-    '- 运行顺序按配对交替，避免总是让某一个后端先跑；正式结果建议至少 5 个 seed，并在空闲机器上重复。',
-    '- 这是端到端耗时：包含模型推理、工具编排、浏览器执行和本地通信。`stateReachedMs` 可用于单独观察写操作在网页状态上何时真正完成。',
-    '- 常规延迟与阶段表只包含成功样本；必须同时看配对成功结果和失败惩罚指标。本报告也不能隔离模型服务端抖动。若置信区间较宽，应增加 seed/trial。',
+    '- Both sides use the same DSH profile, model selection, task prompts, seeds, machine and local web pages; the tool names, descriptions, parameters and the general system prompt the model sees are kept aligned.',
+    '- This is an end-to-end comparison of complete browser backends, not an experiment on transport overhead alone. The structured page representation, the index implementation and the execution of browser actions still differ between the two sides; those differences are part of the backends under test.',
+    '- The run order alternates per pair so that neither backend always runs first; for official results use at least 5 seeds and repeat on an idle machine.',
+    '- These are end-to-end timings: they include model inference, tool orchestration, browser execution and local communication. `stateReachedMs` can be used to see separately when a write actually took effect in the page state.',
+    '- The regular latency and phase tables cover successful samples only; always read the paired success results and the failure-penalized metric alongside them. This report cannot isolate jitter on the model server side either. If the confidence interval is wide, add seeds/trials.',
     '',
   ]
   return lines.join('\n')
@@ -329,7 +329,7 @@ export async function writeReportForFile(inputPath, outputPath) {
 async function latestResult() {
   const resultsRoot = join(benchmarkRoot, 'results')
   const candidates = (await readdir(resultsRoot)).filter((name) => name.endsWith('.jsonl')).sort().reverse()
-  if (candidates.length === 0) throw new Error('benchmark/results 中没有 JSONL 结果，请先运行 node benchmark/run.mjs')
+  if (candidates.length === 0) throw new Error('benchmark/results has no JSONL results; run node benchmark/run.mjs first')
   return join(resultsRoot, candidates[0])
 }
 

@@ -26,7 +26,7 @@
  *   panel → bg: { type: 'request-status' }
  *   panel → bg: { type: 'discovery.start', id }
  *   panel → bg: { type: 'discovery.cancel' }
- *   panel → bg: { type: 'pair.start', id }
+ *   panel → bg: { type: 'pair.start', id, again? }
  *   panel → bg: { type: 'pair.cancel' }
  *   bg → panel: { type: 'pair.code', id, code, answerTimeoutMs }
  *   bg → panel: { type: 'pair.result', id, ok, reason? }
@@ -89,7 +89,7 @@ import {
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { BRIDGE_CONFIG_PATH, BRIDGE_PATH, DEVTOOLS_CAPS_VERSION, parseBridgeConfigPayload } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import { BridgeClient, type BridgeFailure, type BridgeState } from './bridge.ts'
+import { BridgeClient, loadInstalledToken, type BridgeFailure, type BridgeState } from './bridge.ts'
 import { createRpc } from './rpc.ts'
 import { discoverInstances, planDiscovery, portOfUrl, readBridgeConfig } from './discovery.ts'
 import { browserName, extensionOrigin, pairWithBridge, type PairingFailure } from './pairing.ts'
@@ -255,7 +255,7 @@ export interface Settings {
 const SETTINGS_VERSION = 2
 
 const SETTINGS_DEFAULTS: Settings = {
-  // 空地址 = 自动探测本机 dsh（零配置）；手动填地址时优先手动。
+  // Empty address = auto-discover the local dsh (zero configuration); a manually entered address takes precedence.
   bridgeUrl: '',
   token: '',
   sharePageContent: 'auto',
@@ -279,30 +279,30 @@ const SETTINGS_DEFAULTS: Settings = {
 const MAX_APPROVAL_TIMEOUT_MINUTES = 14
 
 /**
- * 自动探测：DSH Desktop 启动 Host 时用 `--port 0`，本地 Web 端口每次启动都由系统
- * 随机分配，固定端口列表无法预知。因此按以下顺序探测：
- * 上次成功的地址 → `dsh web` 默认端口 → 插件固定端口信标（43189–43198）。
- * 只在面板打开时跑一次、或用户点「自动检测」时跑；未找到即终态，不再重试。
+ * Auto-discovery: DSH Desktop starts the Host with `--port 0`, so the local web port is
+ * assigned by the system at every start and no fixed port list can predict it. Probe in this order:
+ * the last address that worked → the `dsh web` default port → the plugin's fixed-port beacon (43189–43198).
+ * It runs once when the panel opens, or when the user clicks "Detect"; not found is final, with no retry.
  */
 const LEGACY_LOCAL_URL = 'ws://127.0.0.1:3080'
 const LAST_BRIDGE_URL_KEY = 'dshLastBridgeUrl'
 const DISCOVERY_LATCH_KEY = 'dshDiscoveryLatch'
 
-/** 一次面板租约内的自动探测闸门；`not-found` 表示已确认没有服务，不再重试。 */
+/** Auto-discovery gate for one panel lease; `not-found` means no service was confirmed, so there is no retry. */
 type DiscoveryLatch = 'idle' | 'running' | 'not-found'
 
-/** 报给面板的探测状态，与传输层状态分开。 */
+/** Discovery status reported to the panel, separate from the transport status. */
 type DiscoveryState = 'idle' | 'running' | 'found' | 'not-found'
 
 let discoveryLatch: DiscoveryLatch = 'idle'
 let discoveryState: DiscoveryState = 'idle'
-/** 上次成功连接的桥地址，下次探测时优先尝试。 */
+/** The bridge address of the last successful connection, tried first at the next discovery. */
 let lastBridgeUrl: string | undefined
-/** 当前连接实际使用的地址（手动填写或探测得到）。 */
+/** The address the current connection actually uses (entered manually or discovered). */
 let connectedAddress: string | undefined
-/** 用户点「自动检测」发起的枚举，同一时间只跑一个。 */
+/** The enumeration started by the user clicking "Detect"; only one runs at a time. */
 let activeScan: { id: string; controller: AbortController } | undefined
-/** 回环地址判定：只有本机地址才在连接失败时回落到自动探测。 */
+/** Loopback check: only a local address falls back to auto-discovery when the connection fails. */
 function isLocalBridgeAddress(url: string): boolean {
   try {
     const host = new URL(url).hostname.toLowerCase()
@@ -312,7 +312,7 @@ function isLocalBridgeAddress(url: string): boolean {
   }
 }
 
-/** 记下成功的地址，供下次面板打开时优先尝试。 */
+/** Remember the address that worked, to try it first the next time the panel opens. */
 function rememberBridgeUrl(url: string): void {
   if (lastBridgeUrl === url) return
   lastBridgeUrl = url
@@ -355,21 +355,21 @@ function onBridgeProofRejected(url: string): void {
   void settingsReady.then(() => startBridge())
 }
 
-/** 跨 service worker 重启保留「未找到」，避免后台重启后偷偷重试。 */
+/** Keep "not found" across service worker restarts, so a background restart does not retry silently. */
 function persistDiscoveryLatch(value: DiscoveryLatch): void {
   const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
   if (area === undefined) return
   void Promise.resolve(area.set({ [DISCOVERY_LATCH_KEY]: value })).catch(() => {})
 }
 
-/** 恢复上次运行留下的闸门与最近地址。 */
+/** Restore the gate and the most recent address left by the previous run. */
 async function loadDiscoveryMemory(): Promise<void> {
   try {
     const stored = await chrome.storage.local.get(LAST_BRIDGE_URL_KEY)
     const remembered = stored?.[LAST_BRIDGE_URL_KEY]
     if (typeof remembered === 'string' && remembered !== '') lastBridgeUrl = remembered
   } catch {
-    // 记忆地址只是加速手段，读不到就按无记忆处理。
+    // The remembered address is only a shortcut; if it cannot be read, carry on as if there were none.
   }
   const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
   if (area === undefined) return
@@ -380,13 +380,13 @@ async function loadDiscoveryMemory(): Promise<void> {
       discoveryState = 'not-found'
     }
   } catch {
-    // 同上：读不到按 idle 处理。
+    // Same as above: if it cannot be read, treat it as idle.
   }
 }
 
 const discoveryMemory = loadDiscoveryMemory()
 
-/** 运行一次自动探测，返回首个命中的桥地址。 */
+/** Run auto-discovery once and return the first bridge address that answers. */
 async function discoverBridgeUrl(
   shouldContinue: () => boolean,
   excludeUrl?: string,
@@ -2547,7 +2547,7 @@ async function followModelSelectedTab(tab: chrome.tabs.Tab, sessionId?: string):
   commitTabAffinityRebind(summary, sessionId, 'background')
 }
 
-/** 把协商的快照预算下发到受控页（尚未绑定时使用活动页）。 */
+/** Push the negotiated snapshot budget to the controlled page (the active page when none is bound yet). */
 async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> {
   await affinityReady
   const resolution = tabAffinity.resolveTarget()
@@ -2563,7 +2563,7 @@ async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> 
       budget: { maxItems: negotiated.maxInteractiveItems, maxChars: negotiated.snapshotMaxChars },
     })
   } catch {
-    // 页面尚未注入 content script：下一次快照仍用默认预算，可接受。
+    // The content script is not injected in the page yet: the next snapshot still uses the default budget, which is acceptable.
   }
 }
 
@@ -3114,9 +3114,9 @@ async function startBridge(): Promise<void> {
     broadcastStatus()
     return
   }
-  // 手动填的地址常只有主机部分（如 ws://127.0.0.1:3080）；桥路径是协议
-  // 常量，缺省时自动补全，避免连到根路径失败。
-  // 非法 URL 原样交给 WebSocket 构造函数报错。
+  // A manually entered address often has only the host part (e.g. ws://127.0.0.1:3080); the bridge
+  // path is a protocol constant, so it is filled in when missing, to avoid a failed connection to the root path.
+  // An invalid URL is passed unchanged to the WebSocket constructor, which reports the error.
   url = normalizeBridgeUrl(url, BRIDGE_PATH)
   // The hello must carry this install's identity.
   if (clientIdentity === undefined) {
@@ -3220,14 +3220,20 @@ let activePairing: AbortController | undefined
 
 /**
  * One-step pairing (pairing.ts): ask the DSH host for the bridge token, show
- * the code the user compares there, and once they approve store the token
- * like a typed one and connect. The request goes to the bridge this install
+ * the code the user types there, and once the exchange verified store the
+ * token like a typed one and connect. The request goes to the bridge this install
  * is already trying to reach: the address in use, else the filled-in one,
  * else the first local instance discovery finds.
  * @param onCode - receives the code to display while the request waits.
  * @returns the failure, or `undefined` once the token is stored.
  */
-async function pairWithHost(onCode: (code: string, answerTimeoutMs: number) => void): Promise<PairingFailure | undefined> {
+async function pairWithHost(onCode: (code: string, answerTimeoutMs: number) => void, again: boolean): Promise<PairingFailure | undefined> {
+  await settingsReady
+  // An install that already holds a token pairs only when the user explicitly
+  // asked to pair again: a connection that merely fails (a process answering
+  // on the bridge's port, a bridge that is down) must never start a pairing
+  // by itself, and whatever happens the old token stays until a new one verified.
+  if (!again && (settings.token !== '' || await loadInstalledToken() !== '')) return 'has-token'
   activePairing?.abort()
   const controller = new AbortController()
   activePairing = controller
@@ -3256,7 +3262,7 @@ async function pairWithHost(onCode: (code: string, answerTimeoutMs: number) => v
     rejectedBridgeUrls.clear()
     discoveryLatch = 'idle'
     persistDiscoveryLatch('idle')
-    // The user approved this bridge on their own host: prefer it next time.
+    // This bridge proved it was given the code the user read here: prefer it next time.
     if (url !== filledIn) rememberBridgeUrl(url)
     if (panelPorts.size > 0) {
       await startBridge()
@@ -3411,7 +3417,7 @@ chrome.runtime.onConnect.addListener((port) => {
   void settingsReady.then(() => {
     if (!panelPorts.has(port)) return
     // One automatic pass per panel lease: a confirmed miss stays terminal until
-    // the lease ends or the user asks again (settings save / 自动检测).
+    // the lease ends or the user asks again (settings save / "Detect").
     if (discoveryLatch === 'not-found') return
     if (bridge === null || bridge.state === 'stopped') return startBridge()
   })
@@ -3602,11 +3608,11 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       case 'pair.start': {
         // Only the extension's own panel reaches this port. The panel gets the code to display, never the token.
-        const request = message as { id?: unknown }
+        const request = message as { id?: unknown; again?: unknown }
         if (typeof request.id !== 'string') break
         const id = request.id
         const post = (reply: unknown): void => { try { port.postMessage(reply) } catch { /* panel closed */ } }
-        void pairWithHost((code, answerTimeoutMs) => { post({ type: 'pair.code', id, code, answerTimeoutMs }) }).then(
+        void pairWithHost((code, answerTimeoutMs) => { post({ type: 'pair.code', id, code, answerTimeoutMs }) }, request.again === true).then(
           reason => reason,
           (): PairingFailure => 'unreachable',
         ).then((reason) => {
@@ -3817,7 +3823,7 @@ chrome.runtime.onConnect.addListener((port) => {
     const panelSessionId = panelActiveSessions.get(port)
     panelActiveSessions.delete(port)
     panelPorts.delete(port)
-    // Nobody is left to compare the code: withdraw a pairing request that is still waiting.
+    // Nobody is left to read the code: withdraw a pairing request that is still waiting.
     if (panelPorts.size === 0) activePairing?.abort()
     if (panelSessionId !== undefined) void checkpointSessionPage(panelSessionId)
     interactionResponses.removePort(port)

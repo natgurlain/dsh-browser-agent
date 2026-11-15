@@ -312,6 +312,8 @@ async function main() {
   }
 
   if (options.build && !options.installerOnly) {
+    // Published builds keep the plain version: no checkout build number.
+    process.env.DSH_BROWSER_RELEASE_BUILD = '1'
     run('pnpm', ['--filter', '@natgurlain/dsh-bridge-browser', 'run', 'build'], root)
     run('pnpm', ['--filter', 'dsh-browser-extension', 'run', 'build'], root)
     run('pnpm', ['--filter', 'dsh-browser-extension', 'run', 'build:firefox'], root)
@@ -326,6 +328,10 @@ async function main() {
   if (!options.installerOnly) {
     for (const [browser, dist] of [['chrome', 'dist'], ['firefox', 'dist-firefox']]) {
       const file = join(options.out, names[browser])
+      const built = readJson(join(extensionDir, dist, 'manifest.json')).version
+      if (built !== version) {
+        throw new Error(`${dist}/manifest.json is version ${built}, not ${version}: it is a checkout build with a build number; run without --skip-build`)
+      }
       const { files, stripped } = zipExtension(join(extensionDir, dist), file)
       console.log(`${basename(file)}: ${files} files${stripped ? ', manifest key stripped' : ''}`)
       assets.push(file)

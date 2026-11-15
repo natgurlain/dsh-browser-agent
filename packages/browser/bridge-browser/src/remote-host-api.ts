@@ -522,7 +522,7 @@ type RemoteEventOutcome =
     }
   }
 
-/** 一条扩展连接中的交互事件及各个会话的独立订阅。 */
+/** The interaction events of one extension connection and the separate subscription of each session. */
 class EventGeneration {
   private readonly lifetime = new AbortController()
   private readonly signal: AbortSignal
@@ -624,7 +624,7 @@ class EventGeneration {
     const signal = AbortSignal.any([this.signal, controller.signal])
     const iterators: AsyncIterator<unknown>[] = []
     try {
-      // 先建立投影订阅，再读取基线，保证打开期间的变化不会丢失。
+      // Subscribe to the projection first, then read the baseline, so changes during the open are not lost.
       const projections = await openWireStream(this.gateway, this.peer, 'session/observeProjections', {
         args: { request: { sessionId } },
       }, signal)
@@ -867,7 +867,7 @@ class EventGeneration {
   }
 }
 
-/** 单个调用的取消只结束自己的等待，共享订阅由连接和会话管理。 */
+/** Cancelling one call ends only its own wait; the shared subscriptions are managed by the connection and the session. */
 async function withSignal<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
   signal.throwIfAborted()
   let rejectAbort!: (reason: unknown) => void

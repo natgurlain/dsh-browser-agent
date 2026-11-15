@@ -9,10 +9,10 @@ import {
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import {
   createPairingShare,
-  derivePairingSession,
-  formatPairingCode,
+  derivePairingKeys,
+  normalizePairingCode,
   sealPairingToken,
-  verifyPairingCommitment,
+  verifyPairingClientConfirmation,
   type PairingContext,
 } from '@natgurlain/dsh-bridge-browser/src/pairing.ts'
 import { completeHandshake, panelSawConnected } from './support/bridge-handshake.ts'
@@ -83,10 +83,22 @@ function mockFetch(options: { installedToken?: string } = {}) {
   return fetchMock
 }
 
-type Sent = { t?: string; nonce: string; commit: string; share: string; opening: string; origin: string; name: string }
+type Sent = { t?: string; nonce: string; share: string; origin: string; name: string; mac: string }
 
-/** Play the bridge half of a pairing exchange up to the point where the request waits for the user. */
-async function playPairing(socket: FakeWebSocket) {
+/** The code the worker told the panel to display for request `id`. */
+const shownCode = (postMessage: ReturnType<typeof panelPort>['postMessage'], id: string): Promise<string> => vi.waitFor(() => {
+  const message = postMessage.mock.calls.map(call => call[0] as { type?: string; id?: string; code?: string }).find(entry => entry.type === 'pair.code' && entry.id === id)
+  expect(message).toBeDefined()
+  return message!.code!
+})
+
+/**
+ * Play the bridge half of a pairing exchange on the socket the worker opened,
+ * as a bridge whose user typed `typed` (a string, or a thunk read once the
+ * request arrived).
+ * @returns whether the worker held that code; when it did, `pair.ok` with `token` was sent.
+ */
+async function playPairing(socket: FakeWebSocket, typed: string | (() => Promise<string>), token: string): Promise<boolean> {
   const serverNonce = createBridgeNonce()
   socket.open()
   socket.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: serverNonce })
@@ -96,41 +108,51 @@ async function playPairing(socket: FakeWebSocket) {
     return frame as Sent
   })
   const request = await find('pair.request')
-  const own = createPairingShare()
+  const code = normalizePairingCode(typeof typed === 'string' ? typed : await typed())!
+  const context: PairingContext = { code, serverNonce, clientNonce: request.nonce, endpoint: bridgeEndpointOfUrl(socket.url)!, origin: request.origin, name: request.name }
+  const own = createPairingShare(context)
+  const keys = derivePairingKeys(context, own.secret, request.share, own.share, 'server')!
   socket.receive({ t: 'pair.share', share: own.share })
-  const reveal = await find('pair.reveal')
-  expect(verifyPairingCommitment(request.commit, reveal.share, reveal.opening)).toBe(true)
-  const context: PairingContext = { serverNonce, clientNonce: request.nonce, endpoint: bridgeEndpointOfUrl(socket.url)!, origin: request.origin, name: request.name }
-  const session = derivePairingSession(context, own.secret, reveal.share, own.share, 'server')!
-  return {
-    /** The code the host's prompt shows. */
-    code: formatPairingCode(session.code),
-    name: request.name,
-    approve: (token: string) => { socket.receive({ t: 'pair.ok', ...sealPairingToken(session, token) }) },
-    deny: () => { socket.close(BRIDGE_CLOSE_CODES.pairingDenied, 'the pairing request was denied') },
+  const confirm = await find('pair.confirm')
+  if (!verifyPairingClientConfirmation(keys, confirm.mac)) {
+    socket.close(BRIDGE_CLOSE_CODES.pairingFailed, 'pairing failed: the code entered on the host is not this request\'s code')
+    return false
   }
+  socket.receive({ t: 'pair.ok', ...sealPairingToken(keys, token) })
+  return true
 }
 
 const statuses = (postMessage: ReturnType<typeof panelPort>['postMessage']): Array<{ state: string; failure?: string }> =>
   postMessage.mock.calls.map(call => call[0] as { type?: string; state: string; failure?: string }).filter(message => message.type === 'status')
 
 afterEach(() => {
+  vi.doUnmock('../src/background/pairing.ts')
   vi.resetModules()
   vi.unstubAllGlobals()
   FakeWebSocket.instances = []
 })
 
 describe('background one-step pairing', () => {
-  it('reports "no token" without dialing, shows the host\'s code, stores the token once approved and connects', async () => {
+  // The worker reads its own origin from `location`; jsdom's is a web page, so pairing is given an extension origin.
+  const STORE_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop'
+  async function loadWorker(): Promise<void> {
+    vi.doMock('../src/background/pairing.ts', async importOriginal => ({
+      ...(await importOriginal<typeof import('../src/background/pairing.ts')>()),
+      extensionOrigin: () => STORE_ORIGIN,
+    }))
+    await import('../src/background/index.ts')
+  }
+
+  it('reports "no token" without dialing, shows a code, stores the token once that code was typed on the host, and connects', async () => {
     const chromeMock = mockChrome()
     mockFetch()
     vi.stubGlobal('WebSocket', FakeWebSocket)
-    await import('../src/background/index.ts')
+    await loadWorker()
 
     const panel = panelPort()
     chromeMock.onConnect.emit(panel.port)
     // A bridge answers discovery, but this install has nothing to prove: no
-    // socket is opened, and the panel is told why so it can offer pairing.
+    // socket is opened, and the panel is told why so it can start pairing.
     await vi.waitFor(() => { expect(statuses(panel.postMessage).at(-1)).toMatchObject({ state: 'reconnecting', failure: 'no-token' }) })
     expect(FakeWebSocket.instances).toHaveLength(0)
 
@@ -139,22 +161,17 @@ describe('background one-step pairing', () => {
     const pairingSocket = FakeWebSocket.instances[0]!
     // The request goes to the bridge this install was already trying to reach.
     expect(pairingSocket.url).toBe(BRIDGE_URL)
-    const host = await playPairing(pairingSocket)
-    // The panel is given the same code the host shows, and nothing is stored while it waits.
-    await vi.waitFor(() => {
-      expect(panel.postMessage).toHaveBeenCalledWith({ type: 'pair.code', id: 'pair-1', code: host.code, answerTimeoutMs: expect.any(Number) })
-    })
-    expect(chromeMock.local.dshSettings).toBeUndefined()
-    expect(panel.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'pair.result' }))
+    // The user reads the code off the panel and types it into DSH.
+    expect(await playPairing(pairingSocket, () => shownCode(panel.postMessage, 'pair-1'), BRIDGE_TOKEN)).toBe(true)
 
-    host.approve(BRIDGE_TOKEN)
     await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'pair.result', id: 'pair-1', ok: true }) })
-    // Stored like a typed token; the approved bridge is remembered.
+    // Stored like a typed token; the bridge that proved the code is remembered.
     expect((chromeMock.local.dshSettings as { token: string }).token).toBe(BRIDGE_TOKEN)
     expect(chromeMock.local.dshLastBridgeUrl).toBe(BRIDGE_URL)
     expect(pairingSocket.readyState).toBe(FakeWebSocket.CLOSED)
-    // The pairing socket never carried a hello; the token reaches the panel in no message.
-    expect(pairingSocket.sent.map(frame => (frame as { t: string }).t)).toEqual(['pair.request', 'pair.reveal'])
+    // The pairing socket never carried a hello or the code; the token reaches the panel in no message.
+    expect(pairingSocket.sent.map(frame => (frame as { t: string }).t)).toEqual(['pair.request', 'pair.confirm', 'pair.done'])
+    expect(JSON.stringify(pairingSocket.sent)).not.toContain(normalizePairingCode(await shownCode(panel.postMessage, 'pair-1')))
     expect(JSON.stringify(panel.postMessage.mock.calls)).not.toContain(BRIDGE_TOKEN)
 
     // The worker now connects with the ordinary handshake, keyed by that token.
@@ -166,49 +183,120 @@ describe('background one-step pairing', () => {
     expect(statuses(panel.postMessage).at(-1)?.failure).toBeUndefined()
   })
 
-  it('stores nothing and says why when the user denies the request', async () => {
+  it('stores nothing and says why when another code was typed on the host', async () => {
     const chromeMock = mockChrome()
     mockFetch()
     vi.stubGlobal('WebSocket', FakeWebSocket)
-    await import('../src/background/index.ts')
+    await loadWorker()
     const panel = panelPort()
     chromeMock.onConnect.emit(panel.port)
     await vi.waitFor(() => { expect(statuses(panel.postMessage).at(-1)).toMatchObject({ failure: 'no-token' }) })
 
     panel.onMessage.emit({ type: 'pair.start', id: 'pair-2' })
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
-    const host = await playPairing(FakeWebSocket.instances[0]!)
-    host.deny()
-    await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'pair.result', id: 'pair-2', ok: false, reason: 'denied' }) })
+    expect(await playPairing(FakeWebSocket.instances[0]!, 'ZZZ-ZZZ', BRIDGE_TOKEN)).toBe(false)
+    await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'pair.result', id: 'pair-2', ok: false, reason: 'wrong-code' }) })
     expect(chromeMock.local.dshSettings).toBeUndefined()
     expect(FakeWebSocket.instances).toHaveLength(1)
+  })
+
+  it('regression (review PoC): a squatter that sends pair.ok without the code gets nothing stored, remembered or dialed', async () => {
+    const chromeMock = mockChrome()
+    mockFetch()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await loadWorker()
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => { expect(statuses(panel.postMessage).at(-1)).toMatchObject({ failure: 'no-token' }) })
+
+    panel.onMessage.emit({ type: 'pair.start', id: 'pair-poc' })
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    const squatter = FakeWebSocket.instances[0]!
+    const serverNonce = createBridgeNonce()
+    squatter.open()
+    squatter.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: serverNonce })
+    const request = await vi.waitFor(() => {
+      const frame = squatter.sent.find(sent => (sent as Sent).t === 'pair.request')
+      expect(frame).toBeDefined()
+      return frame as Sent
+    })
+    // It answers at once with a share made for a guess, and seals a token of its own choosing under its keys.
+    const context: PairingContext = { code: 'ZZZZZZ', serverNonce, clientNonce: request.nonce, endpoint: bridgeEndpointOfUrl(BRIDGE_URL)!, origin: request.origin, name: request.name }
+    const own = createPairingShare(context)
+    const keys = derivePairingKeys(context, own.secret, request.share, own.share, 'server')!
+    squatter.receive({ t: 'pair.share', share: own.share })
+    squatter.receive({ t: 'pair.ok', ...sealPairingToken(keys, 'attacker-chosen-token-0123456789abcdef') })
+    await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'pair.result', id: 'pair-poc', ok: false, reason: 'untrusted' }) })
+    expect(chromeMock.local.dshSettings).toBeUndefined()
+    expect(chromeMock.local.dshLastBridgeUrl).toBeUndefined()
+    expect(squatter.sent.some(sent => (sent as Sent).t === 'pair.done')).toBe(false)
+    // No connection is attempted with anything the squatter sent.
+    await new Promise((resolve) => { setTimeout(resolve, 30) })
+    expect(FakeWebSocket.instances).toHaveLength(1)
+  })
+
+  it('regression (review PoC): an install that holds a token never pairs by itself, and a failed "pair again" keeps the token', async () => {
+    const chromeMock = mockChrome({ dshSettings: { token: BRIDGE_TOKEN } })
+    mockFetch()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await loadWorker()
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    // A squatter on the dialed port refuses the handshake the way a bridge refuses an unknown extension.
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    FakeWebSocket.instances[0]!.open()
+    FakeWebSocket.instances[0]!.close(BRIDGE_CLOSE_CODES.originRejected, 'origin not allowed')
+    await vi.waitFor(() => { expect(statuses(panel.postMessage).at(-1)).toMatchObject({ failure: 'origin-rejected' }) })
+
+    // Whatever asks without the user's explicit "pair again" is refused before any socket opens.
+    panel.onMessage.emit({ type: 'pair.start', id: 'pair-auto' })
+    await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'pair.result', id: 'pair-auto', ok: false, reason: 'has-token' }) })
+    expect(FakeWebSocket.instances.filter(socket => socket.sent.some(sent => (sent as Sent).t === 'pair.request'))).toEqual([])
+
+    // The user insists; the squatter still cannot make the worker accept anything, and the old token stays.
+    panel.onMessage.emit({ type: 'pair.start', id: 'pair-again', again: true })
+    const pairing = await vi.waitFor(() => {
+      const socket = FakeWebSocket.instances.find(candidate => candidate.readyState !== FakeWebSocket.CLOSED && candidate.sent.length === 0)
+      expect(socket).toBeDefined()
+      return socket!
+    })
+    expect(await playPairing(pairing, 'ZZZ-ZZZ', 'attacker-chosen-token-0123456789abcdef')).toBe(false)
+    await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'pair.result', id: 'pair-again', ok: false, reason: 'wrong-code' }) })
+    expect((chromeMock.local.dshSettings as { token: string }).token).toBe(BRIDGE_TOKEN)
   })
 
   it('withdraws a waiting request when the panel cancels or closes, and a new request replaces the old', async () => {
     const chromeMock = mockChrome()
     mockFetch()
     vi.stubGlobal('WebSocket', FakeWebSocket)
-    await import('../src/background/index.ts')
+    await loadWorker()
     const panel = panelPort()
     chromeMock.onConnect.emit(panel.port)
     await vi.waitFor(() => { expect(statuses(panel.postMessage).at(-1)).toMatchObject({ failure: 'no-token' }) })
+    const requested = (socket: FakeWebSocket): Promise<void> => {
+      socket.open()
+      socket.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: createBridgeNonce() })
+      return vi.waitFor(() => { expect(socket.sent).toHaveLength(1) })
+    }
 
     panel.onMessage.emit({ type: 'pair.start', id: 'pair-3' })
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
-    await playPairing(FakeWebSocket.instances[0]!)
+    await requested(FakeWebSocket.instances[0]!)
     panel.onMessage.emit({ type: 'pair.cancel' })
     await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'pair.result', id: 'pair-3', ok: false, reason: 'cancelled' }) })
-    // Closing the socket is what takes the prompt off the host.
+    // Closing the socket is what takes the request off the host.
     expect(FakeWebSocket.instances[0]!.readyState).toBe(FakeWebSocket.CLOSED)
 
     panel.onMessage.emit({ type: 'pair.start', id: 'pair-4' })
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })
-    await playPairing(FakeWebSocket.instances[1]!)
+    await requested(FakeWebSocket.instances[1]!)
     panel.onMessage.emit({ type: 'pair.start', id: 'pair-5' })
     await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'pair.result', id: 'pair-4', ok: false, reason: 'cancelled' }) })
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(3) })
-    await playPairing(FakeWebSocket.instances[2]!)
-    // The last panel closes: nobody is left to compare the code.
+    await requested(FakeWebSocket.instances[2]!)
+    // Each request showed its own code.
+    expect(await shownCode(panel.postMessage, 'pair-5')).not.toBe(await shownCode(panel.postMessage, 'pair-4'))
+    // The last panel closes: nobody is left to read the code.
     panel.onDisconnect.emit()
     await vi.waitFor(() => { expect(FakeWebSocket.instances[2]!.readyState).toBe(FakeWebSocket.CLOSED) })
     expect(chromeMock.local.dshSettings).toBeUndefined()
@@ -218,7 +306,7 @@ describe('background one-step pairing', () => {
     const chromeMock = mockChrome()
     mockFetch()
     vi.stubGlobal('WebSocket', FakeWebSocket)
-    await import('../src/background/index.ts')
+    await loadWorker()
     const panel = panelPort()
     chromeMock.onConnect.emit(panel.port)
     await vi.waitFor(() => { expect(statuses(panel.postMessage).at(-1)).toMatchObject({ failure: 'no-token' }) })
@@ -232,20 +320,18 @@ describe('background one-step pairing', () => {
     expect(chromeMock.local.dshSettings).toBeUndefined()
   })
 
-  it('asks the filled-in address, and says so when no DSH runs at all', async () => {
+  it('asks the filled-in address', async () => {
     const chromeMock = mockChrome({ dshSettings: { bridgeUrl: 'ws://203.0.113.7:9911' } })
     vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 404 })))
     vi.stubGlobal('WebSocket', FakeWebSocket)
-    await import('../src/background/index.ts')
+    await loadWorker()
     const panel = panelPort()
     chromeMock.onConnect.emit(panel.port)
     await vi.waitFor(() => { expect(statuses(panel.postMessage).length).toBeGreaterThan(0) })
 
     panel.onMessage.emit({ type: 'pair.start', id: 'pair-7' })
     await vi.waitFor(() => { expect(FakeWebSocket.instances.some(socket => socket.sent.length === 0 && socket.url === 'ws://203.0.113.7:9911/ext/bridge')).toBe(true) })
-    const socket = FakeWebSocket.instances.at(-1)!
-    const host = await playPairing(socket)
-    host.approve(BRIDGE_TOKEN)
+    expect(await playPairing(FakeWebSocket.instances.at(-1)!, () => shownCode(panel.postMessage, 'pair-7'), BRIDGE_TOKEN)).toBe(true)
     await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'pair.result', id: 'pair-7', ok: true }) })
     expect(chromeMock.local.dshSettings).toMatchObject({ bridgeUrl: 'ws://203.0.113.7:9911', token: BRIDGE_TOKEN })
   })
@@ -254,7 +340,7 @@ describe('background one-step pairing', () => {
     const chromeMock = mockChrome()
     vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 404 })))
     vi.stubGlobal('WebSocket', FakeWebSocket)
-    await import('../src/background/index.ts')
+    await loadWorker()
     const panel = panelPort()
     chromeMock.onConnect.emit(panel.port)
     await vi.waitFor(() => { expect(statuses(panel.postMessage).some(status => (status as { discovery?: string }).discovery === 'not-found')).toBe(true) })
@@ -267,15 +353,31 @@ describe('background one-step pairing', () => {
     const chromeMock = mockChrome()
     mockFetch({ installedToken: BRIDGE_TOKEN })
     vi.stubGlobal('WebSocket', FakeWebSocket)
-    await import('../src/background/index.ts')
+    await loadWorker()
     const panel = panelPort()
     chromeMock.onConnect.emit(panel.port)
-    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
-    const socket = FakeWebSocket.instances[0]!
-    socket.open()
-    await completeHandshake(socket, { token: BRIDGE_TOKEN, until: panelSawConnected(panel.postMessage) })
+    await vi.waitFor(() => { expect(FakeWebSocket.instances.length).toBeGreaterThanOrEqual(1) })
+    // Workers of earlier tests are still retrying and now find the token file too: answer every
+    // socket, and watch this test's panel.
+    const connected = panelSawConnected(panel.postMessage)
+    const answered = new Set<FakeWebSocket>()
+    await vi.waitFor(async () => {
+      for (const socket of FakeWebSocket.instances) {
+        if (answered.has(socket)) continue
+        answered.add(socket)
+        socket.open()
+        void completeHandshake(socket, { token: BRIDGE_TOKEN }).catch(() => {})
+      }
+      connected()
+    }, { timeout: 5_000 })
     expect(statuses(panel.postMessage).some(status => status.failure === 'no-token')).toBe(false)
-    expect(socket.sent.some(frame => String((frame as { t: string }).t).startsWith('pair.'))).toBe(false)
+    expect(FakeWebSocket.instances.some(socket => socket.sent.some(frame => String((frame as { t: string }).t).startsWith('pair.')))).toBe(false)
     expect(chromeMock.local.dshSettings).toBeUndefined()
+    const sockets = FakeWebSocket.instances.length
+    // It holds a token (the installer's file): pairing is refused unless the user asks to pair again.
+    panel.onMessage.emit({ type: 'pair.start', id: 'pair-dev' })
+    await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'pair.result', id: 'pair-dev', ok: false, reason: 'has-token' }) })
+    expect(FakeWebSocket.instances.filter(socket => socket.sent.some(frame => (frame as { t: string }).t === 'pair.request'))).toEqual([])
+    expect(FakeWebSocket.instances.length).toBeGreaterThanOrEqual(sockets)
   })
 })

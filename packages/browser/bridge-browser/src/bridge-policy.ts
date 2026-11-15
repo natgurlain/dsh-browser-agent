@@ -234,6 +234,19 @@ export function permissionCommandOf(line: string): { kind: 'none' } | { kind: 's
   return exact === null ? { kind: 'malformed' } : { kind: 'switch', preset: exact[1]! }
 }
 
+const LOOKS_LIKE_PAIRING = /^[\s\p{Z}\p{Cf}]*\/[\s\p{Z}\p{Cf}]*browser[\s\p{Z}\p{Cf}_-]*pair(?![a-z0-9])/iu
+
+/**
+ * Whether a command line is, or could be read as, the host's `/browser-pair`
+ * command. Pairing is the host owner's decision: a browser that is already
+ * connected must not be able to enter a code, resume a paused desk, or
+ * unpair another extension on the user's behalf.
+ * @param line - the exact composer line.
+ */
+export function isPairingCommand(line: string): boolean {
+  return HOST_COMMAND.exec(line)?.[1] === 'browser-pair' || LOOKS_LIKE_PAIRING.test(line.normalize('NFKC'))
+}
+
 /**
  * Wrap the Host API with the bridge's least-privilege policy.
  * @param api - the composed Host API (deferral, workspace grouping, adapter).
@@ -532,6 +545,9 @@ function refuseCall(
       return typeof payload.preset === 'string' ? refuseFullAccessSwitch(payload.preset) : undefined
     case 'commands.execute': {
       if (typeof payload.line !== 'string') return undefined
+      if (isPairingCommand(payload.line)) {
+        return forbidden('Pairing is done in DSH itself: `/browser-pair` cannot be run from the browser extension.')
+      }
       const permission = permissionCommandOf(payload.line)
       if (permission.kind === 'malformed') {
         return forbidden('Only `/permission <preset>` with a plain preset name can be sent from the browser extension.')

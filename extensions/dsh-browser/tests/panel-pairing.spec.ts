@@ -21,17 +21,18 @@ import { App } from '../src/panel/App.tsx'
 // English is the default locale of the panel.
 const copy = PANEL_COPY.en
 
-/** A pairing request the spec answers by hand, like the user would in DSH. */
+/** A pairing request the spec completes by hand, as the background would once the code was typed in DSH. */
 interface Asked {
   showCode: (code: string) => void
-  approve: () => void
+  succeed: () => void
   fail: (reason: string) => void
+  again: boolean
 }
 
 describe('pairing in the panel', () => {
   let root: Root
   let onStatus: ((state: BridgeState, caps: null, discovery: DiscoveryStatus, address?: string, failure?: BridgeFailure) => void) | undefined
-  let pair: Mock<(onCode: (code: string) => void) => Promise<void>>
+  let pair: Mock<(onCode: (code: string) => void, options?: { again?: boolean }) => Promise<void>>
   let cancelPairing: Mock<() => Promise<void>>
   let updateSettings: Mock<(settings: Partial<PanelSettings>) => Promise<void>>
   let storedSettings: Record<string, unknown>
@@ -52,8 +53,8 @@ describe('pairing in the panel', () => {
       },
     })
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline') }))
-    pair = vi.fn((onCode: (code: string) => void) => new Promise<void>((resolve, reject) => {
-      asked.push({ showCode: onCode, approve: resolve, fail: reason => { reject(new PanelRpcError(reason, 'pairing failed')) } })
+    pair = vi.fn((onCode: (code: string) => void, options?: { again?: boolean }) => new Promise<void>((resolve, reject) => {
+      asked.push({ showCode: onCode, succeed: resolve, fail: reason => { reject(new PanelRpcError(reason, 'pairing failed')) }, again: options?.again === true })
     }))
     cancelPairing = vi.fn(async () => {})
     updateSettings = vi.fn(async () => {})
@@ -90,42 +91,68 @@ describe('pairing in the panel', () => {
     expect(pair).not.toHaveBeenCalled()
   })
 
-  it.each(['no-token', 'origin-rejected'] as const)('asks DSH by itself when the install cannot connect (%s) and shows the code to compare', async (failure) => {
-    await unpaired(failure)
-    expect(document.querySelector('.connection-label')?.textContent).toBe(copy.bridgeFailure[failure])
+  it('asks DSH by itself when the install has no token, and shows the code to type there', async () => {
+    await unpaired('no-token')
+    expect(document.querySelector('.connection-label')?.textContent).toBe(copy.bridgeFailure['no-token'])
     // No click was needed: opening the panel is the user's whole first step.
     expect(pair).toHaveBeenCalledOnce()
+    expect(asked[0]!.again).toBe(false)
     expect(card()?.textContent).toContain(copy.pairing.needed)
     expect(card()?.textContent).toContain(copy.pairing.asking)
     expect(code()).toBeUndefined()
 
     await act(async () => { asked[0]!.showCode('4F7-K2Q') })
     expect(code()).toBe('4F7-K2Q')
-    expect(card()?.textContent).toContain('Approve in DeepSeek Harness')
-    expect(card()?.textContent).toContain('/browser-pair approve')
-    // Nothing to type and nothing to press while it waits.
+    expect(card()?.textContent).toContain('Enter this code in DeepSeek Harness')
+    expect(card()?.textContent).toContain('/browser-pair')
+    // Nothing to type and nothing to press here while it waits.
     expect(card()!.querySelector('input')).toBeNull()
     expect(card()!.querySelectorAll('button')).toHaveLength(0)
 
-    await act(async () => { asked[0]!.approve() })
+    await act(async () => { asked[0]!.succeed() })
     expect(card()?.querySelector('[role="status"]')?.textContent).toBe(copy.pairing.paired)
     expect(code()).toBeUndefined()
   })
 
-  it('waits for a click when a token stopped working (something may be in the way)', async () => {
-    await unpaired('token-mismatch')
-    expect(card()).not.toBeNull()
+  it.each(['origin-rejected', 'token-mismatch', 'version-mismatch', 'busy'] as const)(
+    'regression (review PoC): never starts pairing by itself when a token is held (%s), whatever the bridge on the port says', async (failure) => {
+      await unpaired(failure)
+      expect(document.querySelector('.connection-label')?.textContent).toBe(copy.bridgeFailure[failure])
+      // No card on the main view and no request: a refusal alone is not a reason to pair.
+      expect(card()).toBeNull()
+      expect(pair).not.toHaveBeenCalled()
+    })
+
+  it('pairs an install that holds a token only through "Pair again…" in Settings, after a warning', async () => {
+    await unpaired('origin-rejected')
+    await act(async () => { document.querySelector<HTMLButtonElement>('.settings-trigger')!.click() })
+    expect(card()?.textContent).toContain(copy.pairing.againHelp)
     expect(pair).not.toHaveBeenCalled()
-    await act(async () => { button(copy.pairing.start)!.click() })
+
+    await act(async () => { button(copy.pairing.again)!.click() })
+    // A confirmation first: it says when pairing again is right, and when it is not.
+    expect(card()?.querySelector('[role="alert"]')?.textContent).toBe(copy.pairing.againWarning)
+    expect(copy.pairing.againWarning).toMatch(/reinstalled DSH or reset its bridge token/u)
+    expect(pair).not.toHaveBeenCalled()
+    await act(async () => { button(copy.pairing.cancel)!.click() })
+    expect(card()?.querySelector('[role="alert"]')).toBeNull()
+    expect(pair).not.toHaveBeenCalled()
+
+    await act(async () => { button(copy.pairing.again)!.click() })
+    await act(async () => { button(copy.pairing.againConfirm)!.click() })
     expect(pair).toHaveBeenCalledOnce()
+    expect(asked[0]!.again).toBe(true)
+    await act(async () => { asked[0]!.showCode('ABC-DEF') })
+    expect(code()).toBe('ABC-DEF')
   })
 
   it.each([
-    ['denied', copy.pairing.failure.denied],
+    ['wrong-code', copy.pairing.failure['wrong-code']],
     ['expired', copy.pairing.failure.expired],
-    ['busy', copy.pairing.failure.busy],
+    ['paused', copy.pairing.failure.paused],
     ['unreachable', copy.pairing.failure.unreachable],
     ['untrusted', copy.pairing.failure.untrusted],
+    ['has-token', copy.pairing.failure['has-token']],
   ] as const)('explains a failed request (%s) and asks again only on a click', async (reason, text) => {
     await unpaired()
     await act(async () => { asked[0]!.showCode('4F7-K2Q') })
@@ -134,7 +161,7 @@ describe('pairing in the panel', () => {
     expect(status.textContent).toBe(text)
     expect(status.className).toContain('settings-error')
     expect(code()).toBeUndefined()
-    // No automatic retry: a denied or failing request is not repeated behind the user's back.
+    // No automatic retry: every request is the user's own.
     expect(pair).toHaveBeenCalledOnce()
     await act(async () => { button(copy.pairing.retry)!.click() })
     expect(pair).toHaveBeenCalledTimes(2)
@@ -155,20 +182,20 @@ describe('pairing in the panel', () => {
   })
 
   it('offers pairing in Settings next to the manual token field, and a later Save keeps the paired token', async () => {
-    await act(async () => { root.render(createElement(App)) })
+    await unpaired('no-token')
     await act(async () => { document.querySelector<HTMLButtonElement>('.settings-trigger')!.click() })
     expect(card()).not.toBeNull()
     expect(card()?.textContent).toContain(copy.pairing.help)
     expect(document.querySelector<HTMLInputElement>('.settings-panel input[type="password"]')).not.toBeNull()
-    // In Settings nothing is asked until the user says so.
-    expect(pair).not.toHaveBeenCalled()
+    // In Settings nothing is asked until the user says so (the main view's request was withdrawn).
+    expect(pair).toHaveBeenCalledOnce()
 
     await act(async () => { button(copy.pairing.start)!.click() })
-    await act(async () => { asked[0]!.showCode('4F7-K2Q') })
+    await act(async () => { asked[1]!.showCode('4F7-K2Q') })
     expect(code()).toBe('4F7-K2Q')
-    // The background stores the token on approval; the form adopts it.
+    // The background stores the token once the exchange verified; the form adopts it.
     storedSettings = { token: 'paired-token-from-the-bridge' }
-    await act(async () => { asked[0]!.approve() })
+    await act(async () => { asked[1]!.succeed() })
     await vi.waitFor(() => {
       expect(document.querySelector<HTMLInputElement>('.settings-panel input[type="password"]')!.value).toBe('paired-token-from-the-bridge')
     })
@@ -182,16 +209,16 @@ describe('pairing in the panel', () => {
     for (const locale of ['en', 'zh'] as const) {
       const pairing = PANEL_COPY[locale].pairing
       expect(Object.keys(pairing.failure).sort()).toEqual(
-        ['busy', 'cancelled', 'denied', 'expired', 'unreachable', 'unsupported', 'untrusted', 'version-mismatch'])
-      expect(pairingFailureText(new PanelRpcError('denied', 'x'), pairing)).toBe(pairing.failure.denied)
+        ['busy', 'cancelled', 'expired', 'has-token', 'paused', 'unreachable', 'unsupported', 'untrusted', 'version-mismatch', 'wrong-code'])
+      expect(pairingFailureText(new PanelRpcError('wrong-code', 'x'), pairing)).toBe(pairing.failure['wrong-code'])
       // Anything unexpected (a dropped port) reads as "not reachable", never as a blank line.
       expect(pairingFailureText(new Error('port closed'), pairing)).toBe(pairing.failure.unreachable)
       expect(pairingFailureText(new PanelRpcError('constructor', 'x'), pairing)).toBe(pairing.failure.unreachable)
       expect(PANEL_COPY[locale].bridgeFailure['no-token']).not.toBe('')
     }
     expect(PANEL_COPY.zh.pairing.title).toBe('与 DSH 配对')
-    expect(PANEL_COPY.zh.pairing.approve).toBe('请在 DeepSeek Harness 中批准')
-    expect(PANEL_COPY.zh.pairing.approveHelp).toContain('/browser-pair approve')
-    expect(PANEL_COPY.en.pairing.approve).toBe('Approve in DeepSeek Harness')
+    expect(PANEL_COPY.zh.pairing.enter).toBe('请在 DeepSeek Harness 中输入此配对码')
+    expect(PANEL_COPY.zh.pairing.enterHelp).toContain('/browser-pair')
+    expect(PANEL_COPY.en.pairing.enter).toBe('Enter this code in DeepSeek Harness')
   })
 })

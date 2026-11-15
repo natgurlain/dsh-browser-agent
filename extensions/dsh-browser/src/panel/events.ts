@@ -177,9 +177,9 @@ export function textFromBlocks(blocks: unknown): string {
 export function rowFromEvent(event: SessionEventView): Row | null {
   switch (event.type) {
     case 'user/message': {
-      // dsh 每轮把运行时常量上下文作为 source.kind='plugin' 的 user/message
-      // 记入日志（如 <system-reminder> 注入内容）——它们不是用户消息，
-      // 渲染会污染对话流，必须跳过。
+      // Every turn, dsh logs the runtime's constant context as a user/message with
+      // source.kind='plugin' (e.g. injected <system-reminder> content). These are not user
+      // messages; rendering them would pollute the conversation, so they must be skipped.
       const message = event.data?.message ?? event.data
       const source = message?.source
       if (source?.kind !== 'user') return null
@@ -191,8 +191,8 @@ export function rowFromEvent(event: SessionEventView): Row | null {
         : { seq: 0, kind: 'user', text, ...(images.length === 0 ? {} : { images }) }
     }
     case 'assistant/message': {
-      // 工具调用也会产生 assistant/message，但其 content 可能只有 tool_use
-      // 等非文本块。不要为这种中间事件渲染一个空的 AI 气泡。
+      // A tool call also produces an assistant/message, but its content may hold only
+      // non-text blocks such as tool_use. Do not render an empty AI bubble for such an intermediate event.
       const blocks = event.data?.message?.content
       const text = textFromBlocks(blocks)
       const images = imageRefsFromBlocks(blocks)
@@ -401,7 +401,7 @@ export function applyStepAudit(rows: Row[], audit: Map<string, StepAudit>): Row[
   return changed ? next : rows
 }
 
-/** live 追加：用户与助手消息行（工具调用走 appendToolStep，并入时间线）。 */
+/** Live append: user and assistant message rows (tool calls go through appendToolStep and merge into the timeline). */
 export function appendLiveRow(
   rows: Row[],
   kind: Row['kind'],
@@ -413,9 +413,10 @@ export function appendLiveRow(
 }
 
 /**
- * 历史渲染：与实时路径相同的归并规则——连续工具调用并入同一条时间线，结果按 callId
- * 回填。不产生可见行的事件（注入的浏览器上下文、请求头等）不会打断时间线；
- * `turn/end` 时仍未返回结果的步骤视为已中断。
+ * History rendering: the same merge rules as the live path. Consecutive tool calls merge into
+ * one timeline and results are filled in by callId. Events that produce no visible row (injected
+ * browser context, request headers, etc.) do not break the timeline; a step that still has no
+ * result at `turn/end` is treated as interrupted.
  */
 export function mergeHistoryRows(
   events: SessionEventView[],

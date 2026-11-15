@@ -375,7 +375,7 @@ function snapshotAction(args: Record<string, unknown>, ctx: ActionContext): Acti
   if (mode !== 'full' && mode !== 'interactive' && mode !== 'text') {
     throw new ActionError('bad-args', 'mode must be full, interactive, or text.')
   }
-  // 基线在每次快照后都更新：delta 调用才能相对上一次（无论是否 delta）比较。
+  // The baseline is updated after every snapshot, so a delta call compares against the previous one (delta or not).
   const view = buildSnapshot(ctx.ids, {
     delta,
     region,
@@ -916,7 +916,7 @@ async function navigateAction(args: Record<string, unknown>): Promise<ActionResu
 
 async function historyAction(delta: 1 | -1): Promise<ActionResult> {
   resetDeltaState()
-  // 同 navigate：先响应再导航（文档卸载会销毁响应端口）。
+  // Same as navigate: respond first, then navigate (unloading the document destroys the response port).
   setTimeout(() => { if (delta === -1) history.back(); else history.forward() }, 0)
   return {
     text: 'Navigating through browser history. Call browser_snapshot again after the page loads.',

@@ -91,7 +91,7 @@ export function configuredTokenProblem(token: string): string | undefined {
 
 /**
  * Generate a fresh token as lowercase hex.
- * @param bytes - 随机数据的字节数，默认 32（256 位）。
+ * @param bytes - Number of bytes of random data; 32 (256 bits) by default.
  * @returns the hex token string.
  */
 export function generateToken(bytes: number = 32): string {

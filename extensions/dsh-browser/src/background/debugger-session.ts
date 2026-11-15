@@ -220,7 +220,7 @@ export class DebuggerSession {
     return this.sendToSession(undefined, method, params)
   }
 
-  // Runtime 的 uniqueId 在导航和进程切换后不会复用。
+  // A Runtime uniqueId is never reused after a navigation or a process swap.
   async executionContexts(): Promise<readonly FrameExecutionContext[]> {
     return (await this.allContexts()).filter((context) => context.isolated !== true)
   }

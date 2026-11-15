@@ -13,7 +13,7 @@
 页面会转换为结构化文本和带编号的交互元素清单。工具通过编号或选择器定位元素；`browser_screenshot` 经批准后截取受控标签页的可视区域。宿主声明图片能力时，侧栏也可发送 PNG、JPEG、WebP 和 GIF 附件。
 
 > [!IMPORTANT]
-> 工作区固定使用 DSH 0.2.2-rc.2。
+> 桥接插件支持 DSH 0.2.2-rc.1 至 0.2.2-rc.3（均已测试，见 [docs/dsh-matrix.md](docs/dsh-matrix.md)）。工作区默认安装 0.2.2-rc.2。在桌面应用自带的 0.2.2-rc.1 上，失败后“继续”和删除会话时等待 worktree 清理这两项不可用。
 
 ## 快速安装
 
@@ -135,7 +135,13 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 
 ### 安装或更新
 
-运行[快速安装命令](#快速安装)即可安装。安装器打开 `chrome://extensions` 后，首次安装时加载 `~/.dsh/browser-extension` 目录；更新后点击**重新加载**。如果 dsh 已在运行，请重启。
+运行[快速安装命令](#快速安装)即可安装。在 macOS 和 Linux 上只需一条命令，其余由安装器完成：
+
+- **DeepSeek Harness 桌面应用。** 检测到应用时（macOS 的 `/Applications` 或 `~/Applications`；其他位置用 `DSH_DESKTOP_APP=<路径>` 指定，`DSH_DESKTOP_APP=none` 则跳过），除了 `web` profile，还会通过应用自带的 CLI 把桥插件注册到应用专用的 `desktop` profile。安装后请退出并重新打开应用。如果应用的 DSH 版本不在插件支持的范围内，安装器会明确说明，只注册 `web` profile，并提示先更新应用再重新运行；它不会绕过版本检查。
+- **Node.js 与 pnpm。** PATH 上的 `node` 不存在或低于 24.9.0 时，安装器使用本机已经安装的版本：先是应用自带的 Node，然后是 asdf、nvm、fnm、volta 或 mise 中已有的合适版本。PATH 上的 `pnpm` 无法运行时，依次使用应用自带的 pnpm、Corepack、`npx`。安装器不会替你安装任何东西；找不到合适的 Node 时，它会给出本机已有工具对应的安装命令。
+- **浏览器。** 安装器会打开你已安装的 Chromium 浏览器（Chrome、Chromium、Brave、Edge、Vivaldi 或 Arc；默认浏览器在其中时优先使用）的扩展管理页，提示文字也使用该浏览器的名称。首次安装时加载 `~/.dsh/browser-extension` 目录；更新后点击**重新加载**。
+
+安装结束时的摘要会列出桥插件注册到了哪里、跳过了什么。Windows 的 `install.ps1` 只注册 `web` profile，也只检测 Chrome 或 Chromium。如果 dsh 已在运行，请重启。
 
 更新时，在侧栏打开**设置 → 软件更新**。检查会把当前版本与 GitHub 上的最新发布版本比较，并给出一条用本机已有的安装器安装该版本的命令，例如：
 
@@ -150,7 +156,9 @@ DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release
 | `--release latest` 或 `--release vX.Y.Z` | `DSH_BROWSER_VERSION` | 下载该发布版本并用它的 `SHA256SUMS` 校验。不在 checkout 中运行时，这是默认行为。 |
 | `--unverified-branch <name>` | `DSH_BROWSER_UNVERIFIED_BRANCH` | 仅用于开发：安装分支归档。分支没有校验值，内容不会被校验。 |
 | | `DSH_BROWSER_GITHUB_TOKEN` | 私有仓库使用的 token。只会发送到 `api.github.com`，不会被打印。未设置时安装器会改用已登录的 `gh`。 |
-| | `DSH_BROWSER_NO_LAUNCH=1` | 不打开 Chrome，也不改动剪贴板。 |
+| | `DSH_BROWSER_NO_LAUNCH=1` | 不打开浏览器，也不改动剪贴板。 |
+| | `DSH_DESKTOP_APP=<路径>` 或 `none` | DeepSeek Harness 桌面应用的位置；`none` 表示不处理桌面应用（适用于 `install.sh` 和卸载器）。 |
+| `--lang en` 或 `--lang zh` | `DSH_BROWSER_LANG` | 安装器和卸载器的输出语言。每次运行只输出一种语言：默认英文，系统语言为中文时输出中文。 |
 
 如需从源码 checkout 安装（不下载任何文件；仓库私有期间也用这种方式安装）：
 
@@ -180,6 +188,8 @@ Windows 请运行：
 
 在源码目录中运行 `bash scripts/uninstall.sh` 或 `.\scripts\uninstall.ps1`。
 
+卸载器也会通过应用自带的 CLI 从桌面应用的 `desktop` profile 中移除桥插件（应用不在 `/Applications` 或 `~/Applications` 时，用 `--desktop-app <路径>` 或 `DSH_DESKTOP_APP` 指定）。找不到应用时，该注册及其共用的文件会保留，卸载器会给出说明。
+
 ### Firefox 源码构建
 
 Firefox 使用独立的 MV3 manifest、事件页后台和 Sidebar。在 checkout 中构建后，打开 `about:debugging#/runtime/this-firefox`，选择「临时载入附加组件」，再选取 `extensions/dsh-browser/dist-firefox/manifest.json`：
@@ -189,9 +199,11 @@ pnpm install
 pnpm --filter dsh-browser-extension run build:firefox
 ```
 
-桥地址仍会自动探测。Firefox 附加组件不由安装器安装：打开侧边栏后，DSH 中会出现配对提示，确认其中的配对码与侧边栏显示的相同后点击批准即可（见 [docs/store/README.md](docs/store/README.md#pairing-a-store-installed-extension)）。把 `~/.dsh/ext-bridge-token` 中的桥接 token 粘贴到扩展设置中仍可作为备用方式。签名发布时可直接使用同一份 `dist-firefox/` 产物。
+桥地址仍会自动探测。Firefox 附加组件不由安装器安装：打开侧边栏后会显示一个配对码，把它输入 DSH 中出现的卡片即可（见 [docs/store/README.md](docs/store/README.md#pairing-a-store-installed-extension)）。把 `~/.dsh/ext-bridge-token` 中的桥接 token 粘贴到扩展设置中仍可作为备用方式。签名发布时可直接使用同一份 `dist-firefox/` 产物。
 
 ### 启动与使用
+
+使用 DeepSeek Harness 桌面应用时，直接打开应用即可（安装后请重启应用）。下面的 `pnpm start` 和 `dsh web` 启动的是独立的 `web` profile，不包含桌面应用里配置的模型。
 
 启动托管安装：
 
@@ -213,7 +225,7 @@ Chrome 本机使用无需配置：安装器会把桥接 token 放到已安装的
 
 - 确认 DSH 正在运行。安装或更新后，重启 DSH 并重新打开侧栏。
 - 打开**设置 → 自动检测**，选择需要连接的 DSH 实例。
-- Firefox 或从商店安装的版本会在侧边栏显示配对码：在 DSH 中批准显示相同配对码的提示（或运行 `/browser-pair approve <配对码>`）。备用方式：在设置中填写 `~/.dsh/ext-bridge-token` 中的 token。
+- Firefox 或从商店安装的版本会在侧边栏显示配对码：把它输入 DSH 中出现的卡片（或运行 `/browser-pair <配对码>`）。备用方式：在设置中填写 `~/.dsh/ext-bridge-token` 中的 token。
 - 连接远程 DSH 时，在设置中填写服务器地址和对应的桥接 token。
 - 如果插件配置固定了自己的 `token`，请把该 token 粘贴到扩展设置中；已安装扩展里的副本只跟随 `~/.dsh/ext-bridge-token`。
 - 更新后请同时重新加载扩展并重启 DSH：桥接握手带有版本号，旧版扩展或插件会被拒绝，并以「protocol version mismatch」关闭连接。
@@ -223,7 +235,7 @@ Chrome 本机使用无需配置：安装器会把桥接 token 放到已安装的
 - 所有客户端（包括本机回环）都通过桥接令牌完成双向 HMAC 质询-应答（握手 v3）；令牌本身不经过网络，扩展会拒绝无法反向证明令牌的桥接。
 - 两侧证明都绑定扩展实际拨号的地址和端口，桥接会与它接受的套接字核对，因此从其他端口转发握手的本地进程无法完成握手。握手之后每一帧（双向）都带有按连接派生的密钥和严格递增序号的 MAC；未封装、重放、乱序或篡改的帧会直接断开连接。帧只做认证、不加密。经端口转发（Docker `-p`、SSH 隧道）以不同端口访问桥接时会被拒绝，除非在插件配置 `forwardedPorts` 中列出该回环端口**并且**设置 `allowForwardedPorts: true`。在转发端口上监听的程序位于中间，可以读取每一帧（会话记录、页面内容），因此只列出你控制的转发：在列出的端口空闲时绑定它的本地进程可以借它中转。双方声明的能力（caps）也绑定在两侧证明中（协议 v4），即使是受信任的转发也无法开启开发者工具组或修改快照上限。桥接 URL 中的 DNS 名称仅在桥接监听回环地址时被接受；局域网或远程桥接必须用 IP 地址连接。
 - 插件配置中固定的 `token` 至少 32 个可打印字符且具备足够熵（例如 `openssl rand -hex 32`），否则插件启动失败，因为截获的握手可让本地观察者离线猜测弱 token。
-- Chrome 连接只接受 manifest key 固定的扩展 ID（`klmdgljhcjbbpjcplbanjeclilghnaoh`）。其他构建（Web Store 或 Brave 安装的版本）在用户于 DSH 中批准其配对请求后即被接受，其 ID 记录在 `~/.dsh/browser-paired-extensions.json`；bridge-browser 插件配置中的 `allowedChromeExtensionIds` 仍可用于不经配对直接允许某个构建。用 `pnpm --filter dsh-browser-extension run build:store` 构建商店包，该命令会去掉商店不接受的 `key`。
+- Chrome 连接只接受 manifest key 固定的扩展 ID（`klmdgljhcjbbpjcplbanjeclilghnaoh`）。其他构建（Web Store 或 Brave 安装的版本）在用户把其侧边栏显示的配对码输入 DSH 后即被接受，其 ID 记录在 `~/.dsh/browser-paired-extensions.json`；bridge-browser 插件配置中的 `allowedChromeExtensionIds` 仍可用于不经配对直接允许某个构建。用 `pnpm --filter dsh-browser-extension run build:store` 构建商店包，该命令会去掉商店不接受的 `key`。
 - 桥只转发扩展实际用到的 Host 方法。扩展只能在桥接自己创建的会话中发送提示、修改设置、注入页面快照或删除会话：`session.create` 总是新建会话（忽略扩展传入的 `sessionId`、`cwd`、`workspaceId`），归属记录在 `~/.dsh/browser-bridge-sessions.json` 和桥接工作区目录中。桌面端和 CLI 会话不再出现在侧边栏的历史列表中；它们驱动浏览器时，仍可查看历史（用于审批）和停止，但不能从浏览器发送提示。子代理会话始终不可访问。
 - 新的浏览器会话即使宿主默认是完全访问，也会以受限预设启动；切换到完全访问预设，以及在当前运行完全访问预设的会话中发送提示、注入或执行命令都会被拒绝。只有宿主预设表中沙箱为 `read-only` 或 `workspace-write` 的预设（或列在 `safePermissionPresets` 中的预设）被视为受限；未知预设、改名的完全访问预设以及 `custom` 都会被拒绝，`/permission` 只接受严格的 `/permission <preset>` 形式。在插件配置中设置 `allowDangerFullAccess: true` 可解除这些限制。
 - 中转站的已存密钥只会发送到保存时的地址：用不同地址测试模型列表需要重新输入密钥；修改中转站地址但未重新输入密钥时，已存密钥会被清除。
@@ -253,7 +265,7 @@ pnpm --filter dsh-browser-extension run test
 注意：
 
 - 启动前桥接插件必须已有 `lib/` 供 Loader 加载；`scripts/install.sh` 和根目录 `pnpm run build` 都会先构建插件再构建扩展。
-- `@deepseek-ai/dsh` 与桥接插件的依赖固定在同一条经过验证的公开发布线上；升级时必须同时更新 manifest、锁文件并重跑根目录检查。
+- 工作区只安装一个确定的 DSH 版本（根 `package.json`、桥接插件的 devDependencies 与锁文件保持一致）。桥接插件的 `engines.dsh` 和 DSH peer 范围更宽，覆盖通过兼容性矩阵的版本（见 [docs/dsh-matrix.md](docs/dsh-matrix.md)）。更换默认版本时必须同时更新 manifest、锁文件并重跑根目录检查。
 
 `check:runtime` 检查实际解析的 DSH 依赖和锁文件；`test:smoke` 使用临时 DSH home 启动真实 web 宿主，验证桥接和重启后的会话读取，无需模型密钥。
 

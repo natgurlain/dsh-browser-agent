@@ -84,19 +84,19 @@ test('the baseline completes the Phase 1 tasks with its own tools', { skip, time
     const { plan, region } = instance.expected.value
     const label = instance.page.plans.find((candidate) => candidate.value === plan).label
     const snapshot = await tool('browser_snapshot', {})
-    assert.match(snapshot, /<select> "套餐".*options=\[/u)
+    assert.match(snapshot, /<select> "Plan".*options=\[/u)
     assert.match(await tool('browser_select', { index: indexOf(snapshot, /<select>/u), label }), new RegExp(`Selected "${label}"`, 'u'))
     await tool('browser_select', { index: indexOf(snapshot, /role=combobox/u), value: region })
-    await tool('browser_click', { index: indexOf(snapshot, /保存订阅/u) })
+    await tool('browser_click', { index: indexOf(snapshot, /Save subscription/u) })
     assert.deepEqual({ ...await state(instance), createdAt: 0, updatedAt: 0 }, { taskId: 'plan_select', subscriptionSaved: true, plan, region, createdAt: 0, updatedAt: 0 })
     await assert.rejects(tool('browser_select', { index: indexOf(snapshot, /<select>/u), label: 'no such plan' }), /No option matched/u)
   })
 
   await context.test('browser_hover opens a menu that exists only under the pointer', async () => {
     const instance = await open('hover_menu', 1)
-    assert.doesNotMatch(await tool('browser_snapshot', {}), /导出/u)
-    await tool('browser_hover', { index: await find('更多操作') })
-    await tool('browser_click', { index: indexOf(await tool('browser_snapshot', {}), new RegExp(`导出 ${instance.expected.value.exported}`, 'u')) })
+    assert.doesNotMatch(await tool('browser_snapshot', {}), /Export/u)
+    await tool('browser_hover', { index: await find('More actions') })
+    await tool('browser_click', { index: indexOf(await tool('browser_snapshot', {}), new RegExp(`Export ${instance.expected.value.exported}`, 'u')) })
     assert.equal((await state(instance)).exported, instance.expected.value.exported)
     await assert.rejects(tool('browser_hover', {}), /needs index or selector/u)
   })
@@ -125,19 +125,19 @@ test('the baseline completes the Phase 1 tasks with its own tools', { skip, time
     // Then confirm.
     await assert.rejects(tool('browser_click', { selector: button }), /dialog open: confirm dialog/u)
     assert.equal(await tool('browser_dialog', { accept: true }), 'Answered the confirm dialog with OK.')
-    await tool('browser_wait', { text: '草稿已删除' })
+    await tool('browser_wait', { text: 'Draft deleted' })
     assert.deepEqual({ deletedDraft: (await state(instance)).deletedDraft, deletedCount: (await state(instance)).deletedCount }, instance.expected.value)
     // A dialog left open by one run does not poison the next.
     await assert.rejects(tool('browser_click', { selector: '[data-draft-id]' }), /dialog open/u)
     await open('order_lookup', 1)
-    assert.match(await tool('browser_snapshot', {}), /订单中心/u)
+    assert.match(await tool('browser_snapshot', {}), /Order center/u)
   })
 
   await context.test('browser_wait waits for a condition and fails on timeout', async () => {
     const instance = await open('delayed_report', 2)
-    await tool('browser_click', { index: indexOf(await tool('browser_snapshot', {}), /生成报表/u) })
+    await tool('browser_click', { index: indexOf(await tool('browser_snapshot', {}), /Generate report/u) })
     await assert.rejects(tool('browser_wait', { text: 'never shown', timeoutMs: 200 }), /Timed out after 200ms waiting for text "never shown" to appear/u)
-    assert.match(await tool('browser_wait', { text: '报表已生成' }), /Waited for text/u)
+    assert.match(await tool('browser_wait', { text: 'Report generated' }), /Waited for text/u)
     assert.match(await tool('browser_get_text', { selector: '#code' }), new RegExp(instance.expected.value, 'u'))
     await tool('browser_wait', { selector: '#result' })
     await tool('browser_wait', { selector: '#nothing-here', gone: true, timeoutMs: 500 })
@@ -148,7 +148,7 @@ test('the baseline completes the Phase 1 tasks with its own tools', { skip, time
   await context.test('browser_scroll scrolls an inner container, once or until enough items load', async () => {
     const instance = await open('feed_scroll', 4)
     await tool('browser_scroll', { direction: 'bottom', selector: '#feed' })
-    await tool('browser_wait', { text: '第 16 条消息' })
+    await tool('browser_wait', { text: 'Message 16' })
     assert.equal(await page.evaluate(() => window.scrollY), 0, 'the page itself must not scroll')
     const result = await tool('browser_scroll', { direction: 'bottom', selector: '#feed article', untilItems: instance.page.target, maxRounds: 12 })
     assert.match(result, /items are loaded\.$/u)

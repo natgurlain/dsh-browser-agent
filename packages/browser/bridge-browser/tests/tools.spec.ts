@@ -164,7 +164,7 @@ describe('registerBrowserTools', () => {
       properties: Record<string, unknown>
       required?: string[]
     }
-    // 元素编号和 selector 互斥，由扩展验证实际目标。
+    // The element index and the selector are mutually exclusive; the extension validates the actual target.
     expect(click.properties.index).toBeDefined()
     expect(click.properties.selector).toBeDefined()
     expect(click.properties.action).toBeDefined()

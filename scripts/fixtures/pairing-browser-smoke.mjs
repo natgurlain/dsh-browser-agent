@@ -5,14 +5,15 @@
  * A second browser profile loads a store-style copy of the built extension:
  * no manifest `key` (so Chromium gives it an ID the bridge has never heard
  * of) and no installer-written `bridge-token` file. Its side panel asks the
- * host to pair and shows a code; the host shows the same code, and once the
- * request is approved there the panel connects. Nothing is injected into the
- * extension: the token arrives only through the exchange.
+ * host to pair and shows a code; the code is typed into the DSH web app, and
+ * the panel connects. Nothing is injected into the extension: the token
+ * arrives only through the exchange.
  */
 
 import assert from 'node:assert/strict'
 import { cp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 
 /**
  * @param {object} ctx
@@ -81,54 +82,63 @@ export async function runPairingSmoke({ chromium, builtExtension, directory, run
     await shown.waitFor({ timeout: 30_000 })
     const code = (await shown.textContent()).trim()
     assert.match(code, /^[A-HJ-NP-Z2-9]{3}-[A-HJ-NP-Z2-9]{3}$/u)
-    assert.match(await card.textContent(), /Approve in DeepSeek Harness/u)
+    assert.match(await card.textContent(), /Enter this code in DeepSeek Harness/u)
     await panel.screenshot({ path: join(directory, 'screenshots', 'pairing-store-build-code.png') }).catch(() => {})
 
-    // The host shows the same code for this very extension, and has released nothing.
-    const listed = await waitFor(async () => {
-      const answer = await ownerPairing({ action: 'list' })
-      return answer.body?.requests?.length === 1 ? answer.body.requests : undefined
+    // The host knows a browser waits; it holds no code and has released nothing.
+    const desk = await waitFor(async () => {
+      const answer = await ownerPairing({ action: 'status' })
+      return answer.body?.waiting === 1 ? answer.body : undefined
     }, 'the pairing request on the host')
-    assert.equal(listed[0].code, code, 'the host must show the code the panel shows')
-    assert.equal(listed[0].origin, `chrome-extension://${extensionId}`)
+    assert.equal(JSON.stringify(desk).includes(code.replace('-', '')), false)
     assert.equal(await worker.evaluate(async () => (await chrome.storage.local.get('dshSettings')).dshSettings?.token ?? ''), '')
-    assert.equal(await label(), 'Not paired with DSH yet')
 
-    // Denied on the host: the panel explains, stores nothing, and asks again only on a click.
-    assert.equal((await ownerPairing({ action: 'deny', id: listed[0].id })).status, 200)
-    await waitFor(async () => (await status.textContent().catch(() => ''))?.startsWith('The request was denied'), 'the denial in the panel')
+    // Another code is entered on the host: the panel explains, stores nothing, and asks again only on a click.
+    const wrong = code.startsWith('A') ? `B${code.slice(1)}` : `A${code.slice(1)}`
+    assert.equal((await ownerPairing({ action: 'enter', code: wrong })).body.result, 'no-match')
+    await waitFor(async () => (await status.textContent().catch(() => ''))?.startsWith('The code entered in DSH was not this one'), 'the wrong-code message in the panel')
+    assert.equal(await worker.evaluate(async () => (await chrome.storage.local.get('dshSettings')).dshSettings?.token ?? ''), '')
     await card.getByRole('button', { name: 'Ask again', exact: true }).click()
     await shown.waitFor({ timeout: 30_000 })
     const secondCode = (await shown.textContent()).trim()
-    const again = await waitFor(async () => {
-      const answer = await ownerPairing({ action: 'list' })
-      return answer.body?.requests?.length === 1 ? answer.body.requests : undefined
-    }, 'the second pairing request on the host')
-    assert.equal(again[0].code, secondCode)
+    assert.notEqual(secondCode, code, 'every request shows a fresh code')
 
-    // The user's one click: DSH's own web app shows the prompt over the page
-    // ("<browser> wants to connect", the same code), and Approve is pressed there.
+    // The user's one action on the host: DSH's own web app shows "A browser
+    // wants to connect" with one input; the code is typed there and Enter pressed.
     const app = await context.newPage()
     await app.setViewportSize({ width: 1280, height: 860 })
     await app.goto(appUrl)
     const prompt = app.locator('[data-testid="dsh-pairing-prompt"]')
     await prompt.waitFor({ timeout: 45_000 })
-    assert.equal((await prompt.locator('[data-testid="dsh-pairing-code"]').textContent()).trim(), secondCode,
-      'the DSH app must show the code the panel shows')
-    assert.match(await prompt.textContent(), /wants to connect/u)
-    await app.screenshot({ path: join(directory, 'screenshots', 'pairing-dsh-app-prompt.png') }).catch(() => {})
+    assert.match(await prompt.textContent(), /A browser wants to connect/u)
+    assert.equal((await prompt.textContent()).includes(secondCode), false, 'the DSH app never shows a code')
     // A fresh DSH profile opens with a one-time preview notice whose backdrop covers the page.
     await app.getByRole('button', { name: 'Continue', exact: true }).click({ timeout: 5_000 }).catch(() => {})
-    await prompt.getByRole('button', { name: 'Approve', exact: true }).click()
+    const field = prompt.locator('[data-testid="dsh-pairing-input"]')
+    // The app re-renders its overlay layer while that notice closes: type once the field keeps what was typed.
+    await waitFor(async () => {
+      await field.fill(secondCode.toLowerCase())
+      await delay(400)
+      return await field.inputValue() === secondCode.toLowerCase()
+    }, 'the pairing code to stay in the DSH app input', 20_000)
+    await app.screenshot({ path: join(directory, 'screenshots', 'pairing-dsh-app-prompt.png') }).catch(() => {})
+    await field.press('Enter')
+    await waitFor(async () => {
+      const text = await prompt.locator('[data-testid="dsh-pairing-status"]').textContent().catch(() => '')
+      // Any other answer is a failure worth reading, not a reason to keep waiting.
+      if (text !== '' && text !== null && !text.startsWith('Paired.')) throw new Error(`the DSH app answered: ${text}`)
+      return text?.startsWith('Paired.')
+    }, 'the paired notice in the DSH app', 30_000)
     await waitFor(async () => await label() === 'Connected', 'the paired store build to connect', 30_000)
     assert.equal(await card.count(), 0, 'the pairing card leaves once the panel is connected')
     const shot = join(directory, 'screenshots', 'pairing-store-build-connected.png')
     await panel.screenshot({ path: shot }).catch(() => {})
 
     // The host saw exactly this extension pair, and remembers its ID.
-    const after = (await ownerPairing({ action: 'list' })).body
-    assert.deepEqual(after.requests, [])
+    const after = (await ownerPairing({ action: 'status' })).body
+    assert.equal(after.waiting, 0)
     assert.equal(after.paired.origin, `chrome-extension://${extensionId}`)
+    assert.deepEqual(after.pairedIds, [extensionId])
     const record = await waitFor(async () => {
       try { return JSON.parse(await readFile(join(home, 'browser-paired-extensions.json'), 'utf8')) } catch { return undefined }
     }, 'the paired-extension record')
@@ -136,7 +146,7 @@ export async function runPairingSmoke({ chromium, builtExtension, directory, run
     // The token reached the extension's settings through the exchange, not through a file.
     const stored = await worker.evaluate(async () => (await chrome.storage.local.get('dshSettings')).dshSettings?.token ?? '')
     assert.equal(stored, token)
-    results.push('a store-style build (no manifest key, no token file) asks to pair by itself and shows the code the host shows; a denial stores nothing, and one click on Approve in the DSH web app\'s own prompt connects it, with nothing typed or copied')
+    results.push('a store-style build (no manifest key, no token file) asks to pair by itself and shows a code; a wrong code entered on the host stores nothing; the code typed into the DSH web app\'s own card connects it, with no token copied and no code shown by the host')
     return [shot]
   } finally {
     await context.close().catch(() => {})
