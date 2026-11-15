@@ -154,7 +154,8 @@ describe('learning panel UI', () => {
     const host = await mount(createElement(LearningPanel, { locale: 'en', connected: true }))
     await act(async () => { push({ settings: { workflows: false, siteDrivers: true, siteDriverOrigins: [], watchMe: false, fixtures: false } }) })
     const input = host.querySelector('input[type=file]') as HTMLInputElement
-    const file = new File(['[]'], 'drivers.json', { type: 'application/json' })
+    // jsdom's File has no text(); the panel only reads it.
+    const file = { name: 'drivers.json', text: async () => '[]' }
     Object.defineProperty(input, 'files', { configurable: true, value: [file] })
     let value = 'C:\\fakepath\\drivers.json'
     Object.defineProperty(input, 'value', { configurable: true, get: () => value, set: (next: string) => { value = next } })
