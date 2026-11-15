@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks'
-import { stateReached, validateTask } from './tasks.mjs'
+import { extensionSettingsFor, stateReached, validateTask } from './tasks.mjs'
 
 function round(value) {
   return value === undefined ? undefined : Math.round(value * 100) / 100
@@ -54,6 +54,7 @@ async function resetState(siteOrigin, instance) {
 async function prepareBackend(backend, instance, extensionBrowser) {
   if (backend.backend === 'extension') {
     if (extensionBrowser === undefined) throw new Error('extension browser is not running')
+    await extensionBrowser.configure?.(extensionSettingsFor(instance.id))
     await extensionBrowser.prepare(instance.url)
     return
   }
@@ -95,6 +96,7 @@ export async function runOne({
 
   const created = await backend.client.rpc('session.create', { cwd: workspace })
   const sessionId = created.sessionId
+  if (backend.backend === 'extension') await extensionBrowser.bindSession?.(sessionId)
   const models = await backend.client.rpc('session.modelCatalog')
   let selectedModel = models.default
   if (modelSelection !== undefined) {
@@ -175,11 +177,13 @@ export async function runOne({
         if (typeof call.callId === 'string') openCalls.set(call.callId, { call, receivedAt })
         if (!call.name.startsWith('browser_')) observerError ??= `forbidden tool called: ${call.name}`
       } else if (event.type === 'tool/result') {
-        const callId = event.data?.message?.source?.callId
+        const message = event.data?.message
+        const callId = message?.source?.callId ?? message?.toolCallId
         const open = openCalls.get(callId)
         if (open !== undefined) {
           open.call.durationMs = round(receivedAt - open.receivedAt)
-          open.call.ok = event.data?.message?.content?.[0]?.isError !== true && event.data?.error === undefined
+          // DSH marks a failed tool call on the tool-result message itself.
+          open.call.ok = message?.isError !== true && message?.content?.[0]?.isError !== true && event.data?.error === undefined
           openCalls.delete(callId)
         }
       } else if (event.type === 'turn/end') {
