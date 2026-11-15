@@ -287,20 +287,44 @@ release_fetch() {
 }
 # <<< release-fetch
 
+# Messages are bilingual: English first, Chinese on the indented line below.
+# Callers pass the Chinese text first and the English text second.
 print_step() {
-  printf '\n[%s/4] %s\n' "$1" "$2"
-  printf '      %s\n' "$3"
+  printf '\n[%s/4] %s\n' "$1" "$3"
+  printf '      %s\n' "$2"
 }
 
 print_pair() {
-  printf '%s\n' "$1"
-  printf '   %s\n' "$2"
+  printf '%s\n' "$2"
+  printf '   %s\n' "$1"
 }
 
 fail_pair() {
-  printf '\n错误：%s\n' "$1" >&2
-  printf 'Error: %s\n' "$2" >&2
+  printf '\nError: %s\n' "$2" >&2
+  printf '错误：%s\n' "$1" >&2
   exit 1
+}
+
+# Runs a command in the checkout with its output hidden. When it fails, the end
+# of that output is shown and the install stops, so a failed build or dependency
+# install is never a silent exit.
+run_quiet() {
+  local zh="$1" en="$2" log status=0
+  shift 2
+  log="$(mktemp "${TMPDIR:-/tmp}/dsh-browser-install.XXXXXX")"
+  (cd "$ROOT" && "$@") >"$log" 2>&1 || status=$?
+  if [ "$status" -eq 0 ]; then
+    rm -f "$log"
+    return 0
+  fi
+  printf '\n' >&2
+  tail -n 40 "$log" >&2
+  printf '\nFull output: %s\n' "$log" >&2
+  printf '完整输出：%s\n' "$log" >&2
+  printf '\nError: %s (exit code %s).\n' "$en" "$status" >&2
+  printf '错误：%s（退出码 %s）。\n' "$zh" "$status" >&2
+  # Keep the command's own exit code for whoever called the installer.
+  exit "$status"
 }
 
 has_workspace() {
@@ -360,7 +384,7 @@ copy_to_clipboard() {
   return 1
 }
 
-# Echoes a launch target for the local Chrome/Chromium install: on macOS an app bundle path
+# Echoes a launch target for the local Chrome, Chromium or Brave install: on macOS an app bundle path
 # or a LaunchServices app name (both accepted by `open -a`), on Linux an executable on PATH.
 find_browser_target() {
   local name
@@ -368,7 +392,7 @@ find_browser_target() {
   if is_macos; then
     local dir app
     for dir in "/Applications" "$HOME/Applications"; do
-      for name in "Google Chrome" "Google Chrome Canary" "Chromium"; do
+      for name in "Google Chrome" "Google Chrome Canary" "Chromium" "Brave Browser"; do
         app="$dir/$name.app"
         if [ -x "$app/Contents/MacOS/$name" ]; then
           printf '%s\n' "$app"
@@ -378,7 +402,7 @@ find_browser_target() {
     done
 
     # Fallback: recognize apps registered with LaunchServices in non-standard locations.
-    for name in "Google Chrome" "Google Chrome Canary" "Chromium"; do
+    for name in "Google Chrome" "Google Chrome Canary" "Chromium" "Brave Browser"; do
       if open -Ra "$name" >/dev/null 2>&1; then
         printf '%s\n' "$name"
         return 0
@@ -387,7 +411,7 @@ find_browser_target() {
     return 1
   fi
 
-  for name in google-chrome google-chrome-stable chromium chromium-browser; do
+  for name in google-chrome google-chrome-stable chromium chromium-browser brave-browser brave-browser-stable brave; do
     if command -v "$name" >/dev/null 2>&1; then
       printf '%s\n' "$name"
       return 0
@@ -710,8 +734,8 @@ node -e 'const [major, minor] = process.versions.node.split(".").map(Number); pr
 require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not found; install rsync first."
 
 print_step 1 "构建浏览器桥" "Build the browser bridge"
-(cd "$ROOT" && pnpm install --frozen-lockfile >/dev/null 2>&1)
-(cd "$ROOT" && pnpm --filter @natgurlain/dsh-bridge-browser run build >/dev/null 2>&1)
+run_quiet "依赖安装失败" "Installing dependencies failed" pnpm install --frozen-lockfile
+run_quiet "桥插件构建失败" "Building the bridge plugin failed" pnpm --filter @natgurlain/dsh-bridge-browser run build
 
 print_step 2 "注册到本机 web profile" "Register with the local web profile"
 for legacy_plugin in $LEGACY_PLUGINS; do
@@ -722,7 +746,7 @@ done
 (cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "@natgurlain/dsh-bridge-browser@link:$PLUGIN" >/dev/null)
 
 print_step 3 "构建 Chrome 扩展" "Build the Chrome extension"
-(cd "$ROOT" && pnpm --filter dsh-browser-extension run build >/dev/null 2>&1)
+run_quiet "扩展构建失败" "Building the extension failed" pnpm --filter dsh-browser-extension run build
 
 print_step 4 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
 NO_LAUNCH="${DSH_BROWSER_NO_LAUNCH:-0}"
@@ -807,8 +831,8 @@ printf '\n'
 print_pair "加载完成后：" "After loading the extension:"
 print_pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "Click the DeepSeek whale icon in the toolbar to open the side panel"
 print_pair "• 扩展会自动发现本机 dsh，无需填写地址或 token（已放入扩展目录）" "The extension discovers local dsh automatically; no address or token is required (it was placed in the extension directory)"
-printf '• 启动固定版本：cd %q && pnpm start\n' "$ROOT"
-printf '   Start the pinned version: cd %q && pnpm start\n' "$ROOT"
+printf '• Start the pinned version: cd %q && pnpm start\n' "$ROOT"
+printf '   启动固定版本：cd %q && pnpm start\n' "$ROOT"
 print_pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.2.2-rc.2 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.2-rc.2 web"
 printf '\n'
 print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/natgurlain/dsh-browser-agent" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/natgurlain/dsh-browser-agent"
