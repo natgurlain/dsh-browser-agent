@@ -61,6 +61,10 @@ export const TAINT_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'session_event_trace',
   'session_search',
   'session_trace',
+  // A structured subagent (a tab-fleet worker) reports its answer through this
+  // child-scoped tool; it only hands a value to the parent, which treats it as
+  // untrusted page-derived data.
+  'structured_output',
 ])
 
 /**
