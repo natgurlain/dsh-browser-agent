@@ -17,13 +17,12 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** The URL when `value` is an absolute http(s) URL, else undefined. */
+/**
+ * The URL when `value` is a string holding an absolute http(s) URL, else
+ * undefined. Strings only: model arguments are JSON, and an object that
+ * merely looks like a URL must never pass as one.
+ */
 export function parseHttpUrl(value: unknown): URL | undefined {
-  if (value instanceof URL) return value.protocol === 'http:' || value.protocol === 'https:' ? value : undefined
-  // A URL object from another realm (tests, frames) fails instanceof: re-parse its href.
-  if (typeof value === 'object' && value !== null && typeof (value as { href?: unknown }).href === 'string') {
-    return parseHttpUrl((value as { href: string }).href)
-  }
   if (typeof value !== 'string' || value.trim() === '') return undefined
   try {
     const parsed = new URL(value)

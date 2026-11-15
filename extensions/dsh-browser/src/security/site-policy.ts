@@ -210,7 +210,7 @@ function layerVerdict(entries: readonly SiteRuleEntry[], url: URL, source: SiteR
  * unrestricted access is off (ordinary approval flow). Non-web URLs have none.
  */
 export function resolveSiteRule(value: string | URL, policy: SitePolicy): SiteVerdict | undefined {
-  const url = parseHttpUrl(value)
+  const url = parseHttpUrl(typeof value === 'string' ? value : value.href)
   if (url === undefined) return undefined
   const managed = layerVerdict(policy.managed, url, 'managed')
   if (managed !== undefined) return managed

@@ -425,5 +425,17 @@ describe('learning runtime', () => {
     await flush()
     expect(learning.stepsFor('s1')).toEqual([])
   })
+
+  it('a closed tab takes its pending probes with it (M9)', async () => {
+    const { learning } = runtime({}, { dshLearningSettings: { workflows: true } })
+    await learning.ready
+    sendMessage.mockResolvedValue({ ok: true, result: { role: 'button', name: 'Save', css: '#save' } })
+    const click = call('browser_click', { index: 1 })
+    learning.wrapPolicy(click, { id: 7, url: tabUrl }, policy)!(click, { reads: [], acts: [] })
+    learning.forgetTab(7)
+    learning.recordResult(click, { ok: true, result: { text: 'ok' } }, { tabId: 7, url: tabUrl })
+    await flush()
+    expect(learning.stepsFor('s1')).toEqual([])
+  })
 })
 

@@ -9,8 +9,10 @@ describe('web-url', () => {
     for (const value of ['chrome://settings', 'file:///etc/passwd', 'blob:https://a.example/1', 'data:text/html,x', 'about:blank', '/relative', '', '   ', undefined, 42, null]) {
       expect(httpOrigin(value)).toBeUndefined()
     }
-    expect(parseHttpUrl(new URL('https://a.example/p'))?.pathname).toBe('/p')
-    expect(parseHttpUrl(new URL('ftp://a.example/'))).toBeUndefined()
+    // Strings only: a JSON object shaped like a URL is not one (model arguments).
+    expect(httpOrigin({ href: 'https://a.example/' })).toBeUndefined()
+    expect(parseHttpUrl(new URL('https://a.example/p'))).toBeUndefined()
+    expect(parseHttpUrl('https://a.example/p')?.pathname).toBe('/p')
   })
 
   it('recognizes plain objects', () => {
