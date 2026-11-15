@@ -1,63 +1,10 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { BRIDGE_PROTOCOL_VERSION, createBridgeNonce } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import { completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
-
-class FakeWebSocket extends EventTarget {
-  static readonly CONNECTING = 0
-  static readonly OPEN = 1
-  static readonly CLOSED = 3
-  static instances: FakeWebSocket[] = []
-
-  readyState = FakeWebSocket.CONNECTING
-  readonly sent: unknown[] = []
-
-  constructor(readonly url: string) {
-    super()
-    FakeWebSocket.instances.push(this)
-  }
-
-  send(value: string): void {
-    this.sent.push(JSON.parse(value))
-  }
-
-  open(): void {
-    this.readyState = FakeWebSocket.OPEN
-    this.dispatchEvent(new Event('open'))
-  }
-
-  receive(frame: unknown): void {
-    this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(frame) }))
-  }
-
-  close(code = 1000, reason = ''): void {
-    if (this.readyState === FakeWebSocket.CLOSED) return
-    this.readyState = FakeWebSocket.CLOSED
-    this.dispatchEvent(new CloseEvent('close', { code, reason }))
-  }
-}
-
-function chromeEvent<T extends unknown[]>() {
-  const listeners = new Set<(...args: T) => void>()
-  return {
-    addListener: vi.fn((listener: (...args: T) => void) => { listeners.add(listener) }),
-    emit: (...args: T) => { for (const listener of listeners) listener(...args) },
-  }
-}
-
-function panelPort() {
-  const onMessage = chromeEvent<[unknown]>()
-  const onDisconnect = chromeEvent<[]>()
-  const postMessage = vi.fn()
-  const port = {
-    name: 'dsh-panel',
-    postMessage,
-    onMessage,
-    onDisconnect,
-  } as unknown as chrome.runtime.Port
-  return { onDisconnect, onMessage, port, postMessage }
-}
+import { createBridgeNonce } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import { challengeUntilHello, completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
+import { FakeWebSocket } from './support/fake-websocket.ts'
+import { chromeEvent, panelPort } from './support/chrome.ts'
 
 function mockChrome(options: {
   localGet?: () => Promise<Record<string, unknown>>
@@ -1061,12 +1008,7 @@ describe('background bridge lifecycle', () => {
     squatter.open()
     // The squatter does not know the token, so its server proof is wrong.
     const squatterNonce = createBridgeNonce()
-    await vi.waitFor(() => {
-      if (!squatter.sent.some((frame) => (frame as { t?: unknown }).t === 'hello')) {
-        squatter.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: squatterNonce })
-      }
-      expect(squatter.sent.some((frame) => (frame as { t?: unknown }).t === 'hello')).toBe(true)
-    }, { interval: 5 })
+    await challengeUntilHello(squatter, squatterNonce)
     squatter.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }, mac: 'f'.repeat(64) })
     await vi.waitFor(() => { expect(chrome.storage.local.remove).toHaveBeenCalledWith('dshLastBridgeUrl') })
 

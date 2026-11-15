@@ -9,47 +9,8 @@ import {
   createBridgeNonce,
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, INSTALLED_TOKEN_PATH, loadInstalledToken, type BridgeState } from '../src/background/bridge.ts'
-import { completeHandshake, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
-
-class FakeWebSocket extends EventTarget {
-  static readonly CONNECTING = 0
-  static readonly OPEN = 1
-  static readonly CLOSED = 3
-  static instances: FakeWebSocket[] = []
-
-  readyState = FakeWebSocket.CONNECTING
-  readonly sent: unknown[] = []
-  closedWith: { code: number; reason: string } | undefined
-
-  constructor(readonly url: string) {
-    super()
-    FakeWebSocket.instances.push(this)
-  }
-
-  send(data: string): void {
-    this.sent.push(JSON.parse(data))
-  }
-
-  open(): void {
-    this.readyState = FakeWebSocket.OPEN
-    this.dispatchEvent(new Event('open'))
-  }
-
-  receive(frame: unknown): void {
-    this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(frame) }))
-  }
-
-  receiveRaw(data: string): void {
-    this.dispatchEvent(new MessageEvent('message', { data }))
-  }
-
-  close(code = 1000, reason = ''): void {
-    if (this.readyState === FakeWebSocket.CLOSED) return
-    this.closedWith = { code, reason }
-    this.readyState = FakeWebSocket.CLOSED
-    this.dispatchEvent(new CloseEvent('close', { code, reason }))
-  }
-}
+import { challengeUntilHello, completeHandshake, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
+import { FakeWebSocket } from './support/fake-websocket.ts'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -207,16 +168,7 @@ describe('bridge mutual authentication', () => {
     return socket
   }
 
-  /** Send the challenge until the client answers; return the client's hello. */
-  async function challenge(socket: FakeWebSocket, nonce: string): Promise<{ nonce: string; mac: string; caps: unknown }> {
-    let hello: { t: string; nonce: string; mac: string; caps: unknown } | undefined
-    await vi.waitFor(() => {
-      hello = socket.sent.find((frame) => (frame as { t: string }).t === 'hello') as typeof hello
-      if (hello === undefined) socket.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce })
-      expect(hello).toBeDefined()
-    }, { interval: 5 })
-    return hello!
-  }
+  const challenge = challengeUntilHello
 
   it('sends nothing before the challenge and never sends the token', async () => {
     const { client } = recordingClient()

@@ -7,49 +7,8 @@ import {
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { HOLD_EXPIRED_MESSAGE } from '../src/background/pause-gate.ts'
 import { completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
-
-class FakeWebSocket extends EventTarget {
-  static readonly CONNECTING = 0
-  static readonly OPEN = 1
-  static readonly CLOSED = 3
-  static instances: FakeWebSocket[] = []
-
-  readyState = FakeWebSocket.CONNECTING
-  readonly sent: unknown[] = []
-
-  constructor(readonly url: string) {
-    super()
-    FakeWebSocket.instances.push(this)
-  }
-
-  send(value: string): void {
-    this.sent.push(JSON.parse(value))
-  }
-
-  open(): void {
-    this.readyState = FakeWebSocket.OPEN
-    this.dispatchEvent(new Event('open'))
-  }
-
-  receive(frame: unknown): void {
-    this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(frame) }))
-  }
-
-  close(code = 1000, reason = ''): void {
-    if (this.readyState === FakeWebSocket.CLOSED) return
-    this.readyState = FakeWebSocket.CLOSED
-    this.dispatchEvent(new CloseEvent('close', { code, reason }))
-  }
-}
-
-function chromeEvent<T extends unknown[]>() {
-  const listeners = new Set<(...args: T) => void>()
-  return {
-    addListener: vi.fn((listener: (...args: T) => void) => { listeners.add(listener) }),
-    removeListener: vi.fn((listener: (...args: T) => void) => { listeners.delete(listener) }),
-    emit: (...args: T) => { for (const listener of listeners) listener(...args) },
-  }
-}
+import { FakeWebSocket } from './support/fake-websocket.ts'
+import { chromeEvent } from './support/chrome.ts'
 
 function browserTab(url: string, title = 'Page'): chrome.tabs.Tab {
   return {
