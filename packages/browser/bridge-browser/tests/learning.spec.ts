@@ -290,6 +290,40 @@ describe('workflow schedules', () => {
     expect(await new WorkflowSchedules(file, () => service, async () => true).list()).toEqual([])
   })
 
+  it('keeps the record of a schedule it could not delete, so the panel can still cancel it', async () => {
+    const { service, tasks } = fakeSchedule()
+    const file = join(tempDir(), 'schedules.json')
+    const schedules = new WorkflowSchedules(file, () => service, async () => true)
+    const workflow = validateWorkflow({ ...baseWorkflow(), params: [{ name: 'contact', default: 'Ada' }], steps: (baseWorkflow().steps as unknown[]).filter((_s, i) => i !== 2) })
+    const stuck = await schedules.create('owned', workflow, { kind: 'every', every_seconds: 60 })
+    await schedules.create('owned', workflow, { kind: 'every', every_seconds: 120 })
+    const edit = service.edit as ReturnType<typeof vi.fn>
+    const realEdit = edit.getMockImplementation()!
+    edit.mockImplementation(async (request: { id: string }) => {
+      if (request.id === stuck.id) throw new Error('host busy')
+      return realEdit(request)
+    })
+    expect(await schedules.revokeAll()).toEqual({ revoked: 1, failed: 1 })
+    expect(tasks.has(stuck.id)).toBe(true)
+    const reloaded = new WorkflowSchedules(file, () => service, async () => true)
+    expect((await reloaded.list()).map((entry) => entry.id)).toEqual([stuck.id])
+    edit.mockImplementation(realEdit)
+    expect(await reloaded.cancel(stuck.id)).toBe(true)
+  })
+
+  it('leaves its cache untouched and no temp file behind when a write fails', async () => {
+    const { service } = fakeSchedule()
+    const dir = tempDir()
+    const file = join(dir, 'schedules.json')
+    const schedules = new WorkflowSchedules(file, () => service, async () => true)
+    const workflow = validateWorkflow({ ...baseWorkflow(), params: [{ name: 'contact', default: 'Ada' }], steps: (baseWorkflow().steps as unknown[]).filter((_s, i) => i !== 2) })
+    // The target is a directory: the rename fails.
+    mkdirSync(file)
+    await expect(schedules.create('owned', workflow, { kind: 'every', every_seconds: 60 })).rejects.toThrow()
+    expect(await schedules.count()).toBe(0)
+    expect(readdirSync(dir)).toEqual(['schedules.json'])
+  })
+
   it('refuses unattended runs of workflows with sensitive inputs', async () => {
     const { service } = fakeSchedule()
     const schedules = new WorkflowSchedules(join(tempDir(), 's.json'), () => service, async () => true)
@@ -510,6 +544,18 @@ describe('learning mount', () => {
       expect(tasks.has('s1')).toBe(true)
       await mount.rpc(LEARNING_METHODS.state, { workflows: false }, as('a'))
       expect(tasks.has('s1')).toBe(true)
+    })
+
+    it('dispose unregisters the workflow tools even while schedules exist, and a late count does not bring them back', async () => {
+      const kept = setup([{ id: 's1', install: 'a' }])
+      await vi.waitFor(() => { expect(kept.registered.has('browser_workflow_run')).toBe(true) })
+      kept.mount.dispose()
+      expect(kept.registered.size).toBe(0)
+      // Dispose before the startup schedule count resolves.
+      const early = setup([{ id: 's1', install: 'a' }])
+      early.mount.dispose()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      expect(early.registered.size).toBe(0)
     })
 
     it('the kill switch revokes every schedule regardless of state or install', async () => {

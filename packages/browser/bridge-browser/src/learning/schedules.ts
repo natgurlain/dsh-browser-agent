@@ -17,7 +17,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { Workflow } from './workflow.ts'
 
@@ -114,11 +114,17 @@ export class WorkflowSchedules {
   }
 
   private async persist(records: ScheduleRecordEntry[]): Promise<void> {
-    this.cache = records
     await mkdir(dirname(this.file), { recursive: true, mode: 0o700 })
     const temporary = `${this.file}.${randomUUID()}.tmp`
-    await writeFile(temporary, `${JSON.stringify(records, null, 2)}\n`, { mode: 0o600 })
-    await rename(temporary, this.file)
+    try {
+      await writeFile(temporary, `${JSON.stringify(records, null, 2)}\n`, { mode: 0o600 })
+      await rename(temporary, this.file)
+    } catch (error: unknown) {
+      await unlink(temporary).catch(() => {})
+      throw error
+    }
+    // Only a durable write updates what this process believes.
+    this.cache = records
   }
 
   private serialized<T>(task: () => Promise<T>): Promise<T> {
@@ -186,8 +192,8 @@ export class WorkflowSchedules {
    * Delete the schedules this bridge created (all of them for the kill
    * switch; one install's when its user turns workflows off): a schedule is
    * a standing grant to run the browser unattended. Deletion failures are
-   * reported, and the record is dropped either way so a later list never
-   * resurrects it.
+   * reported and their records kept, so the panel can still list and cancel
+   * a schedule that keeps firing (`list` sweeps records whose schedule is gone).
    * @param install - only schedules created from this install (plus older records that name none).
    */
   revokeAll(install?: string): Promise<{ revoked: number; failed: number }> {
@@ -196,17 +202,16 @@ export class WorkflowSchedules {
       const records = install === undefined ? all : all.filter((record) => record.install === undefined || record.install === install)
       if (records.length === 0) return { revoked: 0, failed: 0 }
       const service = this.schedule()
-      let failed = 0
+      const deleted: ScheduleRecordEntry[] = []
       for (const record of records) {
         try {
           if (service === undefined) throw new Error('no schedule service')
           await service.edit({ id: record.id, action: 'delete' })
-        } catch {
-          failed += 1
-        }
+          deleted.push(record)
+        } catch { /* counted below; the record stays so the panel can retry */ }
       }
-      await this.persist(all.filter((record) => !records.includes(record)))
-      return { revoked: records.length - failed, failed }
+      if (deleted.length > 0) await this.persist(all.filter((record) => !deleted.includes(record)))
+      return { revoked: deleted.length, failed: records.length - deleted.length }
     })
   }
 

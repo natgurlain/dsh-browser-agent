@@ -176,9 +176,13 @@ export function mountLearning(
   let workflowDisposers: Array<() => void> | undefined
   /** Schedules this bridge recorded: the workflow tools stay registered (refusing) so a delivery while every install has workflows off is skipped and audited. */
   let liveSchedules = 0
+  /** Set by dispose: nothing registers again (a late schedule count included). */
+  let disposed = false
   const workflowsEnabled = (): boolean => [...states.values()].some((state) => state.workflows)
   const refreshScheduleCount = async (): Promise<void> => {
-    liveSchedules = await schedules.count().catch(() => 0)
+    const count = await schedules.count().catch(() => 0)
+    if (disposed) return
+    liveSchedules = count
     sync()
   }
   /** Fail closed: no connected install has saved workflows on. */
@@ -256,8 +260,8 @@ export function mountLearning(
   })
 
   const sync = (): void => {
-    const all = [...states.values()]
-    const workflowsOn = all.some((state) => state.workflows) || liveSchedules > 0
+    const all = disposed ? [] : [...states.values()]
+    const workflowsOn = all.some((state) => state.workflows) || (!disposed && liveSchedules > 0)
     if (workflowsOn && workflowDisposers === undefined) {
       workflowDisposers = workflowTools().map((tool) => ctx.tools.register(tool))
       const service = (ctx.get as (name: string) => unknown)('skills') as SkillsServiceLike | undefined
@@ -413,6 +417,8 @@ export function mountLearning(
     },
     revokeStandingGrants: () => revokeSchedules('kill switch engaged'),
     dispose: () => {
+      disposed = true
+      liveSchedules = 0
       states.clear()
       sync()
     },
