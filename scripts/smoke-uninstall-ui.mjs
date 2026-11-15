@@ -73,7 +73,9 @@ for (const mode of ['managed', 'checkout', 'unknown']) {
         assert.equal(preview.status, 0, preview.stdout + preview.stderr)
         assert.ok(preview.stdout.includes(home))
       } else {
-        assert.ok(command.endsWith('| bash') || command.includes('-File $s } finally {'))
+        // No recorded home: the pinned, tagged release script (never a branch).
+        assert.ok(/\| bash -s -- --release v\d+\.\d+\.\d+$/u.test(command) || /-File \$s --release v\d+\.\d+\.\d+ \} /u.test(command), command)
+        assert.ok(command.includes('/releases/download/v'), command)
       }
       await page.bringToFront()
       await card.getByRole('button', { name: locale === 'en' ? 'Copy uninstall command' : '复制卸载命令', exact: true }).click()

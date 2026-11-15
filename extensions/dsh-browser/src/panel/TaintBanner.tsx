@@ -8,7 +8,7 @@
 import { useState } from 'react'
 import type { UiLocale } from '../i18n.ts'
 import type { TaintRecord } from '../security/taint.ts'
-import { NO_SESSION_KEY, taintKey } from '../security/taint.ts'
+import { NO_SESSION_KEY, taintKey, UNKNOWN_SOURCE } from '../security/taint.ts'
 import { useSidePort } from './side-port.ts'
 import { PANEL_COPY } from './strings.ts'
 
@@ -38,7 +38,9 @@ export function TaintBanner({ sessionId, locale }: { sessionId: string | null; l
   const record = records[key]
   if (record === undefined) return null
   const copy = PANEL_COPY[locale].taint
-  const sources = record.sources.length === 0 ? copy.unknownSource : record.sources.join(', ')
+  const sources = record.sources.length === 0
+    ? copy.unknownSource
+    : record.sources.map((source) => source === UNKNOWN_SOURCE ? copy.unknownSource : source).join(', ')
   return (
     <div className="taint-banner" role="status" data-testid="taint-banner">
       <span>{copy.body(sources)}</span>

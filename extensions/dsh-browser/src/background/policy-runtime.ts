@@ -17,7 +17,7 @@
 import { evaluateCallPolicy, type CallPolicyDecision, type CallPolicyTargets, type ManagedCallFlags } from '../security/call-policy.ts'
 import { EMPTY_MANAGED_POLICY, loadManagedPolicy, type ManagedPolicy } from '../security/managed-policy.ts'
 import { matchSitePattern, type SitePolicy, type SiteRuleEntry } from '../security/site-policy.ts'
-import { resultTaintsSession, TaintTracker, taintKey, type TaintRecord } from '../security/taint.ts'
+import { resultTaintsSession, TaintTracker, taintKey, UNKNOWN_SOURCE, type TaintRecord } from '../security/taint.ts'
 import { httpOrigin, parseHttpUrl } from '../security/web-url.ts'
 import type { CallPolicyHook, ToolCall } from './tools.ts'
 import { isDevToolsTool } from './authorization.ts'
@@ -242,17 +242,17 @@ export class PolicyRuntime {
    * The sources are unknown, so no origin is ever exempt.
    */
   markHostTaint(sessionId: string | undefined): void {
-    if (this.taint.get(sessionId) === undefined) this.taint.mark(sessionId, 'host-lineage', [])
+    if (this.taint.get(sessionId) === undefined) this.taint.mark(sessionId, 'host-lineage', [UNKNOWN_SOURCE])
   }
 
   /** The user attached a page selection to a prompt: its page text entered the session. */
   recordSelection(sessionId: string, origin: string | undefined): void {
-    this.taint.mark(sessionId, 'selection-attachment', origin === undefined ? [] : [origin])
+    this.taint.mark(sessionId, 'selection-attachment', [origin ?? UNKNOWN_SOURCE])
   }
 
   /** A snapshot was injected into a session without a tool call (follow refresh). */
   recordInjection(sessionId: string, origin: string | undefined): void {
-    this.taint.mark(sessionId, 'snapshot-injection', origin === undefined ? [] : [origin], origin)
+    this.taint.mark(sessionId, 'snapshot-injection', [origin ?? UNKNOWN_SOURCE], origin)
   }
 
   get(sessionId: string | undefined): TaintRecord | undefined {

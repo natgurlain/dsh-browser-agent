@@ -109,7 +109,7 @@ describe('PolicyRuntime side doors', () => {
     expect(policy.pageHidden('https://app.corp.example/')).toBe(false)
 
     policy.markHostTaint('child')
-    expect(policy.get('child')).toMatchObject({ sources: [], firstTool: 'host-lineage' })
+    expect(policy.get('child')).toMatchObject({ sources: ['(unknown)'], firstTool: 'host-lineage' })
 
     policy.recordResult({ id: 'x', name: 'browser_click', sessionId: 'err' }, false, 'https://a.example')
     expect(policy.get('err')?.sources).toEqual(['https://a.example'])

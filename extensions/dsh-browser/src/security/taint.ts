@@ -16,7 +16,34 @@
  */
 
 import { EXTERNAL_SESSION_PREFIX } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import { analyzeUrl } from './url-risk.ts'
+import { analyzeUrl, type UrlAnalysis } from './url-risk.ts'
+
+/**
+ * A source that is no origin: content entered the session from somewhere this
+ * extension did not see (Host lineage, an attachment without a page URL). It
+ * never equals a destination, so {@link onlySourceIs} stays false for good,
+ * whatever origins are recorded later.
+ */
+export const UNKNOWN_SOURCE = '(unknown)'
+
+/** Letters and digits in one URL value from which a tainted session's URL counts as carrying data. */
+const TAINT_DATA_LENGTH = 16
+
+/**
+ * Whether a destination URL can carry data out of a tainted session. The
+ * ordinary card's `risky` skips plain numbers and low-entropy runs so that
+ * everyday links do not prompt; under taint a card number or a low-entropy
+ * key is exactly what must not leave, so any value, fragment, or path segment
+ * with 16+ letters and digits that include a digit counts.
+ */
+export function urlCarriesDataUnderTaint(url: UrlAnalysis): boolean {
+  if (url.risky) return true
+  const pieces = [...url.params.flatMap((param) => [param.name, param.value]), url.fragment, ...url.path.split('/')]
+  return pieces.some((piece) => {
+    const joined = piece.replace(/[^A-Za-z0-9]+/g, '')
+    return joined.length >= TAINT_DATA_LENGTH && /\d/.test(joined)
+  })
+}
 
 /** Session key used for calls that carry no agent session (probes, tests). */
 export const NO_SESSION_KEY = '(no-session)'
@@ -201,7 +228,7 @@ export function taintForcedReasons(facts: TaintCallFacts, taint: TaintRecord | u
     case 'browser_open_tab': {
       const raw = typeof facts.args.url === 'string' ? facts.args.url : ''
       const url = analyzeUrl(raw)
-      if (url !== undefined && url.risky && !onlySourceIs(taint, url.origin)) {
+      if (url !== undefined && urlCarriesDataUnderTaint(url) && !onlySourceIs(taint, url.origin)) {
         reasons.push(`The session has read untrusted page content from ${describeSources(taint)}, and this URL (${url.origin}) carries data in its host, path, query, or fragment.`)
       }
       break
@@ -247,5 +274,7 @@ export function taintForcedReasons(facts: TaintCallFacts, taint: TaintRecord | u
 }
 
 function describeSources(taint: TaintRecord): string {
-  return taint.sources.length === 0 ? 'an unknown origin' : taint.sources.join(', ')
+  const known = taint.sources.filter((source) => source !== UNKNOWN_SOURCE)
+  if (known.length === 0) return 'an unknown origin'
+  return known.length === taint.sources.length ? known.join(', ') : `${known.join(', ')} and an unknown origin`
 }
