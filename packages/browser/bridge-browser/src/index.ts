@@ -30,6 +30,7 @@ import type {} from '@deepseek-ai/dsh-experimental-worktree'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { BridgeServer, DEFAULT_MAX_APPROVAL_HOLD_MS } from './server.ts'
+import { detectDshVersion, dshSupport, unsupportedDshError, untestedDshWarning } from './dsh-support.ts'
 import { createHostApprovalRequester, type AgentLookup, type ApprovalServiceLike } from './host-approval.ts'
 import { BrowserContextInjector } from './browser-context.ts'
 import { AuditLog, ToolCallAuditor } from './audit-log.ts'
@@ -253,11 +254,16 @@ export async function apply(ctx: Context, resolved: ResolvedConfig): Promise<voi
 
   const gateway = ctx.get('typertGateway') as unknown as GatewayCandidate | undefined
   const connection = ctx.get('connection') as unknown as HostConnectionLike | undefined
+  // DSH refuses the plugin outside engines.dsh; this covers what that leaves:
+  // a release inside the range that the matrix has not run, a host the user
+  // exempted with `dsh plugin allow-version`, and a host missing a needed API.
+  const dshVersion = detectDshVersion()
+  if (dshSupport(dshVersion) === 'untested') ctx.logger.warn(untestedDshWarning(dshVersion as string))
   if (gateway === undefined || !hasRemoteWireStream(gateway)) {
-    throw new Error('bridge-browser: dsh 0.2.2-rc.2 is required (Gateway wireStream unavailable)')
+    throw unsupportedDshError('Gateway wireStream', dshVersion)
   }
   if (connection === undefined || typeof connection.createPeer !== 'function') {
-    throw new Error('bridge-browser: dsh 0.2.2-rc.2 is required (connection.createPeer unavailable)')
+    throw unsupportedDshError('connection.createPeer', dshVersion)
   }
   const tokenRes = await resolveToken(resolved.token)
   // Zero-config Chrome: keep the installed extension's copy of the persisted

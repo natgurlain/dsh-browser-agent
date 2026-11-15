@@ -319,7 +319,7 @@ export function installSessionTaint(ctx: Context, registry: SessionTaintRegistry
     const cwd = exec.agent.session?.header?.cwd
     return workspaceReadDenial(exec.name, exec.arguments, typeof cwd === 'string' ? cwd : undefined)
   }
-  // dsh-tools 0.2.2-rc.2 (the pinned peer; index.ts refuses older hosts) always has guard().
+  // dsh-tools in every tested DSH release (src/dsh-support.ts; index.ts refuses older hosts) always has guard().
   disposers.push(ctx.tools.guard((exec) => denial(exec as unknown as GuardExec)))
   return () => { for (const dispose of disposers.reverse()) dispose() }
 }

@@ -1,5 +1,6 @@
 import { readFile, stat } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
+import { DSH_DEFAULT_VERSION, DSH_PEER_RANGE, SUPPORTED_DSH_RANGE } from '../src/dsh-support.ts'
 
 /**
  * The dsh 0.2.1 plugin-manifest contract this package publishes: the runtime
@@ -30,15 +31,23 @@ describe('plugin manifest', () => {
     expect(dsh.bundle?.patch).toBe('./cordis.patch.yml')
     expect(dsh.client?.platform).toBe('web')
     expect(dsh.client?.inject).toEqual(expect.arrayContaining(['@deepseek-ai/dsh-client-ui-slots']))
-    expect(engines.dsh).toBe('^0.2.2-rc.2')
+    // scripts/dsh-matrix.mjs --probe-outside-range rewrites engines.dsh in its copy and says so here.
+    expect(engines.dsh).toBe(process.env.DSH_MATRIX_ENGINES_OVERRIDE ?? SUPPORTED_DSH_RANGE)
     expect(engines.node).toBe('>=24.9.0')
   })
 
-  it('pins runtime peer dependencies', () => {
+  it('declares one DSH range for every runtime peer dependency', () => {
     const peers = manifest.peerDependencies as Record<string, string>
     const dshPeers = Object.keys(peers).filter(name => name.startsWith('@deepseek-ai/dsh'))
     expect(dshPeers.length).toBeGreaterThan(0)
-    for (const name of dshPeers) expect(peers[name]).toBe('0.2.2-rc.2')
+    for (const name of dshPeers) expect(peers[name]).toBe(DSH_PEER_RANGE)
+  })
+
+  it('develops against the workspace default DSH release', () => {
+    const dev = manifest.devDependencies as Record<string, string>
+    const dshDev = Object.keys(dev).filter(name => name.startsWith('@deepseek-ai/dsh'))
+    expect(dshDev.length).toBeGreaterThan(0)
+    for (const name of dshDev) expect(dev[name]).toBe(DSH_DEFAULT_VERSION)
   })
 
   it('publishes the resources the Plugins page reads', () => {
