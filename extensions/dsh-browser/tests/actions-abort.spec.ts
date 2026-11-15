@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
- * The kill switch reaches the page: in-flight waits and scroll loops stop
- * at once instead of running to their own timeouts (#8).
+ * The kill switch reaches the page: in-flight waits (conditional and fixed)
+ * stop at once instead of running to their own timeouts (#8).
  */
 import { expect, it } from 'vitest'
 import { abortRunningActions, runAction } from '../src/content/actions.ts'

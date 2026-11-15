@@ -12,8 +12,8 @@
  * @module
  */
 
-import { querySelectorAllDeep, resolveSelectorAll, SHADOW_PIERCE } from './dom.ts'
-import { accessibleName, isVisible } from './extract.ts'
+import { cssEscape, querySelectorAllDeep, resolveSelectorAll, SHADOW_PIERCE } from './dom.ts'
+import { accessibleName, isVisible, rendersBox } from './extract.ts'
 
 /** One locator request as supplied by the model. */
 export interface LocatorQuery {
@@ -84,6 +84,25 @@ export function roleOfElement(el: Element): string {
   return 'generic'
 }
 
+/**
+ * The snapshot inventory prints its own role names for form controls
+ * (snapshot.ts `roleOf`); a role read from it must find the element here too.
+ */
+const INVENTORY_ROLES: Record<string, (el: Element) => boolean> = {
+  input: (el) => el instanceof HTMLInputElement && roleOfElement(el) === 'textbox',
+  spinbutton: (el) => el instanceof HTMLInputElement && el.type === 'number',
+  textarea: (el) => el instanceof HTMLTextAreaElement,
+  select: (el) => el instanceof HTMLSelectElement,
+  contenteditable: (el) => el instanceof HTMLElement && !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
+    && (el.isContentEditable === true || ['', 'true', 'plaintext-only'].includes(el.getAttribute('contenteditable') ?? 'false')),
+}
+
+/** Whether an element has a role, by its ARIA name or the inventory's name. */
+export function roleMatches(el: Element, wanted: string): boolean {
+  if (roleOfElement(el) === wanted) return true
+  return Object.hasOwn(INVENTORY_ROLES, wanted) && INVENTORY_ROLES[wanted]!(el) && (el.getAttribute('role') ?? '').trim() === ''
+}
+
 /** Whether an element can take keyboard focus, even when it has no size (editor proxies). */
 export function isFocusableElement(el: Element): boolean {
   if (!(el instanceof HTMLElement)) {
@@ -110,19 +129,10 @@ export function isEditableElement(el: Element): boolean {
  */
 function isRendered(el: Element): boolean {
   // Hidden-but-operable form controls (custom checkboxes) count as rendered.
-  if (el instanceof HTMLElement && isVisible(el)) return true
-  const style = getComputedStyle(el)
-  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false
-  const rect = el.getBoundingClientRect()
-  return rect.width > 0 && rect.height > 0
+  return (el instanceof HTMLElement && isVisible(el)) || rendersBox(el)
 }
 
 /** Escape an identifier for a CSS selector. */
-function cssEscape(value: string): string {
-  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value)
-  return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`)
-}
-
 /**
  * Build a selector that resolves back to this element. The walk uses
  * `:nth-child` so it stays unique among siblings; an id short-circuits it.
@@ -259,7 +269,7 @@ function candidates(query: LocatorQuery): Element[] {
     if (matched.length >= MAX_MATCHES || scanned >= MAX_SCANNED_ELEMENTS) break
     scanned += 1
     if (SKIPPED_TAGS.has(el.tagName.toLowerCase())) continue
-    if (query.role !== undefined && roleOfElement(el) !== query.role) continue
+    if (query.role !== undefined && !roleMatches(el, query.role)) continue
     if (needle !== undefined && !matchesText(el, needle)) continue
     matched.push(el)
   }

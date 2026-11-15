@@ -1,7 +1,10 @@
 /**
- * Page actions: click/type/press/scroll/navigate/get_text/wait, executed in
- * the content script against the real page (preserving login state), each
- * returning a short text status. Navigations return a fresh full snapshot
+ * Page actions: snapshot, click, type, press, scroll, select, extract,
+ * clipboard paste, navigate/back/forward/reload, get_text and wait, executed
+ * in the content script against the real page (preserving login state), each
+ * returning a short text status. Results of actions that change the page
+ * (click, type, press, scroll, select, clipboard) carry a post-action
+ * verification report. Navigations return a fresh full snapshot
  * because the document — and the id registry — reset.
  *
  * All browser action results use structured text, so a
@@ -10,7 +13,7 @@
  * @module
  */
 
-import { composedParent, deepActiveElement, querySelectorAllDeep, resolveSelector, resolveSelectorAll } from './dom.ts'
+import { composedParent, deepActiveElement, querySelectorAllDeep, referencedElements, resolveSelector, resolveSelectorAll } from './dom.ts'
 import { accessibleName, collectInteractive, isVisible, pageText } from './extract.ts'
 import { findElements, LocatorError, parseLocatorQuery, renderFound, roleOfElement } from './find.ts'
 import type { ElementIds } from './ids.ts'
@@ -195,12 +198,7 @@ export function resolveActionTarget(args: Record<string, unknown>, ids: ElementI
     throw new ActionError('bad-args', 'Provide index or selector.')
   }
   if (hasIndex) return elementOrThrow(ids, numberArg(args, 'index'))
-  let found: Element | null
-  try {
-    found = resolveSelector(selector as string)
-  } catch {
-    throw new ActionError('bad-args', `selector is not a valid CSS selector: ${String(selector)}`)
-  }
+  const found = selectorOrBadArgs(() => resolveSelector(selector as string), 'selector', String(selector))
   if (found === null) {
     throw new ActionError('action-failed', `No element matched selector: ${String(selector)}`)
   }
@@ -291,6 +289,20 @@ export interface ActionContext {
   generation?: number
 }
 
+/**
+ * Run a selector lookup, turning an unparseable selector into `bad-args`.
+ * @param lookup - the resolve call.
+ * @param argName - the argument the selector came from, for the message.
+ * @param selector - the selector text, for the message.
+ */
+function selectorOrBadArgs<T>(lookup: () => T, argName: string, selector: string): T {
+  try {
+    return lookup()
+  } catch {
+    throw new ActionError('bad-args', `${argName} is not a valid CSS selector: ${selector}`)
+  }
+}
+
 /** Actions whose result carries a post-action verification report. */
 const VERIFIED_ACTIONS = new Set(['browser_click', 'browser_type', 'browser_press', 'browser_scroll', 'browser_select', 'browser_clipboard'])
 
@@ -357,11 +369,7 @@ function snapshotAction(args: Record<string, unknown>, ctx: ActionContext): Acti
   // A region that matches nothing must not look like an empty page.
   let regionMiss = false
   if (region !== undefined) {
-    try {
-      regionMiss = resolveSelector(region) === null
-    } catch {
-      throw new ActionError('bad-args', `region is not a valid CSS selector: ${region}`)
-    }
+    regionMiss = selectorOrBadArgs(() => resolveSelector(region), 'region', region) === null
   }
   const mode = args.mode === undefined ? 'full' : args.mode
   if (mode !== 'full' && mode !== 'interactive' && mode !== 'text') {
@@ -836,11 +844,7 @@ async function infiniteScroll(args: Record<string, unknown>, target: ScrollTarge
   const scope = target.element ?? document
   const countItems = (): number => {
     if (itemSelector === undefined) return collectInteractive(scope).length
-    try {
-      return resolveSelectorAll(itemSelector, scope).length
-    } catch {
-      throw new ActionError('bad-args', `itemSelector is not a valid CSS selector: ${itemSelector}`)
-    }
+    return selectorOrBadArgs(() => resolveSelectorAll(itemSelector, scope), 'itemSelector', itemSelector).length
   }
   const startedAt = performance.now()
   const initial = countItems()
@@ -933,11 +937,7 @@ async function getTextAction(args: Record<string, unknown>): Promise<ActionResul
   const selector = typeof args.selector === 'string' && args.selector !== '' ? args.selector : undefined
   let source: Element | null = null
   if (selector !== undefined) {
-    try {
-      source = resolveSelector(selector)
-    } catch {
-      throw new ActionError('bad-args', `selector is not a valid CSS selector: ${selector}`)
-    }
+    source = selectorOrBadArgs(() => resolveSelector(selector), 'selector', selector)
   }
   if (source === null && selector !== undefined) return { text: `No element matched selector: ${selector}` }
   const offset = args.offset === undefined ? 0 : numberArg(args, 'offset')
@@ -1025,12 +1025,7 @@ function fieldValue(el: Element): string | undefined {
  * guard can never be used to test guesses against it.
  */
 function valueMatches(selector: string, expected: string): boolean {
-  let matches: Element[]
-  try {
-    matches = resolveSelectorAll(selector)
-  } catch {
-    throw new ActionError('bad-args', `selector is not a valid CSS selector: ${selector}`)
-  }
+  const matches = selectorOrBadArgs(() => resolveSelectorAll(selector), 'selector', selector)
   const field = matches[0]
   if (field === undefined) return false
   if (isSensitiveField(field)) throw new ActionError('action-failed', 'A value guard cannot read a sensitive field.')
@@ -1039,12 +1034,7 @@ function valueMatches(selector: string, expected: string): boolean {
 
 /** Visible elements matching a selector (piercing open shadow roots). */
 function visibleMatches(selector: string): Element[] {
-  let matches: Element[]
-  try {
-    matches = resolveSelectorAll(selector)
-  } catch {
-    throw new ActionError('bad-args', `selector is not a valid CSS selector: ${selector}`)
-  }
+  const matches = selectorOrBadArgs(() => resolveSelectorAll(selector), 'selector', selector)
   return matches.filter((el) => isVisible(el) || (!(el instanceof HTMLElement) && el.getBoundingClientRect().width > 0))
 }
 
@@ -1139,7 +1129,7 @@ async function selectAction(args: Record<string, unknown>, ctx: ActionContext): 
   return { ...result, pageContent: result.pageContent === undefined ? selected : `${selected}\n\n${result.pageContent}` }
 }
 
-/** Rows returned inline per page when the caller does not save to a file. */
+/** browser_extract: structured rows from the page (extract.ts), as text. */
 function extractAction(args: Record<string, unknown>): ActionResult {
   let extracted
   try {
@@ -1186,12 +1176,7 @@ function beginVerification(): VerificationProbe {
 
 /** The error text a field points at (aria-errormessage / aria-describedby). */
 function fieldErrorText(field: Element): string {
-  const root = field.getRootNode() as Document | ShadowRoot
-  const ids = `${field.getAttribute('aria-errormessage') ?? ''} ${field.getAttribute('aria-describedby') ?? ''}`
-    .split(/\s+/).filter((id) => id !== '')
-  return ids
-    .map((id) => ('getElementById' in root ? root.getElementById(id) : null) ?? document.getElementById(id))
-    .filter((el): el is HTMLElement => el !== null)
+  return referencedElements(field, 'aria-errormessage', 'aria-describedby')
     .map((el) => pageText(el))
     .filter((text) => text !== '')
     .join(' ')

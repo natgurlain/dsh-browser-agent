@@ -18,6 +18,7 @@
  */
 
 import { normalizeSelectionText, type SelectionCapture } from '../selection.ts'
+import { deepActiveElement } from './dom.ts'
 import { isSensitiveField } from './privacy.ts'
 
 /** Quiet period after the last selection change before a capture is emitted. */
@@ -25,13 +26,6 @@ const SELECTION_SETTLE_MS = 250
 
 /** Field-like ancestors whose contents must never be echoed unchecked. */
 const FIELD_SELECTOR = 'input, textarea, select, [contenteditable]'
-
-/** The deepest focused element, following shadow roots the page may use. */
-function deepActiveElement(): Element | null {
-  let active: Element | null = document.activeElement
-  while (active?.shadowRoot?.activeElement != null) active = active.shadowRoot.activeElement
-  return active
-}
 
 /** Whether an element sits inside — or is — a field that must not be read. */
 function withinSensitiveField(node: Node | null): boolean {

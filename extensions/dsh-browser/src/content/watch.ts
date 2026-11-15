@@ -16,6 +16,8 @@
  * @module
  */
 
+import { resolveSelector } from './dom.ts'
+
 /** Mirrors background/watchers.ts WatchCondition. */
 export type WatchCondition =
   | { kind: 'selector'; selector: string; gone: boolean }
@@ -50,6 +52,8 @@ interface WatchState {
 export interface Evaluation {
   met: boolean
   matched?: string
+  /** The condition can never be evaluated here (an invalid selector). */
+  invalid?: true
 }
 
 function excerpt(text: string): string {
@@ -78,11 +82,13 @@ function patternTest(pattern: string): (value: string) => boolean {
 export function evaluateCondition(condition: WatchCondition, since = 0, doc: Document = document): Evaluation {
   switch (condition.kind) {
     case 'selector': {
+      // The same shadow-aware resolver as browser_wait, so `host >>> inner`
+      // selectors handed out by the locator work here too.
       let element: Element | null = null
       try {
-        element = doc.querySelector(condition.selector)
+        element = resolveSelector(condition.selector, doc)
       } catch {
-        return { met: false }
+        return { met: false, invalid: true }
       }
       if (condition.gone) return { met: element === null }
       return element === null ? { met: false } : { met: true, matched: excerpt(element.textContent ?? '') }
@@ -149,6 +155,12 @@ export class PageWatchObserver {
     for (const state of this.states.values()) {
       if (state.inFlight) continue
       const result = evaluateCondition(state.watch.condition, state.since)
+      if (result.invalid === true) {
+        // Polling an unparseable selector forever would never fire, not even with `gone`.
+        this.states.delete(state.watch.id)
+        if (this.states.size === 0) this.stop()
+        continue
+      }
       if (!result.met) {
         state.fired = false
         continue

@@ -4,6 +4,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PanelApi } from '../src/panel/api.ts'
+import { fakePanelApi } from './support/panel-api.ts'
 
 let panelApi: PanelApi
 
@@ -37,35 +38,7 @@ describe('panel UI language setting', () => {
         getURL: (path: string) => `chrome-extension://test/${path}`,
       },
     })
-    const unsubscribe = (): void => {}
-    panelApi = {
-      rpc: async <T = unknown>(): Promise<T> => ({ events: [] }) as T,
-      respond: vi.fn(async () => undefined),
-      onStatus: vi.fn(() => unsubscribe),
-      onEvent: vi.fn(() => unsubscribe),
-      onApprovalRequest: vi.fn(() => unsubscribe),
-      onApprovalResolved: vi.fn(() => unsubscribe),
-      onTabAffinity: vi.fn(() => unsubscribe),
-      onSelection: vi.fn(() => unsubscribe),
-      onSessionResumeHint: vi.fn(() => unsubscribe),
-      respondToApproval: vi.fn(async () => {}),
-      resolveTabAffinity: vi.fn(async () => {}),
-      rebindTabAffinity: vi.fn(async () => {}),
-      returnToControlledTab: vi.fn(async () => {}),
-      clearSelection: vi.fn(async () => {}),
-      registerWindow: vi.fn(async () => {}),
-      setActiveSession: vi.fn(async () => {}),
-      updateSettings: vi.fn(async () => {}),
-      onDevToolsStatus: vi.fn(() => unsubscribe),
-      detachDevTools: vi.fn(async () => undefined),
-      requestStatus: vi.fn(async () => {}),
-      startDiscovery: vi.fn(async () => []),
-      cancelDiscovery: vi.fn(async () => {}),
-      onDiscoveryProgress: vi.fn(() => unsubscribe),
-      engageKillSwitch: vi.fn(async () => undefined),
-      releaseKillSwitch: vi.fn(async () => undefined),
-      onKillSwitch: vi.fn(() => () => {}),
-    }
+    panelApi = fakePanelApi()
     setUiLocalePreference('auto')
     vi.stubGlobal('navigator', { languages: ['en-US'], language: 'en-US' })
     root = createRoot(document.querySelector('#root')!)

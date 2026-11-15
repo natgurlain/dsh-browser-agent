@@ -6,18 +6,30 @@
  * @module
  */
 
-import type { OverlayCopy } from '../content/overlay.ts'
+/** Localized overlay copy, sent by the background with each command. */
+export interface OverlayCopy {
+  controlling: string
+  stop: string
+  stopHint: string
+  typing: string
+  takeoverTitle: string
+  takeoverBody: string
+  resume: string
+}
+
+/** English copy; also the content script's default for a missing message field. */
+export const OVERLAY_COPY_EN: OverlayCopy = {
+  controlling: 'AI controlling',
+  stop: 'Stop',
+  stopHint: 'Stop the agent now (kill switch)',
+  typing: 'typing…',
+  takeoverTitle: 'You\'re in control',
+  takeoverBody: 'The agent is paused. Resume when done.',
+  resume: 'Resume',
+}
 
 export const OVERLAY_COPY: Record<'en' | 'zh', OverlayCopy> = {
-  en: {
-    controlling: 'AI controlling',
-    stop: 'Stop',
-    stopHint: 'Stop the agent now (kill switch)',
-    typing: 'typing…',
-    takeoverTitle: 'You\'re in control',
-    takeoverBody: 'The agent is paused. Resume when done.',
-    resume: 'Resume',
-  },
+  en: OVERLAY_COPY_EN,
   zh: {
     controlling: 'AI 正在操作',
     stop: '停止',

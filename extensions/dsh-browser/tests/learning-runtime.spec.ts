@@ -261,4 +261,18 @@ describe('learning runtime', () => {
     await learning.onWatchEvent(7, 0, { kind: 'click', css: '#a' })
     expect((learning.snapshot().watching as { events: number }).events).toBe(0)
   })
+
+  it('tells only the watched tab top frame on the same origin to resume Watch me after a navigation', async () => {
+    const { learning } = runtime({}, { dshLearningSettings: { watchMe: true } })
+    await learning.ready
+    sendMessage.mockResolvedValue({ ok: true })
+    expect(learning.watchMeReady(7, 0, 'https://crm.example/next')).toBe(false)
+    await learning.startWatching(7)
+    expect(learning.watchMeReady(7, 0, 'https://crm.example/next')).toBe(true)
+    expect(learning.watchMeReady(7, 3, 'https://crm.example/next')).toBe(false)
+    expect(learning.watchMeReady(8, 0, 'https://crm.example/next')).toBe(false)
+    expect(learning.watchMeReady(7, 0, 'https://elsewhere.example/')).toBe(false)
+    await learning.stopWatching()
+    expect(learning.watchMeReady(7, 0, 'https://crm.example/next')).toBe(false)
+  })
 })

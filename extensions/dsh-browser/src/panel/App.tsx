@@ -7,7 +7,7 @@
  * @module
  */
 
-import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { BRIDGE_AUDIT_EXPORT_METHOD, BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeCaps } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
@@ -90,6 +90,8 @@ import {
   type ComposerDraft,
 } from './composer.ts'
 import { isNearScrollBottom } from './scroll.ts'
+import { SettingToggle } from './SettingToggle.tsx'
+import { downloadText, requestOptionalPermission } from './browser-helpers.ts'
 import {
   isExperimentalPreset,
   isSelectablePreset,
@@ -662,17 +664,6 @@ function ApprovalDetailView({ detail, copy }: { detail: ApprovalDetail; copy: Pa
   }
 }
 
-/** Ask the browser for an optional permission (must run inside a click). */
-function requestOptionalPermission(permission: string): Promise<boolean> {
-  const permissions = (globalThis as { chrome?: { permissions?: { request?: (value: { permissions: string[] }) => Promise<boolean> } } }).chrome?.permissions
-  if (typeof permissions?.request !== 'function') return Promise.resolve(false)
-  try {
-    return Promise.resolve(permissions.request({ permissions: [permission] })).catch(() => false)
-  } catch {
-    return Promise.resolve(false)
-  }
-}
-
 function ApprovalDialog({
   request,
   onDecision,
@@ -1130,11 +1121,16 @@ export function App(): React.JSX.Element {
   useEffect(() => api.onDevToolsStatus(setDevToolsStatus), [api])
   // Kill switch: the toolbar button and Ctrl+Shift+K stop the agent at once.
   const [killSwitchEngaged, setKillSwitchEngaged] = useState(false)
-  useEffect(() => api.onKillSwitch?.(setKillSwitchEngaged), [api])
+  useEffect(() => api.onKillSwitch(setKillSwitchEngaged), [api])
 
   // Pause / take over / resume: the background holds the next tool call.
   const [pauseState, setPauseState] = useState<AgentPauseState>({ mode: 'running', held: [] })
-  useEffect(() => api.onPauseState?.(setPauseState), [api])
+  useEffect(() => api.onPauseState(setPauseState), [api])
+  // Stable handlers, so the memoized AgentControls skips unrelated renders.
+  const pauseAfterStep = useCallback(() => { void api.pauseAgent('after-step').catch(() => {}) }, [api])
+  const takeOver = useCallback(() => { void api.pauseAgent('take-over').catch(() => {}) }, [api])
+  const resumeAgent = useCallback(() => { void api.resumeAgent().catch(() => {}) }, [api])
+  const engageKillSwitch = useCallback(() => { setKillSwitchEngaged(true); void api.engageKillSwitch().catch(() => {}) }, [api])
 
   // Step decisions and durations come from the bridge's audit log.
   const auditRefreshRef = useRef<{ timer?: ReturnType<typeof setTimeout>; sessionId?: string }>({})
@@ -1161,15 +1157,7 @@ export function App(): React.JSX.Element {
         BRIDGE_AUDIT_EXPORT_METHOD,
         sessionId === null ? {} : { sessionId },
       )
-      const blob = new Blob([JSON.stringify(exported, null, 2)], { type: 'application/json' })
-      const url = URL.createObjectURL(blob)
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = `dsh-browser-audit-${sessionId ?? 'unscoped'}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
-      document.body.append(anchor)
-      anchor.click()
-      anchor.remove()
-      setTimeout(() => { URL.revokeObjectURL(url) }, 10_000)
+      downloadText(`dsh-browser-audit-${sessionId ?? 'unscoped'}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, JSON.stringify(exported, null, 2))
       setAuditExport({ busy: false, message: copy.audit.exported(exported?.entries?.length ?? 0, exported?.verification?.ok === true), error: exported?.verification?.ok !== true })
     } catch (cause) {
       setAuditExport({ busy: false, message: copy.audit.failed(cause instanceof Error ? cause.message : String(cause)), error: true })
@@ -2742,7 +2730,7 @@ export function App(): React.JSX.Element {
   const approvalDialog = !approvalReadyForSession(queuedApproval, sessionRef.current, sessionChanging)
     ? null
     : <ApprovalDialog key={queuedApproval!.id} request={queuedApproval!} onDecision={decideApproval} copy={copy}
-        onKillSwitch={() => { setKillSwitchEngaged(true); void api.engageKillSwitch().catch(() => {}) }} />
+        onKillSwitch={engageKillSwitch} />
   const permissionDialog = permissionConfirm === null
     ? null
     : (
@@ -2890,43 +2878,26 @@ export function App(): React.JSX.Element {
           </label>
         </div>
         <div className="settings-panel preference-toggles">
-          <label className="setting-toggle">
-            <span className="setting-toggle-copy">
-              <strong>{copy.settings.unrestrictedBrowserAccess}</strong>
-              <small>{copy.settings.unrestrictedBrowserAccessHelp}</small>
-            </span>
-            <input
-              className="setting-toggle-input"
-              type="checkbox"
-              checked={settings?.unrestrictedBrowserAccess ?? false}
-              onChange={(event) => setSettings((current) => current === null
-                ? current
-                : { ...current, unrestrictedBrowserAccess: event.target.checked })}
-            />
-            <span className="setting-toggle-control" aria-hidden="true"><span /></span>
-          </label>
+          <SettingToggle
+            title={copy.settings.unrestrictedBrowserAccess}
+            help={copy.settings.unrestrictedBrowserAccessHelp}
+            checked={settings?.unrestrictedBrowserAccess ?? false}
+            onChange={(checked) => setSettings((current) => current === null ? current : { ...current, unrestrictedBrowserAccess: checked })}
+          />
           <div className="setting-toggle-row">
-            <label className="setting-toggle">
-              <span className="setting-toggle-copy">
-                <strong>{copy.settings.allowDevTools}</strong>
-                <small>{copy.settings.allowDevToolsHelp}</small>
-                {/* The state belongs to this switch, so it reads as its detail
-                    line rather than as a setting of its own. */}
-                <small className={`devtools-status${hasDevToolsError(devToolsStatus) ? ' is-error' : ''}`}>
-                  {devToolsStatusText(devToolsStatus, copy)}
-                </small>
-              </span>
-              <input
-                className="setting-toggle-input"
-                type="checkbox"
-                disabled={devToolsStatus !== null && !devToolsStatus.supported}
-                checked={settings?.allowDevTools ?? false}
-                onChange={(event) => setSettings((current) => current === null
-                  ? current
-                  : { ...current, allowDevTools: event.target.checked })}
-              />
-              <span className="setting-toggle-control" aria-hidden="true"><span /></span>
-            </label>
+            <SettingToggle
+              title={copy.settings.allowDevTools}
+              help={copy.settings.allowDevToolsHelp}
+              disabled={devToolsStatus !== null && !devToolsStatus.supported}
+              checked={settings?.allowDevTools ?? false}
+              onChange={(checked) => setSettings((current) => current === null ? current : { ...current, allowDevTools: checked })}
+            >
+              {/* The state belongs to this switch, so it reads as its detail
+                  line rather than as a setting of its own. */}
+              <small className={`devtools-status${hasDevToolsError(devToolsStatus) ? ' is-error' : ''}`}>
+                {devToolsStatusText(devToolsStatus, copy)}
+              </small>
+            </SettingToggle>
             {devToolsStatus?.attached === true && (
               <button className="secondary" onClick={() => { void api.detachDevTools().catch(() => {}) }}>
                 {copy.settings.devToolsDetach}
@@ -2934,37 +2905,19 @@ export function App(): React.JSX.Element {
             )}
           </div>
           {devToolsStatus?.supported !== false && (
-            <label className="setting-toggle">
-              <span className="setting-toggle-copy">
-                <strong>{copy.settings.catchPageDialogs}</strong>
-                <small>{copy.settings.catchPageDialogsHelp}</small>
-              </span>
-              <input
-                className="setting-toggle-input"
-                type="checkbox"
-                checked={settings?.catchPageDialogs ?? false}
-                onChange={(event) => setSettings((current) => current === null
-                  ? current
-                  : { ...current, catchPageDialogs: event.target.checked })}
-              />
-              <span className="setting-toggle-control" aria-hidden="true"><span /></span>
-            </label>
-          )}
-          <label className="setting-toggle">
-            <span className="setting-toggle-copy">
-              <strong>{copy.settings.approvalNotifications}</strong>
-              <small>{copy.settings.approvalNotificationsHelp}</small>
-            </span>
-            <input
-              className="setting-toggle-input"
-              type="checkbox"
-              checked={settings?.approvalNotifications ?? true}
-              onChange={(event) => setSettings((current) => current === null
-                ? current
-                : { ...current, approvalNotifications: event.target.checked })}
+            <SettingToggle
+              title={copy.settings.catchPageDialogs}
+              help={copy.settings.catchPageDialogsHelp}
+              checked={settings?.catchPageDialogs ?? false}
+              onChange={(checked) => setSettings((current) => current === null ? current : { ...current, catchPageDialogs: checked })}
             />
-            <span className="setting-toggle-control" aria-hidden="true"><span /></span>
-          </label>
+          )}
+          <SettingToggle
+            title={copy.settings.approvalNotifications}
+            help={copy.settings.approvalNotificationsHelp}
+            checked={settings?.approvalNotifications ?? true}
+            onChange={(checked) => setSettings((current) => current === null ? current : { ...current, approvalNotifications: checked })}
+          />
           <label>
             <span>{copy.settings.approvalTimeout}</span>
             <small>{copy.settings.approvalTimeoutHelp}</small>
@@ -2979,51 +2932,24 @@ export function App(): React.JSX.Element {
                 : { ...current, approvalTimeoutMinutes: Number(event.target.value) })}
             />
           </label>
-          <label className="setting-toggle">
-            <span className="setting-toggle-copy">
-              <strong>{copy.settings.autoResumeSession}</strong>
-              <small>{copy.settings.autoResumeSessionHelp}</small>
-            </span>
-            <input
-              className="setting-toggle-input"
-              type="checkbox"
-              checked={settings?.autoResumeSession ?? true}
-              onChange={(event) => setSettings((current) => current === null
-                ? current
-                : { ...current, autoResumeSession: event.target.checked })}
-            />
-            <span className="setting-toggle-control" aria-hidden="true"><span /></span>
-          </label>
-          <label className="setting-toggle">
-            <span className="setting-toggle-copy">
-              <strong>{copy.settings.showAgentOverlay}</strong>
-              <small>{copy.settings.showAgentOverlayHelp}</small>
-            </span>
-            <input
-              className="setting-toggle-input"
-              type="checkbox"
-              checked={settings?.showAgentOverlay ?? true}
-              onChange={(event) => setSettings((current) => current === null
-                ? current
-                : { ...current, showAgentOverlay: event.target.checked })}
-            />
-            <span className="setting-toggle-control" aria-hidden="true"><span /></span>
-          </label>
-          <label className="setting-toggle">
-            <span className="setting-toggle-copy">
-              <strong>{copy.settings.allowPageWatchers}</strong>
-              <small>{copy.settings.allowPageWatchersHelp}</small>
-            </span>
-            <input
-              className="setting-toggle-input"
-              type="checkbox"
-              checked={settings?.allowPageWatchers ?? false}
-              onChange={(event) => setSettings((current) => current === null
-                ? current
-                : { ...current, allowPageWatchers: event.target.checked })}
-            />
-            <span className="setting-toggle-control" aria-hidden="true"><span /></span>
-          </label>
+          <SettingToggle
+            title={copy.settings.autoResumeSession}
+            help={copy.settings.autoResumeSessionHelp}
+            checked={settings?.autoResumeSession ?? true}
+            onChange={(checked) => setSettings((current) => current === null ? current : { ...current, autoResumeSession: checked })}
+          />
+          <SettingToggle
+            title={copy.settings.showAgentOverlay}
+            help={copy.settings.showAgentOverlayHelp}
+            checked={settings?.showAgentOverlay ?? true}
+            onChange={(checked) => setSettings((current) => current === null ? current : { ...current, showAgentOverlay: checked })}
+          />
+          <SettingToggle
+            title={copy.settings.allowPageWatchers}
+            help={copy.settings.allowPageWatchersHelp}
+            checked={settings?.allowPageWatchers ?? false}
+            onChange={(checked) => setSettings((current) => current === null ? current : { ...current, allowPageWatchers: checked })}
+          />
         </div>
         <section className="audit-export" aria-labelledby="audit-title">
           <span id="audit-title" className="audit-export-copy">
@@ -3104,21 +3030,14 @@ export function App(): React.JSX.Element {
                   placeholder={copy.settings.relayModelsPlaceholder}
                 />
               </div>
-              <label className="setting-toggle">
-                <span className="setting-toggle-copy">
-                  <strong>{copy.settings.relaySetDefault}</strong>
-                  <small>{copy.settings.relaySetDefaultHelp}</small>
-                </span>
-                <input
-                  className="setting-toggle-input"
-                  type="checkbox"
-                  checked={profile.setDefault}
-                  onChange={(event) => setRelayProfiles((current) => current.map((candidate, at) => at === index
-                    ? { ...candidate, setDefault: event.target.checked }
-                    : candidate))}
-                />
-                <span className="setting-toggle-control" aria-hidden="true"><span /></span>
-              </label>
+              <SettingToggle
+                title={copy.settings.relaySetDefault}
+                help={copy.settings.relaySetDefaultHelp}
+                checked={profile.setDefault}
+                onChange={(checked) => setRelayProfiles((current) => current.map((candidate, at) => at === index
+                  ? { ...candidate, setDefault: checked }
+                  : candidate))}
+              />
               <div className="relay-profile-actions">
                 <button
                   disabled={profile.name.trim() === '' || profile.baseUrl.trim() === ''}
@@ -3198,7 +3117,7 @@ export function App(): React.JSX.Element {
         </button>
         <div className="topbar-actions">
           <button className="icon-button kill-switch-trigger" disabled={killSwitchEngaged}
-            onClick={() => { setKillSwitchEngaged(true); void api.engageKillSwitch().catch(() => {}) }}
+            onClick={engageKillSwitch}
             aria-label={copy.killSwitch.engage} title={copy.killSwitch.engageHint}>
             <StopIcon />
           </button>
@@ -3238,9 +3157,9 @@ export function App(): React.JSX.Element {
         state={pauseState}
         working={working && state === 'connected'}
         copy={copy}
-        onPause={() => { void api.pauseAgent?.('after-step').catch(() => {}) }}
-        onTakeOver={() => { void api.pauseAgent?.('take-over').catch(() => {}) }}
-        onResume={() => { void api.resumeAgent?.().catch(() => {}) }}
+        onPause={pauseAfterStep}
+        onTakeOver={takeOver}
+        onResume={resumeAgent}
       />
       <LearningPanel locale={locale} connected={state === 'connected'} {...(sessionRef.current === null ? {} : { sessionId: sessionRef.current })} />
       <TabAffinityBanner

@@ -225,11 +225,35 @@ describe('content observer', () => {
     expect(evaluateCondition({ kind: 'selector', selector: '.missing', gone: true })).toEqual({ met: true })
     expect(evaluateCondition({ kind: 'text', text: 'in stock', gone: false }).matched).toContain('In Stock')
     expect(evaluateCondition({ kind: 'text', text: 'sold out', gone: false })).toEqual({ met: false })
-    expect(evaluateCondition({ kind: 'selector', selector: '[[bad', gone: false })).toEqual({ met: false })
+    expect(evaluateCondition({ kind: 'selector', selector: '[[bad', gone: false })).toEqual({ met: false, invalid: true })
     vi.spyOn(performance, 'getEntriesByType').mockReturnValue([{ name: 'https://shop.example/api/cart?id=1', startTime: 50 } as PerformanceEntry])
     expect(evaluateCondition({ kind: 'network', pattern: '/api/cart' }, 0)).toEqual({ met: true, matched: 'https://shop.example/api/cart?id=1' })
     expect(evaluateCondition({ kind: 'network', pattern: '/api/cart' }, 100)).toEqual({ met: false })
     vi.restoreAllMocks()
+  })
+
+  it('resolves selector watchers through the shadow-aware resolver, like browser_wait', () => {
+    document.body.innerHTML = '<my-card></my-card>'
+    const root = document.querySelector('my-card')!.attachShadow({ mode: 'open' })
+    root.innerHTML = '<span class="price">Now $9</span>'
+    expect(evaluateCondition({ kind: 'selector', selector: 'my-card >>> .price', gone: false })).toEqual({ met: true, matched: 'Now $9' })
+    expect(evaluateCondition({ kind: 'selector', selector: '.price', gone: false })).toEqual({ met: true, matched: 'Now $9' })
+    expect(evaluateCondition({ kind: 'selector', selector: 'my-card >>> .price', gone: true })).toEqual({ met: false })
+    root.innerHTML = ''
+    expect(evaluateCondition({ kind: 'selector', selector: 'my-card >>> .price', gone: true })).toEqual({ met: true })
+  })
+
+  it('stops polling a watcher whose selector is invalid instead of never firing', () => {
+    document.body.innerHTML = '<p>x</p>'
+    const report = vi.fn(async () => ({ accepted: true }))
+    const observer = new PageWatchObserver(report, () => 0)
+    observer.arm([
+      { id: 'bad', condition: { kind: 'selector', selector: '[[bad', gone: true } },
+      { id: 'ok', condition: { kind: 'text', text: 'never', gone: false } },
+    ])
+    expect(observer.size).toBe(1)
+    expect(report).not.toHaveBeenCalled()
+    observer.stop()
   })
 
   it('reports once per transition, backs off after a refusal, and forgets a watcher the background rejects', async () => {

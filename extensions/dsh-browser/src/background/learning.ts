@@ -663,6 +663,15 @@ export class LearningRuntime {
     this.broadcast()
   }
 
+  /**
+   * Whether a freshly loaded top document should resume "Watch me": only the
+   * watched tab, its top frame, and the origin the recording started on.
+   */
+  watchMeReady(tabId: number, frameId: number | undefined, url: string | undefined): boolean {
+    const watch = this.watch
+    return this.settings.watchMe && watch !== undefined && watch.tabId === tabId && (frameId ?? 0) === 0 && originOf(url) === watch.origin
+  }
+
   /** One trusted user event from the watched tab. */
   async onWatchEvent(tabId: number, frameId: number, raw: unknown): Promise<void> {
     const watch = this.watch

@@ -4,6 +4,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { BridgeInstance, DiscoveryProgress, DiscoveryStatus, PanelApi, PanelSettings } from '../src/panel/api.ts'
+import { fakePanelApi } from './support/panel-api.ts'
 import type { BridgeState } from '../src/background/bridge.ts'
 import { getUiLocale } from '../src/i18n.ts'
 import { PANEL_COPY } from '../src/panel/strings.ts'
@@ -44,34 +45,14 @@ describe('discovery settings', () => {
     startDiscovery = vi.fn(async () => [])
     cancelDiscovery = vi.fn(async () => {})
     updateSettings = vi.fn(async () => {})
-    panelApi = {
+    panelApi = fakePanelApi({
       rpc: vi.fn(async () => ({ items: [], events: [] })) as unknown as PanelApi['rpc'],
-      respond: vi.fn(async () => undefined),
       onStatus: vi.fn((callback) => { onStatus = callback; return unsubscribe }),
-      onEvent: vi.fn(() => unsubscribe),
-      onApprovalRequest: vi.fn(() => unsubscribe),
-      onApprovalResolved: vi.fn(() => unsubscribe),
-      onTabAffinity: vi.fn(() => unsubscribe),
-      onSelection: vi.fn(() => unsubscribe),
-      onSessionResumeHint: vi.fn(() => unsubscribe),
-      respondToApproval: vi.fn(async () => {}),
-      resolveTabAffinity: vi.fn(async () => {}),
-      rebindTabAffinity: vi.fn(async () => {}),
-      returnToControlledTab: vi.fn(async () => {}),
-      clearSelection: vi.fn(async () => {}),
-      registerWindow: vi.fn(async () => {}),
-      setActiveSession: vi.fn(async () => {}),
       updateSettings,
-      onDevToolsStatus: vi.fn(() => unsubscribe),
-      detachDevTools: vi.fn(async () => undefined),
-      requestStatus: vi.fn(async () => {}),
       startDiscovery,
       cancelDiscovery,
       onDiscoveryProgress: vi.fn((callback) => { onDiscoveryProgress = callback; return unsubscribe }),
-      engageKillSwitch: vi.fn(async () => undefined),
-      releaseKillSwitch: vi.fn(async () => undefined),
-      onKillSwitch: vi.fn(() => () => {}),
-    }
+    })
     root = createRoot(document.querySelector('#root')!)
   })
 

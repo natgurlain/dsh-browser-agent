@@ -1,5 +1,6 @@
 import type { BridgeState } from '../background/bridge.ts'
 import type { UiLocale } from '../i18n.ts'
+import type { SiteRule } from '../security/site-policy.ts'
 
 export interface PanelCopy {
   documentTitle: string
@@ -20,7 +21,6 @@ export interface PanelCopy {
     alwaysAllowReads: string
     trustSession: string
     devToolsTitle: string
-    trustDevTools: string
     readFootnote: string
     actionFootnote: string
     devToolsFootnote: string
@@ -29,8 +29,6 @@ export interface PanelCopy {
     /** Label of the developer-tools session trust button. */
     trustDevToolsOrigin: (origin: string) => string
     codeLabel: (characters: number) => string
-    showCode: string
-    hideCode: string
     typedTextLabel: string
     maskedText: (characters: number) => string
     reveal: string
@@ -57,11 +55,7 @@ export interface PanelCopy {
   tool: {
     running: string
     complete: string
-    inProgress: string
-    completed: string
-    done: string
     labels: Record<string, string>
-    overflow: (shown: string[], total: number) => string
   }
   tabHandoff: {
     eyebrow: string
@@ -278,6 +272,117 @@ export interface PanelCopy {
     reset: string
     value: (percent: string) => string
   }
+  /** Settings → Site policy (security/site-policy.ts). */
+  sitePolicy: {
+    title: string
+    help: string
+    builtIn: string
+    builtInHelp: (patterns: number) => string
+    patternLabel: string
+    ruleLabel: string
+    rules: Record<SiteRule, string>
+    add: string
+    remove: string
+    strictTitle: string
+    strictHelp: string
+    strictUnavailable: string
+    strictSiteLabel: string
+    managedIntro: string
+    managedNoUnrestricted: string
+    managedNoDevTools: string
+    managedNoScreenshots: string
+    managedAllowedOnly: (origins: readonly string[]) => string
+  }
+  /** Session taint banner (security/taint.ts). */
+  taint: {
+    body: (sources: string) => string
+    unknownSource: string
+    clear: string
+  }
+  /** Active page watchers card. */
+  watchers: {
+    label: string
+    title: (count: number) => string
+    then: string
+    minutesLeft: (minutes: number) => string
+    hoursLeft: (hours: number) => string
+    lastMiss: (reason: string) => string
+    cancel: string
+  }
+  /** Settings → Dev loop. */
+  devLoop: {
+    title: string
+    help: string
+    caution: string
+    openLocalhost: string
+    unlink: string
+    linkTab: string
+    noSessions: string
+    sessionLabel: string
+    link: string
+  }
+  /** Learning features: chat-view panel and settings section. */
+  learning: {
+    label: string
+    sensitiveStep: string
+    stepsRecorded: (count: number) => string
+    saveAsWorkflow: string
+    workflowName: string
+    description: string
+    descriptionPlaceholder: string
+    saveHelp: string
+    variable: string
+    variableName: string
+    save: string
+    savedTo: (path: string) => string
+    clearRecording: string
+    savedWorkflows: string
+    stepCount: (count: number) => string
+    everyMinutesLabel: string
+    minutesPlaceholder: string
+    scheduleHint: string
+    schedule: string
+    scheduled: string
+    schedules: string
+    everyMinutes: (minutes: number) => string
+    cancel: string
+    scheduleCancelled: string
+    watchIdle: string
+    watching: (origin: string, events: number) => string
+    watchMe: string
+    stopWatching: string
+    repeated: (times: number) => string
+    done: string
+    doRemaining: (remaining: number) => string
+    proposedDriver: string
+    parameters: string
+    tokenSource: (kind: string, name: string) => string
+    dropped: string
+    saveDriver: string
+    driverSaved: string
+    discard: string
+    siteDrivers: string
+    deleteDriver: string
+    exportDrivers: string
+    importDrivers: string
+    imported: (count: number) => string
+    settingsTitle: string
+    settingsHelp: string
+    workflowsTitle: string
+    workflowsHelp: string
+    watchMeTitle: string
+    watchMeHelp: string
+    driversTitle: string
+    driversUnavailable: string
+    driversHelp: string
+    driverSiteLabel: string
+    add: string
+    remove: string
+    fixturesTitle: string
+    fixturesHelp: string
+    requestFailed: string
+    disconnected: string
+  }
   app: {
     openSettings: string
     settings: string
@@ -395,15 +500,12 @@ const EN: PanelCopy = {
     alwaysAllowReads: 'Always allow reads',
     trustSession: 'Trust this domain for this session',
     devToolsTitle: 'Allow developer tools?',
-    trustDevTools: 'Trust developer tools for this session',
     readFootnote: 'Esc to deny · You can disable automatic reading in Settings at any time',
     actionFootnote: 'Esc to deny · Temporary trust ends when the side panel closes · Text for sensitive fields starts masked',
     devToolsFootnote: 'Developer tools expose page internals and captured traffic. Trust covers this conversation on this site for 30 minutes, ends when the tab leaves the site or the side panel closes, and never covers JavaScript or unredacted traffic. Chrome blocks its own DevTools while this runs.',
     trustEval: (origin) => `Trust JavaScript on ${origin} for this conversation (30 min)`,
     trustDevToolsOrigin: (origin) => `Trust developer tools on ${origin} for this conversation (30 min)`,
     codeLabel: (characters) => `JavaScript to run (${characters} characters)`,
-    showCode: 'Show code',
-    hideCode: 'Hide code',
     typedTextLabel: 'Text to type',
     maskedText: (characters) => `Masked: ${characters} characters for a sensitive or uninspected field`,
     reveal: 'Reveal',
@@ -430,9 +532,6 @@ const EN: PanelCopy = {
   tool: {
     running: 'Working on page',
     complete: 'Page action',
-    inProgress: 'In progress',
-    completed: 'Completed',
-    done: 'Done',
     labels: {
       browser_snapshot: 'Read page',
       browser_click: 'Click element',
@@ -469,8 +568,14 @@ const EN: PanelCopy = {
       browser_downloads: 'Check downloads',
       browser_save_pdf: 'Save page as PDF',
       browser_pdf_text: 'Read PDF text',
+      browser_run: 'Run step program',
+      browser_watch: 'Watch page',
+      browser_watches: 'List page watchers',
+      browser_fanout: 'Run tabs in parallel',
+      browser_fleet_release: 'Release tab fleet',
+      browser_workflow_list: 'List workflows',
+      browser_workflow_run: 'Run workflow',
     },
-    overflow: (shown, total) => `${shown.join(' → ')} → ${total - shown.length} more`,
   },
   tabHandoff: {
     eyebrow: 'Page handoff',
@@ -698,6 +803,112 @@ const EN: PanelCopy = {
     reset: 'Reset',
     value: (percent) => `Text size ${percent}`,
   },
+  sitePolicy: {
+    title: 'Site policy',
+    help: 'Per-site rules apply before every other setting. "Unrestricted access" trusts every site except these. Patterns: example.com (and subdomains), *bank*, github.com/settings.',
+    builtIn: 'Built-in protections',
+    builtInHelp: (patterns) => `Banking and payment, password vaults, account pages, and cloud consoles are read-only (${String(patterns)} patterns).`,
+    patternLabel: 'Site pattern',
+    ruleLabel: 'Rule',
+    rules: { blocked: 'Blocked (no reads)', 'read-only': 'Read-only', ask: 'Always ask', trusted: 'Trusted' },
+    add: 'Add',
+    remove: 'Remove',
+    strictTitle: 'Strict mode (commit gate)',
+    strictHelp: 'On these sites, every POST/PUT/PATCH/DELETE or form submission the page sends during an agent action waits for your approval, with the fields shown (sensitive ones masked). It attaches the debugger, so Chrome shows its debugging bar. WebSocket messages and sendBeacon cannot be intercepted.',
+    strictUnavailable: 'Unavailable in this browser: strict mode needs the Chrome debugger.',
+    strictSiteLabel: 'Strict mode site',
+    managedIntro: 'Managed by your administrator (overrides the settings above):',
+    managedNoUnrestricted: 'Unrestricted access is disabled.',
+    managedNoDevTools: 'Developer tools are disabled.',
+    managedNoScreenshots: 'Screenshots are disabled.',
+    managedAllowedOnly: (origins) => `Only these sites are allowed: ${origins.join(', ') || '(none)'}`,
+  },
+  taint: {
+    body: (sources) => `This session has read untrusted page content (${sources}). Cross-site typing, clipboard and file writes, and data-carrying navigation need your approval; shell and file-writing tools are off.`,
+    unknownSource: 'an unknown origin',
+    clear: 'Clear',
+  },
+  watchers: {
+    label: 'Page watchers',
+    title: (count) => `Watching ${String(count)} page${count === 1 ? '' : 's'}`,
+    then: 'Then: ',
+    minutesLeft: (minutes) => `${String(minutes)} min left`,
+    hoursLeft: (hours) => `${String(hours)} h left`,
+    lastMiss: (reason) => ` · last wake missed (${reason})`,
+    cancel: 'Cancel',
+  },
+  devLoop: {
+    title: 'Dev loop',
+    help: 'Link a localhost tab to a DSH coding session. After each turn in which that session edits files, it receives this tab\'s new console errors, failed requests and page changes as read-only context. It can never be prompted from here.',
+    caution: 'Caution: if your local app renders untrusted data (user content, scraped or proxied pages), that text can reach the coding session this way. Set devLoop.trustLoopback: false in the bridge config to treat such injections as untrusted web content (the session then becomes read-only until you clear it).',
+    openLocalhost: 'Open the localhost page (localhost, 127.0.0.1 or [::1]) in this window first.',
+    unlink: 'Unlink',
+    linkTab: 'Link this tab to a coding session…',
+    noSessions: 'No DSH coding session found. Start one in DSH (Desktop or CLI) first.',
+    sessionLabel: 'Coding session',
+    link: 'Link',
+  },
+  learning: {
+    label: 'Learning',
+    sensitiveStep: '(asked at replay, never stored)',
+    stepsRecorded: (count) => `${String(count)} step(s) recorded in this conversation`,
+    saveAsWorkflow: 'Save as workflow',
+    workflowName: 'Workflow name',
+    description: 'Description',
+    descriptionPlaceholder: 'What it does (optional)',
+    saveHelp: 'Untick steps to leave out. Tick "variable" on a typed value to make it a parameter (its current value becomes the default). Only runs recorded with the setting on can be saved.',
+    variable: 'variable',
+    variableName: 'Variable name',
+    save: 'Save',
+    savedTo: (path) => `Saved to ${path}`,
+    clearRecording: 'Clear recording',
+    savedWorkflows: 'Saved workflows',
+    stepCount: (count) => `${String(count)} steps`,
+    everyMinutesLabel: 'Every N minutes',
+    minutesPlaceholder: 'min',
+    scheduleHint: 'Runs in this conversation; at least every minute. Approval cards still ask, and fail closed when nobody answers.',
+    schedule: 'Schedule',
+    scheduled: 'Scheduled.',
+    schedules: 'Schedules',
+    everyMinutes: (minutes) => `every ${String(minutes)} min`,
+    cancel: 'Cancel',
+    scheduleCancelled: 'Schedule cancelled.',
+    watchIdle: 'Show me once or twice; I\'ll offer to do the rest.',
+    watching: (origin, events) => `Watching ${origin} · ${String(events)} input(s)`,
+    watchMe: 'Watch me',
+    stopWatching: 'Stop watching',
+    repeated: (times) => `You did this ${String(times)} times:`,
+    done: 'Done.',
+    doRemaining: (remaining) => `Do the remaining ${String(remaining)} like this`,
+    proposedDriver: 'Proposed site driver',
+    parameters: 'Parameters',
+    tokenSource: (kind, name) => `read from page ${kind} "${name}" each time (never stored)`,
+    dropped: 'Dropped (no page source)',
+    saveDriver: 'Save driver',
+    driverSaved: 'Driver saved.',
+    discard: 'Discard',
+    siteDrivers: 'Site drivers',
+    deleteDriver: 'Delete',
+    exportDrivers: 'Export drivers',
+    importDrivers: 'Import…',
+    imported: (count) => `Imported ${String(count)} driver(s).`,
+    settingsTitle: 'Learning (experimental)',
+    settingsHelp: 'All off by default. These features record what happens in the browser so it can be repeated; every replayed action still goes through site rules, the pause and kill switches, and approval cards. They apply immediately, without Save.',
+    workflowsTitle: 'Record runs for "Save as workflow"',
+    workflowsHelp: 'Keeps the agent\'s successful steps in memory with how to find each element again (role, name, text, CSS). Values typed into password or other sensitive fields are never recorded. Saved workflows are JSON files in the session workspace and become skills; they can be replayed or scheduled.',
+    watchMeTitle: 'Watch me (experimental)',
+    watchMeHelp: 'Shows a "Watch me" button. While it is on, your own clicks and typing on the current tab are recorded (passwords never; sensitive fields masked) to offer "Do the remaining N like this" after you repeat something twice.',
+    driversTitle: 'Site drivers (experimental)',
+    driversUnavailable: 'Unavailable in this browser: site drivers need the Chrome debugger.',
+    driversHelp: 'For the sites listed below, learns the same-origin request behind an agent action (needs developer tools allowed, so network capture runs) and proposes a reusable tool. Nothing is saved until you approve it; secrets and cookies are never stored. Every use shows the exact request on an approval card.',
+    driverSiteLabel: 'Site for drivers',
+    add: 'Add',
+    remove: 'Remove',
+    fixturesTitle: 'Save failures as test fixtures',
+    fixturesHelp: 'When a step fails (element not found, page guard, failed after a retry, other errors), saves the page and the intended action under browser-fixtures/ in the session workspace. Denied, timed-out and cancelled steps and blocked sites are never captured. Sensitive field values are masked; a full MHTML copy is used only for pages without sensitive fields and if you grant the page-capture permission.',
+    requestFailed: 'The request failed.',
+    disconnected: 'Lost the connection to the extension. Try again.',
+  },
   app: {
     openSettings: 'Open settings',
     settings: 'Settings',
@@ -817,15 +1028,12 @@ const ZH: PanelCopy = {
     alwaysAllowReads: '始终允许读取',
     trustSession: '本次会话信任此域',
     devToolsTitle: '允许使用开发者工具？',
-    trustDevTools: '本次会话信任开发者工具',
     readFootnote: 'Esc 拒绝 · 可随时在设置中关闭自动读取',
     actionFootnote: 'Esc 拒绝 · 关闭侧栏后临时信任失效 · 敏感字段的输入内容默认遮盖',
     devToolsFootnote: '开发者工具会暴露页面内部结构与抓包内容。信任仅覆盖本对话在此站点上的调用，30 分钟后、标签页离开该站点或侧栏关闭时失效，且从不覆盖 JavaScript 执行与不脱敏的抓包内容。附加期间 Chrome 自身无法在该标签页打开开发者工具。',
     trustEval: (origin) => `本对话中信任在 ${origin} 上执行 JavaScript（30 分钟）`,
     trustDevToolsOrigin: (origin) => `本对话中信任 ${origin} 上的开发者工具（30 分钟）`,
     codeLabel: (characters) => `将执行的 JavaScript（${characters} 个字符）`,
-    showCode: '显示代码',
-    hideCode: '隐藏代码',
     typedTextLabel: '将输入的文本',
     maskedText: (characters) => `已遮盖：${characters} 个字符（敏感字段或未能检查的字段）`,
     reveal: '显示',
@@ -852,9 +1060,6 @@ const ZH: PanelCopy = {
   tool: {
     running: '正在操作页面',
     complete: '页面操作',
-    inProgress: '进行中',
-    completed: '已完成',
-    done: '完成',
     labels: {
       browser_snapshot: '读取页面',
       browser_click: '点击元素',
@@ -891,8 +1096,14 @@ const ZH: PanelCopy = {
       browser_downloads: '查看下载',
       browser_save_pdf: '将页面保存为 PDF',
       browser_pdf_text: '读取 PDF 文本',
+      browser_run: '运行步骤程序',
+      browser_watch: '监视页面',
+      browser_watches: '列出页面监视',
+      browser_fanout: '并行运行多个标签页',
+      browser_fleet_release: '释放标签页组',
+      browser_workflow_list: '列出工作流',
+      browser_workflow_run: '运行工作流',
     },
-    overflow: (shown, total) => `${shown.join(' → ')} 等${total}个工具`,
   },
   tabHandoff: {
     eyebrow: '页面交接',
@@ -1119,6 +1330,112 @@ const ZH: PanelCopy = {
     larger: '放大字号',
     reset: '恢复默认',
     value: (percent) => `字号 ${percent}`,
+  },
+  sitePolicy: {
+    title: '站点策略',
+    help: '站点规则优先于其他所有设置。「完全访问」信任除这些站点外的所有站点。格式：example.com（含子域名）、*bank*、github.com/settings。',
+    builtIn: '内置保护',
+    builtInHelp: (patterns) => `银行与支付、密码库、账户页面和云控制台默认只读（${String(patterns)} 条规则）。`,
+    patternLabel: '站点规则',
+    ruleLabel: '规则',
+    rules: { blocked: '禁止（不可读取）', 'read-only': '只读', ask: '每次询问', trusted: '信任' },
+    add: '添加',
+    remove: '移除',
+    strictTitle: '严格模式（提交闸门）',
+    strictHelp: '在这些站点上，代理操作期间页面发出的每个 POST/PUT/PATCH/DELETE 或表单提交都需要您批准，并显示字段（敏感字段已遮盖）。它会附加调试器，Chrome 会显示调试提示条。WebSocket 消息和 sendBeacon 无法拦截。',
+    strictUnavailable: '此浏览器不可用：严格模式需要 Chrome 调试器。',
+    strictSiteLabel: '严格模式站点',
+    managedIntro: '由管理员管理（优先于上方设置）：',
+    managedNoUnrestricted: '已禁用完全访问。',
+    managedNoDevTools: '已禁用开发者工具。',
+    managedNoScreenshots: '已禁用截图。',
+    managedAllowedOnly: (origins) => `仅允许以下站点：${origins.join('、') || '（无）'}`,
+  },
+  taint: {
+    body: (sources) => `本会话已读取不受信任的网页内容（${sources}）。跨站输入、剪贴板写入、文件写入和带数据的跳转需要您批准；命令行与文件写入工具已停用。`,
+    unknownSource: '未知来源',
+    clear: '清除',
+  },
+  watchers: {
+    label: '页面监视',
+    title: (count) => `正在监视 ${String(count)} 个页面`,
+    then: '触发后：',
+    minutesLeft: (minutes) => `剩余 ${String(minutes)} 分钟`,
+    hoursLeft: (hours) => `剩余 ${String(hours)} 小时`,
+    lastMiss: (reason) => ` · 上次未送达（${reason}）`,
+    cancel: '取消',
+  },
+  devLoop: {
+    title: '开发闭环',
+    help: '将本地页面标签关联到 DSH 编码会话。该会话每次编辑文件后，会以只读上下文收到此标签新的控制台错误、失败请求和页面变化；此处永远不会向它发送提示。',
+    caution: '注意：如果本地应用会渲染不可信数据（用户内容、抓取或代理的页面），这些文本可能借此进入编码会话。可在桥接配置中设置 devLoop.trustLoopback: false，将此类注入视为不可信网页内容（会话随后变为只读，直到你清除）。',
+    openLocalhost: '请先在此窗口打开本地页面（localhost、127.0.0.1 或 [::1]）。',
+    unlink: '取消关联',
+    linkTab: '将此标签关联到编码会话…',
+    noSessions: '未找到 DSH 编码会话。请先在 DSH（桌面版或 CLI）中开始一个会话。',
+    sessionLabel: '编码会话',
+    link: '关联',
+  },
+  learning: {
+    label: '学习',
+    sensitiveStep: '（重放时询问，从不存储）',
+    stepsRecorded: (count) => `本会话已记录 ${String(count)} 步`,
+    saveAsWorkflow: '保存为工作流',
+    workflowName: '工作流名称',
+    description: '描述',
+    descriptionPlaceholder: '用途（可选）',
+    saveHelp: '取消勾选可排除步骤。在输入值上勾选「变量」即可将其设为参数（当前值作为默认值）。只能保存在开启该设置后记录的运行。',
+    variable: '变量',
+    variableName: '变量名',
+    save: '保存',
+    savedTo: (path) => `已保存到 ${path}`,
+    clearRecording: '清除记录',
+    savedWorkflows: '已保存的工作流',
+    stepCount: (count) => `${String(count)} 步`,
+    everyMinutesLabel: '每 N 分钟',
+    minutesPlaceholder: '分钟',
+    scheduleHint: '在本会话中运行；最短每分钟一次。批准卡片仍会询问，无人回应时默认拒绝。',
+    schedule: '定时',
+    scheduled: '已定时。',
+    schedules: '定时任务',
+    everyMinutes: (minutes) => `每 ${String(minutes)} 分钟`,
+    cancel: '取消',
+    scheduleCancelled: '已取消定时。',
+    watchIdle: '示范一两次，我来完成剩下的。',
+    watching: (origin, events) => `正在观察 ${origin} · ${String(events)} 次输入`,
+    watchMe: '观察我',
+    stopWatching: '停止观察',
+    repeated: (times) => `您已重复 ${String(times)} 次：`,
+    done: '完成。',
+    doRemaining: (remaining) => `按同样方式完成剩余 ${String(remaining)} 项`,
+    proposedDriver: '建议的站点驱动',
+    parameters: '参数',
+    tokenSource: (kind, name) => `每次从页面 ${kind} "${name}" 读取（从不存储）`,
+    dropped: '已丢弃（无页面来源）',
+    saveDriver: '保存驱动',
+    driverSaved: '驱动已保存。',
+    discard: '丢弃',
+    siteDrivers: '站点驱动',
+    deleteDriver: '删除',
+    exportDrivers: '导出驱动',
+    importDrivers: '导入…',
+    imported: (count) => `已导入 ${String(count)} 个驱动。`,
+    settingsTitle: '学习功能（实验性）',
+    settingsHelp: '默认全部关闭。这些功能会记录浏览器中的操作以便重复执行；每个重放的操作仍然经过站点规则、暂停与紧急停止以及批准卡片。这些开关立即生效，无需保存。',
+    workflowsTitle: '记录运行以便「保存为工作流」',
+    workflowsHelp: '在内存中保存代理成功执行的步骤以及重新定位每个元素的方式（角色、名称、文本、CSS）。输入到密码等敏感字段的值从不记录。保存的工作流是会话工作区中的 JSON 文件并注册为技能，可重放或定时运行。',
+    watchMeTitle: '观察我（实验性）',
+    watchMeHelp: '显示「观察我」按钮。开启观察时，会记录您在当前标签页上的点击和输入（从不记录密码，敏感字段被遮盖），在您重复两次后提供「按同样方式完成剩余 N 项」。',
+    driversTitle: '站点驱动（实验性）',
+    driversUnavailable: '此浏览器不可用：站点驱动需要 Chrome 调试器。',
+    driversHelp: '对下方列出的站点，学习代理操作背后的同源请求（需允许开发者工具以进行网络捕获）并建议一个可复用的工具。经您批准才会保存；从不存储密钥和 Cookie。每次使用都会在批准卡片上显示确切请求。',
+    driverSiteLabel: '站点驱动的站点',
+    add: '添加',
+    remove: '移除',
+    fixturesTitle: '将失败保存为测试样例',
+    fixturesHelp: '步骤失败（找不到元素、页面防护拦截、重试后仍失败、其他错误）时，将页面和预期操作保存到会话工作区的 browser-fixtures/ 下。被拒绝、超时和取消的步骤以及被禁止的站点从不保存。敏感字段值会被遮盖；仅当页面没有敏感字段且您授予页面捕获权限时才保存完整 MHTML。',
+    requestFailed: '请求失败。',
+    disconnected: '与扩展的连接已断开，请重试。',
   },
   app: {
     openSettings: '打开设置',

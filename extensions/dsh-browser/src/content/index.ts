@@ -1,11 +1,24 @@
 /**
- * Content script entry: listens for DSH_ACTION messages from the background
- * service worker, runs the action against the real page, and answers with a
- * text-only result. Starts the DOM watcher that marks the snapshot dirty, and
- * the panel-gated watcher that reports what the user highlights.
+ * Content script entry. Routes the background's messages:
  *
- * The content script is the only part that touches the page; the bridge and
- * the model never see page internals beyond the structured text snapshots.
+ * - `DSH_ACTION`: run a browser action against the real page and answer with
+ *   a text result (actions.ts);
+ * - `DSH_OVERLAY`: the on-page agent overlay (overlay.ts);
+ * - `DSH_INPUT_SETUP`: focus/selection/geometry for the debugger-driven
+ *   pointer and keyboard (input-support.ts), never model-facing;
+ * - `DSH_WATCH_ARM`: standing page watchers (watch.ts);
+ * - `DSH_LEARN_*`, `DSH_WATCH` / `DSH_WATCH_PROBE`, `DSH_SITE_DRIVER_FETCH`:
+ *   the default-off learning features (learning.ts);
+ * - `DSH_SELECTION_WATCH` / `DSH_SELECTION_RESET`, `DSH_TARGET_INFO`,
+ *   `DSH_BUDGET`, `DSH_ABORT`: selection reports, the approval-time
+ *   sensitivity probe, snapshot budgets and the kill switch.
+ *
+ * On load it announces `DSH_CONTENT_READY`; the reply restores the selection
+ * watcher, the overlay and "Watch me" on the new document.
+ *
+ * The content script is the only part that touches the page. What leaves it
+ * is structured text (snapshots, action results, matched excerpts), masked
+ * values, and sanitized fixtures, each gated by the background.
  *
  * @module
  */
@@ -15,7 +28,7 @@ import { abortRunningActions, runAction, ActionError, resolveActionTarget, typeT
 import { AgentOverlay, type OverlayCopy, type PointKind } from './overlay.ts'
 import { ElementIds } from './ids.ts'
 import { handleInputSetup } from './input-support.ts'
-import { handleLearningMessage } from './learning.ts'
+import { handleLearningMessage, setWatching } from './learning.ts'
 import { SelectionWatcher } from './selection.ts'
 import { armPageWatch } from './watch.ts'
 import type { InputSetupRequest } from '../shared/input-setup.ts'
@@ -38,6 +51,7 @@ const overlay = new AgentOverlay({
 const CONTENT_SCRIPT_LISTENER = '__dshBrowserContentScriptListener__'
 const CONTENT_SELECTION_WATCHER = '__dshBrowserSelectionWatcher__'
 const CONTENT_OVERLAY = '__dshBrowserAgentOverlay__'
+const CONTENT_LEARNING_WATCH = '__dshBrowserLearningWatch__'
 type ContentListener = typeof onMessage
 
 /** A tool-call result for the bridge. */
@@ -205,6 +219,7 @@ const contentGlobal = globalThis as typeof globalThis & {
   [CONTENT_SCRIPT_LISTENER]?: ContentListener
   [CONTENT_SELECTION_WATCHER]?: { dispose: () => void }
   [CONTENT_OVERLAY]?: { dispose: () => void }
+  [CONTENT_LEARNING_WATCH]?: { dispose: () => void }
 }
 const previousListener = contentGlobal[CONTENT_SCRIPT_LISTENER]
 if (previousListener !== undefined) {
@@ -214,14 +229,18 @@ if (previousListener !== undefined) {
 // releases them: `selectionchange` is a document listener, not an extension one.
 contentGlobal[CONTENT_SELECTION_WATCHER]?.dispose()
 contentGlobal[CONTENT_OVERLAY]?.dispose()
+contentGlobal[CONTENT_LEARNING_WATCH]?.dispose()
 contentGlobal[CONTENT_SCRIPT_LISTENER] = onMessage
 contentGlobal[CONTENT_SELECTION_WATCHER] = selectionWatcher
 contentGlobal[CONTENT_OVERLAY] = overlay
+contentGlobal[CONTENT_LEARNING_WATCH] = { dispose: () => { setWatching(false) } }
 chrome.runtime.onMessage.addListener(onMessage)
 
 // A navigation action answers before unloading. The replacement content
 // script announces when the new document can accept its automatic snapshot,
-// and learns from the reply whether a side panel wants selection reports.
+// and learns from the reply whether a side panel wants selection reports,
+// whether the agent overlay is showing, and whether "Watch me" is recording
+// this tab (a navigation would otherwise end the recording silently).
 void chrome.runtime.sendMessage({ type: 'DSH_CONTENT_READY' }).then((response: unknown) => {
   if (typeof response !== 'object' || response === null) return
   const ready = response as {
@@ -229,6 +248,7 @@ void chrome.runtime.sendMessage({ type: 'DSH_CONTENT_READY' }).then((response: u
     selectionWatchEpoch?: unknown
     selectionWatchRevision?: unknown
     overlay?: { control?: unknown; takeover?: unknown; copy?: Partial<OverlayCopy> }
+    watchMe?: unknown
   }
   if (typeof ready.overlay === 'object' && ready.overlay !== null) {
     if (ready.overlay.control === true) overlay.setControl(true, ready.overlay.copy)
@@ -237,4 +257,5 @@ void chrome.runtime.sendMessage({ type: 'DSH_CONTENT_READY' }).then((response: u
   const epoch = typeof ready.selectionWatchEpoch === 'string' ? ready.selectionWatchEpoch : undefined
   const revision = typeof ready.selectionWatchRevision === 'number' ? ready.selectionWatchRevision : undefined
   selectionWatcher.setEnabled(ready.selectionWatch === true, revision, epoch)
+  if (ready.watchMe === true) setWatching(true)
 }).catch(() => {})

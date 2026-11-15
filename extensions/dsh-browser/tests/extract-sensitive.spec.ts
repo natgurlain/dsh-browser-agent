@@ -24,9 +24,10 @@ it('never returns the value of a password or card field', async () => {
 })
 
 it('keeps a field masked after the page flips its type (latched sensitivity)', async () => {
-  document.body.innerHTML = '<form id="g"><input id="secret" type="password" value="s3cret-value"></form>'
+  // A neutral id and name: only the latch (not the field's name) can keep it masked.
+  document.body.innerHTML = '<form id="g"><input id="f1" name="f1" type="password" value="s3cret-value"></form>'
   await runAction('browser_snapshot', {}, ctx())
-  ;(document.getElementById('secret') as HTMLInputElement).type = 'text'
-  const result = await runAction('browser_extract', { schema: { rows: '#g', fields: { v: '#secret' } } }, ctx())
+  ;(document.getElementById('f1') as HTMLInputElement).type = 'text'
+  const result = await runAction('browser_extract', { schema: { rows: '#g', fields: { v: '#f1' } } }, ctx())
   expect(JSON.stringify(result)).not.toContain('s3cret-value')
 })
