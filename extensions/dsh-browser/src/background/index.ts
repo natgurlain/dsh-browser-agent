@@ -39,7 +39,7 @@
  *   bg → panel: { type: 'settings.result', id, ok, error? }
  *   bg → panel: { type: 'devtools.status', supported, enabled, attached, tabId?, error? }
  *   bg → panel: { type: 'devtools.detach.result', id, ok, error? }
- *   bg → panel: { type: 'status', state: BridgeState, caps?, discovery, address? }
+ *   bg → panel: { type: 'status', state: BridgeState, caps, discovery, address?, failure?, killSwitch }
  *   bg → panel: { type: 'event', frame: ServerFrame }
  *   bg → panel: { type: 'approval.request', request }
  *   bg → panel: { type: 'approval.resolved', id }
@@ -48,6 +48,22 @@
  *   bg → panel: { type: 'tab-affinity', state }
  *   bg → panel: { type: 'tab-affinity.rebind.result', id, ok, error? }
  *   bg → panel: { type: 'tab-affinity.return.result', id, ok, error? }
+ *
+ * An `rpc` for the dev-loop link / unlink / list methods is completed here
+ * (devLoopPanelRpc) instead of being forwarded as is.
+ *
+ * Other extension-page ports (each accepts extension pages only):
+ *   "dsh-policy"   site policy taint state and clears (policy-runtime.ts)
+ *   "dsh-watchers" standing page watchers (watcher-runtime.ts)
+ *   "dsh-learning" workflows, site drivers, Watch me (learning.ts)
+ *
+ * Content-script messages (this extension's own frames, from a tab):
+ *   DSH_CONTENT_READY  frame ready; answered with selection-watch and overlay state
+ *   DSH_SELECTION      the user's page selection
+ *   DSH_KILL_SWITCH    the on-page pill's Stop link
+ *   DSH_AGENT_RESUME   the takeover banner's Resume (opens the panel only)
+ *   DSH_WATCH_EVENT    a Watch me user event (learning.ts)
+ *   DSH_WATCH_HIT      a page watcher's condition holds (watcher-runtime.ts)
  *
  * @module
  */
@@ -2263,8 +2279,7 @@ function devLoopPanelRpc(method: string, payload: unknown): Promise<unknown> | u
   return undefined
 }
 
-/** Route one tool.call frame to the user-approved controlled tab. */
-/** Phase 3 learning features (workflows, site drivers, Watch me, failure fixtures); all default off. */
+/** Learning features (workflows, site drivers, Watch me, failure fixtures); all default off. */
 const learning = new LearningRuntime({
   rpc: () => rpc,
   bridgeConnected: () => bridge?.state === 'connected',
@@ -2287,6 +2302,11 @@ chrome.runtime.onMessage.addListener((message: unknown, sender) => {
   return undefined
 })
 
+/**
+ * Route one tool.call frame: tab resolution, fleet allowlists, the pause gate,
+ * site policy, cards and the commit gate, then the dispatch path for its tool;
+ * the answer (or a cancel / internal error) goes back as tool.result.
+ */
 function routeToolCall(call: ToolCall): void {
   if (bridge === null) return
   activeToolCalls.get(call.id)?.controller.abort()
@@ -3415,7 +3435,7 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       case 'request-status':
         try {
-          port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps, killSwitch: killSwitchEngaged })
+          port.postMessage(statusPayload())
           port.postMessage({ type: 'kill-switch', engaged: killSwitchEngaged })
           // A push on connect cannot reach a panel that has not subscribed yet,
           // so the status request is also the pull path for developer tools.

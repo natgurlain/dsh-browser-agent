@@ -1151,6 +1151,19 @@ describe('background bridge lifecycle', () => {
       })
     })
 
+    it('answers request-status with the full status: discovery and the connected address included (M5)', async () => {
+      const chromeMock = mockChrome({
+        localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }),
+      })
+      const { panel } = await connected(chromeMock)
+      const pushed = panel.postMessage.mock.calls.map(([message]) => message as { type?: string }).filter((message) => message.type === 'status').at(-1)
+      panel.postMessage.mockClear()
+      panel.onMessage.emit({ type: 'request-status' })
+      const pulled = panel.postMessage.mock.calls.map(([message]) => message as { type?: string }).find((message) => message.type === 'status')
+      expect(pulled).toEqual(pushed)
+      expect(pulled).toMatchObject({ state: 'connected', discovery: expect.any(String), killSwitch: false })
+    })
+
     it('engages from the keyboard command and survives a worker restart', async () => {
       const chromeMock = mockChrome({
         localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }),
