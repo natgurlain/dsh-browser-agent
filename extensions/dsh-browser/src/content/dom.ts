@@ -171,3 +171,13 @@ export function composedParent(el: Element): Element | null {
   const root = el.getRootNode()
   return root instanceof ShadowRoot ? root.host : null
 }
+
+/**
+ * `CSS.escape` with a fallback for environments without it.
+ * @param value - an identifier (id, class, attribute value).
+ * @returns the value, safe inside a selector.
+ */
+export function cssEscape(value: string): string {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value)
+  return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`)
+}

@@ -12,7 +12,7 @@
  */
 
 import { querySelectorAllDeep } from './dom.ts'
-import { accessibleName, isVisible } from './extract.ts'
+import { accessibleName, clean, isVisible } from './extract.ts'
 
 /** What the caller wants selected. Exactly one of the forms is used. */
 export interface SelectRequest {
@@ -50,10 +50,6 @@ export class SelectError extends Error {
     super(message)
     this.name = 'SelectError'
   }
-}
-
-function clean(text: string): string {
-  return text.replace(/\s+/g, ' ').trim()
 }
 
 function wanted(request: SelectRequest): number {

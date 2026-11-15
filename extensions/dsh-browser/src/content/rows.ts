@@ -9,6 +9,7 @@
  */
 
 import { resolveSelector, resolveSelectorAll } from './dom.ts'
+import { clean, pageText } from './extract.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
 
 /** One extracted cell value. */
@@ -54,14 +55,6 @@ export class ExtractError extends Error {
 /** Default and maximum rows read from one page. */
 export const DEFAULT_ROW_LIMIT = 500
 export const MAX_ROW_LIMIT = 5_000
-
-function clean(text: string): string {
-  return text.replace(/\s+/g, ' ').trim()
-}
-
-function textOf(el: Element): string {
-  return clean(el instanceof HTMLElement && typeof el.innerText === 'string' ? el.innerText : el.textContent ?? '')
-}
 
 /** Parse one field spec: a bare selector string or an object. */
 function parseField(name: string, value: unknown): FieldSpec {
@@ -141,7 +134,7 @@ function readField(row: Element, spec: FieldSpec): CellValue {
   if (spec.attr === undefined) {
     raw = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement
       ? target.value
-      : textOf(target)
+      : pageText(target)
   } else if ((spec.attr === 'href' || spec.attr === 'src') && spec.attr in target) {
     raw = String((target as unknown as Record<string, unknown>)[spec.attr])
   } else {
@@ -199,7 +192,7 @@ function extractTable(selector: string, limit: number): ExtractedRows {
   const width = Math.max(0, ...allRows.map((row) => row.cells.length))
   const columns = uniqueColumns(Array.from({ length: width }, (_, index) => {
     const cell = headerRow?.cells[index]
-    return cell === undefined ? '' : textOf(cell)
+    return cell === undefined ? '' : pageText(cell)
   }))
   const bodyRows = allRows.filter((row) => row !== headerRow && row.parentElement?.tagName !== 'THEAD'
     && [...row.cells].some((cell) => cell.tagName === 'TD'))
@@ -207,7 +200,7 @@ function extractTable(selector: string, limit: number): ExtractedRows {
     const record: Record<string, CellValue> = {}
     columns.forEach((column, index) => {
       const cell = row.cells[index]
-      record[column] = cell === undefined ? null : textOf(cell)
+      record[column] = cell === undefined ? null : pageText(cell)
     })
     return record
   })

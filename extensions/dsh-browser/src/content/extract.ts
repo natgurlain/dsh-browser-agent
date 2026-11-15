@@ -10,7 +10,7 @@
  * @module
  */
 
-import { querySelectorAllDeep } from './dom.ts'
+import { cssEscape, querySelectorAllDeep } from './dom.ts'
 
 /**
  * Elements that are interactive by their own semantics. A match here always
@@ -106,8 +106,14 @@ export function isInViewport(el: Element): boolean {
 }
 
 /** Normalize whitespace and trim. */
-function clean(text: string): string {
+export function clean(text: string): string {
   return text.replace(/\s+/g, ' ').trim()
+}
+
+/** Whitespace-normalized text cut to `max` characters, the cut marked with an ellipsis. */
+export function clip(text: string, max: number): string {
+  const inline = clean(text)
+  return inline.length > max ? `${inline.slice(0, max - 1)}…` : inline
 }
 
 /**
@@ -193,11 +199,6 @@ function byId(root: Document | ShadowRoot, id: string): Element | null {
 }
 
 /** CSS.escape with a fallback for environments that lack it (jsdom). */
-function cssEscape(value: string): string {
-  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value)
-  return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`)
-}
-
 /**
  * The control a label operates, when it has one.
  * @param label - label element.

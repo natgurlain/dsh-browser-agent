@@ -19,8 +19,8 @@
  */
 
 import { resolveDriverTokens, type DriverRequest } from '@natgurlain/dsh-bridge-browser/src/learning/site-drivers.ts'
-import { deepActiveElement, resolveSelectorAll } from './dom.ts'
-import { accessibleName } from './extract.ts'
+import { cssEscape, deepActiveElement, resolveSelectorAll } from './dom.ts'
+import { accessibleName, clip } from './extract.ts'
 import { roleOfElement, uniqueSelectorFor } from './find.ts'
 import type { ElementIds } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
@@ -41,11 +41,6 @@ const CELL_MAX = 200
 const MAX_CELLS = 20
 const FIXTURE_MAX_CHARS = 4 * 1024 * 1024
 const RESPONSE_MAX_CHARS = 4_000
-
-function clip(text: string, max: number): string {
-  const inline = text.replace(/\s+/gu, ' ').trim()
-  return inline.length > max ? `${inline.slice(0, max - 1)}…` : inline
-}
 
 /** Describe one element as a robust locator. */
 export function describeElement(el: Element): LocatorDescriptor {
@@ -228,7 +223,7 @@ export async function siteDriverFetch(request: DriverRequest): Promise<{ status:
   if (url.origin !== location.origin) throw new Error('A site driver can only call the page\'s own origin.')
   const resolved = resolveDriverTokens(request, (source) => {
     if (source.kind === 'cookie') return pageTokens().cookies.find((cookie) => cookie.name === source.name)?.value
-    return document.querySelector(`meta[name="${CSS.escape(source.name)}"]`)?.getAttribute('content') ?? undefined
+    return document.querySelector(`meta[name="${cssEscape(source.name)}"]`)?.getAttribute('content') ?? undefined
   })
   const response = await fetch(url.href, {
     method: request.method,

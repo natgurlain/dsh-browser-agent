@@ -12,7 +12,7 @@
  * @module
  */
 
-import { querySelectorAllDeep, resolveSelectorAll, SHADOW_PIERCE } from './dom.ts'
+import { cssEscape, querySelectorAllDeep, resolveSelectorAll, SHADOW_PIERCE } from './dom.ts'
 import { accessibleName, isVisible } from './extract.ts'
 
 /** One locator request as supplied by the model. */
@@ -137,11 +137,6 @@ function isRendered(el: Element): boolean {
 }
 
 /** Escape an identifier for a CSS selector. */
-function cssEscape(value: string): string {
-  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(value)
-  return value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`)
-}
-
 /**
  * Build a selector that resolves back to this element. The walk uses
  * `:nth-child` so it stays unique among siblings; an id short-circuits it.
