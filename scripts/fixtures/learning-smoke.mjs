@@ -16,7 +16,7 @@ const PEOPLE = ['Ada', 'Grace', 'Linus']
 const invited = []
 /** The long table: two rows the user does, then more than one program (25 steps) of remaining rows. */
 const MANY_ROWS = 16
-const manyPeople = count => Array.from({ length: count }, (_unused, index) => `Person ${String(index + 1).padStart(2, '0')}`)
+const manyPeople = (count, who = 'Person') => Array.from({ length: count }, (_unused, index) => `${who} ${String(index + 1).padStart(2, '0')}`)
 
 /**
  * Fixture routes for the learning smoke (`/learn`, `/api/learn`, `/api/invite`).
@@ -43,7 +43,7 @@ export function handleLearningRequest(request, response) {
   const suffix = v === '1' ? '' : v
   // rows=N: a longer table, for a "do the remaining N" that exceeds one program.
   const rows = Number(url.searchParams.get('rows') ?? 0)
-  const people = rows > 0 ? manyPeople(rows) : PEOPLE
+  const people = rows > 0 ? manyPeople(rows, url.searchParams.get('who') === 'Guest' ? 'Guest' : 'Person') : PEOPLE
   response.setHeader('set-cookie', `csrftoken=${csrf}; Path=/`)
   response.end(`<!doctype html><title>Learn ${v}</title><meta name="csrf-token" content="${csrf}">
 <body><h1>Contacts</h1>
@@ -265,10 +265,15 @@ export async function runLearningSmoke(ctx) {
   const longRun = learn('learning.watch.run', {}, 180_000)
   const seriesCard = await waitFor(() => panel.evaluate(() => messages.find(message => message.type === 'approval.request')?.request), 'series card')
   assert.equal(seriesCard.action, 'browser_run')
-  // The one card states the true total and lists every step of every batch.
+  // The one card states the true total and reads as one line per row; a row's exact steps are behind its line.
   assert.match(seriesCard.summary, /Repeat a 2-step action on 14 rows: 28 steps in total/u)
-  assert.equal(seriesCard.details.length, 28)
-  assert.ok(seriesCard.details.at(-1).value.includes(`tr:nth-child(${String(MANY_ROWS)})`), 'the last row is on the card')
+  assert.equal(seriesCard.browserOnly, true)
+  assert.equal(seriesCard.details.length, 1)
+  assert.equal(seriesCard.details[0].kind, 'rows')
+  assert.equal(seriesCard.details[0].rows.length, 14)
+  assert.equal(seriesCard.details[0].rows[0].label, 'Type into “Email 3” ← “Person 03” → Click “Invite” — Person 03')
+  assert.equal(seriesCard.details[0].rows.at(-1).label, 'Type into “Email 16” ← “Person 16” → Click “Invite” — Person 16')
+  assert.ok(seriesCard.details[0].rows.at(-1).payload.includes(`tr:nth-child(${String(MANY_ROWS)})`), 'the last row\'s steps are on the card')
   await panel.evaluate(id => { messages = messages.filter(message => message.type !== 'approval.request'); panelPort.postMessage({ type: 'approval.response', id, decision: 'allow-once' }) }, seriesCard.id)
   // Pause as the first batch (12 rows) ends: the run must stop there until the user resumes.
   await waitFor(() => invited.includes(many[13]), 'first batch done', 120_000)
@@ -282,11 +287,52 @@ export async function runLearningSmoke(ctx) {
   const longOutcome = await longRun
   assert.equal(longOutcome.report.status, 'completed', JSON.stringify(longOutcome).slice(0, 2_000))
   assert.deepEqual(longOutcome.report.rows, { done: 14, total: 14, steps: 28 })
-  assert.match(longOutcome.text, /all 14 rows done \(28 steps\)/u)
+  assert.match(longOutcome.text, /^Done: all 14 rows \(28 steps\)\./u)
+  assert.equal((await state()).resume, null)
   await waitFor(() => many.every(person => invited.includes(person)), 'every remaining row done')
   assert.deepEqual(invited.filter(email => many.includes(email)), many, 'each row exactly once, in order')
   assert.equal(await panel.evaluate(() => messages.some(message => message.type === 'approval.request')), false, 'one card covered every batch')
   results.push(`Watch me does a remainder longer than one program (14 rows, 28 steps) in batches under a single card that states the total; a pause held it at ${held.name === 'browser_run' ? 'the batch boundary' : `a step (${held.name})`} until resume`)
+
+  // ---- 3.7 a row relabelled after the approval stops the series; the rest continues on a new card ----
+  const guests = manyPeople(MANY_ROWS, 'Guest')
+  await page.goto(`${origin}/learn?v=1&rows=${String(MANY_ROWS)}&who=Guest`)
+  await page.bringToFront()
+  await delay(1_700)
+  await learn('learning.watch.start')
+  for (const [index, person] of guests.slice(0, 2).entries()) {
+    await page.locator('#people input').nth(index).fill(person)
+    await page.locator('.invite').nth(index).click()
+  }
+  await waitFor(async () => (await state()).suggestion?.remaining === MANY_ROWS - 2, 'watch-me suggestion for the guests')
+  await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request') })
+  const brokenRun = learn('learning.watch.run', {}, 180_000)
+  const guestCard = await waitFor(() => panel.evaluate(() => messages.find(message => message.type === 'approval.request')?.request), 'series card for the guests')
+  assert.equal(guestCard.details[0].rows.at(-1).label, 'Type into “Email 16” ← “Guest 16” → Click “Invite” — Guest 16')
+  await panel.evaluate(id => { messages = messages.filter(message => message.type !== 'approval.request'); panelPort.postMessage({ type: 'approval.response', id, decision: 'allow-once' }) }, guestCard.id)
+  // The page changes after the approval: the last row's button now does something else.
+  await page.locator('.invite').nth(MANY_ROWS - 1).evaluate(button => { button.textContent = 'Delete' })
+  const brokenOutcome = await brokenRun
+  assert.equal(brokenOutcome.report.status, 'failed', JSON.stringify(brokenOutcome).slice(0, 2_000))
+  assert.deepEqual(brokenOutcome.report.rows, { done: 13, total: 14, steps: 28 })
+  assert.match(brokenOutcome.text, /^Stopped after 13 of 14 rows\. Row 14: it no longer looks like the rows you approved \(was “Invite”, now “Delete”\)\. Nothing was done to it\.\nRow 14 was left part-done \(1 of 2 steps ran\)\.\nNothing else was done\. You can continue/u)
+  await delay(500)
+  assert.equal(invited.includes(guests[MANY_ROWS - 1]), false, 'the relabelled row was not clicked')
+  assert.equal(await page.locator('.invite').nth(MANY_ROWS - 1).textContent(), 'Delete')
+  assert.deepEqual(invited.filter(email => guests.includes(email)), guests.slice(0, MANY_ROWS - 1), 'every row before it ran once, in order')
+  assert.equal(await panel.evaluate(() => messages.some(message => message.type === 'approval.request')), false, 'no card was raised in place of the stopped series')
+  // The panel offers the row that is left; continuing asks again, from the page as it is now.
+  assert.deepEqual((await state()).resume, { rows: 1 })
+  await page.locator('.invite').nth(MANY_ROWS - 1).evaluate(button => { button.textContent = 'Invite' })
+  const continued = learn('learning.watch.continue', {}, 120_000)
+  const freshCard = await waitFor(() => panel.evaluate(() => messages.find(message => message.type === 'approval.request')?.request), 'a fresh card for the row that is left')
+  assert.equal(freshCard.action, 'browser_run')
+  assert.ok(JSON.stringify(freshCard.details).includes(`tr:nth-child(${String(MANY_ROWS)})`))
+  await panel.evaluate(id => { messages = messages.filter(message => message.type !== 'approval.request'); panelPort.postMessage({ type: 'approval.response', id, decision: 'allow-once' }) }, freshCard.id)
+  assert.equal((await continued).report.status, 'completed')
+  await waitFor(() => invited.includes(guests[MANY_ROWS - 1]), 'the last row done after the new approval')
+  assert.equal((await state()).resume, null)
+  results.push('a row relabelled after the series card was approved stops the run before that row is touched, with a plain reason; the rest continues only on a new card')
 
   // ---- Off again: tools withdrawn ----
   await learn('learning.settings', { settings: { workflows: false, fixtures: false, watchMe: false, siteDrivers: false } })

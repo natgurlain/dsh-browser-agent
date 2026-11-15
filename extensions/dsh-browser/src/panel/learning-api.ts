@@ -18,6 +18,8 @@ export interface LearningState {
   steps: RecordedStep[]
   watching: { tabId: number; origin: string; events: number } | null
   suggestion: { tabId: number; origin: string; remaining: number; more?: boolean; done: number; period: number; program: ProgramStep[]; labels: string[] } | null
+  /** A long "do the remaining N" that stopped part-way: the rows a new card can continue. */
+  resume?: { rows: number } | null
   proposals: Array<{ driver: SiteDriver; droppedHeaders: string[] }>
   drivers: SiteDriver[]
 }

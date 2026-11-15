@@ -24,6 +24,7 @@ import { approvalBinding } from '../security/payload-binding.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
+import { parseStepTarget, type StepTarget } from '../shared/repetition.ts'
 import { DevToolsError } from './debugger-session.ts'
 import { InputStateStore } from './input-state.ts'
 import {
@@ -196,6 +197,46 @@ export interface TabManagementContext {
    * outside the managed allowlist): browser_list_tabs withholds its title and URL.
    */
   tabHidden?: (url: string) => boolean
+  /**
+   * A program-series step ("do the remaining N"): what its element must still
+   * look like. The content script compares it with the page just before the
+   * action; on any difference the step fails and nothing is done to the page.
+   */
+  expectTarget?: StepTarget
+}
+
+/**
+ * Check a series step's element against what its approval card showed.
+ * @returns a failure answer in the user's words, or undefined when it matches.
+ */
+export async function verifyStepTarget(tabId: number, frame: TabFrame, call: ToolCall, expected: StepTarget): Promise<ToolAnswer | undefined> {
+  let result: { differs?: unknown; now?: unknown } | undefined
+  try {
+    const response = await chrome.tabs.sendMessage(
+      tabId,
+      { type: 'DSH_WATCH_CHECK', args: withoutFrame(call.args), target: expected },
+      frame.documentId === undefined ? { frameId: frame.frameId } : { documentId: frame.documentId },
+    ) as { ok?: boolean; result?: { differs?: unknown; now?: unknown } } | undefined
+    result = response?.ok === true ? response.result : undefined
+  } catch {
+    result = undefined
+  }
+  const differs = Array.isArray(result?.differs) ? result.differs.filter((field): field is string => typeof field === 'string') : ['missing']
+  if (differs.length === 0) return undefined
+  const now = parseStepTarget(result?.now)
+  const zh = getUiLocale() === 'zh'
+  const quote = (text: string): string => `“${text}”`
+  let what: string
+  if (now === undefined) {
+    what = zh ? '它的元素已不存在或已隐藏' : 'its element is gone or hidden'
+  } else {
+    // Say what changed in the words the card used: the label first, then the row, then the kind of element.
+    const field = differs.includes('name') ? 'name' : differs.includes('row') ? 'row' : differs.includes('role') ? 'role' : 'tag'
+    what = zh
+      ? `它与您批准的行不再一致（原为 ${quote(expected[field])}，现为 ${quote(now[field])}）`
+      : `it no longer looks like the rows you approved (was ${quote(expected[field])}, now ${quote(now[field])})`
+  }
+  return { ok: false, error: { code: 'action-failed', message: zh ? `${what}。未对它执行任何操作。` : `${what}. Nothing was done to it.` } }
 }
 
 /** Placeholder for the title and URL of a tab site policy hides. */
@@ -2107,6 +2148,15 @@ export async function dispatchToolCall(
       if (isCancelled(call, signal)) return cancelled()
       if (targetStillAllowed?.() === false) return targetChanged()
     }
+  }
+  if (tabManagement.expectTarget !== undefined) {
+    const frame = executionFrames.find((candidate) => candidate.frameId === requestedFrame(call.args))
+    const mismatch = frame === undefined
+      ? unavailable('The frame of this step is gone.')
+      : await verifyStepTarget(tab.id, frame, call, tabManagement.expectTarget)
+    if (mismatch !== undefined) return mismatch
+    if (isCancelled(call, signal)) return cancelled()
+    if (targetStillAllowed?.() === false) return targetChanged()
   }
   try {
     return await dispatchOnce(

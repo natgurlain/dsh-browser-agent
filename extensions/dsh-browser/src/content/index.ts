@@ -7,7 +7,7 @@
  * - `DSH_INPUT_SETUP`: focus/selection/geometry for the debugger-driven
  *   pointer and keyboard (input-support.ts), never model-facing;
  * - `DSH_WATCH_ARM`: standing page watchers (watch.ts);
- * - `DSH_LEARN_*`, `DSH_WATCH` / `DSH_WATCH_PROBE`, `DSH_SITE_DRIVER_FETCH`:
+ * - `DSH_LEARN_*`, `DSH_WATCH` / `DSH_WATCH_PROBE` / `DSH_WATCH_CHECK`, `DSH_SITE_DRIVER_FETCH`:
  *   the default-off learning features (learning.ts);
  * - `DSH_SELECTION_WATCH` / `DSH_SELECTION_RESET`, `DSH_TARGET_INFO`,
  *   `DSH_BUDGET`, `DSH_ABORT`: selection reports, the approval-time

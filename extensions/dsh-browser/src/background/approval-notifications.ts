@@ -28,7 +28,7 @@ const MAX_NOTIFICATION_TITLE = 60
 /** Classify one approval for the notification surface. */
 export function approvalNotificationClass(request: ApprovalRequest): ApprovalNotificationClass {
   if (request.devTools === true || request.perCallOnly === true || request.forced === true || request.urlRisk === true
-    || request.permission !== undefined) return 'review'
+    || request.permission !== undefined || request.browserOnly === true) return 'review'
   // Allow is offered only when the notification can show the whole summary
   // and which site it acts on: never on a truncated or site-less description.
   if (request.summary.length > MAX_NOTIFICATION_SUMMARY || request.origins.length === 0
@@ -127,6 +127,8 @@ function renderDetail(detail: ApprovalDetail): string | undefined {
     case 'url': return `Destination URL${detail.url.risky ? ' (flagged: may carry smuggled data)' : ''}:\n${detail.url.href}`
     case 'flags': return `Redaction opt-outs requested: ${detail.values.join(', ')}`
     case 'payload': return `Arguments:\n${detail.value}`
+    // A program series is read row by row in the panel only.
+    case 'rows': return undefined
   }
 }
 
@@ -142,6 +144,9 @@ export function hostApprovalReason(request: ApprovalRequest): string | undefined
   // the Host-side answerer sits in the agent's own harness, which is exactly
   // what a tainted session must not be able to approve through.
   if (request.forced === true) return undefined
+  // A program series ("do the remaining N") is the user's own request from the
+  // panel, and only the panel can show its rows.
+  if (request.browserOnly === true) return undefined
   const sections: string[] = [
     `Browser ${request.kind === 'read' ? 'page read' : 'action'} awaiting approval (dsh browser assistant; the side panel is closed).`,
     `Tool: ${request.action}`,

@@ -88,6 +88,39 @@ export interface ProgramStep {
   tool: typeof PROGRAM_STEP_TOOLS[number]
   args: Record<string, unknown>
   expect?: ProgramGuard
+  /**
+   * A series step only: what its element looked like when the offer was
+   * built. The extension shows it on the card, binds it, and compares it with
+   * the page again just before the step.
+   */
+  target?: SeriesTarget
+}
+
+/** What a series step's element looks like (the extension's StepTarget). */
+export interface SeriesTarget {
+  tag: string
+  role: string
+  name: string
+  row: string
+}
+
+const TARGET_FIELD_MAX = 200
+
+function parseSeriesTarget(value: unknown): SeriesTarget | undefined {
+  if (!isRecord(value) || Object.keys(value).length !== 4) return undefined
+  const { tag, role, name, row } = value
+  const fits = (field: unknown): field is string => typeof field === 'string' && field.length <= TARGET_FIELD_MAX
+  return fits(tag) && tag !== '' && fits(role) && fits(name) && fits(row) ? { tag, role, name, row } : undefined
+}
+
+/** Keys that name an object's prototype machinery: never a tool argument. */
+const UNSAFE_KEYS: ReadonlySet<string> = new Set(['__proto__', 'constructor', 'prototype'])
+
+/** Whether any object inside `value` has an own key from {@link UNSAFE_KEYS}. */
+export function hasUnsafeKey(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasUnsafeKey)
+  if (typeof value !== 'object' || value === null) return false
+  return Object.keys(value).some((key) => UNSAFE_KEYS.has(key) || hasUnsafeKey((value as Record<string, unknown>)[key]))
 }
 
 /** Why a program stopped. */
@@ -156,6 +189,8 @@ export function parseProgram(raw: unknown): ProgramStep[] {
     }
     const args = entry.args ?? {}
     if (!isRecord(args)) throw new ProgramError(`${where}.args must be an object`)
+    // The approval card shows the arguments as JSON and hashes them: a key the two could disagree on is refused.
+    if (hasUnsafeKey(args)) throw new ProgramError(`${where}.args must not use the names __proto__, constructor or prototype`)
     const step: ProgramStep = { tool: tool as ProgramStep['tool'], args }
     if (entry.expect !== undefined) {
       if (!isRecord(entry.expect)) throw new ProgramError(`${where}.expect must be an object`)
@@ -324,7 +359,10 @@ export function parseProgramSeries(raw: unknown, rowSteps: unknown): ProgramStep
       throw new ProgramError(`${where} must target its element by selector`)
     }
     if (entry.expect !== undefined) throw new ProgramError(`${where} must not carry an expect`)
-    return { tool: entry.tool as ProgramStep['tool'], args: { ...entry.args } }
+    if (hasUnsafeKey(entry.args)) throw new ProgramError(`${where}.args must not use the names __proto__, constructor or prototype`)
+    const target = parseSeriesTarget(entry.target)
+    if (target === undefined) throw new ProgramError(`${where} must describe its element (target: tag, role, name, row)`)
+    return { tool: entry.tool as ProgramStep['tool'], args: { ...entry.args }, target }
   })
 }
 
@@ -391,7 +429,7 @@ export async function runProgramSeries(
       }
       if (refusal !== undefined) {
         stop = exec.signal.aborted ? 'cancelled' : 'error'
-        message = `Stopped before step ${String(offset + 1)}: ${refusal}`
+        message = refusal.replace(/\.$/u, '')
         break
       }
     }
@@ -430,19 +468,27 @@ export async function runProgramSeries(
  */
 export function renderSeriesOutcome(outcome: ProgramOutcome): string {
   const rows = outcome.rows ?? { done: 0, total: 0, steps: 0 }
+  const rowSteps = rows.total === 0 ? 1 : rows.steps / rows.total
   const ran = outcome.steps.filter((step) => step.ok).length
-  const progress = `${String(rows.done)} of ${String(rows.total)} rows done (${String(ran)} of ${String(rows.steps)} steps ran)`
-  const headline: Record<ProgramStop, string> = {
-    completed: `Program completed: all ${String(rows.total)} rows done (${String(rows.steps)} steps).`,
-    error: `Program stopped by an error: ${progress}.`,
-    guard: `Program stopped by a failed guard: ${progress}.`,
-    cancelled: `Program cancelled: ${progress}.`,
-    'not-approved': `Program not run: ${outcome.message ?? 'it was not approved'}.`,
-  }
-  const lines = [headline[outcome.stop]]
-  if (outcome.stop !== 'not-approved' && outcome.message !== undefined) lines.push(outcome.message)
+  const after = `Stopped after ${String(rows.done)} of ${String(rows.total)} rows`
   const failed = outcome.steps.find((step) => !step.ok)
-  if (failed !== undefined) lines.push(`${String(failed.step)}. ${failed.tool} FAILED: ${failed.text}`)
+  const lines: string[] = []
+  if (outcome.stop === 'completed') {
+    lines.push(`Done: all ${String(rows.total)} rows (${String(rows.steps)} steps).`)
+  } else if (outcome.stop === 'not-approved') {
+    lines.push(`Not run: ${outcome.message ?? 'it was not approved'}.`)
+  } else if (failed !== undefined) {
+    // What happened, to which row, in the words the step itself reported.
+    const row = Math.floor((failed.step - 1) / rowSteps) + 1
+    lines.push(`${after}. Row ${String(row)}: ${failed.text}`)
+    const partial = ran - rows.done * rowSteps
+    if (partial > 0) lines.push(`Row ${String(row)} was left part-done (${String(partial)} of ${String(rowSteps)} steps ran).`)
+  } else {
+    lines.push(`${after}: ${outcome.message ?? (outcome.stop === 'cancelled' ? 'the run was cancelled' : 'the run could not continue')}.`)
+  }
+  if (outcome.stop !== 'completed' && outcome.stop !== 'not-approved' && rows.done < rows.total) {
+    lines.push('Nothing else was done. You can continue with the rows that are left; a new card will show them as the page is now.')
+  }
   if (outcome.delta !== undefined) lines.push('', 'Page changes at the stop point:', outcome.delta)
   return lines.join('\n')
 }

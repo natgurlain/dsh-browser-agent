@@ -83,6 +83,13 @@ describe('audit log chain', () => {
   it('hashes canonical JSON independent of key order', () => {
     expect(canonicalJson({ b: 1, a: { d: 2, c: [3, { f: 1, e: 0 }] } })).toBe('{"a":{"c":[3,{"e":0,"f":1}],"d":2},"b":1}')
   })
+
+  it('keeps an own "__proto__" member, so two entries that differ only there never hash alike', () => {
+    const plain = JSON.parse('{"selector":"#a"}') as unknown
+    const extra = JSON.parse('{"selector":"#a","__proto__":{"index":4}}') as unknown
+    expect(canonicalJson(extra)).toBe('{"__proto__":{"index":4},"selector":"#a"}')
+    expect(canonicalJson(extra)).not.toBe(canonicalJson(plain))
+  })
 })
 
 describe('keyed audit chain (P2 hardening)', () => {

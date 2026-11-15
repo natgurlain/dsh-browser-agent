@@ -181,6 +181,15 @@ export function LearningPanel({ locale, sessionId, connected }: { locale: UiLoca
               </button>
             </div>
           )}
+          {state?.resume !== null && state?.resume !== undefined && (
+            <div className="learning-suggestion">
+              <small>{copy.stoppedEarly(state.resume.rows)}</small>
+              <button className="primary" disabled={busy || !connected}
+                onClick={() => report(client!.request('learning.watch.continue'), (value) => String((value as { text?: string }).text ?? copy.done))}>
+                {copy.continueRemaining(state.resume.rows)}
+              </button>
+            </div>
+          )}
         </div>
       )}
       {settings.siteDrivers && (

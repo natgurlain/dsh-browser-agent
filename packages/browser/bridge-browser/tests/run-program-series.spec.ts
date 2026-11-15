@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { BridgeToolError } from '../src/server.ts'
 import {
+  hasUnsafeKey,
   MAX_PROGRAM_STEPS,
   MAX_SERIES_STEPS,
   parseProgram,
@@ -26,11 +27,11 @@ function fakeBridge(handler: Handler) {
 
 const ok = (text: string) => ({ text })
 
-/** `rows` repetitions of type → click → select, as the extension builds them. */
+/** `rows` repetitions of type → click → select, as the extension builds them: each step says what its element looks like. */
 const seriesSteps = (rows: number) => Array.from({ length: rows }, (_unused, row) => [
-  { tool: 'browser_type', args: { selector: `#row-${String(row + 3)} input`, text: `p${String(row)}`, replace: true } },
-  { tool: 'browser_click', args: { selector: `#row-${String(row + 3)} button` } },
-  { tool: 'browser_select', args: { selector: `#row-${String(row + 3)} select`, value: 'x' } },
+  { tool: 'browser_type', args: { selector: `#row-${String(row + 3)} input`, text: `p${String(row)}`, replace: true }, target: { tag: 'input', role: 'textbox', name: 'Email', row: `Person ${String(row + 3)}` } },
+  { tool: 'browser_click', args: { selector: `#row-${String(row + 3)} button` }, target: { tag: 'button', role: 'button', name: 'Archive', row: `Person ${String(row + 3)}` } },
+  { tool: 'browser_select', args: { selector: `#row-${String(row + 3)} select`, value: 'x' }, target: { tag: 'select', role: 'combobox', name: 'State', row: `Person ${String(row + 3)}` } },
 ]).flat()
 
 const run = (bridge: never, steps: ReturnType<typeof seriesSteps>, signal = new AbortController().signal) =>
@@ -66,12 +67,14 @@ describe('program series', () => {
     expect(later.flatMap((args) => args.steps)).toEqual(first.series.later)
     // Each step runs once, in order, tagged with its own batch's program and its place in it.
     const ran = stepCalls(calls)
-    expect(ran.map((call) => ({ tool: call.name, args: call.args }))).toEqual(steps)
+    // A step call carries the tool and its arguments only; the element descriptions travel with the approval calls.
+    expect(ran.map((call) => ({ tool: call.name, args: call.args }))).toEqual(steps.map((step) => ({ tool: step.tool, args: step.args })))
+    expect(later.every((args) => (args.steps as Array<{ target?: unknown }>).every((step) => step.target !== undefined))).toBe(true)
     expect(ran[0]!.program).toEqual({ id: 'p0', step: 0 })
     expect(ran[24]!.program).toEqual({ id: 'p1', step: 0 })
     expect(ran[113]!.program).toEqual({ id: 'p4', step: 17 })
     expect(ran.every((call) => call.sessionId === 's1')).toBe(true)
-    expect(renderSeriesOutcome(outcome)).toMatch(/^Program completed: all 38 rows done \(114 steps\)\./)
+    expect(renderSeriesOutcome(outcome)).toMatch(/^Done: all 38 rows \(114 steps\)\./)
   })
 
   it('stops at the first failed step mid-way, starts no further batch, and reports the rows done', async () => {
@@ -80,7 +83,7 @@ describe('program series', () => {
       if (name === 'browser_snapshot') return ok('delta')
       seen += 1
       // Step 62: the second step of row 21, in the third batch.
-      if (seen === 62) throw new BridgeToolError('action-failed', 'No element matches #row-23 button')
+      if (seen === 62) throw new BridgeToolError('action-failed', 'it no longer looks like the rows you approved (was “Archive”, now “Delete”). Nothing was done to it.')
       return ok('ok')
     })
     const outcome = await run(bridge, seriesSteps(38))
@@ -89,9 +92,25 @@ describe('program series', () => {
     expect(outcome.steps.at(-1)).toMatchObject({ step: 62, ok: false })
     expect(runCalls(calls)).toHaveLength(3)
     expect(stepCalls(calls)).toHaveLength(62)
-    const text = renderSeriesOutcome(outcome)
-    expect(text).toMatch(/Program stopped by an error: 20 of 38 rows done \(61 of 114 steps ran\)\./)
-    expect(text).toContain('62. browser_click FAILED: No element matches #row-23 button')
+    // Said plainly: how far it got, which row stopped it and why, what state that row is in, and what the user can do.
+    expect(renderSeriesOutcome(outcome).split('\n').slice(0, 3)).toEqual([
+      'Stopped after 20 of 38 rows. Row 21: it no longer looks like the rows you approved (was “Archive”, now “Delete”). Nothing was done to it.',
+      'Row 21 was left part-done (1 of 3 steps ran).',
+      'Nothing else was done. You can continue with the rows that are left; a new card will show them as the page is now.',
+    ])
+  })
+
+  it('does not call a row part-done when its first step is the one that stopped the run', async () => {
+    let seen = 0
+    const { bridge } = approving((name) => {
+      if (name === 'browser_snapshot') return ok('delta')
+      seen += 1
+      if (seen === 61) throw new BridgeToolError('action-failed', 'its element is gone or hidden. Nothing was done to it.')
+      return ok('ok')
+    })
+    const text = renderSeriesOutcome(await run(bridge, seriesSteps(38)))
+    expect(text).toMatch(/^Stopped after 20 of 38 rows\. Row 21: its element is gone or hidden\. Nothing was done to it\.\nNothing else was done\./)
+    expect(text).not.toMatch(/part-done/)
   })
 
   it('waits for each continuation before any of its steps: a paused agent holds the run between batches', async () => {
@@ -123,11 +142,11 @@ describe('program series', () => {
     })
     const stopped = await run(killed.bridge, seriesSteps(10))
     expect(stopped).toMatchObject({ stop: 'error', rows: { done: 8, total: 10, steps: 30 } })
-    expect(stopped.message).toMatch(/Stopped before step 25: The browser bridge closed/)
+    expect(stopped.message).toBe('The browser bridge closed')
     // The bridge is gone: no delta read, and no step of the second batch.
     expect(stopped.delta).toBeUndefined()
     expect(stepCalls(killed.calls)).toHaveLength(24)
-    expect(renderSeriesOutcome(stopped)).toMatch(/8 of 10 rows done \(24 of 30 steps ran\)/)
+    expect(renderSeriesOutcome(stopped)).toMatch(/^Stopped after 8 of 10 rows: The browser bridge closed\.\nNothing else was done\. You can continue/)
 
     batch = 0
     const refused = fakeBridge((name) => {
@@ -155,7 +174,8 @@ describe('program series', () => {
     const nothing = await run(denied.bridge, seriesSteps(10))
     expect(nothing).toMatchObject({ stop: 'not-approved', steps: [], rows: { done: 0, total: 10, steps: 30 } })
     expect(denied.calls).toHaveLength(1)
-    expect(renderSeriesOutcome(nothing)).toMatch(/^Program not run: The user denied/)
+    expect(renderSeriesOutcome(nothing)).toBe('Not run: The user denied the browser program..')
+    expect(renderSeriesOutcome(outcome)).toMatch(/^Stopped after 8 of 10 rows: the run was cancelled\./)
   })
 
   it('has one overall bound, and holds only whole repetitions of selector-targeted input', () => {
@@ -169,6 +189,19 @@ describe('program series', () => {
     expect(() => parseProgramSeries([{ tool: 'browser_click', args: { index: 4 } }], 1)).toThrow(/by selector/)
     expect(() => parseProgramSeries([{ tool: 'browser_click', args: { selector: '#a', index: 4 } }], 1)).toThrow(/by selector/)
     expect(() => parseProgramSeries([{ tool: 'browser_click', args: { selector: '#a' }, expect: { text: 'x' } }], 1)).toThrow(/expect/)
+    // Every step says what its element looks like (the extension shows, binds and re-checks it).
+    const target = { tag: 'button', role: 'button', name: 'Archive', row: 'Invoice 1042' }
+    expect(parseProgramSeries([{ tool: 'browser_click', args: { selector: '#a' }, target }], 1)).toEqual([{ tool: 'browser_click', args: { selector: '#a' }, target }])
+    expect(() => parseProgramSeries([{ tool: 'browser_click', args: { selector: '#a' } }], 1)).toThrow(/describe its element/)
+    expect(() => parseProgramSeries([{ tool: 'browser_click', args: { selector: '#a' }, target: { ...target, extra: 1 } }], 1)).toThrow(/describe its element/)
+    expect(() => parseProgramSeries([{ tool: 'browser_click', args: { selector: '#a' }, target: { ...target, name: 'x'.repeat(201) } }], 1)).toThrow(/describe its element/)
+    // Argument names the approval card and its hash could disagree on are refused, in a series and in any program.
+    const smuggled = JSON.parse('{"selector":"#a","__proto__":{"index":4}}') as Record<string, unknown>
+    expect(() => parseProgramSeries([{ tool: 'browser_click', args: smuggled, target }], 1)).toThrow(/__proto__/)
+    expect(() => parseProgram([{ tool: 'browser_click', args: smuggled }])).toThrow(/__proto__/)
+    expect(() => parseProgram([{ tool: 'browser_drag', args: { from: { constructor: 1 } } }])).toThrow(/__proto__/)
+    expect(hasUnsafeKey({ a: [{ b: { prototype: 1 } }] })).toBe(true)
+    expect(hasUnsafeKey({ a: [{ b: { proto: 1 } }], selector: '__proto__' })).toBe(false)
     // The model-facing tool keeps its own cap: it cannot start a series.
     expect(() => parseProgram(seriesSteps(9))).toThrow(/at most 25 steps/)
   })

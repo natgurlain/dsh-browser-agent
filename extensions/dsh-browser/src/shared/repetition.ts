@@ -43,6 +43,51 @@ export interface WatchEvent {
   /** Texts of the cells of the row the target sits in (for value sources). */
   cells?: string[]
   label?: string
+  /** Tag name (lowercase) and role of the target at event time. */
+  tag?: string
+  role?: string
+}
+
+/**
+ * What a step's element looks like. Recorded for every row when a long
+ * "do the remaining N" is offered, shown and bound on its approval card, and
+ * compared with the page again just before the step runs.
+ */
+export interface StepTarget {
+  tag: string
+  role: string
+  /** Accessible name. */
+  name: string
+  /** The row's identity: its first cell with words, else its first cell with text. */
+  row: string
+}
+
+const TARGET_FIELD_MAX = 200
+
+/** A well-formed {@link StepTarget}, or undefined. */
+export function parseStepTarget(value: unknown): StepTarget | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const raw = value as Record<string, unknown>
+  const keys = Object.keys(raw)
+  if (keys.length !== 4) return undefined
+  const field = (key: string): string | undefined => typeof raw[key] === 'string' && (raw[key] as string).length <= TARGET_FIELD_MAX ? raw[key] as string : undefined
+  const tag = field('tag')
+  const role = field('role')
+  const name = field('name')
+  const row = field('row')
+  return tag === undefined || tag === '' || role === undefined || name === undefined || row === undefined ? undefined : { tag, role, name, row }
+}
+
+/**
+ * An accessible name with what varies by row taken out: the row's own cell
+ * texts and any digits ("Email 3", "Invite Ada" → the same shape on every row).
+ */
+export function nameShape(name: string, cells: readonly string[] = []): string {
+  let shape = name
+  // The cell that holds the element itself reads the same as its name: that is the name, not the row's own text.
+  const own = cells.map((cell) => cell.trim()).filter((cell) => cell.length >= 2 && cell !== name.trim()).sort((a, b) => b.length - a.length)
+  for (const cell of own) shape = shape.split(cell).join('§')
+  return shape.replace(/\d+/gu, '#').replace(/\s+/gu, ' ').trim()
 }
 
 /** A selector with numeric slots that advance by `step` per repetition. */
@@ -60,6 +105,20 @@ export interface PatternStep {
   template: SelectorTemplate
   value: ValueSource
   label?: string
+  /**
+   * What the user's own targets had in common at this position (set only
+   * where every repetition agreed): a further row must look the same.
+   */
+  tag?: string
+  role?: string
+  shape?: string
+}
+
+/** Whether a further row's element looks like the ones the user acted on at this position. */
+export function looksLikeStep(step: PatternStep, target: StepTarget, cells: readonly string[]): boolean {
+  return (step.tag === undefined || step.tag === target.tag)
+    && (step.role === undefined || step.role === target.role)
+    && (step.shape === undefined || step.shape === nameShape(target.name, cells))
 }
 
 /** A detected repetition. */
@@ -75,6 +134,8 @@ export interface RepetitionPattern {
 export interface ProgramStep {
   tool: 'browser_click' | 'browser_type' | 'browser_select'
   args: Record<string, unknown>
+  /** Set on every step of a program longer than one `browser_run` (a series). */
+  target?: StepTarget
 }
 
 const NUMBER_SPLIT = /(\d+)/u
@@ -165,7 +226,15 @@ export function detectRepetition(events: readonly WatchEvent[]): RepetitionPatte
         const template = generalizeSelectors(column.map((event) => event.css))
         const value = valueSource(column)
         if (template === undefined || value === undefined) { ok = false; break }
-        steps.push({ kind: column[0]!.kind, template, value, ...(column[0]!.label === undefined ? {} : { label: column[0]!.label }) })
+        const agreed = <T>(values: Array<T | undefined>): T | undefined => values[0] !== undefined && values.every((entry) => entry === values[0]) ? values[0] : undefined
+        const tag = agreed(column.map((event) => event.tag))
+        const role = agreed(column.map((event) => event.role))
+        const shape = agreed(column.map((event) => event.label === undefined ? undefined : nameShape(event.label, event.cells)))
+        steps.push({
+          kind: column[0]!.kind, template, value,
+          ...(column[0]!.label === undefined ? {} : { label: column[0]!.label }),
+          ...(tag === undefined ? {} : { tag }), ...(role === undefined ? {} : { role }), ...(shape === undefined ? {} : { shape }),
+        })
       }
       // At least one position must move through rows, or nothing repeats over rows.
       if (ok && steps.some((step) => step.template.parts.some((part) => typeof part !== 'string'))) {
@@ -186,17 +255,20 @@ export function nextSelectors(pattern: RepetitionPattern, count: number): string
  * Build the program for the remaining rows.
  * @param pattern - detected pattern.
  * @param rows - for each remaining repetition (as probed), the cells of its row.
+ * @param targets - for a series: what each step's element looks like, per row.
  */
-export function buildProgram(pattern: RepetitionPattern, rows: ReadonlyArray<readonly string[]>): ProgramStep[] {
+export function buildProgram(pattern: RepetitionPattern, rows: ReadonlyArray<readonly string[]>, targets?: ReadonlyArray<readonly StepTarget[]>): ProgramStep[] {
   const program: ProgramStep[] = []
+  const push = (step: ProgramStep, target: StepTarget | undefined): void => { program.push(target === undefined ? step : { ...step, target }) }
   rows.forEach((cells, offset) => {
     const repetition = pattern.done + offset
-    for (const step of pattern.steps) {
+    for (const [position, step] of pattern.steps.entries()) {
+      const target = targets?.[offset]?.[position]
       const selector = instantiate(step.template, repetition)
       const value = step.value.kind === 'constant' ? step.value.value : step.value.kind === 'cell' ? (cells[step.value.cell] ?? '').trim() : undefined
-      if (step.kind === 'click') program.push({ tool: 'browser_click', args: { selector } })
-      else if (step.kind === 'type') program.push({ tool: 'browser_type', args: { selector, text: value ?? '', replace: true } })
-      else program.push({ tool: 'browser_select', args: { selector, value: value ?? '' } })
+      if (step.kind === 'click') push({ tool: 'browser_click', args: { selector } }, target)
+      else if (step.kind === 'type') push({ tool: 'browser_type', args: { selector, text: value ?? '', replace: true } }, target)
+      else push({ tool: 'browser_select', args: { selector, value: value ?? '' } }, target)
     }
   })
   return program

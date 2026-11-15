@@ -34,6 +34,10 @@ export interface PanelCopy {
     reveal: string
     hide: string
     pathsLabel: (count: number) => string
+    /** Heading of a program series' folded row list. */
+    rowsLabel: (count: number) => string
+    rowsFirst: string
+    rowsLast: string
     urlLabel: string
     queryParams: string
     fragmentLabel: string
@@ -357,6 +361,9 @@ export interface PanelCopy {
     done: string
     /** `steps`: the run's true total; `more`: rows are left beyond what one run does. */
     doRemaining: (remaining: number, steps?: number, more?: boolean) => string
+    /** A long run stopped part-way with `rows` rows left. */
+    stoppedEarly: (rows: number) => string
+    continueRemaining: (rows: number) => string
     proposedDriver: string
     parameters: string
     tokenSource: (kind: string, name: string) => string
@@ -514,6 +521,9 @@ const EN: PanelCopy = {
     reveal: 'Reveal',
     hide: 'Hide',
     pathsLabel: (count) => `Local files to attach (${count})`,
+    rowsLabel: (count) => `Show all ${count} rows (open a row for its exact steps)`,
+    rowsFirst: 'First row:',
+    rowsLast: 'Last row:',
     urlLabel: 'Full destination URL',
     queryParams: 'Decoded parameters',
     fragmentLabel: 'Fragment',
@@ -892,6 +902,8 @@ const EN: PanelCopy = {
       : steps !== undefined && steps > remaining
       ? `Do the remaining ${String(remaining)} like this (${String(steps)} steps)`
       : `Do the remaining ${String(remaining)} like this`,
+    stoppedEarly: (rows) => `The run stopped with ${String(rows)} rows left. Continuing looks at the page as it is now and asks you again.`,
+    continueRemaining: (rows) => `Continue with the ${String(rows)} rows left`,
     proposedDriver: 'Proposed site driver',
     parameters: 'Parameters',
     tokenSource: (kind, name) => `read from page ${kind} "${name}" each time (never stored)`,
@@ -1051,6 +1063,9 @@ const ZH: PanelCopy = {
     reveal: '显示',
     hide: '隐藏',
     pathsLabel: (count) => `将附加的本地文件（${count} 个）`,
+    rowsLabel: (count) => `显示全部 ${count} 行（展开某一行可查看具体步骤）`,
+    rowsFirst: '第一行：',
+    rowsLast: '最后一行：',
     urlLabel: '完整目标 URL',
     queryParams: '解码后的参数',
     fragmentLabel: '片段',
@@ -1429,6 +1444,8 @@ const ZH: PanelCopy = {
       : steps !== undefined && steps > remaining
       ? `按同样方式完成剩余 ${String(remaining)} 项（共 ${String(steps)} 步）`
       : `按同样方式完成剩余 ${String(remaining)} 项`,
+    stoppedEarly: (rows) => `运行已停止，还剩 ${String(rows)} 行。继续时会按页面当前的样子重新询问您。`,
+    continueRemaining: (rows) => `继续处理剩下的 ${String(rows)} 行`,
     proposedDriver: '建议的站点驱动',
     parameters: '参数',
     tokenSource: (kind, name) => `每次从页面 ${kind} "${name}" 读取（从不存储）`,

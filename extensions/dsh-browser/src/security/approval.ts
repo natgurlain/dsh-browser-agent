@@ -31,6 +31,12 @@ export type ApprovalDetail =
   | { kind: 'flags'; values: string[] }
   /** The call's verbatim arguments (JSON), when they decide what the call does. */
   | { kind: 'payload'; value: string }
+  /**
+   * The rows of a program series ("do the remaining N"): one line per row in
+   * a person's words (`label`), with that row's verbatim steps behind it
+   * (`payload`, JSON). The panel shows the count and folds the list.
+   */
+  | { kind: 'rows'; rows: Array<{ label: string; payload: string }> }
 
 /** A policy decision awaiting a user response. */
 export interface ApprovalPrompt {
@@ -70,6 +76,12 @@ export interface ApprovalPrompt {
    * The reasons are shown on the card as a text detail.
    */
   forced?: true
+  /**
+   * Answerable in the browser only: never forwarded to the Host's approval
+   * surface, and a notification can only open it for review. Set on a card
+   * whose content (the rows of a program series) only the panel can show.
+   */
+  browserOnly?: true
   /**
    * The external (MCP) client that asked, for a bridge-owned external
    * session: its self-reported name, sanitized by the bridge. Shown on the

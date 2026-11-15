@@ -25,7 +25,7 @@ import { roleOfElement, uniqueSelectorFor } from './find.ts'
 import type { ElementIds } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
 import { resolveActionTarget } from './actions.ts'
-import { MAX_FINISH_STEPS } from '../shared/repetition.ts'
+import { MAX_FINISH_STEPS, parseStepTarget, type StepTarget } from '../shared/repetition.ts'
 
 /** A recorded locator for one element. */
 export interface LocatorDescriptor {
@@ -175,7 +175,7 @@ export function setWatching(enabled: boolean): void {
     if (target instanceof HTMLInputElement && !['button', 'submit', 'checkbox', 'radio', 'reset'].includes(target.type)) return
     if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return
     const cells = rowCells(target)
-    sendWatchEvent({ kind: 'click', css: uniqueSelectorFor(target), label: clip(accessibleName(target), LABEL_MAX), ...(cells === undefined ? {} : { cells }) })
+    sendWatchEvent({ kind: 'click', css: uniqueSelectorFor(target), label: clip(accessibleName(target), LABEL_MAX), tag: target.tagName.toLowerCase(), role: roleOfElement(target), ...(cells === undefined ? {} : { cells }) })
   }
   const change = (event: Event): void => {
     if (!event.isTrusted || !(event.target instanceof Element)) return
@@ -189,6 +189,8 @@ export function setWatching(enabled: boolean): void {
       kind: target instanceof HTMLSelectElement ? 'select' : 'type',
       css: uniqueSelectorFor(target),
       label: clip(accessibleName(target), LABEL_MAX),
+      tag: target.tagName.toLowerCase(),
+      role: roleOfElement(target),
       ...(sensitive ? { sensitive: true } : { value: target.value.slice(0, 2_000) }),
       ...(cells === undefined ? {} : { cells }),
     })
@@ -198,24 +200,88 @@ export function setWatching(enabled: boolean): void {
   document.addEventListener('change', change, true)
 }
 
-/** For each next repetition, whether all its selectors resolve to exactly one element, plus its row cells. */
-export function probeRows(selectors: readonly (readonly string[])[]): string[][] {
+/**
+ * Whether the user can see the element: a hidden template row or a collapsed
+ * section is not a row to act on.
+ */
+function shown(el: Element): boolean {
+  const check = (el as Element & { checkVisibility?: (options?: Record<string, boolean>) => boolean }).checkVisibility
+  if (typeof check === 'function') return check.call(el, { visibilityProperty: true, checkVisibilityCSS: true })
+  // No layout engine (tests): the declared state of the element and its ancestors.
+  for (let node: Element | null = el; node !== null; node = node.parentElement) {
+    if (node.hasAttribute('hidden')) return false
+    const style = getComputedStyle(node)
+    if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false
+  }
+  return true
+}
+
+/**
+ * What an element looks like, for "do the remaining N": recorded when the
+ * offer is built, shown on the card, and compared again just before the step.
+ */
+export function stepTargetOf(el: Element): StepTarget {
+  const cells = (rowCells(el) ?? []).map((cell) => cell.trim()).filter((cell) => cell !== '')
+  return {
+    tag: el.tagName.toLowerCase(),
+    role: roleOfElement(el),
+    name: clip(accessibleName(el), LABEL_MAX),
+    // The row's identity: its first cell with words (a leading number or checkbox column says little), else its first cell with text.
+    row: cells.find((cell) => /\p{L}/u.test(cell)) ?? cells[0] ?? '',
+  }
+}
+
+/**
+ * For each next repetition whose selectors each resolve to exactly one
+ * visible element: its row cells and what each step's element looks like.
+ * Stops at the first repetition that does not.
+ */
+export function probeRowTargets(selectors: readonly (readonly string[])[]): { rows: string[][]; targets: StepTarget[][] } {
   const rows: string[][] = []
+  const targets: StepTarget[][] = []
   for (const set of selectors) {
     let cells: string[] | undefined
+    const row: StepTarget[] = []
     for (const selector of set) {
       let found: Element[]
       try {
         found = resolveSelectorAll(selector)
       } catch {
-        return rows
+        return { rows, targets }
       }
-      if (found.length !== 1) return rows
+      if (found.length !== 1 || !shown(found[0]!)) return { rows, targets }
       cells ??= rowCells(found[0]!) ?? []
+      row.push(stepTargetOf(found[0]!))
     }
     rows.push(cells ?? [])
+    targets.push(row)
   }
-  return rows
+  return { rows, targets }
+}
+
+/** The row cells of {@link probeRowTargets}. */
+export function probeRows(selectors: readonly (readonly string[])[]): string[][] {
+  return probeRowTargets(selectors).rows
+}
+
+/**
+ * Whether the element a step would act on still is what the approval card
+ * showed. Resolves the target exactly as the action does.
+ * Only what the card showed is compared (tag, role, accessible name, the
+ * row's identity): styling, a spinner, or changes elsewhere on the page do
+ * not matter.
+ * @returns the fields that differ (empty: it matches) and what the element is now; `missing` when nothing resolves or it is hidden.
+ */
+export function stepTargetDiffers(args: Record<string, unknown>, ids: ElementIds, expected: StepTarget): { differs: string[]; now?: StepTarget } {
+  let el: Element
+  try {
+    el = resolveActionTarget(args, ids)
+  } catch {
+    return { differs: ['missing'] }
+  }
+  if (!shown(el)) return { differs: ['missing'] }
+  const now = stepTargetOf(el)
+  return { differs: (['tag', 'role', 'name', 'row'] as const).filter((key) => now[key] !== expected[key]), now }
 }
 
 // ---- Site driver execution ----
@@ -281,7 +347,12 @@ export function handleLearningMessage(message: { type?: string } & Record<string
       return false
     case 'DSH_WATCH_PROBE': {
       const selectors = Array.isArray(message.selectors) ? message.selectors.filter((set): set is string[] => Array.isArray(set) && set.every((s) => typeof s === 'string')) : []
-      sendResponse({ ok: true, result: { rows: probeRows(selectors.slice(0, MAX_FINISH_STEPS + 1)) } })
+      sendResponse({ ok: true, result: probeRowTargets(selectors.slice(0, MAX_FINISH_STEPS + 1)) })
+      return false
+    }
+    case 'DSH_WATCH_CHECK': {
+      const expected = parseStepTarget(message.target)
+      sendResponse({ ok: true, result: expected === undefined ? { differs: ['missing'] } : stepTargetDiffers((message.args ?? {}) as Record<string, unknown>, ids, expected) })
       return false
     }
     case 'DSH_SITE_DRIVER_FETCH':

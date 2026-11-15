@@ -612,6 +612,30 @@ function ApprovalDetailView({ detail, copy }: { detail: ApprovalDetail; copy: Pa
           </ul>
         </div>
       )
+    case 'rows': {
+      // One line per row in plain words; the list is folded, each row's raw steps are folded again.
+      const first = detail.rows[0]
+      const last = detail.rows.at(-1)
+      return (
+        <div className="approval-payload">
+          {first !== undefined && <p className="approval-rows-sample">{copy.approval.rowsFirst} {revealInvisible(first.label)}</p>}
+          {last !== undefined && detail.rows.length > 1 && <p className="approval-rows-sample">{copy.approval.rowsLast} {revealInvisible(last.label)}</p>}
+          <details className="approval-rows">
+            <summary>{copy.approval.rowsLabel(detail.rows.length)}</summary>
+            <ol className="approval-rows-list">
+              {detail.rows.map((row, index) => (
+                <li key={index}>
+                  <details>
+                    <summary>{revealInvisible(row.label)}</summary>
+                    <pre className="approval-code"><code>{revealInvisible(row.payload)}</code></pre>
+                  </details>
+                </li>
+              ))}
+            </ol>
+          </details>
+        </div>
+      )
+    }
     case 'url':
       return (
         <div className="approval-payload">

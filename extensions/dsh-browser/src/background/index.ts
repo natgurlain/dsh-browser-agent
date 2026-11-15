@@ -105,7 +105,7 @@ import { HOLD_EXPIRED_MESSAGE, PauseGate, type PauseRequest } from './pause-gate
 import { capturePauseBaseline, prepareResume, type PauseBaseline, type ResumeFlowDeps } from './resume-flow.ts'
 import { AgentOverlayController } from './agent-overlay.ts'
 import { DialogController } from './dialogs.ts'
-import { approveProgram, coverByProgram, ProgramGrants } from './run-program.ts'
+import { approveProgram, coverByProgram, endsSeries, ProgramGrants } from './run-program.ts'
 import { PageWatcherRuntime } from './watcher-runtime.ts'
 import { chromeFleetDeps, FLEETS_STORAGE_KEY, FleetRegistry, type FleetDeps } from './fleet.ts'
 import {
@@ -1178,6 +1178,8 @@ async function engageKillSwitch(): Promise<void> {
   sessionTrustedActionOrigins.clear()
   devToolsGrants.clear()
   programGrants.clear()
+  // No series card may be raised for a run started before the switch, and its wait ends now.
+  learning.disarmSeries()
   // Fleet children lose their tab bindings; the tabs stay open for the user.
   void fleets.releaseAll(fleetDeps(AbortSignal.abort(), async () => 'denied'))
   // Standing watchers are standing grants: the kill switch revokes them too.
@@ -1346,6 +1348,8 @@ async function pauseAgent(request: PauseRequest): Promise<void> {
   pauseGate.pause(request)
   // Taking over hands the page to the user: their own writes are not the agent's.
   if (request === 'take-over') commitGateTurnEnded(undefined)
+  // ... and a "do the remaining N" series does not continue blind over whatever they change.
+  if (request === 'take-over') programGrants.onTakeOver()
   if (wasRunning) pauseBaseline = capturePauseBaseline(resumeFlowDeps())
 }
 
@@ -2645,7 +2649,12 @@ function routeToolCall(call: ToolCall): void {
   // browser_run: an approved program stands in for this step's ordinary card only (run-program.ts).
   // The step must run on the tab the program was approved on.
   const programTarget = tabAffinity.resolveTarget(call.sessionId)
-  const programCover = programGrants.claim(call, programTarget.kind === 'target' ? programTarget.tab.tabId : undefined)
+  const programTabId = programTarget.kind === 'target' ? programTarget.tab.tabId : undefined
+  const programCover = programGrants.claim(call, programTabId)
+  // Anything else that may change the page ends a "do the remaining N" series there: its rows are no longer what the card showed.
+  if (endsSeries(call)) programGrants.onForeignAction(call.sessionId, programTabId)
+  // A claimed step reports how it ended; only a step that was done lets its series go on.
+  let programStepDone = false
   // A fleet worker's cards show under its parent's session; its allowlist is enforced here too (fleet.ts).
   // Both are read once the persisted fleets are loaded, before any dispatch path runs.
   let approvalSession = call.sessionId
@@ -2751,7 +2760,7 @@ function routeToolCall(call: ToolCall): void {
         authorize: authorizeFor(call.sessionId),
         signal: controller.signal,
         // Only "Do the remaining N" runs longer than one program, and only as the extension built it.
-        allowSeries: (sessionId, steps) => learning.claimSeries(sessionId, steps),
+        allowSeries: (sessionId, steps, tabId, documentKey) => learning.claimSeries(sessionId, steps, tabId, documentKey),
         onContinued: () => { activeCall.decision = 'program-approved' },
       })
     : call.name === 'browser_open_tab'
@@ -2789,7 +2798,11 @@ function routeToolCall(call: ToolCall): void {
           controller.signal,
           noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url)),
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
-          { unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit, policy: learning.wrapPolicy(call, target, policy), overlay: agentOverlay },
+          {
+            unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit, policy: learning.wrapPolicy(call, target, policy), overlay: agentOverlay,
+            // A series step acts only on an element that still looks as its card showed it.
+            ...(programCover?.target === undefined ? {} : { expectTarget: programCover.target }),
+          },
         ))))
   )
   // Paused or taken over: the call waits here, before any tab resolution,
@@ -2825,6 +2838,11 @@ function routeToolCall(call: ToolCall): void {
         const socket = bridge
         if (socket === null) return
         recordAuditNote(call, activeCall, navigatedTo)
+        // Before the result leaves: the bridge sends the next step only after it.
+        if (programCover !== undefined && call.program !== undefined) {
+          programStepDone = true
+          programGrants.settle(call.program, true)
+        }
         socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
       } else {
         const socket = bridge
@@ -2857,6 +2875,8 @@ function routeToolCall(call: ToolCall): void {
       })
     },
   ).finally(() => {
+    // Failed, denied, cancelled, expired or never answered: a series step that was not done ends its series.
+    if (programCover !== undefined && call.program !== undefined && !programStepDone) programGrants.settle(call.program, false)
     if (expiryTimer !== undefined) clearTimeout(expiryTimer)
     unsettledToolCalls.delete(activeCall)
     activeCall.settle()
@@ -3883,6 +3903,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.webNavigation.onCommitted.addListener(({ tabId, frameId, url }) => {
   // Developer-tools grants end once their tab leaves the granted origin.
   if (frameId === 0) devToolsGrants.onTopFrameCommit(tabId, url)
+  // A "do the remaining N" series ends with the document it was approved on.
+  if (frameId === 0) programGrants.onTopFrameNavigation(tabId, url, false)
   cancelDevToolsCalls(tabId)
   broadcastSelections(selections.clearTab(tabId, frameId))
   // A new top-level document drops any modifier or button held by a trusted
@@ -4001,6 +4023,15 @@ if (import.meta.env.EXT_TARGET === 'firefox') {
 // runtimeRestored has read storage). This unconditional disarm runs before
 // either can: the restore path awaits storage first.
 disarmBridgeKeepalive()
+
+// A single-page app changes route without a new document: a "do the
+// remaining N" series ends when its tab's path changes (query and fragment
+// may change; the rows are checked one by one anyway).
+for (const event of [chrome.webNavigation.onHistoryStateUpdated, chrome.webNavigation.onReferenceFragmentUpdated] as Array<typeof chrome.webNavigation.onHistoryStateUpdated | undefined>) {
+  event?.addListener(({ tabId, frameId, url }) => {
+    if (frameId === 0) programGrants.onTopFrameNavigation(tabId, url, true)
+  })
+}
 
 // `settingsReady` intentionally has no bridge-start continuation: opening a
 // side panel is the first action allowed to claim the bridge connection.

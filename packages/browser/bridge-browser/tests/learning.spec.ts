@@ -602,10 +602,11 @@ describe('learning mount', () => {
   it('runs "Do the remaining 38" (3 steps per row) as batches under one card, and reports rows done when a row breaks', async () => {
     const root = tempDir()
     const { ctx } = fakeCtx(root)
+    const target = (row: number, tag: string, role: string, name: string) => ({ tag, role, name, row: `Person ${String(row + 3)}` })
     const rows = (count: number) => Array.from({ length: count }, (_unused, row) => [
-      { tool: 'browser_type', args: { selector: `#people > tr:nth-child(${String(row + 3)}) input`, text: `p${String(row)}`, replace: true } },
-      { tool: 'browser_click', args: { selector: `#people > tr:nth-child(${String(row + 3)}) .invite` } },
-      { tool: 'browser_click', args: { selector: `#people > tr:nth-child(${String(row + 3)}) .confirm` } },
+      { tool: 'browser_type', args: { selector: `#people > tr:nth-child(${String(row + 3)}) input`, text: `p${String(row)}`, replace: true }, target: target(row, 'input', 'textbox', 'Email') },
+      { tool: 'browser_click', args: { selector: `#people > tr:nth-child(${String(row + 3)}) .invite` }, target: target(row, 'button', 'button', 'Invite') },
+      { tool: 'browser_click', args: { selector: `#people > tr:nth-child(${String(row + 3)}) .confirm` }, target: target(row, 'button', 'button', 'Confirm') },
     ]).flat()
     let batch = 0
     let failAt: string | undefined
@@ -621,16 +622,20 @@ describe('learning mount', () => {
     // Longer than one browser_run: refused without the row size, and beyond the overall bound.
     expect(await rpc({ steps })).toMatchObject({ ok: false })
     expect(await rpc({ steps: rows(84), rowSteps: 3 })).toMatchObject({ ok: false, error: { message: expect.stringMatching(/at most 250 steps/) } })
+    // ... and without what each step's element looks like.
+    expect(await rpc({ steps: steps.map((step) => ({ tool: step.tool, args: step.args })), rowSteps: 3 })).toMatchObject({ ok: false, error: { message: expect.stringMatching(/describe its element/) } })
     expect(requestTool).not.toHaveBeenCalled()
 
     const done = await rpc({ sessionId: 's1', steps, rowSteps: 3 }) as { ok: true; result: { report: { status: string; rows: unknown; steps: unknown[] }; text: string } }
     expect(done).toMatchObject({ ok: true, result: { report: { status: 'completed', rows: { done: 38, total: 38, steps: 114 } } } })
-    expect(done.result.text).toMatch(/all 38 rows done \(114 steps\)/)
+    expect(done.result.text).toMatch(/^Done: all 38 rows \(114 steps\)\./)
     const runs = requestTool.mock.calls.filter(([name]) => name === 'browser_run')
     expect(runs).toHaveLength(5)
     // One card for all 114 steps; the other four calls continue it.
     const first = runs[0]![1] as { steps: unknown[]; series: { rowSteps: number; later: unknown[] } }
     expect(first.steps.length + first.series.later.length).toBe(114)
+    // The card's call carries every step with its element description, exactly as the extension sent them.
+    expect([...first.steps, ...first.series.later]).toEqual(steps)
     expect(runs.slice(1).every(([, args]) => (args as { continues?: string }).continues === 'program-0')).toBe(true)
     expect(requestTool.mock.calls.filter(([name]) => name === 'browser_type' || name === 'browser_click')).toHaveLength(114)
 
@@ -640,7 +645,7 @@ describe('learning mount', () => {
     const broken = await rpc({ sessionId: 's1', steps, rowSteps: 3 }) as { ok: true; result: { report: { status: string; stoppedAt: number }; text: string } }
     // Row 13 (nth-child 15) breaks at its second step: 12 rows done, nothing after it.
     expect(broken).toMatchObject({ ok: true, result: { report: { status: 'failed', stoppedAt: 37, rows: { done: 12, total: 38, steps: 114 } } } })
-    expect(broken.result.text).toMatch(/12 of 38 rows done \(37 of 114 steps ran\)/)
+    expect(broken.result.text).toMatch(/^Stopped after 12 of 38 rows\. Row 13: No element matches that selector\nRow 13 was left part-done \(1 of 3 steps ran\)\.\nNothing else was done\. You can continue with the rows that are left/)
     expect(requestTool.mock.calls.filter(([name]) => name === 'browser_run')).toHaveLength(2)
     mount.dispose()
   })
