@@ -30,7 +30,8 @@ $ManagedRoot = Join-Path $DshHomeDir 'dsh-browser'
 # Same marker filename as scripts/install.sh: one managed root, one definition of "managed".
 $ManagedMarker = Join-Path $ManagedRoot '.managed-by-install-sh'
 $ArchiveUrl = "https://github.com/$Repository/archive/refs/heads/$RemoteRef.zip"
-$LegacyPlugin = '@deepseek-ai/dsh-bridge-browser'
+# Earlier package names of this bridge (upstream and its origin); scripts/uninstall.mjs knows the same names.
+$LegacyPlugins = @('@deepseek-ai/dsh-bridge-browser', '@yuxianglin/dsh-bridge-browser')
 $BridgePlugin = '@natgurlain/dsh-bridge-browser'
 
 function Write-Step {
@@ -433,10 +434,12 @@ if (-not (Test-Path -LiteralPath $WebProfileManifest -PathType Leaf)) {
     -FailZh "初始化 web profile 失败。" -FailEn "Initializing the web profile failed."
 }
 
-if (Test-ProfileDependency -Manifest $WebProfileManifest -PackageName $LegacyPlugin) {
-  Invoke-Quiet -WorkingDirectory $WebProfileDir -Command 'pnpm' `
-    -Arguments @('remove', '-w', $LegacyPlugin) `
-    -FailZh "移除旧插件失败。" -FailEn "Removing the legacy plugin failed."
+foreach ($LegacyPlugin in $LegacyPlugins) {
+  if (Test-ProfileDependency -Manifest $WebProfileManifest -PackageName $LegacyPlugin) {
+    Invoke-Quiet -WorkingDirectory $WebProfileDir -Command 'pnpm' `
+      -Arguments @('remove', '-w', $LegacyPlugin) `
+      -FailZh "移除旧插件失败。" -FailEn "Removing the legacy plugin failed."
+  }
 }
 
 # A profile-local junction keeps the link spec free of absolute Windows paths.
@@ -465,7 +468,7 @@ Invoke-Quiet -WorkingDirectory $WebProfileDir -Command 'pnpm' `
 
 # The direct pnpm registration above bypasses dsh's bundle-roster update.
 $ProfileManifest = Get-Content -LiteralPath $WebProfileManifest -Raw -Encoding UTF8 | ConvertFrom-Json
-$Bundles = @($ProfileManifest.dsh.profile.bundles) | Where-Object { $_ -ne $LegacyPlugin }
+$Bundles = @(@($ProfileManifest.dsh.profile.bundles) | Where-Object { $LegacyPlugins -notcontains $_ })
 if ($Bundles -notcontains $BridgePlugin) { $Bundles += $BridgePlugin }
 $ProfileManifest.dsh.profile.bundles = $Bundles
 $ProfileJson = ($ProfileManifest | ConvertTo-Json -Depth 20) + "`n"
@@ -483,7 +486,8 @@ Confirm-Browser | Out-Null
 $DistDir = Join-Path $DshHomeDir 'browser-extension'
 $IsUpdate = Test-Path -LiteralPath (Join-Path $DistDir 'manifest.json') -PathType Leaf
 New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
-Sync-Directory -Source (Join-Path $Ext 'dist') -Destination $DistDir
+# bridge-token is not in dist: keep the existing copy so an ACL the user tightened survives.
+Sync-Directory -Source (Join-Path $Ext 'dist') -Destination $DistDir -ExcludeName @('bridge-token')
 
 $InstallMode = if (Test-Path -LiteralPath (Join-Path $Root '.managed-by-install-sh') -PathType Leaf) { 'managed' } else { 'checkout' }
 & node (Join-Path $Root 'scripts\write-install-info.mjs') `
