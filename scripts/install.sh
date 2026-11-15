@@ -15,6 +15,9 @@
 # clipboard.
 set -euo pipefail
 
+# Corepack would otherwise stop and ask before downloading the pinned pnpm.
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+
 DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
 MANAGED_ROOT="$DSH_HOME_DIR/dsh-browser"
 MANAGED_MARKER="$MANAGED_ROOT/.managed-by-install-sh"
@@ -309,8 +312,23 @@ fail_pair() {
 run_quiet() {
   local zh="$1" en="$2" log status=0
   shift 2
+  local watcher=""
   log="$(mktemp "${TMPDIR:-/tmp}/dsh-browser-install.XXXXXX")"
-  (cd "$ROOT" && "$@") >"$log" 2>&1 || status=$?
+  # A long step (the first dependency install downloads a few hundred MB) must
+  # not look like a hang: every 15 seconds show the latest line of its output.
+  (
+    waited=0
+    while sleep 15; do
+      waited=$((waited + 15))
+      printf '      ... %ss: %s\n' "$waited" "$(tail -n 1 "$log" 2>/dev/null | cut -c1-100)"
+    done
+  ) &
+  watcher=$!
+  # No terminal input: a hidden prompt (Corepack asking to download pnpm, for
+  # example) would otherwise wait forever on a question nobody can see.
+  (cd "$ROOT" && "$@") >"$log" 2>&1 </dev/null || status=$?
+  kill "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
   if [ "$status" -eq 0 ]; then
     rm -f "$log"
     return 0
