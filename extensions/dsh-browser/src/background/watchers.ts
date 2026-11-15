@@ -518,6 +518,12 @@ export interface WatchHitDeps {
    * it, so nothing is decided on state from before the wait.
    */
   connected?: () => Promise<void>
+  /**
+   * The tab's address as of now (undefined: the tab is gone or unreadable).
+   * Read after {@link connected}: the tab may have navigated during the wait,
+   * and the content script's report names the page it was sent from.
+   */
+  currentUrl?: (tabId: number) => Promise<string | undefined>
   changed: () => void
 }
 
@@ -540,14 +546,16 @@ export async function handleWatchHit(
   await deps.registry.ready
   const watchId = hit.watchId
   if (typeof watchId !== 'string') return { accepted: false, reason: 'bad-request' }
-  /** The watcher this hit may fire, as of now; or why not. */
+  /** Where the tab is: the reporting page, replaced by the tab's own address after a wait. */
+  let senderUrl = sender.url
+  /** The watcher this hit may fire, as of now (an expired or spent one is gone from the registry); or why not. */
   const admit = (): PageWatcher | HitOutcome => {
     const found = deps.registry.get(watchId)
     if (found === undefined) return { accepted: false, reason: 'unknown' }
     if (sender.tabId !== found.tabId || (sender.frameId !== undefined && sender.frameId !== 0)) return { accepted: false, reason: 'wrong-tab' }
     // A URL watcher reports from the background and may follow the tab to another site;
     // every other watcher fires only on the origin the user approved.
-    if (sender.urlWatcher === true ? found.condition.kind !== 'url' : (found.condition.kind === 'url' || httpOrigin(sender.url) !== found.origin)) {
+    if (sender.urlWatcher === true ? found.condition.kind !== 'url' : (found.condition.kind === 'url' || httpOrigin(senderUrl) !== found.origin)) {
       return { accepted: false, reason: 'other-origin' }
     }
     if (!deps.enabled()) return { accepted: false, reason: 'disabled' }
@@ -558,12 +566,19 @@ export async function handleWatchHit(
   if ('accepted' in watcher) return watcher
   if (deps.connected !== undefined) {
     await deps.connected().catch(() => {})
-    // The wait took time: the watcher may be gone, the setting off, the agent stopped.
+    // The wait took time: the watcher may be gone or expired, the setting off,
+    // the agent stopped, and the tab may show another page. Everything below
+    // (origin, site policy, the URL sent to the bridge) uses where the tab is now.
+    if (deps.currentUrl !== undefined) {
+      const current = await deps.currentUrl(watcher.tabId).catch(() => undefined)
+      if (current === undefined) return { accepted: false, reason: 'tab-gone' }
+      senderUrl = current
+    }
     watcher = admit()
     if ('accepted' in watcher) return watcher
   }
   // Site policy as of now, not as of approval: a blocked page suspends the watcher.
-  const pageUrl = sender.url ?? watcher.url
+  const pageUrl = senderUrl ?? watcher.url
   // A network watcher's match is a request URL, possibly to another (blocked) origin.
   const matchedHidden = watcher.condition.kind !== 'selector' && watcher.condition.kind !== 'text'
     && typeof hit.matched === 'string' && deps.pageHidden?.(hit.matched) === true

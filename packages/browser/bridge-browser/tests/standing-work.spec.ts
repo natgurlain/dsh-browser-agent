@@ -10,6 +10,7 @@ import {
   BRIDGE_STANDING_EVENT_METHOD,
   MAX_STANDING_SCHEDULES,
   STANDING_WORK_CAPS_VERSION,
+  BridgeFrameChannel,
   bridgeClientKey,
   computeBridgeProof,
   isStandingWork,
@@ -47,15 +48,17 @@ const standingEvents = (frames: readonly BridgeFrame[]): unknown[] => frames
   .map((frame) => frame.frame.payload)
 
 describe('standing-work validation', () => {
-  it('accepts only the exact shape', () => {
+  it('requires well-typed known keys and ignores keys it does not know', () => {
     expect(isStandingWork({ schedules: 0, mcp: false })).toBe(true)
     expect(isStandingWork({ schedules: 3, mcp: true })).toBe(true)
     expect(isStandingWork({ schedules: MAX_STANDING_SCHEDULES, mcp: false })).toBe(true)
     for (const bad of [
       undefined, null, 1, 'x', [], { schedules: 1 }, { mcp: true }, { schedules: -1, mcp: false }, { schedules: 1.5, mcp: false },
       { schedules: '1', mcp: false }, { schedules: 1, mcp: 1 }, { schedules: MAX_STANDING_SCHEDULES + 1, mcp: false },
-      { schedules: Number.NaN, mcp: false }, { schedules: 1, mcp: true, watchers: 9 },
+      { schedules: Number.NaN, mcp: false },
     ]) expect(isStandingWork(bad), JSON.stringify(bad)).toBe(false)
+    // A later bridge may add reasons: the extra key is not a reason to refuse.
+    expect(isStandingWork({ schedules: 1, mcp: true, watchers: 9 })).toBe(true)
   })
 
   it('drops a hello.ok or hello whose standing caps are malformed, and parses well-formed ones', () => {
@@ -65,8 +68,13 @@ describe('standing-work validation', () => {
     expect(parseBridgeFrame(ok({ standing: { schedules: 2, mcp: true } }))).toMatchObject({ caps: { standing: { schedules: 2, mcp: true } } })
     expect(parseBridgeFrame(ok({ standing: { schedules: 'many', mcp: true } }))).toBeUndefined()
     expect(parseBridgeFrame(ok({ standing: true }))).toBeUndefined()
-    expect(parseBridgeFrame(ok({ standingUpdates: 2 }))).toBeUndefined()
     expect(parseBridgeFrame(ok({ standingUpdates: STANDING_WORK_CAPS_VERSION }))).toBeDefined()
+    // Forward compatibility: a newer version or an extra key never drops the handshake frame.
+    expect(parseBridgeFrame(ok({ standingUpdates: 2 }))).toBeDefined()
+    expect(parseBridgeFrame(ok({ standing: { schedules: 2, mcp: true, jobs: 4 } }))).toBeDefined()
+    // Wrong types for known keys are still refused.
+    expect(parseBridgeFrame(ok({ standingUpdates: 'yes' }))).toBeUndefined()
+    expect(parseBridgeFrame(ok({ standingUpdates: 0 }))).toBeUndefined()
   })
 })
 
@@ -108,7 +116,54 @@ describe('standing work in hello.ok', () => {
 })
 
 describe('standing-work change events', () => {
-  it('tells a connected extension when its hint changes, sealed, and only then', async () => {
+  it('a client announcing a standingUpdates version this bridge does not know connects and is sent no events', async () => {
+    let work: StandingWork = { schedules: 0, mcp: false }
+    const h = await startTestBridge({ standingWork: () => work })
+    const future = await connectClient(h.url, identity('client-aaaa', { standingUpdates: 2 }))
+    expect(helloOk(future.frames).caps.standing).toEqual({ schedules: 0, mcp: false })
+    work = { schedules: 2, mcp: false }
+    h.bridge.notifyStandingWork()
+    await new Promise((resolve) => { setTimeout(resolve, 40) })
+    expect(standingEvents(future.frames)).toEqual([])
+  })
+
+  it('a plugin hint with an extra key is sent as the two known fields only', async () => {
+    const h = await startTestBridge({ standingWork: () => ({ schedules: 1, mcp: false, jobs: 3 }) as StandingWork })
+    const client = await connectClient(h.url, identity('client-aaaa'))
+    expect(helloOk(client.frames).caps.standing).toEqual({ schedules: 1, mcp: false })
+  })
+
+  it('sends the change event as a sealed frame whose MAC verifies with the connection keys, and a tampered copy does not', async () => {
+    let work: StandingWork = { schedules: 0, mcp: false }
+    const h = await startTestBridge({ standingWork: () => work })
+    const caps = identity('client-aaaa', { standingUpdates: STANDING_WORK_CAPS_VERSION })
+    const socket = await openSocket(h.url)
+    const raw: string[] = []
+    socket.ws.on('message', (data) => { raw.push(data.toString()) })
+    const clientNonce = await sendHello(socket.ws, TEST_TOKEN, caps)
+    await waitFor(() => socket.frames.some((frame) => frame.t === 'hello.ok'))
+    work = { schedules: 5, mcp: true }
+    h.bridge.notifyStandingWork()
+    await waitFor(() => standingEvents(socket.frames).length === 1)
+    const challenge = socket.frames.find((frame) => frame.t === 'challenge') as Extract<BridgeFrame, { t: 'challenge' }>
+    const sealed = raw.filter((text) => (JSON.parse(text) as { t?: string }).t === 'sealed')
+    // On the wire the event exists only inside a sealed envelope.
+    expect(raw.filter((text) => text.includes(BRIDGE_STANDING_EVENT_METHOD)).every((text) => sealed.includes(text))).toBe(true)
+    const carrier = sealed.findIndex((text) => text.includes(BRIDGE_STANDING_EVENT_METHOD))
+    expect(carrier).toBeGreaterThanOrEqual(0)
+    expect(JSON.parse(sealed[carrier]!)).toMatchObject({ t: 'sealed', seq: expect.any(Number), mac: expect.stringMatching(/^[0-9a-f]{64}$/u) })
+    // An independent channel derived from the handshake values accepts every frame in order...
+    const verifier = BridgeFrameChannel.derive(TEST_TOKEN, 'client', challenge.nonce, clientNonce, endpointOf(socket.ws))
+    const opened = sealed.slice(0, carrier + 1).map((text) => verifier.open(text))
+    expect(opened.at(-1)).toEqual({ t: 'event', frame: { rpcId: '', method: BRIDGE_STANDING_EVENT_METHOD, payload: { schedules: 5, mcp: true } } })
+    // ...and refuses the same frame with its payload altered.
+    const tamperer = BridgeFrameChannel.derive(TEST_TOKEN, 'client', challenge.nonce, clientNonce, endpointOf(socket.ws))
+    for (const text of sealed.slice(0, carrier)) expect(tamperer.open(text)).toBeDefined()
+    expect(tamperer.open(sealed[carrier]!.replace('\\"schedules\\":5', '\\"schedules\\":6'))).toBeUndefined()
+    expect(sealed[carrier]).toContain('\\"schedules\\":5')
+  })
+
+  it('tells a connected extension when its hint changes, and only then', async () => {
     let work: StandingWork = { schedules: 0, mcp: false }
     const h = await startTestBridge({ standingWork: () => work })
     const client = await connectClient(h.url, identity('client-aaaa', { standingUpdates: STANDING_WORK_CAPS_VERSION }))
@@ -120,7 +175,6 @@ describe('standing-work change events', () => {
     work = { schedules: 0, mcp: false }
     h.bridge.notifyStandingWork()
     await waitFor(() => standingEvents(client.frames).length === 2)
-    // The test client only records frames its channel could open: both arrived sealed.
     expect(standingEvents(client.frames)).toEqual([{ schedules: 1, mcp: false }, { schedules: 0, mcp: false }])
     await new Promise((resolve) => { setTimeout(resolve, 30) })
     expect(standingEvents(client.frames)).toHaveLength(2)

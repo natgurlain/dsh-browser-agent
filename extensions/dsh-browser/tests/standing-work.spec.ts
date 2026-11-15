@@ -11,7 +11,9 @@ import {
 } from '../src/background/runtime-lifecycle.ts'
 import {
   STANDING_HOST_MAX_AGE_MS,
+  hintAddressAllowed,
   hostHasStanding,
+  normalizeBridgeUrl,
   parseStoredStandingHost,
   standingCount,
   storedStandingHost,
@@ -180,6 +182,31 @@ describe('stored host hint', () => {
   })
 })
 
+describe('which address a stored hint may be honoured for', () => {
+  const loopback = (url: string): boolean => new URL(url).hostname === '127.0.0.1'
+  const allowed = (hint: string, configured: string, remembered?: string): boolean =>
+    hintAddressAllowed(hint, configured, remembered, loopback, '/ext/bridge')
+  const local = 'ws://127.0.0.1:3080/ext/bridge'
+
+  it('the configured address, exactly (a bare host matches its bridge path)', () => {
+    expect(allowed('wss://bridge.example/ext/bridge', 'wss://bridge.example/ext/bridge')).toBe(true)
+    expect(allowed('wss://bridge.example/ext/bridge', 'wss://bridge.example')).toBe(true)
+    expect(allowed('wss://bridge.example/ext/bridge', 'wss://other.example/ext/bridge')).toBe(false)
+    expect(allowed('ws://bridge.example/ext/bridge', 'wss://bridge.example/ext/bridge')).toBe(false)
+    expect(allowed('wss://bridge.example:444/ext/bridge', 'wss://bridge.example/ext/bridge')).toBe(false)
+    // A remembered address does not widen an explicit setting.
+    expect(allowed(local, 'wss://bridge.example/ext/bridge', local)).toBe(false)
+  })
+
+  it('with no configured address, only the remembered loopback address', () => {
+    expect(allowed(local, '', local)).toBe(true)
+    expect(allowed(local, '', undefined)).toBe(false)
+    expect(allowed(local, '', 'ws://127.0.0.1:3081/ext/bridge')).toBe(false)
+    expect(allowed('ws://attacker.example/ext/bridge', '', 'ws://attacker.example/ext/bridge')).toBe(false)
+    expect(normalizeBridgeUrl('not a url', '/ext/bridge')).toBe('not a url')
+  })
+})
+
 describe('panel status', () => {
   it('reads the standing summary and ignores an empty or malformed one', () => {
     expect(parseStandingStatus({ watchers: 2, schedules: 1, mcp: true })).toEqual({ watchers: 2, schedules: 1, mcp: true })
@@ -255,7 +282,7 @@ describe('a watcher hit while the bridge reconnects', () => {
     expect(fire).not.toHaveBeenCalled()
   })
 
-  it('re-checks everything after the wait: a kill switch, a turned-off setting or a cancelled watcher stops the fire', async () => {
+  it('re-checks the switch, the setting, the watcher and site policy after the wait', async () => {
     const paused = await hitSetup()
     paused.connected.mockImplementation(async () => { paused.state.blocked = true })
     expect(await handleWatchHit({ watchId: 'w-1' }, sender, paused.deps)).toEqual({ accepted: false, reason: 'paused' })
@@ -277,6 +304,46 @@ describe('a watcher hit while the bridge reconnects', () => {
     blockedSite.connected.mockImplementation(async () => { hidden = true })
     expect(await handleWatchHit({ watchId: 'w-1' }, sender, blockedSite.deps)).toEqual({ accepted: false, reason: 'blocked-site' })
     expect(blockedSite.fire).not.toHaveBeenCalled()
+  })
+
+  it('after the wait the tab is read again: another origin, a closed tab, or an expired watcher stops the fire', async () => {
+    const moved = await hitSetup({ currentUrl: vi.fn(async () => 'https://bank.example/account') })
+    expect(await handleWatchHit({ watchId: 'w-1', matched: 'In stock' }, sender, moved.deps)).toEqual({ accepted: false, reason: 'other-origin' })
+    expect(moved.fire).not.toHaveBeenCalled()
+
+    const closed = await hitSetup({ currentUrl: vi.fn(async () => undefined) })
+    expect(await handleWatchHit({ watchId: 'w-1' }, sender, closed.deps)).toEqual({ accepted: false, reason: 'tab-gone' })
+    expect(closed.fire).not.toHaveBeenCalled()
+
+    const unreadable = await hitSetup({ currentUrl: vi.fn(async () => { throw new Error('No tab with id 7') }) })
+    expect(await handleWatchHit({ watchId: 'w-1' }, sender, unreadable.deps)).toEqual({ accepted: false, reason: 'tab-gone' })
+    expect(unreadable.fire).not.toHaveBeenCalled()
+
+    // The watcher's lifetime ends during the wait.
+    let now = 1_000
+    const registry = new WatcherRegistry(memoryStorage(), () => now)
+    await registry.add({
+      id: 'w-1', sessionId: 's1', tabId: 7, origin: 'https://shop.example', url: PAGE,
+      condition: { kind: 'text', text: 'In stock', gone: false }, prompt: 'Buy one', createdAt: 0, expiresAt: 5_000, maxFires: 3, fires: 0,
+    })
+    const fire = vi.fn(async () => ({ woken: true }))
+    const expired = {
+      registry, enabled: () => true, blocked: () => false, shareContent: () => true, fire, changed: vi.fn(),
+      connected: async () => { now = 6_000 }, currentUrl: async () => PAGE,
+    }
+    expect(await handleWatchHit({ watchId: 'w-1' }, sender, expired)).toEqual({ accepted: false, reason: 'unknown' })
+    expect(fire).not.toHaveBeenCalled()
+  })
+
+  it('site policy and the reported URL use the tab\'s address after the wait', async () => {
+    const samePage = 'https://shop.example/item/42?step=2'
+    const hidden = await hitSetup({ currentUrl: async () => samePage, pageHidden: (url: string) => url === samePage })
+    expect(await handleWatchHit({ watchId: 'w-1' }, sender, hidden.deps)).toEqual({ accepted: false, reason: 'blocked-site' })
+    expect(hidden.fire).not.toHaveBeenCalled()
+
+    const fresh = await hitSetup({ currentUrl: async () => samePage })
+    expect(await handleWatchHit({ watchId: 'w-1' }, sender, fresh.deps)).toEqual({ accepted: true })
+    expect(fresh.fire).toHaveBeenCalledWith(expect.objectContaining({ url: samePage }))
   })
 
   it('a failing wait is not an error: the hit goes on to the usual outcome', async () => {

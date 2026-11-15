@@ -122,12 +122,15 @@ export interface StandingWork {
   mcp: boolean
 }
 
-/** Strict shape check for {@link StandingWork} (no extra keys). */
+/**
+ * Shape check for {@link StandingWork}. The known keys must be well-typed;
+ * keys this build does not know are ignored (a later bridge may add reasons),
+ * so readers copy `schedules` and `mcp` and nothing else.
+ */
 export function isStandingWork(value: unknown): value is StandingWork {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const work = value as Record<string, unknown>
-  return Object.keys(work).length === 2
-    && typeof work.schedules === 'number' && Number.isSafeInteger(work.schedules)
+  return typeof work.schedules === 'number' && Number.isSafeInteger(work.schedules)
     && work.schedules >= 0 && work.schedules <= MAX_STANDING_SCHEDULES
     && typeof work.mcp === 'boolean'
 }
@@ -711,9 +714,11 @@ export interface BridgeCaps {
   standing?: StandingWork
   /**
    * Client only: the extension handles {@link BRIDGE_STANDING_EVENT_METHOD}
-   * events. Absent on older extensions, which are never sent one.
+   * events at this wire version ({@link STANDING_WORK_CAPS_VERSION}). Absent
+   * on older extensions; a version this bridge does not know is treated as
+   * absent too (no events), never as a reason to refuse the handshake.
    */
-  standingUpdates?: typeof STANDING_WORK_CAPS_VERSION
+  standingUpdates?: number
 }
 
 /** Per-install identity a client advertises in `hello` caps. */
@@ -988,7 +993,8 @@ function isCaps(value: unknown): value is BridgeCaps {
     && (caps.client === undefined || isBridgeClientIdentity(caps.client))
     && (caps.hostApprovals === undefined || caps.hostApprovals === HOST_APPROVALS_CAPS_VERSION)
     && (caps.standing === undefined || isStandingWork(caps.standing))
-    && (caps.standingUpdates === undefined || caps.standingUpdates === STANDING_WORK_CAPS_VERSION)
+    // Any version is a valid claim; only the known one is acted on.
+    && (caps.standingUpdates === undefined || (typeof caps.standingUpdates === 'number' && Number.isSafeInteger(caps.standingUpdates) && caps.standingUpdates > 0))
 }
 
 /** Validate the optional developer-tools capability; unknown versions are unusable. */

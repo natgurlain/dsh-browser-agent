@@ -135,6 +135,8 @@ export class BridgeClient {
   private channel: BridgeFrameChannel | undefined
   /** Why the most recent attempt was refused; cleared by a successful connection. */
   failure: BridgeFailure | undefined
+  /** The bridge handed this install's slot to another connection (close code 4000); cleared by `start`. */
+  replaced = false
 
   constructor(
     readonly sinks: BridgeSinks,
@@ -164,10 +166,12 @@ export class BridgeClient {
    *   provisioned `bridge-token` file, re-read on every attempt.
    */
   start(url: string, token: string): void {
+    // A new start is a new verdict: the stop below must not report the old one.
+    this.failure = undefined
+    this.replaced = false
     this.stop()
     this.url = url
     this.token = token
-    this.failure = undefined
     this.running = true
     this.attempt = 0
     this.generation += 1
@@ -271,6 +275,7 @@ export class BridgeClient {
         if (failure !== undefined && this.ws === socket) this.failure = failure
         if (event.code !== BRIDGE_CLOSE_CODES.replaced || this.ws !== socket || !this.running) return
         this.running = false
+        this.replaced = true
         this.clearAckTimer()
         this.ws = null
         this.emitState('stopped')
