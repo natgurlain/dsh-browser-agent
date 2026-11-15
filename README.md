@@ -13,7 +13,7 @@ Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to t
 Pages become structured text with a numbered inventory of interactive elements. Tools address elements by number or selector; `browser_screenshot` captures the controlled tab's viewport after approval. The side panel also accepts PNG, JPEG, WebP, and GIF attachments when the host advertises image support.
 
 > [!IMPORTANT]
-> The workspace is pinned to DSH 0.2.2-rc.2.
+> The bridge supports DSH 0.2.2-rc.1 through 0.2.2-rc.3 (tested; see [docs/dsh-matrix.md](docs/dsh-matrix.md)). The workspace installs 0.2.2-rc.2 by default. On 0.2.2-rc.1, the release the desktop app ships, Continue after a failed turn and the wait for worktree cleanup on delete are unavailable.
 
 ## Quick install
 
@@ -199,7 +199,7 @@ Start the managed installation with:
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
-From a source checkout, run `pnpm start` in the repository root. The exact supported public runtime is:
+From a source checkout, run `pnpm start` in the repository root. The default tested public runtime is:
 
 ```sh
 npx @deepseek-ai/dsh@0.2.2-rc.2 web
@@ -253,7 +253,7 @@ pnpm --filter dsh-browser-extension run test
 Notes:
 
 - The bridge plugin must have a built `lib/` before startup because the loader consumes it; both `scripts/install.sh` and the root `pnpm run build` build the plugin before the extension.
-- The dependencies of `@deepseek-ai/dsh` and the bridge plugin are pinned to the same tested public release line. An upgrade must update the manifests and lockfile together and rerun the root checks.
+- The workspace installs one exact DSH release (the root `package.json`, the bridge's devDependencies and the lockfile agree on it). The bridge's `engines.dsh` and DSH peer ranges are wider and cover the releases that passed the compatibility matrix below. Changing the default release must update the manifests and lockfile together and rerun the root checks.
 
 `check:runtime` checks the resolved DSH dependencies and lockfile; `test:smoke` starts the real web host in a temporary DSH home and verifies the bridge and session reads after a restart, without model credentials.
 
@@ -286,6 +286,22 @@ It runs the steps below one after another, keeps going after a failure, prints a
 | `smoke-uninstall-ui` | `pnpm test:uninstall:ui` | yes |
 
 `.github/workflows/ci.yml` runs `pnpm gate` and nothing else, so it cannot drift from the local command; `uninstall.yml` adds `pnpm test:scripts` on macOS and Windows. Both are untested until Actions is available.
+
+### DSH compatibility matrix
+
+The gate runs against the default DSH release only. Other releases are checked by a separate command, because it installs each release from the npm registry into a temporary copy of the repository and takes a few minutes per release, so it is neither fast nor usable offline:
+
+```sh
+node scripts/dsh-matrix.mjs tested latest next --record   # the tested releases plus two dist-tags; refreshes docs/dsh-matrix.md
+node scripts/dsh-matrix.mjs 0.2.2-rc.4 --record           # one release
+node scripts/dsh-matrix.mjs 0.2.1-rc.5 --probe-outside-range   # a release engines.dsh excludes: measure the code, not the host's refusal
+```
+
+Each row runs install, `check:runtime`, typecheck, the bridge, extension and MCP unit tests, the bridge build and the runtime smoke; per-step logs go to `.artifacts/dsh-matrix/<version>/`. `--record` writes one row per release to [docs/dsh-matrix.md](docs/dsh-matrix.md), which also explains what is supported and why. The offline part is in the gate: `test-scripts` fails when the releases listed as tested (`TESTED_DSH_VERSIONS` in `packages/browser/bridge-browser/src/dsh-support.ts`) have no all-pass row in that record, or when `engines.dsh`, the peer ranges, the default release and the printed `npx @deepseek-ai/dsh@<version> web` hints disagree.
+
+To run the runtime smoke with a DSH installed somewhere else against this checkout's bridge (the layout of a linked checkout loaded by the desktop app or a global install), set `DSH_SMOKE_CLI` to that install's `lib/bin.js`: `DSH_SMOKE_CLI=<dir>/node_modules/@deepseek-ai/dsh/lib/bin.js pnpm test:smoke`.
+
+On a DSH release outside the tested list the bridge still loads if `engines.dsh` admits it, and logs a warning naming the tested releases and the command that starts one. Outside `engines.dsh`, DSH itself refuses the plugin with `Plugin @natgurlain/dsh-bridge-browser@<version> is incompatible with dsh <version>: requirements {"engines.dsh":"^0.2.2-rc.1"}`.
 
 What each phase gate rests on (the roadmap is not in this repository; the phases are the ones the tests name):
 

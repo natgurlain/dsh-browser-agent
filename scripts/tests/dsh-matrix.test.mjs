@@ -125,16 +125,17 @@ test('recordRow: cells for passed, failed, skipped and not-run steps, and the no
     { name: 'typecheck', ok: false, note: 'exit 1', seconds: 5, error: 'src/a.ts(1,2): error TS2339: no | pipe' },
     { name: 'bridge unit tests', ok: true, note: '', seconds: 8, tests: { passed: 604, failed: 0, skipped: 2 } },
     { name: 'extension unit tests', ok: false, note: 'exit 1', seconds: 8, tests: { passed: 10, failed: 3, skipped: 0 }, error: 'AssertionError: nope' },
+    { name: 'mcp shim tests', ok: false, note: 'exit 1', seconds: 1, tests: { passed: 16, failed: 0, skipped: 0 }, error: 'Error: Cannot find package x' },
     { name: 'smoke-runtime', ok: false, skipped: true, note: 'skipped (bridge build failed)', seconds: 0 },
   ]
   const cells = row('0.2.2-rc.1', { labels: ['latest'], inRange: false, probed: true, dropped: ['@deepseek-ai/dsh-error'], results })
   assert.deepEqual(cells.slice(0, 5), ['0.2.2-rc.1', 'latest', '2026-11-15 20:00', 'abc1234', 'no'])
   assert.deepEqual(cells.slice(5, 13), [
-    'pass', 'not run', 'FAIL (exit 1)', 'pass (604 passed, 2 skipped)', 'FAIL (3 failed, 10 passed)', 'not run', 'not run', 'skipped',
+    'pass', 'not run', 'FAIL (exit 1)', 'pass (604 passed, 2 skipped)', 'FAIL (3 failed, 10 passed)', 'FAIL (exit 1; 16 passed)', 'not run', 'skipped',
   ])
   assert.equal(cells[13], 'not published at 0.2.2-rc.1, removed from the copy: `@deepseek-ai/dsh-error`; '
     + 'outside the declared `engines.dsh` (`^0.2.2-rc.2`): probed with it rewritten to `0.2.2-rc.1` in the copy; '
-    + 'typecheck: src/a.ts(1,2): error TS2339: no \\| pipe; extension unit tests: AssertionError: nope')
+    + 'typecheck: src/a.ts(1,2): error TS2339: no \\| pipe; extension unit tests: AssertionError: nope; mcp shim tests: Error: Cannot find package x')
 })
 
 test('recordRow notes what a passing step said it did not exercise', () => {
@@ -164,4 +165,39 @@ test('the pin row (no install step) counts as passed; a skipped step does not', 
   const skipped = passing.map(result => result.name === 'smoke-runtime' ? { ...result, ok: false, skipped: true } : result)
   const text = updateRecord(`${RECORD_BEGIN}\n${RECORD_END}\n`, [row('0.2.2-rc.2', { results: pin }), row('0.2.2-rc.3', { results: skipped })])
   assert.deepEqual(passedVersions(text), ['0.2.2-rc.2'])
+})
+
+// The declared support, the recorded evidence and the printed hints must agree.
+test('supported DSH releases match the recorded matrix, the manifests and the printed hints', () => {
+  const support = read('packages/browser/bridge-browser/src/dsh-support.ts')
+  const constant = name => new RegExp(`export const ${name}(?:: [^=]+)? = (.+)`, 'u').exec(support)?.[1]
+  const defaultVersion = /'([^']+)'/u.exec(constant('DSH_DEFAULT_VERSION'))[1]
+  const tested = [...constant('TESTED_DSH_VERSIONS').matchAll(/'([^']+)'/gu)].map(match => match[1])
+  const range = /'([^']+)'/u.exec(constant('SUPPORTED_DSH_RANGE'))[1]
+  const peerRange = /'([^']+)'/u.exec(constant('DSH_PEER_RANGE'))?.[1] ?? range // declared as the engines range itself
+
+  const rootManifest = JSON.parse(read('package.json'))
+  const bridge = JSON.parse(read('packages/browser/bridge-browser/package.json'))
+  const dshOnly = map => Object.entries(map).filter(([name]) => /^@deepseek-ai\/dsh(?:-|$)/u.test(name))
+  for (const [name, version] of [...dshOnly(rootManifest.dependencies), ...dshOnly(bridge.devDependencies)]) {
+    assert.equal(version, defaultVersion, `${name}: the lockfile default is one exact release`)
+  }
+  assert.equal(bridge.engines.dsh, range)
+  for (const [name, declared] of dshOnly(bridge.peerDependencies)) assert.equal(declared, peerRange, name)
+
+  const passed = passedVersions(read(DEFAULT_RECORD))
+  assert.ok(tested.includes(defaultVersion), 'the default release is a tested one')
+  for (const version of tested) {
+    assert.ok(passed.includes(version), `${version} is listed as tested but ${DEFAULT_RECORD} has no all-pass row for it`)
+    assert.ok(inDeclaredRange(version, range), `engines.dsh ${range} excludes tested ${version}`)
+    assert.ok(inDeclaredRange(version, peerRange), `the peer range ${peerRange} excludes tested ${version}`)
+  }
+
+  const hint = `npx @deepseek-ai/dsh@${defaultVersion} web`
+  for (const path of ['scripts/install.sh', 'scripts/install.ps1', 'README.md', 'README.zh.md', 'packages/browser/bridge-browser/cordis.patch.yml']) {
+    const text = read(path)
+    const versions = [...text.matchAll(/npx @deepseek-ai\/dsh@(\d\S*) web/gu)].map(match => match[1])
+    assert.ok(versions.length > 0, `${path}: no "${hint}" hint`)
+    assert.deepEqual([...new Set(versions)], [defaultVersion], `${path}: every start hint names the default release`)
+  }
 })

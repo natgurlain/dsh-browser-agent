@@ -10,6 +10,8 @@
  * (unless the user granted `dsh plugin allow-version`), so the bridge normally
  * only loads inside `SUPPORTED_DSH_RANGE`. Inside that range but outside the
  * tested list (a newer release candidate, say) the bridge loads and warns.
+ * Host APIs that differ between tested releases are handled where they are
+ * used: session-purge.ts (archive cleanup) and subagent-compat.ts.
  *
  * @module
  */

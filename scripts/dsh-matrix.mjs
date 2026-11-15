@@ -270,7 +270,9 @@ function stepCell(result) {
   if (result.skipped) return 'skipped'
   const tests = result.tests
   if (result.ok) return tests === undefined ? 'pass' : `pass (${tests.passed} passed${tests.skipped > 0 ? `, ${tests.skipped} skipped` : ''})`
-  return tests === undefined ? `FAIL (${result.note})` : `FAIL (${tests.failed} failed, ${tests.passed} passed)`
+  if (tests === undefined) return `FAIL (${result.note})`
+  // No failed test and a failing exit means a file did not load at all.
+  return tests.failed > 0 ? `FAIL (${tests.failed} failed, ${tests.passed} passed)` : `FAIL (${result.note}; ${tests.passed} passed)`
 }
 
 /** One record row (an array of cells, in RECORD_HEADER order) for a finished matrix row. */
@@ -425,7 +427,7 @@ async function runRow(row, options, pinned) {
     results.push({
       name, ok, note: outcome.note, seconds: outcome.seconds,
       tests: /tests$/u.test(name) ? parseTestCounts(outcome.output) : undefined,
-      error: ok ? '' : firstErrorLine(outcome.output),
+      error: ok ? '' : firstErrorLine(outcome.output.replaceAll(cwd, '.')),
       // A step that passed while saying it left something out, e.g. the smoke on a host without a feature.
       caveat: ok ? /\(([^()\n]*NOT exercised)\)/u.exec(outcome.output)?.[1] : undefined,
     })
@@ -447,7 +449,8 @@ async function runRow(row, options, pinned) {
 function commitLabel() {
   try {
     const sha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: root }).toString('utf8').trim()
-    const dirty = execFileSync('git', ['status', '--porcelain'], { cwd: root }).toString('utf8').trim() !== ''
+    // The record this run writes does not make the tested code dirty.
+    const dirty = execFileSync('git', ['status', '--porcelain', '--', '.', `:(exclude)${DEFAULT_RECORD}`], { cwd: root }).toString('utf8').trim() !== ''
     return dirty ? `${sha}+dirty` : sha
   } catch {
     return 'unknown'
