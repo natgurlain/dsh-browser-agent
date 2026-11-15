@@ -30,6 +30,7 @@ import { parseScheduleTiming, WorkflowSchedules, type ScheduleServiceLike } from
 import { parseSiteDrivers, siteDriverToolName, type SiteDriverSummary } from './site-drivers.ts'
 import { listWorkflows, loadWorkflow, registerWorkflowSkills, saveWorkflow, workspaceRootOf, type SkillsServiceLike } from './store.ts'
 import { WorkflowError } from './workflow.ts'
+import { errorMessage, isRecord } from '../host-api.ts'
 
 /** Extension → bridge learning RPC methods. */
 export const LEARNING_METHODS = {
@@ -93,12 +94,8 @@ export interface LearningMount {
   dispose: () => void
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 function errorAnswer(code: string, error: unknown): LearningRpcAnswer {
-  return { ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } }
+  return { ok: false, error: { code, message: errorMessage(error) } }
 }
 
 /** Build a step caller bound to one session (undefined: agentless). */
@@ -116,7 +113,7 @@ export function bridgeStepCall(bridge: Pick<BridgeServer, 'requestTool'>, toolTi
       return {
         ok: false,
         code: error instanceof BridgeToolError ? error.code : 'internal',
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
       }
     }
   }
@@ -235,7 +232,7 @@ export function mountLearning(
         const a = args as { name: string; params?: Record<string, unknown>; fromStep?: number }
         requireWorkflowsOn(exec, 'browser_workflow_run', a.name)
         const workflow = await loadWorkflow(rootOf(exec), a.name).catch((error: unknown) => {
-          throw new WorkflowError(`workflow "${a.name}" could not be loaded: ${error instanceof Error ? error.message : String(error)}`)
+          throw new WorkflowError(`workflow "${a.name}" could not be loaded: ${errorMessage(error)}`)
         })
         const report = await executorFor(execCall(exec)).runWorkflow(workflow, a.params ?? {}, {
           signal: exec.signal,
@@ -271,7 +268,7 @@ export function mountLearning(
         try {
           skills = registerWorkflowSkills(service)
         } catch (error: unknown) {
-          ctx.logger.warn(`browser bridge: workflow skills unavailable: ${error instanceof Error ? error.message : String(error)}`)
+          ctx.logger.warn(`browser bridge: workflow skills unavailable: ${errorMessage(error)}`)
         }
       }
     } else if (!workflowsOn && workflowDisposers !== undefined) {
@@ -313,7 +310,7 @@ export function mountLearning(
       await refreshScheduleCount()
       if (revoked > 0 || failed > 0) ctx.logger.info(`browser bridge: ${why}; revoked ${String(revoked)} workflow schedule(s)${failed > 0 ? `, ${String(failed)} could not be deleted` : ''}`)
     } catch (error: unknown) {
-      ctx.logger.warn(`browser bridge: could not revoke workflow schedules: ${error instanceof Error ? error.message : String(error)}`)
+      ctx.logger.warn(`browser bridge: could not revoke workflow schedules: ${errorMessage(error)}`)
     }
   }
 
@@ -424,7 +421,7 @@ export function mountLearning(
         await refreshScheduleCount()
         if (revoked > 0 || failed > 0) ctx.logger.info(`browser bridge: session ${sessionId} was purged; revoked ${String(revoked)} workflow schedule(s)${failed > 0 ? `, ${String(failed)} could not be deleted` : ''}`)
       } catch (error: unknown) {
-        ctx.logger.warn(`browser bridge: could not revoke the purged session's workflow schedules: ${error instanceof Error ? error.message : String(error)}`)
+        ctx.logger.warn(`browser bridge: could not revoke the purged session's workflow schedules: ${errorMessage(error)}`)
       }
     },
     dispose: () => {

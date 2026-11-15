@@ -9,6 +9,7 @@
 
 import type { AuditAnnotation, BridgeAuditObserver } from './audit-log.ts'
 import { BRIDGE_AUDIT_EXPORT_METHOD, BRIDGE_AUDIT_RECORD_METHOD } from './protocol.ts'
+import { errorMessage, isRecord } from './host-api.ts'
 
 /** What the server hands the audit RPC handler. */
 export interface AuditRpcContext {
@@ -29,10 +30,6 @@ export type AuditRpcAnswer =
   | { ok: false; error: { code: string; message: string } }
 
 const ANNOTATION_STRINGS = ['decision', 'url', 'navigatedTo', 'policy', 'policyReason', 'strict'] as const
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 /**
  * Handle one audit RPC.
@@ -89,7 +86,7 @@ async function exportLog(payload: unknown, context: AuditRpcContext): Promise<Au
   try {
     return { ok: true, result: await context.exportAudit(sessionId) }
   } catch (error: unknown) {
-    return { ok: false, error: { code: 'internal', message: error instanceof Error ? error.message : String(error) } }
+    return { ok: false, error: { code: 'internal', message: errorMessage(error) } }
   }
 }
 

@@ -15,6 +15,7 @@
 
 import { maskAuditArgs, redactAuditUrl } from '../audit-log.ts'
 import { writeWorkspaceFile, type WorkspaceWriteTarget } from '../workspace-write.ts'
+import { isRecord } from '../host-api.ts'
 
 /** Workspace directory fixtures land in. */
 export const FIXTURE_DIRECTORY = 'browser-fixtures'
@@ -51,10 +52,6 @@ export interface FixtureMeta {
   /** The action that failed, with secrets masked like the audit log. */
   intended: { tool: string; args: Record<string, unknown> }
   error: { code: string; message: string }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** Validate an untrusted fixture payload from the extension. */

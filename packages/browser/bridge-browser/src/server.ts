@@ -96,6 +96,7 @@ import { SessionPurgeError } from './session-purge.ts'
 import type { BridgeAuditObserver } from './audit-log.ts'
 import { handleAuditRpc } from './audit-rpc.ts'
 import { verifyToken } from './token.ts'
+import { errorMessage } from './host-api.ts'
 
 /**
  * Gateway methods the /api carrier pins to loopback (mirror of
@@ -924,7 +925,7 @@ export class BridgeServer {
     })
     const internal = audited ?? this.deps.extraRpc?.(frame.method, frame.payload, { connection: conn.key, signal: conn.abort.signal })
     if (internal !== undefined) {
-      const answer = await internal.catch((error: unknown) => ({ ok: false as const, error: { code: 'internal', message: error instanceof Error ? error.message : String(error) } }))
+      const answer = await internal.catch((error: unknown) => ({ ok: false as const, error: { code: 'internal', message: errorMessage(error) } }))
       sendFrame(conn, answer.ok
         ? { t: 'rpc.result', id: frame.id, ok: true, result: { type: 'server-response', rpcId: frame.id, result: { ok: true, value: answer.result } } }
         : { t: 'rpc.result', id: frame.id, ok: false, error: answer.error })
@@ -994,7 +995,7 @@ export class BridgeServer {
         sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { purged: true } })
       } catch (error: unknown) {
         const code = error instanceof SessionPurgeError ? error.code : 'internal'
-        const message = error instanceof Error ? error.message : String(error)
+        const message = errorMessage(error)
         sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: false, error: { code, message } })
       }
       return

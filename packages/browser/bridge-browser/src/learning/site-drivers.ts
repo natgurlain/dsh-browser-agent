@@ -17,6 +17,8 @@
  * @module @natgurlain/dsh-bridge-browser/src/learning/site-drivers
  */
 
+import { isRecord } from '../host-api.ts'
+
 /** Format marker of a saved driver. */
 export const SITE_DRIVER_FORMAT = 'dsh-site-driver/v1'
 
@@ -115,10 +117,6 @@ export class SiteDriverError extends Error {
 const IDENT = /^[a-z][a-z0-9_]{0,39}$/u
 const PARAM = /^[A-Za-z_][A-Za-z0-9_]{0,39}$/u
 const PLACEHOLDER = /\{\{\s*(@(?:cookie|meta):[^}\s]{1,100}|[A-Za-z_][A-Za-z0-9_]*)\s*\}\}/gu
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 function originOf(url: string): string | undefined {
   try {

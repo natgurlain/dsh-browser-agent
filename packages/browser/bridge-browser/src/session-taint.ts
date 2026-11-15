@@ -121,7 +121,7 @@ export function workspaceReadDenial(name: string, args: unknown, workspace: stri
   const deny = (why: string): string => `Tool "${name}" is limited to this session's workspace while the session holds untrusted web page content (${why}). `
     + 'The user can lift the restriction with "Clear" on the untrusted-content banner in the browser panel. Do not retry outside the workspace.'
   if (workspace === undefined || !isAbsolute(workspace)) return deny('the session has no workspace directory')
-  const record = typeof args === 'object' && args !== null && !Array.isArray(args) ? args as Record<string, unknown> : {}
+  const record = isRecord(args) ? args : {}
   const pattern = record.pattern
   if (name === 'glob' && typeof pattern === 'string'
     && (isAbsolute(pattern) || pattern.startsWith('~') || /(?:^|[\\/])\.\.(?:[\\/]|$)/u.test(pattern))) {

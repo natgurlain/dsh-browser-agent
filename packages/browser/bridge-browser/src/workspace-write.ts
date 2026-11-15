@@ -41,6 +41,7 @@ import { randomUUID } from 'node:crypto'
 import { constants, existsSync } from 'node:fs'
 import { link, lstat, mkdir, open, readlink, realpath, unlink, type FileHandle } from 'node:fs/promises'
 import { extname, isAbsolute, join, relative, sep } from 'node:path'
+import { errorMessage } from './host-api.ts'
 
 /** A refused or failed workspace write the model can act on. */
 export class WorkspaceWriteError extends Error {
@@ -120,7 +121,7 @@ export function workspaceWriteTarget(ctx: unknown, agent: unknown, fallbackWorks
   try {
     mode = (service.resolve as (request: object) => { mode?: unknown }).call(service, session === undefined ? {} : { session })?.mode
   } catch (error: unknown) {
-    throw new WorkspaceWriteError(`the session's sandbox policy could not be resolved (${error instanceof Error ? error.message : String(error)}); nothing was written.`)
+    throw new WorkspaceWriteError(`the session's sandbox policy could not be resolved (${errorMessage(error)}); nothing was written.`)
   }
   if (mode === 'read-only') {
     throw new WorkspaceWriteError('this session runs in a read-only sandbox, so the browser tools cannot write files into its workspace; nothing was written.')

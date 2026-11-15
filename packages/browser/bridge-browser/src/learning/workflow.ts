@@ -15,6 +15,7 @@
  */
 
 import { wrapUntrustedPageText } from '../protocol.ts'
+import { isRecord } from '../host-api.ts'
 
 /** File format marker written into every workflow file. */
 export const WORKFLOW_FORMAT = 'dsh-browser-workflow/v1'
@@ -110,10 +111,6 @@ const PARAM_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,39}$/u
 const PLACEHOLDER = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/gu
 const FORBIDDEN_ARGS = new Set(['index', 'selector', 'frame'])
 const MAX_STRING = 4_000
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 /**
  * Normalize a display name into a kebab-case workflow name.

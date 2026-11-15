@@ -27,6 +27,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeServer } from './server.ts'
 import { toolCallIdArg } from './server.ts'
 import { UNTRUSTED_CONTENT_TAG, UNTRUSTED_NOTICE_LEAD } from './protocol.ts'
+import { errorMessage, isRecord } from './host-api.ts'
 
 /** Most steps one program may hold. */
 export const MAX_PROGRAM_STEPS = 25
@@ -113,10 +114,6 @@ export class ProgramError extends Error {
     super(message)
     this.name = 'ProgramError'
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function optionalString(guard: Record<string, unknown>, key: string, where: string): string | undefined {
@@ -206,10 +203,6 @@ export function statusOf(text: string): string {
   return head.length > MAX_STATUS_CHARS ? `${head.slice(0, MAX_STATUS_CHARS)}…` : head
 }
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
-
 /** The bridge closed or the caller cancelled: nothing more can reach the page. */
 function isTerminal(error: unknown, signal: AbortSignal): boolean {
   if (signal.aborted) return true
@@ -240,7 +233,7 @@ export async function runProgram(
     }
     programId = approval.programId
   } catch (error: unknown) {
-    return { stop: 'not-approved', steps: [], message: errorText(error) }
+    return { stop: 'not-approved', steps: [], message: errorMessage(error) }
   }
   const results: ProgramStepResult[] = []
   let stop: ProgramStop = 'completed'
@@ -256,7 +249,7 @@ export async function runProgram(
     try {
       text = resultText(await request(step.tool, step.args, { id: programId, step: index }))
     } catch (error: unknown) {
-      results.push({ step: index + 1, tool: step.tool, ok: false, text: errorText(error) })
+      results.push({ step: index + 1, tool: step.tool, ok: false, text: errorMessage(error) })
       stop = exec.signal.aborted ? 'cancelled' : 'error'
       reachable = !isTerminal(error, exec.signal)
       break
@@ -273,7 +266,7 @@ export async function runProgram(
       try {
         entry.guard = { ok: true, text: statusOf(resultText(await request('browser_wait', check))) }
       } catch (error: unknown) {
-        entry.guard = { ok: false, text: errorText(error) }
+        entry.guard = { ok: false, text: errorMessage(error) }
         reachable = !isTerminal(error, exec.signal)
         break
       }
@@ -289,7 +282,7 @@ export async function runProgram(
   try {
     delta = resultText(await request('browser_snapshot', { delta: true }))
   } catch (error: unknown) {
-    delta = `(No snapshot delta: ${errorText(error)})`
+    delta = `(No snapshot delta: ${errorMessage(error)})`
   }
   return { stop, steps: results, delta, ...(message === undefined ? {} : { message }) }
 }

@@ -32,6 +32,7 @@ import type { BridgeServer } from './server.ts'
 import { toolCallIdArg } from './server.ts'
 import type { SessionLedger } from './session-ledger.ts'
 import { wrapUntrustedPageText } from './protocol.ts'
+import { errorMessage } from './host-api.ts'
 
 /** Most tasks in one fleet. */
 export const MAX_FLEET_TASKS = 8
@@ -255,7 +256,7 @@ export async function runFanout(
           ...(result.diagnostic === undefined ? {} : { diagnostic: result.diagnostic }),
         }
       } catch (error: unknown) {
-        return { url: task.url, stopReason: 'error', diagnostic: error instanceof Error ? error.message : String(error) }
+        return { url: task.url, stopReason: 'error', diagnostic: errorMessage(error) }
       }
     }))
     return renderFleetResults(results)

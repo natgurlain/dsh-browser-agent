@@ -20,6 +20,7 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import { errorMessage } from './host-api.ts'
 
 /** Id of the agent preset this plugin registers. */
 export const BROWSER_AGENT_PRESET_ID = 'browser'
@@ -148,7 +149,7 @@ export function registerBrowserPreset(ctx: Context, presetModuleUrl: string): bo
     const registered = registry.register(browserPresetDefinition(presetModuleUrl)).then((disposer) => {
       dispose = disposer
     }, (error: unknown) => {
-      ctx.logger.warn(`browser bridge: could not register the "${BROWSER_AGENT_PRESET_ID}" agent preset: ${error instanceof Error ? error.message : String(error)}`)
+      ctx.logger.warn(`browser bridge: could not register the "${BROWSER_AGENT_PRESET_ID}" agent preset: ${errorMessage(error)}`)
     })
     return async () => {
       await registered

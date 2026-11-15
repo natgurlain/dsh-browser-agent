@@ -72,6 +72,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { DEVLOOP_CAPTURE_TIMEOUT_MS, DevLoop, withDevLoopMethods } from './dev-loop.ts'
 import { DEVLOOP_CAPTURE_TOOL } from './protocol.ts'
 import { mountLearning, type LearningMount } from './learning/index.ts'
+import { errorMessage } from './host-api.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'bridge-browser'
@@ -265,7 +266,7 @@ export async function apply(ctx: Context, resolved: ResolvedConfig): Promise<voi
       const synced = await syncInstalledExtensionToken(tokenRes.token)
       if (synced === 'written') ctx.logger.info('browser bridge: refreshed the token copy in the installed extension')
     } catch (error: unknown) {
-      ctx.logger.warn(`browser bridge: could not refresh the installed extension token: ${error instanceof Error ? error.message : String(error)}`)
+      ctx.logger.warn(`browser bridge: could not refresh the installed extension token: ${errorMessage(error)}`)
     }
   } else {
     // A pinned token is never copied into the installed extension; say so
@@ -408,7 +409,7 @@ function mountBridge(
       }),
     ...(auditLog === undefined ? {} : {
       audit: new ToolCallAuditor(auditLog, (error) => {
-        ctx.logger.warn(`browser bridge: audit log write failed: ${error instanceof Error ? error.message : String(error)}`)
+        ctx.logger.warn(`browser bridge: audit log write failed: ${errorMessage(error)}`)
       }),
       exportAudit: (sessionId: string | undefined) => auditLog.read(sessionId),
     }),
@@ -432,7 +433,7 @@ function mountBridge(
       ...(auditLog === undefined ? {} : {
         audit: (sessionId, entry) => {
           void auditLog.append(sessionId, { kind: 'fixture', ...entry }).catch((error: unknown) => {
-            ctx.logger.warn(`browser bridge: audit log write failed: ${error instanceof Error ? error.message : String(error)}`)
+            ctx.logger.warn(`browser bridge: audit log write failed: ${errorMessage(error)}`)
           })
         },
       }),
@@ -527,7 +528,7 @@ function mountBridge(
     registerBrowserDelegateTool(ctx, defineTool as never)
   }
   void registerBrowserSkills(ctx, fileURLToPath(new URL('../skills/', import.meta.url))).catch((error: unknown) => {
-    ctx.logger.warn(`browser bridge: could not register the browser skills: ${error instanceof Error ? error.message : String(error)}`)
+    ctx.logger.warn(`browser bridge: could not register the browser skills: ${errorMessage(error)}`)
   })
 
   // Other harnesses drive the same browser tools over a loopback MCP endpoint
@@ -646,7 +647,7 @@ function mountDiscoveryBeacon(
       beacon = started
       ctx.logger.info(`browser bridge: discovery beacon on http://127.0.0.1:${String(started.port)}${BRIDGE_CONFIG_PATH}`)
     }, (error: unknown) => {
-      warn(`browser bridge: discovery beacon failed: ${error instanceof Error ? error.message : String(error)}`)
+      warn(`browser bridge: discovery beacon failed: ${errorMessage(error)}`)
     })
     return () => {
       disposed = true

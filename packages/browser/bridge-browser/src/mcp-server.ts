@@ -31,6 +31,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { isLoopbackAddress } from './server.ts'
+import { errorMessage } from './host-api.ts'
 
 /** URL path of the MCP endpoint. */
 export const MCP_PATH = '/mcp'
@@ -248,7 +249,7 @@ export class McpHttpServer {
       }
       await this.dispatch(req, res, message)
     } catch (error: unknown) {
-      this.options.log?.(`browser bridge MCP: request failed: ${error instanceof Error ? error.message : String(error)}`)
+      this.options.log?.(`browser bridge MCP: request failed: ${errorMessage(error)}`)
       if (!res.headersSent) reply(res, 500, rpcError(null, -32603, 'internal error'))
       else res.end()
     }

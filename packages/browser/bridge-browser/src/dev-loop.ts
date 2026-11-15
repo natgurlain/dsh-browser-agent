@@ -47,7 +47,7 @@
  */
 
 import type { BrowserHostApi, HostRpcCall, HostRpcResult } from './host-api.ts'
-import { isRecord } from './host-api.ts'
+import { errorMessage, isRecord } from './host-api.ts'
 import {
   BRIDGE_DEVLOOP_CANDIDATES_METHOD,
   BRIDGE_DEVLOOP_LINK_METHOD,
@@ -255,7 +255,7 @@ export class DevLoop {
       if (!trusted) this.deps.taint(link.sessionId)
       this.deps.inject(link.sessionId, fenceDevLoopText(text))
     } catch (error: unknown) {
-      this.deps.log?.(`browser bridge: dev loop capture for ${link.sessionId} failed: ${error instanceof Error ? error.message : String(error)}`)
+      this.deps.log?.(`browser bridge: dev loop capture for ${link.sessionId} failed: ${errorMessage(error)}`)
     } finally {
       clearTimeout(timer)
       if (this.inflight.get(link.sessionId) === controller) this.inflight.delete(link.sessionId)
@@ -296,7 +296,7 @@ export function withDevLoopMethods(api: BrowserHostApi, devLoop: DevLoop): Brows
       }
     } catch (error: unknown) {
       if (error instanceof DevLoopError) return failure(error.code, error.message)
-      return failure('internal', error instanceof Error ? error.message : String(error))
+      return failure('internal', errorMessage(error))
     }
   }
   return {

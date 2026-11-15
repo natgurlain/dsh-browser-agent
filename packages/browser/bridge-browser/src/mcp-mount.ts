@@ -23,6 +23,7 @@ import { EXTERNAL_SESSION_PREFIX, sanitizeRequesterLabel } from './protocol.ts'
 import type { SessionLedger } from './session-ledger.ts'
 import { readTokenFile, writeTokenFile } from './token.ts'
 import { writePrivateFile } from './private-file.ts'
+import { errorMessage } from './host-api.ts'
 
 /** Token file name (under the dsh home). */
 export const MCP_TOKEN_FILE_NAME = 'browser-mcp-token'
@@ -101,7 +102,7 @@ export function mountMcpEndpoint(
       await writePrivateFile(endpointFile, `${JSON.stringify({ url: bound.url, pid: process.pid, startedAt: new Date().toISOString() })}\n`, 'the MCP endpoint file')
       ctx.logger.info(`browser bridge: MCP endpoint on ${bound.url} (token in ${dshHomePath(MCP_TOKEN_FILE_NAME)})`)
     })().catch((error: unknown) => {
-      ctx.logger.warn(`browser bridge: MCP endpoint failed to start: ${error instanceof Error ? error.message : String(error)}`)
+      ctx.logger.warn(`browser bridge: MCP endpoint failed to start: ${errorMessage(error)}`)
     })
     return async () => {
       disposed = true
