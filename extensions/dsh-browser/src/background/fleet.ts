@@ -21,9 +21,10 @@
  */
 
 import type { ApprovalAuthorization, ApprovalDetail, ApprovalPrompt } from '../security/approval.ts'
+import type { CallPolicyDecision } from '../security/call-policy.ts'
 import { approvalBinding } from '../security/payload-binding.ts'
 import { analyzeUrl } from '../security/url-risk.ts'
-import type { ToolCall } from './tools.ts'
+import type { CallPolicyHook, ToolCall } from './tools.ts'
 
 export const MAX_FLEET_TASKS = 8
 export const FLEET_GROUP_TITLE = 'DSH fleet'
@@ -68,6 +69,14 @@ export interface FleetDeps {
   closeTab: (tabId: number) => Promise<void>
   signal: AbortSignal
   newId?: () => string
+  /**
+   * The parent's policy hook. Each task URL is judged exactly as a
+   * `browser_open_tab` to it would be: a blocked or managed-disallowed URL
+   * refuses the whole fleet, and a forced decision (site `ask`, taint) makes
+   * the card forced (no unrestricted access or trusted origin skips it).
+   * Absent only in tests that do not exercise policy.
+   */
+  policy?: CallPolicyHook
 }
 
 /** Wire answer (structurally a ToolAnswer). */
@@ -109,9 +118,27 @@ export function parseFleetRequest(args: Record<string, unknown>): FleetRequest |
   return { tasks: parsed, children: children as string[], allowActions: args.allowActions === true }
 }
 
+/** Per-task policy outcome for the fleet card. */
+export type FleetPolicy = { kind: 'deny'; message: string } | { kind: 'ok'; forced: string[] }
+
+/** Judge every task URL as a `browser_open_tab` to it (deny wins; force reasons collect per page). */
+export function evaluateFleetPolicy(call: Pick<ToolCall, 'id' | 'sessionId'>, request: FleetRequest, policy: CallPolicyHook | undefined): FleetPolicy {
+  if (policy === undefined) return { kind: 'ok', forced: [] }
+  const forced: string[] = []
+  for (const [index, task] of request.tasks.entries()) {
+    const openCall: ToolCall = { id: call.id, name: 'browser_open_tab', args: { url: task.url, active: false }, ...(call.sessionId === undefined ? {} : { sessionId: call.sessionId }) }
+    const decision: CallPolicyDecision = policy(openCall, { reads: [], acts: [], destination: task.url })
+    if (decision.kind === 'deny') return { kind: 'deny', message: `Page ${String(index + 1)} (${task.url}): ${decision.message}` }
+    if (decision.kind === 'force') forced.push(...decision.reasons.map((reason) => `Page ${String(index + 1)}: ${reason}`))
+  }
+  return { kind: 'ok', forced }
+}
+
 /** The one card for a whole fleet: every URL (decoded, risk-flagged) and its instruction. */
-export function fleetApprovalPrompt(request: FleetRequest): ApprovalPrompt {
+export function fleetApprovalPrompt(request: FleetRequest, forcedReasons: readonly string[] = []): ApprovalPrompt {
   const origins = [...new Set(request.tasks.map((task) => new URL(task.url).origin))]
+  const analyses = request.tasks.map((task) => analyzeUrl(task.url))
+  const risky = analyses.some((analysis) => analysis?.risky === true)
   return {
     kind: 'action',
     action: 'browser_fanout',
@@ -120,13 +147,20 @@ export function fleetApprovalPrompt(request: FleetRequest): ApprovalPrompt {
       + '. The tabs close when the fleet finishes.',
     origins,
     canTrust: false,
-    details: request.tasks.flatMap((task, index): ApprovalDetail[] => {
-      const analysis = analyzeUrl(task.url)
+    // A long or high-entropy value in any task URL: trusted origins never skip the card.
+    ...risky ? { urlRisk: true as const } : {},
+    // Site policy or taint demands a fresh decision: unrestricted access never skips it.
+    ...forcedReasons.length > 0 ? { forced: true as const, perCallOnly: true as const } : {},
+    details: [
+      ...forcedReasons.length > 0 ? [{ kind: 'text' as const, label: 'Why this needs your approval', masked: false, value: forcedReasons.join('\n') }] : [],
+      ...request.tasks.flatMap((task, index): ApprovalDetail[] => {
+      const analysis = analyses[index]
       return [
         analysis === undefined ? { kind: 'text', label: `Page ${String(index + 1)}`, masked: false, value: task.url } : { kind: 'url', url: analysis },
         { kind: 'text', label: `Task ${String(index + 1)}`, masked: false, value: task.instruction },
       ]
     }),
+    ],
     binding: approvalBinding({ action: 'browser_fanout', args: { tasks: request.tasks, allowActions: request.allowActions }, origins }),
   }
 }
@@ -164,8 +198,10 @@ export class FleetRegistry {
     const request = parseFleetRequest(call.args)
     if (typeof request === 'string') return failed(request, 'bad-args')
     if (request.children.some((id) => this.children.has(id) || id === call.sessionId)) return failed('A fleet child session is already in use.', 'bad-args')
+    const policy = evaluateFleetPolicy(call, request, deps.policy)
+    if (policy.kind === 'deny') return failed(policy.message)
     const windowId = await deps.parentWindow(call.sessionId)
-    const prompt = fleetApprovalPrompt(request)
+    const prompt = fleetApprovalPrompt(request, policy.forced)
     const authorization = await deps.authorize(prompt, windowId ?? 0)
     if (deps.signal.aborted) return failed('Tool call was cancelled')
     if (authorization !== 'approved') {

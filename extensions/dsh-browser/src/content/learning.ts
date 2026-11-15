@@ -229,7 +229,8 @@ export async function siteDriverFetch(request: DriverRequest): Promise<{ status:
     headers: resolved.headers,
     ...(resolved.body === undefined ? {} : { body: resolved.body }),
     credentials: 'same-origin',
-    redirect: 'follow',
+    // A redirect would carry the approved request somewhere the card never named.
+    redirect: 'error',
   })
   if (new URL(response.url || url.href).origin !== location.origin) throw new Error('The site driver request was redirected to another origin.')
   const text = await response.text()

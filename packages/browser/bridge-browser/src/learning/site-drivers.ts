@@ -240,7 +240,11 @@ export function parseSiteDrivers(value: unknown): SiteDriverSummary[] {
 }
 
 /** Field names whose literal value must never be stored in a driver. */
-const SENSITIVE_FIELD = /pass(?:word|wd|code|phrase)?|pwd|secret|token|otp|totp|\bpin\b|cvv|cvc|card|ssn|iban|api[_-]?key|private|mnemonic|seed|recovery|auth|credential|session/iu
+const SENSITIVE_FIELD = /pass(?:word|wd|code|phrase)?|pwd|secret|token|otp|totp|\bpin\b|cvv|cvc|card|ssn|iban|api[_-]?key|private|mnemonic|seed|recovery|auth|credential|session|csrf|xsrf|nonce|signature|jwt|(?:^|[^a-z])sig(?:$|[^a-z])/iu
+/** A field is sensitive when its name looks like a credential to either list (body fields and headers alike). */
+function sensitiveField(key: string): boolean {
+  return SENSITIVE_FIELD.test(key) || SECRET_HEADER.test(key)
+}
 
 const ONLY_PLACEHOLDER = /^\s*\{\{[^}]+\}\}\s*$/u
 
@@ -252,7 +256,7 @@ const ONLY_PLACEHOLDER = /^\s*\{\{[^}]+\}\}\s*$/u
 export function sensitiveLiterals(path: string, body: SiteDriver['body'] | undefined): string[] {
   const found = new Set<string>()
   const check = (key: string, value: unknown): void => {
-    if (!SENSITIVE_FIELD.test(key)) return
+    if (!sensitiveField(key)) return
     if (typeof value === 'string' && (value === '' || ONLY_PLACEHOLDER.test(value))) return
     if (value === null || value === undefined || typeof value === 'boolean') return
     found.add(key)
@@ -273,7 +277,7 @@ export function sensitiveLiterals(path: string, body: SiteDriver['body'] | undef
       try {
         walk(JSON.parse(body.template), 0)
       } catch {
-        if (SENSITIVE_FIELD.test(body.template)) found.add('body')
+        if (sensitiveField(body.template)) found.add('body')
       }
     } else {
       for (const match of body.template.matchAll(/([A-Za-z_][\w-]*)\s*[=:]\s*("?)([^"&\s,}]*)\2/gu)) check(match[1]!, match[3]!)
@@ -386,16 +390,47 @@ export function proposeSiteDriver(
   return { driver, droppedHeaders }
 }
 
+/**
+ * One piece of a built request body: literal text (template text and
+ * already-encoded parameter values) or a page token at a position the saved
+ * template declared. Parameter values are never parsed for placeholders, so a
+ * `{{@cookie:...}}` typed by the model stays literal text.
+ */
+export type DriverBodySegment = { text: string } | { token: TokenSource }
+
 /** A concrete request, ready for the approval card and the page fetch. */
 export interface DriverRequest {
   method: SiteDriverMethod
   url: string
   headers: Record<string, string>
+  /** Body for display (token positions shown as `{{@kind:name}}`); never re-parsed. */
   body?: string
+  /** The body as built: the only input token resolution reads. */
+  bodySegments?: DriverBodySegment[]
   /** Token headers, described (never their values). */
   tokenHeaders: Array<{ header: string; source: TokenSource }>
-  /** Token placeholders left in the body, resolved in the page. */
+  /** Token positions in the body, in order, resolved in the page. */
   bodyTokens: TokenSource[]
+}
+
+function tokenSourceOf(name: string): TokenSource {
+  const [kind, ...rest] = name.slice(1).split(':')
+  return { kind: kind as 'cookie' | 'meta', name: rest.join(':') }
+}
+
+/** Split a saved template into text, parameter and token segments (before any substitution). */
+function templateSegments(template: string): Array<{ text: string } | { param: string } | { token: TokenSource }> {
+  const out: Array<{ text: string } | { param: string } | { token: TokenSource }> = []
+  let last = 0
+  for (const match of template.matchAll(PLACEHOLDER)) {
+    const index = match.index
+    if (index > last) out.push({ text: template.slice(last, index) })
+    const name = match[1]!
+    out.push(name.startsWith('@') ? { token: tokenSourceOf(name) } : { param: name })
+    last = index + match[0].length
+  }
+  if (last < template.length) out.push({ text: template.slice(last) })
+  return out
 }
 
 /**
@@ -413,34 +448,41 @@ export function buildDriverRequest(driver: SiteDriver, values: Record<string, un
   for (const key of Object.keys(values)) {
     if (!(key in params)) throw new SiteDriverError(`unknown parameter "${key}".`)
   }
-  const path = driver.path.replace(PLACEHOLDER, (match, name: string) => name.startsWith('@') ? match : encodeURIComponent(params[name] ?? ''))
+  const path = templateSegments(driver.path).map((segment) => 'text' in segment
+    ? segment.text
+    : 'param' in segment ? encodeURIComponent(params[segment.param] ?? '') : '').join('')
   const url = driverUrl(driver.origin, path)
   const bodyTokens: TokenSource[] = []
-  let body: string | undefined
+  let bodySegments: DriverBodySegment[] | undefined
   if (driver.body !== undefined) {
     const encode = driver.body.type === 'json'
       ? (text: string) => JSON.stringify(text).slice(1, -1)
       : driver.body.type === 'form' ? (text: string) => encodeURIComponent(text) : (text: string) => text
-    body = driver.body.template.replace(PLACEHOLDER, (match, name: string) => {
-      if (name.startsWith('@')) {
-        const [kind, ...rest] = name.slice(1).split(':')
-        bodyTokens.push({ kind: kind as 'cookie' | 'meta', name: rest.join(':') })
-        return match
+    bodySegments = templateSegments(driver.body.template).map((segment): DriverBodySegment => {
+      if ('token' in segment) {
+        bodyTokens.push({ ...segment.token })
+        return { token: { ...segment.token } }
       }
-      return encode(params[name] ?? '')
+      return { text: 'text' in segment ? segment.text : encode(params[segment.param] ?? '') }
     })
   }
+  const body = bodySegments?.map((segment) => 'text' in segment ? segment.text : `{{@${segment.token.kind}:${segment.token.name}}}`).join('')
   return {
     method: driver.method,
     url: url.href,
     headers: { ...driver.headers },
     ...(body === undefined ? {} : { body }),
+    ...(bodySegments === undefined ? {} : { bodySegments }),
     tokenHeaders: driver.tokens.map((token) => ({ ...token })),
     bodyTokens,
   }
 }
 
-/** Fill token placeholders and headers from page values (runs in the page). */
+/**
+ * Fill token headers and body token positions from page values (runs in the
+ * page). Only the segments built from the saved template are filled; a body
+ * without segments is sent verbatim, never searched for placeholders.
+ */
 export function resolveDriverTokens(request: DriverRequest, read: (source: TokenSource) => string | undefined): { headers: Record<string, string>; body?: string } {
   const headers = { ...request.headers }
   for (const token of request.tokenHeaders) {
@@ -449,25 +491,32 @@ export function resolveDriverTokens(request: DriverRequest, read: (source: Token
     headers[token.header] = value
   }
   let body = request.body
-  if (body !== undefined) {
-    body = body.replace(PLACEHOLDER, (match, name: string) => {
-      if (!name.startsWith('@')) return match
-      const [kind, ...rest] = name.slice(1).split(':')
-      const value = read({ kind: kind as 'cookie' | 'meta', name: rest.join(':') })
-      if (value === undefined) throw new SiteDriverError(`the page has no ${String(kind)} "${rest.join(':')}"; the token may be stale.`)
+  if (Array.isArray(request.bodySegments)) {
+    body = request.bodySegments.map((segment) => {
+      if ('text' in segment) return typeof segment.text === 'string' ? segment.text : ''
+      const value = read(segment.token)
+      if (value === undefined) throw new SiteDriverError(`the page has no ${segment.token.kind} "${segment.token.name}"; the token may be stale.`)
       return value
-    })
+    }).join('')
   }
   return { headers, ...(body === undefined ? {} : { body }) }
 }
 
 /** Human description of a request for the approval card (no token values). */
 export function describeDriverRequest(request: DriverRequest): string {
+  const filled = [
+    ...request.tokenHeaders.map((token) => `header ${token.header} ← page ${token.source.kind} "${token.source.name}"`),
+    ...request.bodyTokens.map((token, index) => `body field ${String(index + 1)} ← page ${token.kind} "${token.name}"`),
+  ]
   return [
     `${request.method} ${request.url}`,
     ...Object.entries(request.headers).map(([name, value]) => `${name}: ${value}`),
     ...request.tokenHeaders.map((token) => `${token.header}: <from page ${token.source.kind} "${token.source.name}">`),
     ...(request.body === undefined ? [] : ['', request.body]),
+    '',
+    filled.length === 0
+      ? 'Filled from the page: nothing (any {{@…}} text above is sent literally).'
+      : `Filled from the page (${String(filled.length)}):\n${filled.map((line) => `  ${line}`).join('\n')}\nAny other {{@…}} text above is sent literally.`,
   ].join('\n')
 }
 

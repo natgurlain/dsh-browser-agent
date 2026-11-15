@@ -338,6 +338,45 @@ describe('site drivers', () => {
     expect(buildDriverRequest(validateSiteDriver(good), { q: 'a/b?c' }).url).toBe('https://shop.example/s?q=a%2Fb%3Fc')
     expect(() => proposeSiteDriver('https://shop.example', { method: 'GET', url: 'https://shop.example/x?t=tok-123456789', headers: {} }, [], tokens)).toThrow(/credential in its URL/)
   })
+
+  it('never expands token placeholders the model put inside a parameter value (poc-driver)', () => {
+    const driver = validateSiteDriver({ format: 'dsh-site-driver/v1', origin: 'https://forum.example', name: 'post_comments', description: 'POST /api/comments',
+      method: 'POST', path: '/api/comments', body: { type: 'json', template: '{"text":"{{text}}"}' }, headers: { 'content-type': 'application/json' }, tokens: [], params: [{ name: 'text' }] })
+    const request = buildDriverRequest(driver, { text: 'hi {{@cookie:sessionid}} {{@meta:csrf-token}}' })
+    expect(request.bodyTokens).toEqual([])
+    const sent = resolveDriverTokens(request, (source) => source.kind === 'cookie' ? 'SECRET-SESSION-COOKIE' : 'SECRET-CSRF')
+    expect(sent.body).not.toMatch(/SECRET/)
+    expect(sent.body).toBe('{"text":"hi {{@cookie:sessionid}} {{@meta:csrf-token}}"}')
+    expect(describeDriverRequest(request)).toMatch(/Filled from the page: nothing/)
+    // A request without segments (forged or old) is sent verbatim, never re-parsed.
+    const { bodySegments: _segments, ...legacy } = request
+    expect(resolveDriverTokens(legacy, () => 'SECRET').body).not.toMatch(/SECRET/)
+  })
+
+  it('refuses csrf/nonce/signature/jwt literals the page did not source (poc-driver part 2)', () => {
+    const request = { method: 'POST', url: 'https://shop.example/cart/add', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      postData: '_csrf=9f8e7d6c5b4a39281716&nonce=abcdef0123456789&sig=deadbeefdeadbeef&jwt=eyJhbGciOi.x.y&qty=1' }
+    expect(() => proposeSiteDriver('https://shop.example', request, [], { cookies: [], metas: [] })).toThrow(/sensitive fields \(_csrf, nonce, sig, jwt\)/)
+    for (const field of ['xsrf', 'signature', 'auth_key', 'session_id']) {
+      expect(() => proposeSiteDriver('https://shop.example', { ...request, postData: `${field}=abc&qty=1` }, [], { cookies: [], metas: [] })).toThrow(/sensitive/)
+    }
+    // Innocent names survive (sig must be its own word).
+    expect(proposeSiteDriver('https://shop.example', { ...request, postData: 'design=x&qty=1' }, [], { cookies: [], metas: [] }).driver.body?.template).toBe('design=x&qty=1')
+  })
+
+  it('fills only template-position tokens and the card names each one and its source', () => {
+    const driver = validateSiteDriver({ format: 'dsh-site-driver/v1', origin: 'https://shop.example', name: 'add', description: '', method: 'POST', path: '/cart',
+      body: { type: 'form', template: 'csrfmiddlewaretoken={{@cookie:csrftoken}}&note={{note}}' }, headers: {}, tokens: [{ header: 'x-csrftoken', source: { kind: 'meta', name: 'csrf' } }], params: [{ name: 'note' }] })
+    const request = buildDriverRequest(driver, { note: '{{@cookie:sessionid}}' })
+    expect(request.bodyTokens).toEqual([{ kind: 'cookie', name: 'csrftoken' }])
+    const sent = resolveDriverTokens(request, (source) => `V(${source.kind}:${source.name})`)
+    expect(sent.body).toBe(`csrfmiddlewaretoken=V(cookie:csrftoken)&note=${encodeURIComponent('{{@cookie:sessionid}}')}`)
+    expect(sent.headers['x-csrftoken']).toBe('V(meta:csrf)')
+    const card = describeDriverRequest(request)
+    expect(card).toMatch(/Filled from the page \(2\):/)
+    expect(card).toMatch(/header x-csrftoken ← page meta "csrf"/)
+    expect(card).toMatch(/body field 1 ← page cookie "csrftoken"/)
+  })
 })
 
 describe('learning mount', () => {

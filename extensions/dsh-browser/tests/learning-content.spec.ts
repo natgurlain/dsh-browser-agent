@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { describeElement, probeRows, rowCells, sanitizedDom, sensitiveFieldCount, setWatching, pageTokens } from '../src/content/learning.ts'
+import { describeElement, probeRows, rowCells, sanitizedDom, sensitiveFieldCount, setWatching, pageTokens, siteDriverFetch } from '../src/content/learning.ts'
+import { buildDriverRequest, validateSiteDriver } from '@natgurlain/dsh-bridge-browser/src/learning/site-drivers.ts'
 
 beforeEach(() => {
   document.body.innerHTML = `
@@ -61,5 +62,18 @@ describe('learning content helpers', () => {
     ;(document.querySelector('#save') as HTMLButtonElement).click()
     setWatching(false)
     expect(send).not.toHaveBeenCalled()
+  })
+
+  it('site-driver fetch refuses redirects and never fills tokens typed into a parameter', async () => {
+    document.cookie = 'sessionid=SECRET-SESSION-COOKIE'
+    const fetchMock = vi.fn(async (_url: string, _init: RequestInit) => new Response('ok', { status: 200, headers: { 'content-type': 'text/plain' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const driver = validateSiteDriver({ format: 'dsh-site-driver/v1', origin: location.origin, name: 'post', description: '', method: 'POST', path: '/api/comments',
+      body: { type: 'json', template: '{"text":"{{text}}"}' }, headers: { 'content-type': 'application/json' }, tokens: [], params: [{ name: 'text' }] })
+    await siteDriverFetch(buildDriverRequest(driver, { text: 'hi {{@cookie:sessionid}} {{@meta:csrf-token}}' }))
+    const init = fetchMock.mock.calls[0]![1]
+    expect(init.redirect).toBe('error')
+    expect(String(init.body)).not.toMatch(/SECRET|meta-token/)
+    vi.unstubAllGlobals()
   })
 })
