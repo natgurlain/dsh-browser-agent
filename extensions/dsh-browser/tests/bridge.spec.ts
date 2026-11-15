@@ -99,6 +99,72 @@ describe('BridgeClient connection probe', () => {
     expect(states.at(-1)).toBe('stopped')
     expect(FakeWebSocket.instances).toHaveLength(1)
   })
+
+  it('retries at once, without reporting a stop, when restarted for the address it is already retrying', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const states: BridgeState[] = []
+    const client = new BridgeClient({
+      onStateChange: (state) => { states.push(state) },
+      onFrame: () => {},
+      onHelloOk: () => {},
+    })
+    const url = 'ws://127.0.0.1:3080/ext/bridge'
+
+    client.start(url, TEST_BRIDGE_TOKEN)
+    await vi.advanceTimersByTimeAsync(0)
+    const first = FakeWebSocket.instances[0]!
+    first.open()
+    await completeHandshake(first, { until: () => { expect(states.at(-1)).toBe('connected') } })
+    // The connection drops; the client waits out its backoff before the next dial.
+    first.close(1006, '')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(states.at(-1)).toBe('reconnecting')
+    states.length = 0
+
+    // Something (the keepalive alarm) restarts the same connection meanwhile.
+    client.start(url, TEST_BRIDGE_TOKEN)
+    await vi.advanceTimersByTimeAsync(0)
+
+    // The retry happens now, and a listener that treats `stopped` as the end
+    // of this connection (the panel drops its conversation) never sees one.
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    expect(states).not.toContain('stopped')
+    const second = FakeWebSocket.instances[1]!
+    second.open()
+    await completeHandshake(second, { until: () => { expect(states.at(-1)).toBe('connected') } })
+    // The backoff timer of the superseded wait opens no extra socket.
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    expect(states).not.toContain('stopped')
+    client.stop()
+  })
+
+  it('still reports a stop when restarted for another address or token while retrying', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const states: BridgeState[] = []
+    const client = new BridgeClient({
+      onStateChange: (state) => { states.push(state) },
+      onFrame: () => {},
+      onHelloOk: () => {},
+    }, async () => false)
+
+    client.start('ws://127.0.0.1:3080/ext/bridge', TEST_BRIDGE_TOKEN)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(states.at(-1)).toBe('reconnecting')
+    states.length = 0
+
+    client.start('ws://127.0.0.1:3081/ext/bridge', TEST_BRIDGE_TOKEN)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(states).toContain('stopped')
+    states.length = 0
+
+    client.start('ws://127.0.0.1:3081/ext/bridge', 'another-token')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(states).toContain('stopped')
+    client.stop()
+  })
 })
 
 describe('bridge capability advertisement', () => {

@@ -178,6 +178,46 @@ describe('background bridge lifecycle', () => {
     expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(probed + 1)
   })
 
+  it('keeps the panel on its connection when the keepalive fires during a reconnect', async () => {
+    const chromeMock = mockChrome({
+      localGet: async () => ({ dshSettings: { bridgeUrl: 'ws://127.0.0.1:3080/ext/bridge' } }),
+    })
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      wsUrl: 'ws://127.0.0.1:3080/ext/bridge',
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
+    const states = (): unknown[] => panel.postMessage.mock.calls
+      .map(([message]) => message as { type?: unknown; state?: unknown })
+      .filter((message) => message.type === 'status')
+      .map((message) => message.state)
+
+    // The socket drops; the client is waiting to retry the same address.
+    socket.close(1006, '')
+    await vi.waitFor(() => { expect(states().at(-1)).toBe('reconnecting') })
+    panel.postMessage.mockClear()
+
+    // The half-minute keepalive lands inside that wait.
+    chromeMock.alarms.onAlarm.emit({ name: 'bridge-keepalive', scheduledTime: Date.now() })
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })
+    const next = FakeWebSocket.instances[1]!
+    next.open()
+    await completeHandshake(next, { until: panelSawConnected(panel.postMessage) })
+
+    // `stopped` ends a connection for the panel (it drops its conversation and
+    // starts a new one); a reconnect to the same bridge must not look like one.
+    expect(states()).not.toContain('stopped')
+    expect(states().at(-1)).toBe('connected')
+  })
+
   it('invalidates stale connection settings when their save outlives the panel', async () => {
     let finishSettingsWrite!: () => void
     const settingsWrite = new Promise<void>((resolve) => { finishSettingsWrite = resolve })
