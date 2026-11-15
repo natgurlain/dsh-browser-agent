@@ -95,7 +95,7 @@ export interface SnapshotView {
   reindexed: boolean
   /** Budget accounting: characters cut from main text and items/forms dropped by count caps. */
   truncated: { mainChars: number; itemsDropped: number; formsDropped: number }
-  /** 总预算（渲染封顶用）。 */
+  /** Total budget (caps the rendered output). */
   budgetChars: number
 }
 
@@ -311,7 +311,7 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   let mainDiff: SnapshotView['mainDiff']
   if (options.delta === true && last !== null) {
     if (last.main !== main.text || last.url !== location.href || last.title !== document.title) {
-      changed.add(-1) // -1 = 正文/标题/URL 变化（渲染时说明）
+      changed.add(-1) // -1 = body text/title/URL changed (explained when rendering)
     }
     if (last.main !== main.text) mainDiff = diffLines(last.main, main.text)
     for (const item of items) {
@@ -450,7 +450,7 @@ export function collapseRuns(items: InventoryItem[]): InventoryEntry[] {
   return entries
 }
 
-/** 渲染结果的整体预算：主文/清单之外的部分（标题、URL、包装行）也计入。 */
+/** Overall budget of the rendered result: the parts outside the main text/inventory (title, URL, wrapper lines) count too. */
 function capRendered(text: string, budgetChars: number): string {
   if (text.length <= budgetChars) return text
   return `${text.slice(0, budgetChars)}…(truncated to the snapshot character budget)`

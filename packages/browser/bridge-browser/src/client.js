@@ -17,14 +17,6 @@ window.__ModuleLoader__.load({
     const inject = ['slots', 'locale']
 
     const dictionaries = {
-      zh: {
-        'bridgeAddress.title': '浏览器桥地址',
-        'bridgeAddress.help': '粘贴到 Chrome 扩展「桥地址」设置；本机一般无需 Token。',
-        'bridgeAddress.copy': '复制',
-        'bridgeAddress.copied': '已复制',
-        'bridgeAddress.loading': '正在读取…',
-        'bridgeAddress.unavailable': '暂时无法读取桥地址',
-      },
       en: {
         'bridgeAddress.title': 'Browser bridge address',
         'bridgeAddress.help': 'Paste into the Chrome extension Bridge address setting. Loopback needs no token.',
@@ -32,6 +24,14 @@ window.__ModuleLoader__.load({
         'bridgeAddress.copied': 'Copied',
         'bridgeAddress.loading': 'Loading…',
         'bridgeAddress.unavailable': 'Bridge address unavailable',
+      },
+      zh: {
+        'bridgeAddress.title': '浏览器桥地址',
+        'bridgeAddress.help': '粘贴到 Chrome 扩展「桥地址」设置；本机一般无需 Token。',
+        'bridgeAddress.copy': '复制',
+        'bridgeAddress.copied': '已复制',
+        'bridgeAddress.loading': '正在读取…',
+        'bridgeAddress.unavailable': '暂时无法读取桥地址',
       },
     }
 

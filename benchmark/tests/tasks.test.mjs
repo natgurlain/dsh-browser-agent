@@ -34,8 +34,8 @@ test('inventory validation measures the unique filtered product, not a seed suff
 
   assert.equal(instance.expected.value, target.name)
   assert.doesNotMatch(instance.expected.value, /\s1$/u)
-  assert.equal(validateTask(instance, state, `${target.name}（${target.sku}，¥${(target.cents / 100).toFixed(2)}）`, ['browser_snapshot']).success, true)
-  assert.equal(validateTask(instance, state, '其他商品', ['browser_snapshot']).success, false)
+  assert.equal(validateTask(instance, state, `${target.name} (${target.sku}, ¥${(target.cents / 100).toFixed(2)})`, ['browser_snapshot']).success, true)
+  assert.equal(validateTask(instance, state, 'Some other product', ['browser_snapshot']).success, false)
 })
 
 test('content-tool tasks validate their target state and answers', () => {
@@ -71,7 +71,7 @@ test('ledger totals accept plain and thousands-separated amounts across every pa
   const total = ledger.page.entries.reduce((sum, entry) => sum + entry.cents, 0)
   assert.equal(ledger.page.entries.length, 20)
   assert.equal(ledger.expected.value, `¥${(total / 100).toFixed(2)}`)
-  assert.equal(validateTask(ledger, {}, `总金额 ${ledger.expected.value}`, ['browser_extract']).success, true)
+  assert.equal(validateTask(ledger, {}, `Total amount ${ledger.expected.value}`, ['browser_extract']).success, true)
   assert.equal(validateTask(ledger, {}, ledger.expected.alternatives[0], ['browser_extract']).success, true)
   assert.match(ledger.expected.alternatives[0], /^¥\d{1,3}(,\d{3})+\.\d{2}$/u)
   const firstPageOnly = ledger.page.entries.slice(0, 5).reduce((sum, entry) => sum + entry.cents, 0)

@@ -640,7 +640,7 @@ export function mergeDeclarations(
 ): string[] {
   const edits = new Map<string, { name: string; value: string; important?: boolean }>()
   for (const property of properties) edits.set(property.name.trim().toLowerCase(), property)
-  // 修改 shorthand 时替换其展开项；修改 longhand 时保留其他方向的声明。
+  // Changing a shorthand replaces its expanded longhands; changing a longhand keeps the declarations for the other sides.
   const covered = new Set([...edits.keys()].flatMap(name => LONGHANDS_OF[name] ?? []))
   const declarations: string[] = []
   const seen = new Set<string>()

@@ -16,7 +16,7 @@ import {
   type SessionEventView,
 } from '../src/panel/events.ts'
 
-/** 构造符合真实 SessionEvent 形状（{ type, seq, time, data }）的事件。 */
+/** Builds an event with the shape of a real SessionEvent ({ type, seq, time, data }). */
 function ev(type: string, data: Record<string, unknown>): SessionEventView {
   return { type, data }
 }
@@ -36,8 +36,8 @@ describe('rowFromEvent', () => {
   })
 
   it('skips system-injected user/message events (source.kind = plugin)', () => {
-    // dsh 每轮注入的运行时上下文（<system-reminder> 等）是 plugin 来源，
-    // 绝不能渲染成用户消息。
+    // The runtime context dsh injects every turn (<system-reminder> etc.) has a plugin source
+    // and must never be rendered as a user message.
     const injected = ev('user/message', {
       content: [{ type: 'text', text: '</system-reminder> 一段很长的系统注入…' }],
       source: { kind: 'plugin', plugin: 'workspace-context' },
@@ -170,7 +170,7 @@ describe('mergeHistoryRows', () => {
     expect(rows.map((r) => r.kind)).toEqual(['user', 'tool', 'assistant'])
     expect(rows[0]!.text).toBe('操作页面')
     expect(rows[2]!.text).toBe('已点击')
-    // 连续工具调用归并为一条时间线（每步一条）
+    // Consecutive tool calls merge into one timeline (one entry per step)
     expect(rows[1]).toMatchObject({ text: '读取页面 → 点击元素 #7 → 点击元素 #8', status: 'complete' })
     expect(rows[1]!.steps!.map((step) => step.status)).toEqual(['ok', 'ok', 'ok'])
   })

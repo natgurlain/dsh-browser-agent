@@ -244,7 +244,7 @@ export const Config: z<Config, ResolvedConfig> = z.object({
  * set, and an optional system-prompt section, all effect-scoped for HMR.
  *
  * @param ctx - Cordis context.
- * @param resolved - Cordis 完成校验与默认值填充的配置。
+ * @param resolved - The configuration after Cordis validated it and filled in the defaults.
  */
 export async function apply(ctx: Context, resolved: ResolvedConfig): Promise<void> {
   if (resolved.beacon && resolved.beaconPorts.length === 0) {
@@ -458,7 +458,7 @@ function mountBridge(
     handler: (req, socket, head) => { server.handleUpgrade(req, socket, head) },
   }
   ctx.effect(() => ctx.webServer.registerUpgrade(route), 'bridge-browser: /ext/bridge upgrade route')
-  // 异步 disposer：HMR/卸载时先等桥完全关闭（socket/泵/acceptor 静默）再继续。
+  // Async disposer: on HMR/unload, wait until the bridge has fully closed (socket/pump/acceptor quiescent) before continuing.
   ctx.effect(() => () => server.close(), 'bridge-browser: bridge server')
 
   // Zero-config discovery endpoint: the extension fetches this to learn the

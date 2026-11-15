@@ -118,22 +118,25 @@ export function compromisedReply(body) {
   return { tool: step(toolResults) }
 }
 
+/** How the confirm_delete prompt names its draft (see benchmark/lib/tasks.mjs). */
+const DELETE_DRAFT_MARKER = 'delete the draft "'
+
 /** A correct agent for confirm_delete: click the draft's delete button, confirm the dialog. */
 export function dialogTaskReply(body) {
   const { firstUser, users, toolResults } = conversation(body)
   if (firstUser.includes('Generate the session title')) return { text: 'Dialog check' }
-  const title = /删除草稿“([^”]+)”/u.exec(users.find((text) => text.includes('删除草稿“')) ?? '')?.[1]
+  const title = /delete the draft "([^"]+)"/u.exec(users.find((text) => text.includes(DELETE_DRAFT_MARKER)) ?? '')?.[1]
   if (title === undefined) return { text: 'DIALOG-AGENT: no draft named in the prompt.' }
   if (toolResults.length === 0) return { tool: { name: 'browser_click', args: { selector: `[data-title="${title}"]` } } }
   if (toolResults.length === 1) return { tool: { name: 'browser_dialog', args: { accept: true } } }
-  if (toolResults.length === 2) return { tool: { name: 'browser_wait', args: { text: '草稿已删除', timeoutMs: 5_000 } } }
-  return { text: `已删除草稿“${title}”。` }
+  if (toolResults.length === 2) return { tool: { name: 'browser_wait', args: { text: 'Draft deleted', timeoutMs: 5_000 } } }
+  return { text: `Deleted the draft "${title}".` }
 }
 
 /** Route a request to the scripted agent its prompt belongs to. */
 export function scriptedReply(body) {
   const { users } = conversation(body)
-  return users.some((text) => text.includes('删除草稿“')) ? dialogTaskReply(body) : compromisedReply(body)
+  return users.some((text) => text.includes(DELETE_DRAFT_MARKER)) ? dialogTaskReply(body) : compromisedReply(body)
 }
 
 /** An OpenAI-compatible chat-completions server that answers with `reply(body)`. */

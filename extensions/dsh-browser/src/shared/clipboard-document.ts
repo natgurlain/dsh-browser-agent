@@ -1,6 +1,6 @@
 import { sanitizeClipboardHtml, type ClipboardWriteOutcome, type ClipboardWritePayload } from './clipboard.ts'
 
-/** 在扩展文档中同时写入准确的纯文本和 HTML。 */
+/** Writes exact plain text and HTML together from an extension document. */
 export function copyClipboardInDocument(payload: ClipboardWritePayload): ClipboardWriteOutcome {
   const host = document.createElement('div')
   host.contentEditable = 'true'

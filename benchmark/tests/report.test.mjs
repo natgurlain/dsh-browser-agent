@@ -23,12 +23,12 @@ function record(backend, completionMs, success = true) {
 
 test('report renders success, latency and paired speed ratio', () => {
   const markdown = renderReport([record('playwright', 800), record('extension', 400)])
-  assert.match(markdown, /Playwright \/ 扩展耗时比/u)
+  assert.match(markdown, /Playwright \/ extension time ratio/u)
   assert.match(markdown, /2\.00/u)
   assert.match(markdown, /100\.0%/u)
-  assert.match(markdown, /联系信息表单/u)
-  assert.match(markdown, /平均 TTFT/u)
-  assert.match(markdown, /平均 prompt token（含缓存）/u)
+  assert.match(markdown, /Contact details form/u)
+  assert.match(markdown, /Mean TTFT/u)
+  assert.match(markdown, /Mean prompt tokens \(incl\. cache\)/u)
 })
 
 test('report isolates identical pair IDs from different benchmark runs', () => {
@@ -38,26 +38,26 @@ test('report isolates identical pair IDs from different benchmark runs', () => {
   const secondExtension = { ...record('extension', 600), benchmarkId: 'second-benchmark' }
 
   const markdown = renderReport([firstPlaywright, firstExtension, secondPlaywright, secondExtension])
-  assert.match(markdown, /\| 总计 \| 2 \| 2 \| 0 \| 0 \| 0 \| 1\.00/u)
-  assert.match(markdown, /Benchmark ID 2 个/u)
+  assert.match(markdown, /\| Total \| 2 \| 2 \| 0 \| 0 \| 0 \| 1\.00/u)
+  assert.match(markdown, /Benchmark IDs: 2\./u)
 })
 
 test('report exposes asymmetric outcomes and groups dynamic failure reasons', () => {
   const playwright = record('playwright', 800)
   const extension = {
     ...record('extension', 700, false),
-    validationReason: 'answer did not contain "Birch 旅行杯"',
+    validationReason: 'answer did not contain "Birch Travel Mug"',
   }
   const secondFailure = {
     ...record('extension', 600, false),
     pairId: 'contact_form:seed-2:trial-1',
     seed: 2,
-    validationReason: 'answer did not contain "Cedar 旅行杯"',
+    validationReason: 'answer did not contain "Cedar Travel Mug"',
   }
 
   const markdown = renderReport([playwright, extension, secondFailure])
-  assert.match(markdown, /\| 联系信息表单 \| 1 \| 0 \| 1 \| 0 \| 0 \|/u)
-  assert.match(markdown, /\| extension \| 答案不匹配 \| 2 \|/u)
+  assert.match(markdown, /\| Contact details form \| 1 \| 0 \| 1 \| 0 \| 0 \|/u)
+  assert.match(markdown, /\| extension \| Answer mismatch \| 2 \|/u)
 })
 
 test('report skips duplicate backend records instead of silently cross-pairing them', () => {
@@ -67,8 +67,8 @@ test('report skips duplicate backend records instead of silently cross-pairing t
     record('extension', 400),
   ])
 
-  assert.match(markdown, /有重复后端记录，已跳过/u)
-  assert.match(markdown, /\| 总计 \| 0 \| 0 \| 0 \| 0 \| 0 \|/u)
+  assert.match(markdown, /has duplicate backend records; skipped/u)
+  assert.match(markdown, /\| Total \| 0 \| 0 \| 0 \| 0 \| 0 \|/u)
 })
 
 test('report rejects records from incompatible benchmark suite versions', () => {
@@ -77,6 +77,6 @@ test('report rejects records from incompatible benchmark suite versions', () => 
 
   assert.throws(
     () => renderReport([legacy, current]),
-    /不能汇总多个评测套件版本：1、2/u,
+    /Cannot aggregate several benchmark suite versions: 1, 2/u,
   )
 })

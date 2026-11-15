@@ -53,9 +53,9 @@ export interface SessionPurgeDeps {
    * not provide exclusion: idle Agents and other processes can own the log.
    */
   acquireOwnership(sessionId: string): Promise<{ close(): Promise<void> }>
-  /** 归档后返回恢复原有归档状态的操作，供清理失败时使用。 */
+  /** After archiving, returns an operation that restores the previous archive state, for use when the purge fails. */
   archiveSession(sessionId: string): Promise<void | (() => Promise<void>)>
-  /** 等待宿主完成归档触发的 worktree 清理，再移除会话日志。 */
+  /** Waits for the host to finish the worktree cleanup triggered by archiving, then removes the session log. */
   waitForArchiveCleanup?(sessionId: string): Promise<void>
 }
 

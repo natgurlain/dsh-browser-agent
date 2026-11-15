@@ -265,7 +265,7 @@ describe('mutations', () => {
   })
 
   it('keeps a longhand the user explicitly edits instead of folding it away', () => {
-    // 显式 longhand 保留在 shorthand 后面，其他方向继续使用原值。
+    // The explicit longhand stays after the shorthand; the other sides keep their original values.
     expect(mergeDeclarations(
       { cssProperties: [
         { name: 'margin', value: '0' },

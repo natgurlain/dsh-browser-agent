@@ -9,7 +9,7 @@ test('benchmark site serves tasks and records externally verifiable state', asyn
   const runId = 'site-test-run'
   const page = await fetch(`${site.origin}/task/contact_form?seed=1&run=${runId}`)
   assert.equal(page.status, 200)
-  assert.match(await page.text(), /联系信息/u)
+  assert.match(await page.text(), /Contact details/u)
 
   const action = await fetch(`${site.origin}/api/action`, {
     method: 'POST',
@@ -18,12 +18,12 @@ test('benchmark site serves tasks and records externally verifiable state', asyn
       runId,
       taskId: 'contact_form',
       action: 'submit-contact',
-      payload: { name: '陈然', email: 'benchmark+1@example.com', city: '杭州' },
+      payload: { name: 'Chen Ran', email: 'benchmark+1@example.com', city: 'Hangzhou' },
     }),
   })
   assert.equal(action.status, 200)
   const state = await (await fetch(`${site.origin}/api/state?run=${runId}`)).json()
-  assert.deepEqual(state.form, { name: '陈然', email: 'benchmark+1@example.com', city: '杭州' })
+  assert.deepEqual(state.form, { name: 'Chen Ran', email: 'benchmark+1@example.com', city: 'Hangzhou' })
   assert.equal(state.formSubmitted, true)
 })
 
@@ -31,7 +31,7 @@ test('benchmark site renders and records the content-tool tasks', async (context
   const site = await startBenchmarkSite({ port: 0 })
   context.after(() => site.close())
   const actions = {
-    plan_select: ['save-subscription', { plan: 'pro', region: '华东' }, { subscriptionSaved: true, plan: 'pro', region: '华东' }],
+    plan_select: ['save-subscription', { plan: 'pro', region: 'East China' }, { subscriptionSaved: true, plan: 'pro', region: 'East China' }],
     shadow_toggle: ['save-security', { twoFactor: true }, { securitySaved: true, twoFactor: true }],
     delayed_report: ['request-report', {}, { reportRequested: true }],
     feed_scroll: ['load-feed', { count: 60, targetLoaded: true }, { feedLoaded: 60, feedTargetLoaded: true }],
@@ -65,7 +65,7 @@ test('reliability tasks serve their fixtures and record dialog, pointer, and dra
   const stateOf = async (runId) => (await fetch(`${site.origin}/api/state?run=${runId}`)).json()
 
   const confirmPage = await (await fetch(`${site.origin}/task/confirm_delete?seed=2&run=r1`)).text()
-  assert.match(confirmPage, /confirm\('确定删除/u)
+  assert.match(confirmPage, /confirm\('Delete "/u)
   const confirmTask = makeTaskInstance('confirm_delete', 2, 'r1', site.origin)
   await post('r1', 'confirm_delete', 'delete-draft', { draftId: confirmTask.page.targetId })
   assert.equal(validateTask(confirmTask, await stateOf('r1'), '', ['browser_click', 'browser_dialog']).success, true)
@@ -90,7 +90,7 @@ test('the PDF task serves a real PDF carrying the expected invoice number', asyn
   const site = await startBenchmarkSite({ port: 0 })
   context.after(() => site.close())
   const task = makeTaskInstance('pdf_lookup', 5, 'r5', site.origin)
-  assert.match(await (await fetch(task.url)).text(), /发票 PDF/u)
+  assert.match(await (await fetch(task.url)).text(), /Invoice PDF/u)
   const response = await fetch(task.page.pdfUrl)
   assert.equal(response.headers.get('content-type'), 'application/pdf')
   const body = Buffer.from(await response.arrayBuffer()).toString('latin1')

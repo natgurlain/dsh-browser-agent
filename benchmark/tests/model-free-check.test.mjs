@@ -114,7 +114,7 @@ test('the dialog agent clicks the named draft, confirms, and waits', () => {
   assert.deepEqual(calls, [
     { name: 'browser_click', args: { selector: `[data-title="${title}"]` } },
     { name: 'browser_dialog', args: { accept: true } },
-    { name: 'browser_wait', args: { text: '草稿已删除', timeoutMs: 5_000 } },
+    { name: 'browser_wait', args: { text: 'Draft deleted', timeoutMs: 5_000 } },
   ])
   assert.ok(finalText.includes(title))
   assert.match(dialogTaskReply({ messages: [{ role: 'user', content: 'nothing to delete' }] }).text, /no draft named/u)

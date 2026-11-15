@@ -195,7 +195,7 @@ describe('extension update checks', () => {
   it('keeps the Windows installer encoded for PowerShell 5.1', () => {
     const extensionRoot = process.cwd()
     const installerPath = `${extensionRoot}/../../scripts/install.ps1`
-    // Windows PowerShell 5.1 需要 BOM 才能正确读取 UTF-8 中文。
+    // Windows PowerShell 5.1 needs a BOM to read UTF-8 Chinese text correctly.
     expect(readFileSync(installerPath).subarray(0, 3)).toEqual(Buffer.from([0xef, 0xbb, 0xbf]))
   })
 })

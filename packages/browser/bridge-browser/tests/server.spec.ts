@@ -579,7 +579,7 @@ describe('BridgeServer', () => {
     abort.abort()
     expect(() => h.bridge.requestTool('browser_click', {}, abort.signal))
       .toThrowError(expect.objectContaining({ code: 'bridge-closed' }))
-    // 没有 tool.call 被发出
+    // No tool.call was sent
     await new Promise((resolve) => { setTimeout(resolve, 50) })
     expect(frames.some((f) => f.t === 'tool.call')).toBe(false)
     ws.close()

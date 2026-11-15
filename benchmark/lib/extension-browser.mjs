@@ -17,7 +17,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       executablePath,
       channel: 'chromium',
       headless: true,
-      locale: 'zh-CN',
+      locale: 'en-US',
       timezoneId: 'Asia/Shanghai',
       viewport: { width: 1280, height: 900 },
       args: [

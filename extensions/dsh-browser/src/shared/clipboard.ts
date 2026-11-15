@@ -9,7 +9,7 @@
 
 import DOMPurify from 'dompurify'
 
-/** 保留粘贴内容的排版，移除可执行内容和表单控件。 */
+/** Keeps the formatting of pasted content and removes executable content and form controls. */
 export function sanitizeClipboardHtml(html: string): string {
   return DOMPurify.sanitize(html, {
     USE_PROFILES: { html: true },

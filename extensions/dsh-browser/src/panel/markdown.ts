@@ -25,7 +25,7 @@ const MARKDOWN_SANITIZE_OPTIONS = {
 
 marked.setOptions({
   gfm: true,
-  // 聊天式文本：单个换行渲染为 <br>（与 DeepSeek 聊天界面的换行行为一致）。
+  // Chat-style text: a single newline renders as <br> (matching the line-break behavior of the DeepSeek chat UI).
   breaks: true,
 })
 

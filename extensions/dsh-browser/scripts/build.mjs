@@ -30,7 +30,7 @@ const configs = [
 ]
 
 if (watch) {
-  // 并行启动各个构建目标的 watcher。
+  // Start the watcher of every build target in parallel.
   const children = configs.map((config) => spawn('vite', ['build', '--config', config, '--watch'], {
     cwd: root,
     stdio: 'inherit',
