@@ -120,13 +120,13 @@ release_resolve_token() {
   case "$RELEASE_STATUS" in
     200) ;;
     401 | 403) release_fail \
-      "GitHub 拒绝了 DSH_BROWSER_GITHUB_TOKEN（HTTP $RELEASE_STATUS）。" \
+      "GitHub 拒绝了 DSH_BROWSER_GITHUB_TOKEN（HTTP ${RELEASE_STATUS}）。" \
       "GitHub rejected DSH_BROWSER_GITHUB_TOKEN (HTTP $RELEASE_STATUS)." ;;
     404) release_fail \
       "用该 token 找不到 $RELEASE_REPOSITORY 的发布版本 ${RELEASE_TAG:-latest}；请确认版本已发布且 token 可以读取该仓库。" \
       "No release ${RELEASE_TAG:-latest} of $RELEASE_REPOSITORY is visible to this token; check that it is published and that the token can read the repository." ;;
     *) release_fail \
-      "无法从 GitHub API 读取发布信息（HTTP $RELEASE_STATUS）。" \
+      "无法从 GitHub API 读取发布信息（HTTP ${RELEASE_STATUS}）。" \
       "Could not read the release from the GitHub API (HTTP $RELEASE_STATUS)." ;;
   esac
   # One "name<TAB>url" line per asset, after the tag on the first line.
@@ -201,7 +201,7 @@ release_verify() {
     "None of sha256sum, shasum or openssl was found, so the download cannot be verified."
   if [ "$actual" != "$expected" ]; then
     release_fail \
-      "$name 的 SHA-256 与 SHA256SUMS 不符（期望 $expected，实际 $actual）。文件未被解压或执行。" \
+      "$name 的 SHA-256 与 SHA256SUMS 不符（期望 ${expected}，实际 ${actual}）。文件未被解压或执行。" \
       "SHA-256 mismatch for $name (expected $expected, got $actual). Nothing was unpacked or run."
   fi
 }
@@ -214,7 +214,7 @@ release_fetch() {
   release_check_base "$RELEASE_GITHUB_URL"
   release_check_base "$RELEASE_API_URL"
   if [ -n "$RELEASE_TAG" ] && ! release_valid_tag "$RELEASE_TAG"; then
-    release_fail "不是有效的发布版本号：$RELEASE_TAG（示例：v0.1.5）。" "Not a release tag: $RELEASE_TAG (expected something like v0.1.5)."
+    release_fail "不是有效的发布版本号：${RELEASE_TAG}（示例：v0.1.5）。" "Not a release tag: $RELEASE_TAG (expected something like v0.1.5)."
   fi
   mkdir -p "$directory"
 
@@ -240,7 +240,7 @@ release_fetch() {
         "$RELEASE_REPOSITORY 还没有发布任何版本。" \
         "$RELEASE_REPOSITORY has not published a release yet." ;;
       *) release_fail \
-        "下载失败：无法连接 $RELEASE_GITHUB_URL。现有安装未被修改。" \
+        "下载失败：无法连接 ${RELEASE_GITHUB_URL}。现有安装未被修改。" \
         "Download failed: could not reach $RELEASE_GITHUB_URL. The existing installation was not changed." ;;
     esac
   fi

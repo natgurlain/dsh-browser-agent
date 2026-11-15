@@ -138,13 +138,13 @@ release_resolve_token() {
   case "$RELEASE_STATUS" in
     200) ;;
     401 | 403) release_fail \
-      "GitHub 拒绝了 DSH_BROWSER_GITHUB_TOKEN（HTTP $RELEASE_STATUS）。" \
+      "GitHub 拒绝了 DSH_BROWSER_GITHUB_TOKEN（HTTP ${RELEASE_STATUS}）。" \
       "GitHub rejected DSH_BROWSER_GITHUB_TOKEN (HTTP $RELEASE_STATUS)." ;;
     404) release_fail \
       "用该 token 找不到 $RELEASE_REPOSITORY 的发布版本 ${RELEASE_TAG:-latest}；请确认版本已发布且 token 可以读取该仓库。" \
       "No release ${RELEASE_TAG:-latest} of $RELEASE_REPOSITORY is visible to this token; check that it is published and that the token can read the repository." ;;
     *) release_fail \
-      "无法从 GitHub API 读取发布信息（HTTP $RELEASE_STATUS）。" \
+      "无法从 GitHub API 读取发布信息（HTTP ${RELEASE_STATUS}）。" \
       "Could not read the release from the GitHub API (HTTP $RELEASE_STATUS)." ;;
   esac
   # One "name<TAB>url" line per asset, after the tag on the first line.
@@ -219,7 +219,7 @@ release_verify() {
     "None of sha256sum, shasum or openssl was found, so the download cannot be verified."
   if [ "$actual" != "$expected" ]; then
     release_fail \
-      "$name 的 SHA-256 与 SHA256SUMS 不符（期望 $expected，实际 $actual）。文件未被解压或执行。" \
+      "$name 的 SHA-256 与 SHA256SUMS 不符（期望 ${expected}，实际 ${actual}）。文件未被解压或执行。" \
       "SHA-256 mismatch for $name (expected $expected, got $actual). Nothing was unpacked or run."
   fi
 }
@@ -232,7 +232,7 @@ release_fetch() {
   release_check_base "$RELEASE_GITHUB_URL"
   release_check_base "$RELEASE_API_URL"
   if [ -n "$RELEASE_TAG" ] && ! release_valid_tag "$RELEASE_TAG"; then
-    release_fail "不是有效的发布版本号：$RELEASE_TAG（示例：v0.1.5）。" "Not a release tag: $RELEASE_TAG (expected something like v0.1.5)."
+    release_fail "不是有效的发布版本号：${RELEASE_TAG}（示例：v0.1.5）。" "Not a release tag: $RELEASE_TAG (expected something like v0.1.5)."
   fi
   mkdir -p "$directory"
 
@@ -258,7 +258,7 @@ release_fetch() {
         "$RELEASE_REPOSITORY 还没有发布任何版本。" \
         "$RELEASE_REPOSITORY has not published a release yet." ;;
       *) release_fail \
-        "下载失败：无法连接 $RELEASE_GITHUB_URL。现有安装未被修改。" \
+        "下载失败：无法连接 ${RELEASE_GITHUB_URL}。现有安装未被修改。" \
         "Download failed: could not reach $RELEASE_GITHUB_URL. The existing installation was not changed." ;;
     esac
   fi
@@ -427,9 +427,9 @@ resolve_pnpm() {
     [ -n "$PNPM_NPX_SPEC" ] || PNPM_NPX_SPEC="pnpm"
     pnpm() { npx --yes "$PNPM_NPX_SPEC" "$@"; }
     if [ "$found" -eq 1 ]; then
-      print_pair "PATH 上的 pnpm 无法在当前 Node 下运行，改用 npx $PNPM_NPX_SPEC。" "pnpm on PATH does not run with this Node; using npx $PNPM_NPX_SPEC instead."
+      print_pair "PATH 上的 pnpm 无法在当前 Node 下运行，改用 npx ${PNPM_NPX_SPEC}。" "pnpm on PATH does not run with this Node; using npx $PNPM_NPX_SPEC instead."
     else
-      print_pair "未找到 pnpm，改用 npx $PNPM_NPX_SPEC。" "pnpm was not found; using npx $PNPM_NPX_SPEC instead."
+      print_pair "未找到 pnpm，改用 npx ${PNPM_NPX_SPEC}。" "pnpm was not found; using npx $PNPM_NPX_SPEC instead."
     fi
     return 0
   fi
@@ -554,7 +554,7 @@ register_desktop() {
   [ -n "$DESKTOP_APP" ] || return 0
   if [ -z "$DESKTOP_CLI" ]; then
     DESKTOP_STATUS="no-cli"
-    print_pair "找到了 DeepSeek Harness 应用，但没有找到它自带的 CLI，跳过桌面应用。应用：$DESKTOP_APP；已查找：${DESKTOP_RUNTIME:-$DESKTOP_APP/Contents/Resources/runtime}/cli/bin/dsh" "The DeepSeek Harness app was found, but not its bundled CLI; skipping the desktop app. App: $DESKTOP_APP; looked for: ${DESKTOP_RUNTIME:-$DESKTOP_APP/Contents/Resources/runtime}/cli/bin/dsh"
+    print_pair "找到了 DeepSeek Harness 应用，但没有找到它自带的 CLI，跳过桌面应用。应用：${DESKTOP_APP}；已查找：${DESKTOP_RUNTIME:-$DESKTOP_APP/Contents/Resources/runtime}/cli/bin/dsh" "The DeepSeek Harness app was found, but not its bundled CLI; skipping the desktop app. App: $DESKTOP_APP; looked for: ${DESKTOP_RUNTIME:-$DESKTOP_APP/Contents/Resources/runtime}/cli/bin/dsh"
     return 0
   fi
   if [ ! -d "$DSH_HOME_DIR/profiles/desktop" ]; then
@@ -572,7 +572,7 @@ register_desktop() {
       (cd "$ROOT" && desktop_cli plugin --profile desktop remove "$legacy_plugin") >"$log" 2>&1 </dev/null || status=$?
       if [ "$status" -ne 0 ]; then
         DESKTOP_STATUS="failed"
-        print_pair "警告：无法从桌面应用移除旧的桥插件 $legacy_plugin，桌面应用未注册。" "WARNING: could not remove the old bridge plugin $legacy_plugin from the desktop app; the desktop app was not registered." >&2
+        print_pair "警告：无法从桌面应用移除旧的桥插件 ${legacy_plugin}，桌面应用未注册。" "WARNING: could not remove the old bridge plugin $legacy_plugin from the desktop app; the desktop app was not registered." >&2
         desktop_report_failure "$status" "$log" plugin --profile desktop remove "$legacy_plugin"
         rm -f "$log"
         return 0
@@ -598,7 +598,7 @@ register_desktop() {
     [ -n "$DESKTOP_PLUGIN_RANGE" ] || DESKTOP_PLUGIN_RANGE="$(node -e 'process.stdout.write(String(require(process.argv[1]).engines?.dsh ?? ""))' "$PLUGIN/package.json" 2>/dev/null)" || true
     [ -n "$DESKTOP_APP_VERSION" ] || DESKTOP_APP_VERSION="unknown"
     [ -n "$DESKTOP_PLUGIN_RANGE" ] || DESKTOP_PLUGIN_RANGE="unknown"
-    print_pair "警告：DeepSeek Harness 应用的 DSH 版本是 $DESKTOP_APP_VERSION，本插件支持 $DESKTOP_PLUGIN_RANGE，应用拒绝了安装。请更新 DeepSeek Harness 应用，然后重新运行本安装脚本。安装会继续，web profile 不受影响。" "WARNING: the DeepSeek Harness app has DSH $DESKTOP_APP_VERSION and this plugin supports $DESKTOP_PLUGIN_RANGE, so the app rejected it. Update the DeepSeek Harness app, then run this installer again. The install continues; the web profile is not affected." >&2
+    print_pair "警告：DeepSeek Harness 应用的 DSH 版本是 ${DESKTOP_APP_VERSION}，本插件支持 ${DESKTOP_PLUGIN_RANGE}，应用拒绝了安装。请更新 DeepSeek Harness 应用，然后重新运行本安装脚本。安装会继续，web profile 不受影响。" "WARNING: the DeepSeek Harness app has DSH $DESKTOP_APP_VERSION and this plugin supports $DESKTOP_PLUGIN_RANGE, so the app rejected it. Update the DeepSeek Harness app, then run this installer again. The install continues; the web profile is not affected." >&2
   else
     DESKTOP_STATUS="failed"
     print_pair "警告：注册到 DeepSeek Harness 桌面应用失败。安装会继续完成其余步骤。" "WARNING: registering with the DeepSeek Harness desktop app failed. The install continues with the remaining steps." >&2
@@ -688,7 +688,7 @@ activate_next_node() {
     NODE_FROM_APP=1
     zh_label="DeepSeek Harness 应用"
   fi
-  print_pair "PATH 上没有可用的 Node.js，改用 $zh_label 提供的 Node.js $version（仅本次安装）：$bin" "No usable Node.js on PATH; using Node.js $version from $label (for this install only): $bin"
+  print_pair "PATH 上没有可用的 Node.js，改用 $zh_label 提供的 Node.js ${version}（仅本次安装）：$bin" "No usable Node.js on PATH; using Node.js $version from $label (for this install only): $bin"
   return 0
 }
 
@@ -1235,11 +1235,11 @@ else
 fi
 printf '\n'
 if [ "$BROWSER_OPENED" -ne 1 ]; then
-  print_pair "无法自动打开 $BROWSER_NAME，请手动打开浏览器并在地址栏输入 $BROWSER_URL。" "Could not open $BROWSER_NAME automatically; open the browser and type $BROWSER_URL in the address bar."
+  print_pair "无法自动打开 ${BROWSER_NAME}，请手动打开浏览器并在地址栏输入 ${BROWSER_URL}。" "Could not open $BROWSER_NAME automatically; open the browser and type $BROWSER_URL in the address bar."
 fi
 if [ "$IS_UPDATE" -eq 1 ]; then
   print_pair "检测到已有扩展目录，文件已安全更新。" "Existing extension directory detected; its files were updated safely."
-  print_pair "打开 $BROWSER_NAME（注意不是 Firefox）：" "Open $BROWSER_NAME (not Firefox):"
+  print_pair "打开 ${BROWSER_NAME}（注意不是 Firefox）：" "Open $BROWSER_NAME (not Firefox):"
   printf '\n'
   print_pair "    地址栏输入 $BROWSER_URL" "    Type $BROWSER_URL in the address bar"
   printf '\n'
@@ -1255,9 +1255,9 @@ if [ "$IS_UPDATE" -eq 1 ]; then
   print_pair "出现 “dsh 浏览器助手” 卡片即成功。" "When the “dsh Browser Assistant” card appears, it is loaded."
 else
   if [ "$BROWSER_OPENED" -eq 1 ]; then
-    print_pair "$BROWSER_NAME 扩展管理页（$BROWSER_URL）已打开，请完成以下操作：" "$BROWSER_NAME Extensions ($BROWSER_URL) is open. Complete these steps:"
+    print_pair "$BROWSER_NAME 扩展管理页（${BROWSER_URL}）已打开，请完成以下操作：" "$BROWSER_NAME Extensions ($BROWSER_URL) is open. Complete these steps:"
   else
-    print_pair "请在 $BROWSER_NAME 扩展管理页（$BROWSER_URL）完成以下操作：" "Complete these steps on the $BROWSER_NAME Extensions page ($BROWSER_URL):"
+    print_pair "请在 $BROWSER_NAME 扩展管理页（${BROWSER_URL}）完成以下操作：" "Complete these steps on the $BROWSER_NAME Extensions page ($BROWSER_URL):"
   fi
   printf '\n'
   print_pair "开启“开发者模式”" "1. Enable “Developer mode”"
@@ -1284,10 +1284,10 @@ print_pair "DSH 注册结果：" "DSH targets:"
 print_pair "web profile：已注册" "• web profile: registered"
 case "$DESKTOP_STATUS" in
   registered)
-    print_pair "DeepSeek Harness 桌面应用：已注册（$DESKTOP_APP）" "• DeepSeek Harness desktop app: registered ($DESKTOP_APP)"
+    print_pair "DeepSeek Harness 桌面应用：已注册（${DESKTOP_APP}）" "• DeepSeek Harness desktop app: registered ($DESKTOP_APP)"
     ;;
   rejected)
-    print_pair "DeepSeek Harness 桌面应用：未注册。警告：应用的 DSH 版本是 $DESKTOP_APP_VERSION，本插件支持 $DESKTOP_PLUGIN_RANGE。请更新 DeepSeek Harness 应用，然后重新运行本安装脚本。" "• DeepSeek Harness desktop app: NOT registered. WARNING: the app has DSH $DESKTOP_APP_VERSION and this plugin supports $DESKTOP_PLUGIN_RANGE. Update the DeepSeek Harness app, then run this installer again."
+    print_pair "DeepSeek Harness 桌面应用：未注册。警告：应用的 DSH 版本是 ${DESKTOP_APP_VERSION}，本插件支持 ${DESKTOP_PLUGIN_RANGE}。请更新 DeepSeek Harness 应用，然后重新运行本安装脚本。" "• DeepSeek Harness desktop app: NOT registered. WARNING: the app has DSH $DESKTOP_APP_VERSION and this plugin supports $DESKTOP_PLUGIN_RANGE. Update the DeepSeek Harness app, then run this installer again."
     ;;
   failed)
     print_pair "DeepSeek Harness 桌面应用：未注册。警告：应用自带的 CLI 执行失败，命令、退出码和输出见上文第 2 步。" "• DeepSeek Harness desktop app: NOT registered. WARNING: its bundled CLI failed; the command, exit code and output are under step 2 above."
