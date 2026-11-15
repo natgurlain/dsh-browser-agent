@@ -75,6 +75,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { DEVLOOP_CAPTURE_TIMEOUT_MS, DevLoop, withDevLoopMethods } from './dev-loop.ts'
 import { mountLearning, type LearningMount } from './learning/index.ts'
 import { errorMessage } from './host-api.ts'
+import { PAIRED_EXTENSIONS_FILE_NAME, PairingWindows, readPairedExtensionIds, writePairedExtensionIds } from './pairing-host.ts'
+import { mountPairingControls, PAIRING_COMMAND_NAME, type PairingCommandRegistry, type PairingFetchRegistry } from './pairing-mount.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'bridge-browser'
@@ -153,7 +155,9 @@ export interface Config {
   /**
    * Chrome extension IDs allowed to connect (`chrome-extension://<id>` Origin).
    * Defaults to the manifest-keyed ID; replace it for a differently keyed
-   * development build or a Web Store listing.
+   * development build. Extensions that paired with a one-time code (a Web
+   * Store or Brave build) are allowed in addition, from
+   * `<dsh home>/browser-paired-extensions.json`.
    */
   allowedChromeExtensionIds?: string[]
   /**
@@ -284,7 +288,10 @@ export async function apply(ctx: Context, resolved: ResolvedConfig): Promise<voi
   }
   const ledger = await fileSessionLedger(dshHomePath(SESSION_LEDGER_FILE_NAME), message => { ctx.logger.warn(message) })
   const watchRecords = await fileWatchRecords(dshHomePath(WATCH_RECORDS_FILE_NAME), message => { ctx.logger.warn(message) })
-  mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection), ledger, watchRecords)
+  // Chrome extension IDs that paired with a one-time code on an earlier run.
+  const pairedFile = dshHomePath(PAIRED_EXTENSIONS_FILE_NAME)
+  const pairedExtensionIds = await readPairedExtensionIds(pairedFile)
+  mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection), ledger, watchRecords, { file: pairedFile, ids: pairedExtensionIds })
 }
 
 function mountBridge(
@@ -294,6 +301,7 @@ function mountBridge(
   hostApi: BrowserHostApi,
   ledger: SessionLedger,
   watchRecords: WatchRecordStore,
+  paired: { file: string; ids: string[] },
 ): void {
   // Workspace grouping wraps the gateway create; session deferral wraps the
   // result so materialization at first prompt still flows through grouping.
@@ -384,14 +392,29 @@ function mountBridge(
   })
   ctx.on('agent/status', ({ agent, status }) => { void devLoop.noteStatus(String(agent.id), status) })
   const killSwitch = createKillSwitchHandler({ devLoop, learning: () => learning, info: (message) => { ctx.logger.info(message) } })
+  // One-step pairing for extensions without a token (store builds, Firefox).
+  // No window is open until the user asks for one through dsh itself.
+  const pairing = new PairingWindows()
+  const pairedIds = [...paired.ids]
+  let pairedWrites: Promise<void> = Promise.resolve()
   server = new BridgeServer({
     token: tokenRes.token,
+    pairing,
+    onPaired: ({ origin, chromeExtensionId }) => {
+      ctx.logger.info(`browser bridge: paired ${origin === '' ? 'a client without an extension origin' : origin}`)
+      if (chromeExtensionId === undefined || pairedIds.includes(chromeExtensionId)) return
+      pairedIds.push(chromeExtensionId)
+      // Serialized: two pairings in a row must not interleave their writes.
+      pairedWrites = pairedWrites.then(() => writePairedExtensionIds(paired.file, pairedIds)).catch((error: unknown) => {
+        ctx.logger.warn(`browser bridge: could not record the paired extension (it stays allowed until dsh restarts): ${errorMessage(error)}`)
+      })
+    },
     // An MCP client's external session is the bridge's own: the panel may clear its taint too.
     api: withDevLoopMethods(withTaintMethods(fenced, taint, async (sessionId, signal) =>
       ledger.external(sessionId) !== undefined || fenced.allowsSession(sessionId, signal, 'own')), devLoop),
     sessionScope: fenced,
     sessionLineage: taint,
-    allowedChromeExtensionIds: resolved.allowedChromeExtensionIds,
+    allowedChromeExtensionIds: [...resolved.allowedChromeExtensionIds, ...paired.ids],
     forwardedPorts: trustedForwardedPorts(resolved, message => { ctx.logger.warn(message) }),
     toolTimeoutMs: resolved.toolTimeoutMs,
     caps: {
@@ -460,6 +483,28 @@ function mountBridge(
   ctx.effect(() => ctx.webServer.registerUpgrade(route), 'bridge-browser: /ext/bridge upgrade route')
   // 异步 disposer：HMR/卸载时先等桥完全关闭（socket/泵/acceptor 静默）再继续。
   ctx.effect(() => () => server.close(), 'bridge-browser: bridge server')
+
+  // Host-side pairing controls: both sit behind dsh's own authentication.
+  ctx.effect(() => {
+    let disposers: Array<() => unknown> = []
+    try {
+      const routes = optionalService<{ fetch?: PairingFetchRegistry }>(ctx, 'connection')?.fetch
+      const commands = optionalService<PairingCommandRegistry>(ctx, 'commands')
+      disposers = mountPairingControls(pairing, {
+        ...routes === undefined ? {} : { fetch: routes },
+        ...commands === undefined ? {} : { commands },
+      })
+    } catch (error: unknown) {
+      ctx.logger.warn(`browser bridge: could not register the pairing controls: ${errorMessage(error)}`)
+    }
+    if (disposers.length === 0) {
+      ctx.logger.warn(`browser bridge: this dsh offers no pairing control (neither the /api route nor /${PAIRING_COMMAND_NAME}); extensions without a token must paste it`)
+    }
+    return async () => {
+      pairing.cancel()
+      for (const dispose of disposers.reverse()) await dispose()
+    }
+  }, 'bridge-browser: pairing controls')
 
   // Zero-config discovery endpoint: the extension fetches this to learn the
   // bridge WebSocket URL without any manual configuration. The URL carries no
@@ -665,6 +710,11 @@ function mountDiscoveryBeacon(
       return bound?.close()
     }
   }, 'bridge-browser: discovery beacon')
+}
+
+/** A service this plugin uses when the composition has it (it is not in `inject`). */
+function optionalService<T>(ctx: Context, name: string): T | undefined {
+  return (ctx.get as (name: string) => unknown)(name) as T | undefined
 }
 
 /**

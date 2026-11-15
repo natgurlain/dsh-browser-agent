@@ -187,7 +187,39 @@ export const BRIDGE_CLOSE_CODES = {
    * bridges: this bridge terminates the evicted socket (the client sees 1006).
    */
   busy: 4005,
+  /**
+   * A pairing attempt arrived while no pairing window is open on this bridge:
+   * none was started on the host, it expired, it was already used, or its
+   * attempts ran out. Nothing about the code was tested.
+   */
+  pairingClosed: 4006,
+  /** A pairing attempt failed its key confirmation: wrong code, or a relay between the two halves. */
+  pairingFailed: 4007,
 } as const
+
+/**
+ * Version of the pairing exchange (`pair.*` frames, see pairing.ts). It is
+ * independent of {@link BRIDGE_PROTOCOL_VERSION}: pairing only delivers the
+ * token, and the paired extension then runs the ordinary handshake.
+ */
+export const PAIRING_PROTOCOL_VERSION = 1
+
+/** Hex digits of one pairing share: an element of the 3072-bit group, fixed width. */
+export const PAIRING_SHARE_HEX_LENGTH = 768
+
+/** Longest token box (hex) a `pair.ok` may carry: the token is at most 1024 bytes. */
+export const PAIRING_BOX_HEX_MAX = 2048
+
+/** Longest Origin a `pair.hello` may claim. */
+export const PAIRING_ORIGIN_MAX = 256
+
+const PAIRING_SHARE = /^[0-9a-f]{768}$/u
+const PAIRING_BOX = /^(?:[0-9a-f]{2})+$/u
+
+/** Whether a value has the wire shape of a pairing share (range is checked in pairing.ts). */
+export function isPairingShareHex(value: unknown): value is string {
+  return typeof value === 'string' && PAIRING_SHARE.test(value)
+}
 
 /**
  * Chrome extension ID of the dsh browser extension, fixed by the public key in
@@ -789,6 +821,17 @@ export type ClientFrame =
   | { t: 'tool.result'; id: string; ok: false; error: ToolError }
   /** Liveness reply. */
   | { t: 'pong' }
+  /**
+   * Opens a pairing exchange instead of `hello`, on a socket that has no token
+   * yet (pairing.ts). Accepted only while the user has a pairing window open
+   * on the host. `origin` is the sender's own extension origin (empty for a
+   * non-browser client); the bridge requires it to equal the socket's Origin
+   * header and both halves bind it, with the nonces, the dialed endpoint and
+   * both shares, into the key confirmation.
+   */
+  | { t: 'pair.hello'; v: typeof PAIRING_PROTOCOL_VERSION; nonce: string; endpoint: BridgeEndpoint; origin: string; share: string }
+  /** The client's key confirmation: proves it derived the same key, hence typed the same code. */
+  | { t: 'pair.confirm'; mac: string }
 
 /** Frames sent by the bridge plugin to the extension. */
 export type ServerFrame =
@@ -829,6 +872,14 @@ export type ServerFrame =
   | { t: 'tool.cancel'; id: string }
   /** Liveness probe. */
   | { t: 'ping' }
+  /** The bridge's share of a pairing exchange, answering `pair.hello`. */
+  | { t: 'pair.share'; share: string }
+  /**
+   * Pairing succeeded: the bridge token encrypted under the exchange key
+   * (`box`) and the bridge's own key confirmation over the transcript and the
+   * box (`mac`). Sent only after the client's confirmation verified.
+   */
+  | { t: 'pair.ok'; box: string; mac: string }
   /** Fatal connection error; the client should re-authenticate. */
   | { t: 'error'; code: string; message: string }
 
@@ -870,6 +921,8 @@ export function isServerFrame(frame: BridgeFrame): frame is ServerFrame {
     || frame.t === 'tool.cancel'
     || frame.t === 'ping'
     || frame.t === 'error'
+    || frame.t === 'pair.share'
+    || frame.t === 'pair.ok'
 }
 
 /**
@@ -974,6 +1027,30 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
     case 'error':
       return typeof frame.code === 'string' && typeof frame.message === 'string'
         ? { t: 'error', code: frame.code, message: frame.message }
+        : undefined
+    case 'pair.hello':
+      return frame.v === PAIRING_PROTOCOL_VERSION
+        && isBridgeHex256(frame.nonce)
+        && isBridgeEndpoint(frame.endpoint)
+        && typeof frame.origin === 'string' && frame.origin.length <= PAIRING_ORIGIN_MAX
+        && isPairingShareHex(frame.share)
+        ? {
+            t: 'pair.hello',
+            v: PAIRING_PROTOCOL_VERSION,
+            nonce: frame.nonce,
+            endpoint: { host: frame.endpoint.host, port: frame.endpoint.port },
+            origin: frame.origin,
+            share: frame.share,
+          }
+        : undefined
+    case 'pair.confirm':
+      return isBridgeHex256(frame.mac) ? { t: 'pair.confirm', mac: frame.mac } : undefined
+    case 'pair.share':
+      return isPairingShareHex(frame.share) ? { t: 'pair.share', share: frame.share } : undefined
+    case 'pair.ok':
+      return typeof frame.box === 'string' && frame.box.length <= PAIRING_BOX_HEX_MAX && PAIRING_BOX.test(frame.box)
+        && isBridgeHex256(frame.mac)
+        ? { t: 'pair.ok', box: frame.box, mac: frame.mac }
         : undefined
     default:
       return undefined
