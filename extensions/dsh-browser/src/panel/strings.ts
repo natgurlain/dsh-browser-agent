@@ -99,6 +99,11 @@ export interface PanelCopy {
     languageAuto: string
     languageEnglish: string
     languageChinese: string
+    theme: string
+    themeHelp: string
+    themeAuto: string
+    themeLight: string
+    themeDark: string
     bridgeAddress: string
     bridgeHelp: string
     bridgePlaceholder: string
@@ -620,6 +625,11 @@ const EN: PanelCopy = {
     languageAuto: 'Automatic (follow Chrome)',
     languageEnglish: 'English',
     languageChinese: '中文',
+    theme: 'Theme',
+    themeHelp: 'Colours of the assistant panel. Automatic follows the browser or system setting.',
+    themeAuto: 'Automatic (follow system)',
+    themeLight: 'Light',
+    themeDark: 'Dark',
     bridgeAddress: 'Bridge address',
     bridgeHelp: 'Leave blank to detect a local service automatically',
     bridgePlaceholder: 'Auto-detect (desktop beacon 43189–43198 included)',
@@ -1153,6 +1163,11 @@ const ZH: PanelCopy = {
     languageAuto: '自动（跟随 Chrome）',
     languageEnglish: 'English',
     languageChinese: '中文',
+    theme: '外观主题',
+    themeHelp: '助手侧栏的配色。“自动”会跟随浏览器或系统设置。',
+    themeAuto: '自动（跟随系统）',
+    themeLight: '浅色',
+    themeDark: '深色',
     bridgeAddress: '桥地址',
     bridgeHelp: '留空时自动检测本机服务',
     bridgePlaceholder: '自动检测（含桌面版信标 43189–43198）',
