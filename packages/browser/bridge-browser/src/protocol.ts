@@ -96,7 +96,7 @@ export const BRIDGE_WATCH_FIRE_METHOD = 'bridge.watch.fire'
 export const BRIDGE_AUDIT_EXPORT_METHOD = 'bridge.audit.export'
 
 /**
- * Seconds a fresh socket may take to present `hello` before it is closed.
+ * Milliseconds a fresh socket may take to present `hello` before it is closed.
  * Short on purpose: an unauthenticated socket holds server resources, and the
  * handshake costs the client two HMACs.
  */

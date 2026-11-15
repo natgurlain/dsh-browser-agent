@@ -114,8 +114,8 @@ const DEFAULT_DEFER_SESSION_CREATE = true
 /** Default: advertise a fixed-port discovery beacon so a random host port stays discoverable. */
 const DEFAULT_BEACON = true
 
-/** Reported to MCP clients as the server version. */
-const BRIDGE_PACKAGE_VERSION = '0.0.7'
+/** Reported to MCP clients as the server version; manifest.spec checks it equals package.json's. */
+export const BRIDGE_PACKAGE_VERSION = '0.0.7'
 
 /** Instance metadata the discovery endpoints advertise for the extension's picker. */
 const INSTANCE_INFO = { pid: process.pid, startedAt: new Date().toISOString() }

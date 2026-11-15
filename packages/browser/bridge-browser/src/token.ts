@@ -1,8 +1,10 @@
 /**
- * Bridge bearer-token lifecycle: generation, constant-time verification, and
- * file persistence under the dsh home directory.
+ * Bridge token lifecycle: generation, constant-time comparison, and file
+ * persistence under the dsh home directory.
  *
- * The token authenticates the browser extension against the bridge WebSocket.
+ * The token is the shared HMAC key of the bridge handshake (protocol v2+): it
+ * is never sent; both sides prove knowledge of it and derive the frame
+ * channel from it. It authenticates the browser extension against the bridge WebSocket.
  * It is NOT the /api trust fence (that stays untouched); it is the bridge
  * path's own auth because the bridge route lives outside the fence by design.
  *

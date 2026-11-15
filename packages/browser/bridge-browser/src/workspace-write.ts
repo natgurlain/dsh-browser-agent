@@ -1,8 +1,8 @@
 /**
  * The one way the bridge writes a file into a session's workspace.
  *
- * Every bridge-side file write (`browser_extract { saveTo }`, PDF and
- * download saves) goes through {@link writeWorkspaceFile}:
+ * Every bridge-side file write (`browser_extract { saveTo }`, PDF saves,
+ * saved workflows and failure fixtures) goes through {@link writeWorkspaceFile}:
  *
  * ```ts
  * const target = workspaceWriteTarget(ctx, exec.agent, options.workspacePath ?? '')

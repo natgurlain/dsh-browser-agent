@@ -20,6 +20,11 @@ const dsh = manifest.dsh as {
 const engines = manifest.engines as { dsh?: string; node?: string }
 
 describe('plugin manifest', () => {
+  it('reports the package version to MCP clients', async () => {
+    const { BRIDGE_PACKAGE_VERSION } = await import('../src/index.ts')
+    expect(BRIDGE_PACKAGE_VERSION).toBe(manifest.version)
+  })
+
   it('declares the dsh manifest format and runtime range', () => {
     expect(dsh.manifestVersion).toBe(1)
     expect(dsh.bundle?.patch).toBe('./cordis.patch.yml')

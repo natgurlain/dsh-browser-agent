@@ -159,7 +159,7 @@ export function parseProgram(value: unknown): ProgramStep[] {
  * @param ctx - plugin context.
  * @param bridge - the bridge server (tool dispatch).
  * @param options - resolved options.
- * @param executorFor - executor factory seam (tests; a later `browser_run` executor).
+ * @param executorFor - executor factory seam (tests substitute their own).
  */
 export function mountLearning(
   ctx: Context,

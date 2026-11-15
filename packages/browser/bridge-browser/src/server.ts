@@ -39,9 +39,11 @@
  * predecessor, whose in-flight tool calls settle as `bridge-closed`; clients
  * without an identity share one legacy slot. At most MAX_READY_CONNECTIONS
  * stay open: the least recently active one is evicted beyond that.
- * Tool calls go to the connection a session last prompted from (or that last
- * answered one of its tool calls), else to the most recently active
- * connection that can serve the tool. A `tool.result` is accepted only from
+ * Tool calls go to the connection a session is bound to (the one it was last
+ * prompted from or had a snapshot injected from; a connection that answered
+ * one of its calls binds it only while it is unbound; an MCP session binds at
+ * its first dispatch), else to the most recently active connection that can
+ * serve the tool. A `tool.result` is accepted only from
  * the connection the call was sent to.
  *
  * Panel-independent approvals: while a call waits on the user, the owning
@@ -251,13 +253,14 @@ export interface BridgeServerDeps {
   audit?: BridgeAuditObserver
   /** Read and verify one session's audit log (undefined: agentless calls). */
   exportAudit?: (sessionId: string | undefined) => Promise<unknown>
-  /**
-   * Bridge-internal RPCs owned by plugin modules (page watchers, tab fleets).
-   * Returns undefined for a method it does not own; checked after the audit
-   * RPCs and before anything reaches the Host API.
-   */
   /** The extension reported its kill switch (`bridge.audit.record { event: 'kill-switch' }`). */
   onKillSwitch?: (connection: string | undefined) => void
+  /**
+   * Bridge-internal RPCs owned by plugin modules (page watchers, learning).
+   * Returns undefined for a method it does not own; checked after the audit
+   * RPCs and before anything reaches the Host API. A rejection is answered
+   * as an `internal` error.
+   */
   extraRpc?: (method: string, payload: unknown, context: { connection: string; signal: AbortSignal }) =>
     Promise<{ ok: true; result: unknown } | { ok: false; error: { code: string; message: string } }> | undefined
   /**
@@ -280,7 +283,7 @@ export interface BridgeServerDeps {
    * handshake through it.
    */
   forwardedPorts?: readonly number[]
-  /** Seconds a fresh socket may present `hello`; defaults to HELLO_TIMEOUT_MS. */
+  /** Milliseconds a fresh socket may take to present `hello`; defaults to HELLO_TIMEOUT_MS. */
   helloTimeoutMs?: number
   /** Server ping cadence; defaults to PING_INTERVAL_MS. */
   pingIntervalMs?: number
@@ -388,7 +391,7 @@ export class BridgeServer {
   private readonly wss = new WebSocketServer({ noServer: true })
   /** Authenticated connections by client key. */
   private readonly connections = new Map<string, ReadyConnection>()
-  /** Session → client key that last prompted it or answered one of its tool calls. */
+  /** Session → client key it is bound to (see the class doc for when a binding is set). */
   private readonly sessionAffinity = new Map<string, string>()
   private connectionSerial = 0
   private readonly serverCaps: BridgeCaps
@@ -593,10 +596,7 @@ export class BridgeServer {
     return false
   }
 
-  /**
-   * The install a session is bound to: its own affinity, else its nearest
-   * ancestor's (a subagent or fork acts in the browser its parent drives).
-   */
+  /** Whether the session (or an ancestor) is tainted; fails closed when the lineage throws. */
   private sessionTainted(sessionId: string): boolean {
     try {
       return this.deps.sessionLineage?.isTainted(sessionId) === true
@@ -613,6 +613,10 @@ export class BridgeServer {
     this.sessionAffinity.delete(sessionId)
   }
 
+  /**
+   * The install a session is bound to: its own affinity, else its nearest
+   * ancestor's (a subagent or fork acts in the browser its parent drives).
+   */
   private affinityOf(sessionId: string): string | undefined {
     let current: string | undefined = sessionId
     const seen = new Set<string>()

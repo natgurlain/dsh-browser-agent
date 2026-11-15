@@ -26,12 +26,13 @@ export const SITE_DRIVER_FORMAT = 'dsh-site-driver/v1'
 export const SITE_DRIVER_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const
 export type SiteDriverMethod = typeof SITE_DRIVER_METHODS[number]
 
-/** Plain headers a driver may carry verbatim. */
+/** How a driver's body is encoded, from its Content-Type header. */
 function bodyTypeOf(headers: Record<string, string>): 'json' | 'form' | 'text' {
   const contentType = Object.entries(headers).find(([name]) => name.toLowerCase() === 'content-type')?.[1] ?? ''
   return /json/iu.test(contentType) ? 'json' : /x-www-form-urlencoded/iu.test(contentType) ? 'form' : 'text'
 }
 
+/** Plain headers a driver may carry verbatim. */
 const KEPT_HEADERS = new Set(['content-type', 'accept', 'x-requested-with'])
 /** Headers never stored and never sent from a token source. */
 const FORBIDDEN_HEADERS = new Set(['cookie', 'authorization', 'proxy-authorization', 'host', 'origin', 'referer', 'content-length'])
