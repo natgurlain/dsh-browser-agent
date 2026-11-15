@@ -403,6 +403,7 @@ function mountBridge(
     ? handleWatchFire(payload, context.signal, {
         records: watchRecords,
         ownsSession: (sessionId, signal) => fenced.allowsSession(sessionId, signal, 'own'),
+        isRunning: (sessionId) => ctx.agents.get(sessionId as Parameters<typeof ctx.agents.get>[0]) !== undefined,
         wake: (sessionId, message) => {
           const agent = ctx.agents.get(sessionId as Parameters<typeof ctx.agents.get>[0])
           if (agent === undefined) return false

@@ -237,6 +237,8 @@ export interface WatchFireDeps {
   records: WatchRecordStore
   /** Ledger ownership: never wake a session the bridge does not own. */
   ownsSession: (sessionId: string, signal: AbortSignal) => Promise<boolean>
+  /** Whether the session's Agent is resident (checked before any taint or rate slot is spent). */
+  isRunning: (sessionId: string) => boolean
   /** Deliver to a running Agent; false when it is not resident. */
   wake: (sessionId: string, message: UserMessage) => boolean
   /** Mark the session as having read untrusted page content. */
@@ -260,6 +262,8 @@ export async function handleWatchFire(payload: unknown, signal: AbortSignal, dep
   if (!await deps.ownsSession(fire.sessionId, signal).catch(() => false)) {
     return { ok: false, error: { code: 'forbidden', message: 'the session is not owned by this browser bridge' } }
   }
+  // A session that is not resident gets nothing: no taint, no spent rate slot.
+  if (!deps.isRunning(fire.sessionId)) return { ok: true, result: { woken: false, reason: 'not-running' } }
   const admitted = deps.limiter.admit(fire.sessionId)
   if (!admitted.ok) return { ok: true, result: { woken: false, reason: 'rate-limited', retryAfterMs: admitted.retryAfterMs } }
   const message = createWatchWakeMessage(fire)
@@ -354,7 +358,11 @@ export function defineWatchTools(bridge: Pick<BridgeServer, 'requestTool'>, reco
       const result = sessionId === undefined
         ? await bridge.requestTool('browser_watches', args as Record<string, unknown>, exec.signal, options.toolTimeoutMs)
         : await bridge.requestTool('browser_watches', args as Record<string, unknown>, exec.signal, options.toolTimeoutMs, sessionId, ...toolCallIdArg(exec))
-      if (a.action === 'cancel' && a.id !== undefined) await records.remove(a.id)
+      // Only the owning session's cancel drops the record; another session's
+      // (or an unknown id) must not orphan a live watcher.
+      if (a.action === 'cancel' && a.id !== undefined && sessionId !== undefined && records.get(a.id)?.sessionId === sessionId) {
+        await records.remove(a.id)
+      }
       return { text: textOf(result, 'No watchers.') }
     },
   })
