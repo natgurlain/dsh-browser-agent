@@ -92,6 +92,46 @@ export const BRIDGE_AUDIT_RECORD_METHOD = 'bridge.audit.record'
 /** Internal RPC: a standing page watcher fired; the bridge wakes its owning session (watchers.ts). */
 export const BRIDGE_WATCH_FIRE_METHOD = 'bridge.watch.fire'
 
+/**
+ * Wire version of the standing-work hint: a client that advertises
+ * `standingUpdates` understands {@link BRIDGE_STANDING_EVENT_METHOD} events.
+ */
+export const STANDING_WORK_CAPS_VERSION = 1
+
+/**
+ * Method of the bridge's own `event` frame that carries a changed
+ * {@link StandingWork}. It travels sealed like every post-handshake frame, is
+ * sent only to clients that advertised `standingUpdates`, and is never
+ * projected from a Host stream.
+ */
+export const BRIDGE_STANDING_EVENT_METHOD = 'bridge/standing'
+
+/** Upper bound on the schedule count a hint may claim (anything larger is malformed). */
+export const MAX_STANDING_SCHEDULES = 10_000
+
+/**
+ * Unattended work the Host holds for one browser install: reasons for its
+ * extension to stay connected with no side panel open. A hint only keeps the
+ * connection up; it grants nothing, and every tool call that arrives over the
+ * connection still passes the extension's own gates.
+ */
+export interface StandingWork {
+  /** Workflow schedules this bridge created from that install (or from an older record naming none). */
+  schedules: number
+  /** The loopback MCP endpoint is enabled in the plugin config. */
+  mcp: boolean
+}
+
+/** Strict shape check for {@link StandingWork} (no extra keys). */
+export function isStandingWork(value: unknown): value is StandingWork {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const work = value as Record<string, unknown>
+  return Object.keys(work).length === 2
+    && typeof work.schedules === 'number' && Number.isSafeInteger(work.schedules)
+    && work.schedules >= 0 && work.schedules <= MAX_STANDING_SCHEDULES
+    && typeof work.mcp === 'boolean'
+}
+
 /** Internal RPC: read and verify one session's audit log for the panel's export. */
 export const BRIDGE_AUDIT_EXPORT_METHOD = 'bridge.audit.export'
 
@@ -662,6 +702,18 @@ export interface BridgeCaps {
    * route those methods to the gateway and refuse them.
    */
   hostApprovals?: typeof HOST_APPROVALS_CAPS_VERSION
+  /**
+   * Server only: unattended work the Host holds for this install when the
+   * connection is accepted (see {@link StandingWork}). Absent on older
+   * bridges, which the extension reads as "none". Bound into the server
+   * proof like every other cap.
+   */
+  standing?: StandingWork
+  /**
+   * Client only: the extension handles {@link BRIDGE_STANDING_EVENT_METHOD}
+   * events. Absent on older extensions, which are never sent one.
+   */
+  standingUpdates?: typeof STANDING_WORK_CAPS_VERSION
 }
 
 /** Per-install identity a client advertises in `hello` caps. */
@@ -935,6 +987,8 @@ function isCaps(value: unknown): value is BridgeCaps {
     && (caps.devTools === undefined || isDevToolsCaps(caps.devTools))
     && (caps.client === undefined || isBridgeClientIdentity(caps.client))
     && (caps.hostApprovals === undefined || caps.hostApprovals === HOST_APPROVALS_CAPS_VERSION)
+    && (caps.standing === undefined || isStandingWork(caps.standing))
+    && (caps.standingUpdates === undefined || caps.standingUpdates === STANDING_WORK_CAPS_VERSION)
 }
 
 /** Validate the optional developer-tools capability; unknown versions are unusable. */

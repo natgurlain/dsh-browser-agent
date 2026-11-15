@@ -191,6 +191,19 @@ export class WorkflowSchedules {
   }
 
   /**
+   * How many recorded schedules each install created. The key is the bridge
+   * client key; `undefined` collects older records that name no install
+   * (any connected browser may be the one they need).
+   */
+  countByInstall(): Promise<Map<string | undefined, number>> {
+    return this.serialized(async () => {
+      const counts = new Map<string | undefined, number>()
+      for (const record of await this.records()) counts.set(record.install, (counts.get(record.install) ?? 0) + 1)
+      return counts
+    })
+  }
+
+  /**
    * Delete the schedules this bridge created (all of them for the kill
    * switch; one install's when its user turns workflows off): a schedule is
    * a standing grant to run the browser unattended. Deletion failures are

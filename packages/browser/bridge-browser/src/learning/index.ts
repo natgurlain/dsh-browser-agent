@@ -80,6 +80,8 @@ export interface LearningOptions {
   ownsSession: (sessionId: string) => Promise<boolean>
   /** Mark a session tainted: a fixture puts page content where its file tools can read it. */
   markTainted?: (sessionId: string) => void
+  /** The recorded schedules were (re)counted: the bridge refreshes its standing-work hints. */
+  onSchedulesChanged?: () => void
   /** Record a saved fixture in the session's keyed audit chain. */
   audit?: (sessionId: string | undefined, entry: { kind?: 'fixture' | 'schedule'; tool: string; url: string; decision: string; resultDigest?: string }) => void
 }
@@ -90,6 +92,11 @@ export interface LearningMount {
   disconnected: (connection: string) => void
   /** The user's kill switch: revoke every standing grant (workflow schedules). */
   revokeStandingGrants: () => Promise<void>
+  /**
+   * Schedules that need one install's browser: those it created, plus older
+   * records that name no install. Zero until the records have been read.
+   */
+  standingSchedules: (connection: string) => number
   /** A session was purged: delete the workflow schedules that target it. */
   forgetSession: (sessionId: string) => Promise<void>
   dispose: () => void
@@ -179,11 +186,15 @@ export function mountLearning(
   /** Set by dispose: nothing registers again (a late schedule count included). */
   let disposed = false
   const workflowsEnabled = (): boolean => [...states.values()].some((state) => state.workflows)
+  /** Recorded schedules per creating install (see WorkflowSchedules.countByInstall). */
+  let schedulesByInstall = new Map<string | undefined, number>()
   const refreshScheduleCount = async (): Promise<void> => {
-    const count = await schedules.count().catch(() => 0)
+    const counts = await schedules.countByInstall().catch(() => new Map<string | undefined, number>())
     if (disposed) return
-    liveSchedules = count
+    schedulesByInstall = counts
+    liveSchedules = [...counts.values()].reduce((sum, count) => sum + count, 0)
     sync()
+    options.onSchedulesChanged?.()
   }
   /** Fail closed: no connected install has saved workflows on. */
   const requireWorkflowsOn = (exec: Pick<ToolRunContext, 'agent'>, tool: string, name?: string): void => {
@@ -416,6 +427,7 @@ export function mountLearning(
       if (states.delete(connection)) sync()
     },
     revokeStandingGrants: () => revokeSchedules('kill switch engaged'),
+    standingSchedules: (connection) => (schedulesByInstall.get(connection) ?? 0) + (schedulesByInstall.get(undefined) ?? 0),
     forgetSession: async (sessionId) => {
       try {
         const { revoked, failed } = await schedules.revokeSession(sessionId)
@@ -428,6 +440,7 @@ export function mountLearning(
     dispose: () => {
       disposed = true
       liveSchedules = 0
+      schedulesByInstall = new Map()
       states.clear()
       sync()
     },

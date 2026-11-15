@@ -74,6 +74,10 @@ import {
   isBridgeHex256,
   BRIDGE_PROTOCOL_VERSION,
   BRIDGE_SESSION_PURGE_METHOD,
+  BRIDGE_STANDING_EVENT_METHOD,
+  STANDING_WORK_CAPS_VERSION,
+  canonicalJson,
+  isStandingWork,
   HELLO_TIMEOUT_MS,
   PINNED_CHROME_EXTENSION_ID,
   BridgeFrameChannel,
@@ -92,6 +96,7 @@ import {
   type BridgeHmac,
   type ClientFrame,
   type ProgramStepRef,
+  type StandingWork,
   type ToolErrorCode,
 } from './protocol.ts'
 import { SessionPurgeError } from './session-purge.ts'
@@ -310,6 +315,13 @@ export interface BridgeServerDeps {
   }
   /** Told when an authenticated connection goes away (learning features drop its switches). */
   onDisconnect?: (connection: string) => void
+  /**
+   * Unattended work the Host holds for one install (client key): sent in that
+   * connection's `hello.ok` caps, and again through
+   * {@link BridgeServer.notifyStandingWork} when it changes. Absent: no hint
+   * is sent at all (the extension then keeps its usual idle rule).
+   */
+  standingWork?: (connection: string) => StandingWork
 }
 
 /** Longest parent chain followed when resolving inherited affinity. */
@@ -353,6 +365,8 @@ interface ReadyConnection {
   abort: AbortController
   pump: Promise<void>
   ping: NodeJS.Timeout
+  /** The standing-work hint this connection was last told (canonical JSON). */
+  standing: string | undefined
 }
 
 /** Send one unsealed handshake frame (challenge, hello.ok). */
@@ -404,7 +418,7 @@ export class BridgeServer {
 
   constructor(private readonly deps: BridgeServerDeps) {
     this.chromeExtensionIds = new Set(deps.allowedChromeExtensionIds ?? [PINNED_CHROME_EXTENSION_ID])
-    const { hostApprovals: _hostApprovals, client: _client, ...caps } = deps.caps
+    const { hostApprovals: _hostApprovals, client: _client, standing: _standing, standingUpdates: _standingUpdates, ...caps } = deps.caps
     this.serverCaps = deps.requestHostApproval === undefined
       ? caps
       : { ...caps, hostApprovals: HOST_APPROVALS_CAPS_VERSION }
@@ -412,6 +426,36 @@ export class BridgeServer {
 
   private now(): number {
     return this.deps.now?.() ?? Date.now()
+  }
+
+  /** The standing-work hint for one install, or undefined when the plugin supplies none (or a malformed one). */
+  private standingFor(key: string): StandingWork | undefined {
+    const work = this.deps.standingWork?.(key)
+    return isStandingWork(work) ? { schedules: work.schedules, mcp: work.mcp } : undefined
+  }
+
+  /** The caps one connection's `hello.ok` carries: the shared ones plus that install's standing work. */
+  private capsFor(key: string): BridgeCaps {
+    const standing = this.standingFor(key)
+    return standing === undefined ? this.serverCaps : { ...this.serverCaps, standing }
+  }
+
+  /**
+   * The Host's standing work changed (a schedule was created, cancelled or
+   * revoked): tell each connected extension whose hint differs from the one
+   * it last received. Sent sealed, and only to extensions that advertised
+   * `standingUpdates`.
+   */
+  notifyStandingWork(): void {
+    for (const conn of this.connections.values()) {
+      if (conn.clientCaps.standingUpdates !== STANDING_WORK_CAPS_VERSION) continue
+      const standing = this.standingFor(conn.key)
+      if (standing === undefined) continue
+      const text = canonicalJson(standing)
+      if (text === conn.standing) continue
+      conn.standing = text
+      sendFrame(conn, { t: 'event', frame: { rpcId: '', method: BRIDGE_STANDING_EVENT_METHOD, payload: standing } })
+    }
   }
 
   /**
@@ -738,8 +782,9 @@ export class BridgeServer {
         leavePending()
         if (limited) setSocketMaxPayload(ws, this.wss.options.maxPayload ?? 100 * 1024 * 1024)
         channel = BridgeFrameChannel.derive(this.deps.token, 'server', serverNonce, frame.nonce, frame.endpoint, nodeHmac)
-        ready = this.promote(ws, remoteAddress, frame.caps, channel,
-          bridgeProof(this.deps.token, 'server', frame.nonce, serverNonce, frame.endpoint, { client: frame.caps, server: this.serverCaps }, nodeHmac))
+        const serverCaps = this.capsFor(bridgeClientKey(frame.caps.client))
+        ready = this.promote(ws, remoteAddress, frame.caps, channel, serverCaps,
+          bridgeProof(this.deps.token, 'server', frame.nonce, serverNonce, frame.endpoint, { client: frame.caps, server: serverCaps }, nodeHmac))
         return
       }
       const frame = channel?.open(text)
@@ -782,6 +827,7 @@ export class BridgeServer {
     remoteAddress: string | undefined,
     clientCaps: BridgeCaps,
     channel: BridgeFrameChannel,
+    serverCaps: BridgeCaps,
     serverMac: string,
   ): ReadyConnection {
     const key = bridgeClientKey(clientCaps.client)
@@ -803,6 +849,8 @@ export class BridgeServer {
       try {
         for await (const frame of this.deps.api.events(abort.signal)) {
           if (ws.readyState !== WebSocket.OPEN) break
+          // The bridge's own event methods are never projected from a Host stream.
+          if (frame.method === BRIDGE_STANDING_EVENT_METHOD) continue
           sendFrame(target, {
             t: 'event',
             frame,
@@ -829,9 +877,10 @@ export class BridgeServer {
       abort,
       pump,
       ping,
+      standing: serverCaps.standing === undefined ? undefined : canonicalJson(serverCaps.standing),
     }
     this.connections.set(key, conn)
-    sendHandshakeFrame(ws, { t: 'hello.ok', caps: this.serverCaps, mac: serverMac })
+    sendHandshakeFrame(ws, { t: 'hello.ok', caps: serverCaps, mac: serverMac })
     // Notify only after the new connection owns the slot, so a listener reading
     // `devToolsSupported()` sees the capability that just arrived.
     this.deps.onCapsChange?.(clientCaps)
