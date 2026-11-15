@@ -466,7 +466,7 @@ function mountBridge(
       subagents: () => ctx.get('subagents' as never) as FleetSubagents | undefined,
       children: fleetChildren,
       ledger,
-      taint: (sessionId) => { taint.mark(sessionId, 'browser_fanout') },
+      lineage: taint,
     }, { toolTimeoutMs: resolved.toolTimeoutMs, provider: 'spawn' })
     return () => {
       disposeFanout()

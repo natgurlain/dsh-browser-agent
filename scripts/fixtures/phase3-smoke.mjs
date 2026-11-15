@@ -142,7 +142,9 @@ export async function runPhase3Smoke(ctx) {
 
   // ---- Audit: each step is its own entry, tagged with the program ----
   const unscoped = parseAuditLines(await readFile(join(env.DSH_HOME, 'browser-audit', 'unscoped.jsonl'), 'utf8'))
-  assert.equal(verifyAuditChain(unscoped).ok, true)
+  // The chain is HMAC-keyed with the bridge's private key file.
+  const chainKey = Buffer.from((await readFile(join(env.DSH_HOME, 'browser-audit', '.chain-key'), 'utf8')).trim(), 'hex')
+  assert.equal(verifyAuditChain(unscoped, chainKey).ok, true)
   const stepCalls = unscoped.filter(entry => entry.kind === 'tool-call' && entry.program !== undefined)
   assert.ok(stepCalls.length >= 7, `program steps in the audit log: ${stepCalls.length}`)
   const programId = stepCalls[0].program.id

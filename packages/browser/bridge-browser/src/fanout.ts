@@ -15,8 +15,9 @@
  *    restricted with `ctx.tools.restrict` to browser read tools (plus page
  *    actions when the parent passed `allowActions`, each still behind its own
  *    card), never tab management.
- * 5. Results are collected, wrapped in the untrusted-content boundary (they are
- *    derived from page text), and the parent session is marked tainted.
+ * 5. Results are collected and wrapped in the untrusted-content boundary (they
+ *    are derived from page text); the workers' reads already tainted the parent
+ *    through the session lineage.
  * 6. The fleet's tabs are released (closed by default) through the extension.
  *
  * @module
@@ -176,12 +177,17 @@ export function renderFleetResults(results: FleetResult[]): string {
 
 /** What the fanout runner needs. */
 export interface FanoutDeps {
-  bridge: Pick<BridgeServer, 'requestTool'> & Partial<Pick<BridgeServer, 'shareSessionAffinity'>>
+  bridge: Pick<BridgeServer, 'requestTool'>
   subagents: () => FleetSubagents | undefined
   children: FleetChildren
   ledger: SessionLedger
-  /** Mark the parent as having read untrusted page content. */
-  taint: (sessionId: string) => void
+  /**
+   * The bridge's session lineage (session-taint.ts). Linking each worker to
+   * its parent before it starts means it starts tainted when the parent is,
+   * its page reads taint the parent, and its calls route to the parent's
+   * browser install (no cross-profile fallback).
+   */
+  lineage?: { link(child: string, parent: string): void }
   newId?: () => string
 }
 
@@ -223,8 +229,8 @@ export async function runFanout(
   try {
     for (const childId of childIds) {
       deps.children.expect(childId, tools)
-      // Workers act in the browser that opened their tabs.
-      deps.bridge.shareSessionAffinity?.(childId, parentId)
+      deps.lineage?.link(childId, parentId)
+      // Durable ownership mirrors the lineage link (owned only through an owned parent).
       await deps.ledger.addChild?.(childId, parentId)
     }
     const results = await Promise.all(args.tasks.map(async (task, index): Promise<FleetResult> => {
@@ -252,7 +258,6 @@ export async function runFanout(
         return { url: task.url, stopReason: 'error', diagnostic: error instanceof Error ? error.message : String(error) }
       }
     }))
-    deps.taint(parentId)
     return renderFleetResults(results)
   } finally {
     for (const childId of childIds) deps.children.forget(childId)

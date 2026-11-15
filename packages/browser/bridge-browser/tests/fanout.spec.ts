@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { memorySessionLedger } from '../src/session-ledger.ts'
+import { SessionTaintRegistry } from '../src/session-taint.ts'
 import { registerBrowserTools } from '../src/tools.ts'
 import { defineRunProgramTool } from '../src/run-program.ts'
 import { defineWatchTools, memoryWatchRecords } from '../src/watchers.ts'
@@ -45,7 +46,7 @@ function harness(overrides: { result?: (index: number) => unknown; parentOwned?:
     }
   })
   const ledger = memorySessionLedger(overrides.parentOwned === false ? [] : ['parent'])
-  const tainted: string[] = []
+  const lineage = new SessionTaintRegistry()
   const children = new FleetChildren()
   let n = 0
   const deps: FanoutDeps = {
@@ -53,10 +54,10 @@ function harness(overrides: { result?: (index: number) => unknown; parentOwned?:
     subagents: () => ({ startActivation }) as FleetSubagents,
     children,
     ledger,
-    taint: (id) => { tainted.push(id) },
+    lineage,
     newId: () => `child-${String(++n)}`,
   }
-  return { deps, requests, started, disposed, ledger, tainted, children, startActivation }
+  return { deps, requests, started, disposed, ledger, lineage, children, startActivation }
 }
 
 const parent = { id: 'parent' } as never
@@ -83,7 +84,8 @@ describe('runFanout', () => {
     expect(h.ledger.has('child-1')).toBe(true)
     expect(text).toMatch(/Fleet finished: 2 of 2 tasks completed/)
     expect(text).toMatch(/<UNTRUSTED_PAGE_CONTENT nonce="[^"]+">\n\{\n {2}"price": "\$10"/)
-    expect(h.tainted).toEqual(['parent'])
+    // Workers are linked into the session lineage under their parent.
+    expect(h.lineage.parentOf('child-1')).toBe('parent')
     expect(h.disposed.sort()).toEqual(['child-1', 'child-2'])
     expect(h.requests.at(-1)).toMatchObject({ name: 'browser_fleet_release', sessionId: 'parent', args: { fleetId: 'fleet-1', closeTabs: true } })
     // Restrictions only live as long as the fleet.
@@ -105,12 +107,20 @@ describe('runFanout', () => {
     expect(seen.flat()).not.toContain('browser_close_tab')
   })
 
-  it('routes each worker to the browser that opened its tab', async () => {
+  it('links workers under a tainted parent so they start tainted and taint flows back up', async () => {
     const h = harness()
-    const shareSessionAffinity = vi.fn()
-    const bridge = { requestTool: (h.deps.bridge as { requestTool: unknown }).requestTool, shareSessionAffinity }
-    await runFanout(parent, { tasks, allowActions: false, closeTabs: true }, { signal }, { ...h.deps, bridge: bridge as never }, { toolTimeoutMs: 1000, provider: 'spawn' })
-    expect(shareSessionAffinity.mock.calls).toEqual([['child-1', 'parent'], ['child-2', 'parent']])
+    h.lineage.mark('parent', 'browser_get_text')
+    let taintedAtStart: boolean | undefined
+    const start = vi.fn(async (spec: Parameters<FleetSubagents['startActivation']>[0]) => {
+      taintedAtStart ??= h.lineage.isTainted(spec.childId)
+      return { childId: spec.childId, result: Promise.resolve({ output: [], stopReason: 'completed' }) as never, dispose: async () => {} }
+    })
+    await runFanout(parent, { tasks: [tasks[0]!], allowActions: false, closeTabs: true }, { signal }, { ...h.deps, subagents: () => ({ startActivation: start }) as never }, { toolTimeoutMs: 1000, provider: 'spawn' })
+    expect(taintedAtStart).toBe(true)
+    const fresh = new SessionTaintRegistry()
+    fresh.link('kid', 'p')
+    fresh.mark('kid', 'browser_get_text')
+    expect(fresh.isTainted('p')).toBe(true)
   })
 
   it('does not record children of a session the bridge does not own', async () => {
