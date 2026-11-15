@@ -21,6 +21,7 @@ Page snapshots contain structured text with numbered controls and masked form fi
 | `beaconPorts` | `number[]` | `43189…43198` | Candidate beacon ports, tried in order until one binds; the first free port wins, which keeps several local instances discoverable. Ignored when `beacon` is false. |
 | `mcp.enabled` | `boolean` | `false` | Serve a loopback MCP endpoint (Streamable HTTP) so Claude Code, Cursor, Codex and other MCP clients can drive the browser. See [MCP clients](#mcp-clients). |
 | `mcp.port` | `number` | `0` | Loopback port of the MCP endpoint (`0`: any free port; the URL is written to `~/.dsh/browser-mcp.json`). |
+| `devLoop.enabled` | `boolean` | `false` | Turn the dev loop on. While off, the panel cannot list or link coding sessions and nothing is captured. See [Dev loop](#dev-loop-coding-sessions). |
 | `devLoop.trustLoopback` | `boolean` | `true` | Loopback dev-loop injections do not taint the coding session. Set `false` if your dev server renders untrusted data. |
 | `devLoop.allowedOrigins` | `string[]` | `[]` | Extra exact origins (beyond localhost / 127.0.0.1 / [::1]) a tab may have to be linked to a coding session. See [Dev loop](#dev-loop-coding-sessions). |
 
@@ -146,7 +147,9 @@ With `mcp.enabled: true` the plugin serves an MCP endpoint at `http://127.0.0.1:
 
 ## Dev loop (coding sessions)
 
-In **Settings → Dev loop**, open a localhost page (`localhost`, `127.0.0.1` or `[::1]`) in the panel's window. Click "Link this tab to a coding session…" and pick one of your DSH coding sessions. Bridge sessions are never offered, nor are subagent or MCP sessions. After each turn of that session that edited files (a successful `edit`, `write`, `apply_patch`, `str_replace_editor` or `notebook_edit`), the following happens:
+The dev loop is off until the Host operator sets `devLoop.enabled: true` in the bridge-browser plugin config.
+
+In **Settings → Dev loop**, open a localhost page (`localhost`, `127.0.0.1` or `[::1]`) in the panel's window. Click "Link this tab to a coding session…" and pick one of your DSH coding sessions. Only sessions on a restricted permission preset (`read-only`, `workspace-write`, or a preset the operator lists as safe) are offered or can be linked; a session on `danger-full-access`, `auto` or an unknown preset never is, and a linked session switched to such a preset is unlinked at its next capture. The picker sees only each session's id and title (never its directory, project or run state). Bridge sessions are never offered, nor are subagent or MCP sessions. After each turn of that session that edited files (a successful `edit`, `write`, `apply_patch`, `str_replace_editor` or `notebook_edit`), the following happens:
 
 1. The bridge sends the reserved `browser_devloop_capture` action to the extension. It is an ordinary `tool.call`, so the pause gate, kill switch, site policy, taint rules, read-approval settings and the audit log all apply. It is not a model tool, and it is never served over MCP.
 2. The extension refuses the action unless that session has a link made in this browser, and unless the linked tab is still on the linked origin.
@@ -155,15 +158,15 @@ In **Settings → Dev loop**, open a localhost page (`localhost`, `127.0.0.1` or
    - a `browser_snapshot { delta: true }` of the page.
 
    If that page read is refused, nothing from the page is shared.
-4. The bridge injects the answer into the session as read-only browser context, inside the untrusted boundary. The injection does not wake the session. The model sees it with the user's next message.
+4. The bridge injects the answer into the session as read-only browser context, inside an untrusted boundary the bridge writes itself (fresh nonce per injection; any boundary text from the extension or the page stays inside it). The injection does not wake the session. The model sees it with the user's next message.
 
 Rules that still hold:
 
 - **Linking is not prompting.** The session still cannot be prompted, steered, re-permissioned or snapshot-injected from the browser (`bridge-policy.ts`).
 - **Origins.** Only loopback origins by default. `devLoop.allowedOrigins` (exact `http(s)://host[:port]`) adds others.
-- **Taint.** By default (`devLoop.trustLoopback: true`) a loopback injection does **not** taint the coding session on the Host. That taint would make its edit tools read-only and break the loop. The source is the user's own dev server, and the payload is fenced as untrusted text. An injection from an allowed non-loopback origin **does** taint it. On the browser side, the capture taints that session's browser actions like any other page read.
+- **Taint.** By default (`devLoop.trustLoopback: true`) an injection does **not** taint the coding session on the Host when every origin the capture read (the linked page and each of its frames) is loopback. That taint would make its edit tools read-only and break the loop. The source is the user's own dev server, and the payload is fenced as untrusted text. An injection that read any non-loopback origin (a third-party iframe, an allowed non-loopback origin, or a capture that cannot say which origins it read) **does** taint it. On the browser side, the capture taints that session's browser actions like any other page read.
 - **Caveat.** A local dev server that renders untrusted data (user-generated content, scraped or proxied pages) can put that text into the coding session through the dev loop. For such apps, set `devLoop.trustLoopback: false`: loopback injections then taint the session like any web content.
-- **Lifetime.** Links live in the bridge's memory and in the extension's session storage. After DSH restarts, opening the panel's settings re-asserts them. A link ends when its tab closes.
+- **Lifetime.** Links live in the bridge's memory and in the extension's session storage. After DSH restarts, opening the panel's settings re-asserts them. A link ends when its tab closes, and the kill switch removes every link on both sides.
 
 ## Browser subagent and skills
 

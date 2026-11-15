@@ -374,6 +374,8 @@ export interface WatchToolDeps {
   arm: (tabId: number) => Promise<void>
   /** Tell open panels the list changed. */
   changed: () => void
+  /** Site policy hides the page from the agent (blocked / managed-disallowed). */
+  pageHidden?: (url: string) => boolean
   newId?: () => string
   now?: () => number
   signal: AbortSignal
@@ -417,6 +419,8 @@ export async function createWatcher(call: ToolCall, deps: WatchToolDeps): Promis
   }
   const origin = originOf(tab.url)
   if (tab.id === undefined || tab.url === undefined || origin === undefined) return failed('Only http and https pages can be watched.')
+  // A page site policy hides cannot be watched; its address is not echoed back.
+  if (deps.pageHidden?.(tab.url) === true) return failed('This page is blocked by site policy, so it cannot be watched.')
   const page = { url: tab.url, origin, ...(tab.title === undefined ? {} : { title: tab.title }) }
   const prompt = watchApprovalPrompt(request, page)
   const authorization = await deps.authorize(prompt, tab.windowId ?? 0)
@@ -454,7 +458,7 @@ export async function createWatcher(call: ToolCall, deps: WatchToolDeps): Promis
 }
 
 /** `browser_watches`: list or cancel this session's watchers. */
-export async function manageWatchers(call: ToolCall, deps: Pick<WatchToolDeps, 'registry' | 'changed' | 'arm'>): Promise<WatchAnswer> {
+export async function manageWatchers(call: ToolCall, deps: Pick<WatchToolDeps, 'registry' | 'changed' | 'arm' | 'pageHidden'>): Promise<WatchAnswer> {
   await deps.registry.ready
   const action = call.args.action ?? 'list'
   const mine = deps.registry.list().filter((watcher) => watcher.sessionId === call.sessionId)
@@ -472,7 +476,7 @@ export async function manageWatchers(call: ToolCall, deps: Pick<WatchToolDeps, '
   return {
     ok: true,
     result: {
-      text: mine.map((watcher) => `${watcher.id}: ${describeCondition(watcher.condition)} on ${watcher.url}; fired ${String(watcher.fires)}/${String(watcher.maxFires)}; `
+      text: mine.map((watcher) => `${watcher.id}: ${describeCondition(watcher.condition)} on ${deps.pageHidden?.(watcher.url) === true ? 'a page blocked by site policy (suspended)' : watcher.url}; fired ${String(watcher.fires)}/${String(watcher.maxFires)}; `
         + `expires ${new Date(watcher.expiresAt).toISOString()}${watcher.lastMiss === undefined ? '' : `; last wake missed (${watcher.lastMiss})`}`).join('\n'),
     },
   }
@@ -527,7 +531,10 @@ export async function handleWatchHit(
   if (deps.blocked()) return { accepted: false, reason: 'paused' }
   // Site policy as of now, not as of approval: a blocked page suspends the watcher.
   const pageUrl = sender.url ?? watcher.url
-  if (deps.pageHidden?.(pageUrl) === true || deps.pageHidden?.(watcher.url) === true) {
+  // A network watcher's match is a request URL, possibly to another (blocked) origin.
+  const matchedHidden = watcher.condition.kind !== 'selector' && watcher.condition.kind !== 'text'
+    && typeof hit.matched === 'string' && deps.pageHidden?.(hit.matched) === true
+  if (deps.pageHidden?.(pageUrl) === true || deps.pageHidden?.(watcher.url) === true || matchedHidden) {
     await deps.registry.recordMiss(watcher.id, 'suspended: the page is blocked by site policy')
     deps.changed()
     return { accepted: false, reason: 'blocked-site' }

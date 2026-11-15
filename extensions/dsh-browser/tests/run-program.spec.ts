@@ -139,6 +139,14 @@ describe('program grant pinning (review finding 9)', () => {
     expect(claim(grants, 3, 7)!.covers(action(['https://shop.example']))).toBe(true)
   })
 
+  it('treats drag from/to indexes as snapshot indexes', async () => {
+    const { usesSnapshotIndex } = await import('../src/background/run-program.ts')
+    expect(usesSnapshotIndex({ from: { index: 2 }, to: { selector: '#bin' } })).toBe(true)
+    expect(usesSnapshotIndex({ from: { selector: '#a' }, to: { index: 5 } })).toBe(true)
+    expect(usesSnapshotIndex({ from: { selector: '#a' }, toOffset: { x: 1, y: 1 } })).toBe(false)
+    expect(usesSnapshotIndex({ selector: '#a' })).toBe(false)
+  })
+
   it('approveProgram pins the grant to the approved tab', async () => {
     const grants = new ProgramGrants()
     await approveProgram({ id: 'p', name: 'browser_run', args: { steps: program }, sessionId: 's1' }, {

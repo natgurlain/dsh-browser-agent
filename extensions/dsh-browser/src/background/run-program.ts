@@ -146,6 +146,12 @@ export function programApprovalPrompt(steps: ProgramStepInput[], frames: TabFram
   }
 }
 
+/** Whether a step targets an element by a raw snapshot index (`index`, or drag's `from`/`to: { index }`). */
+export function usesSnapshotIndex(args: Record<string, unknown>): boolean {
+  const indexed = (value: unknown): boolean => isRecord(value) && typeof value.index === 'number' && typeof value.selector !== 'string'
+  return (typeof args.index === 'number' && typeof args.selector !== 'string') || indexed(args.from) || indexed(args.to)
+}
+
 /** Steps after which the page the program card showed is gone. */
 const NAVIGATION_STEP_TOOLS: ReadonlySet<string> = new Set(['browser_navigate', 'browser_back', 'browser_forward', 'browser_reload'])
 
@@ -221,7 +227,7 @@ export class ProgramGrants {
     if (grant.next >= grant.digests.length) this.grants.delete(ref.id)
     const origins = grant.origins
     // An index names an element of a snapshot; after a navigation that is a page the card never showed.
-    const indexAfterNavigation = grant.navigated && typeof call.args.index === 'number' && typeof call.args.selector !== 'string'
+    const indexAfterNavigation = grant.navigated && usesSnapshotIndex(call.args)
     if (NAVIGATION_STEP_TOOLS.has(call.name)) grant.navigated = true
     return {
       covers: (prompt) => !indexAfterNavigation && ordinaryActionCard(prompt) && prompt.origins.length > 0 && prompt.origins.every((origin) => origins.has(origin)),

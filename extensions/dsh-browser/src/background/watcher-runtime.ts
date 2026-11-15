@@ -93,6 +93,7 @@ export class PageWatcherRuntime {
       registry: this.registry,
       changed: () => { this.broadcast() },
       arm: (tabId: number) => this.arm(tabId),
+      ...(this.options.pageHidden === undefined ? {} : { pageHidden: this.options.pageHidden }),
     }
     if (call.name === 'browser_watches') return manageWatchers(call, shared)
     return createWatcher(call, {

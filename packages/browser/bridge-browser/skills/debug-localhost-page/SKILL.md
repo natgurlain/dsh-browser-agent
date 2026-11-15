@@ -11,7 +11,7 @@ Use this skill while you are developing a web app that the user runs locally (`h
 
 In a DSH coding session, the first successful `browser_*` result marks the session as having read web content. From then on, file edits, shell commands and other write tools are **blocked until the user clears it** in the browser side panel. Plan for this:
 
-- **Preferred:** ask the user to link the tab to this session (side panel → Settings → **Dev loop**). After each turn that edits files, you then receive the page's console errors, failed requests and DOM changes as context, without calling browser tools yourself, so your edit tools stay available.
+- **Preferred:** ask the user to link the tab to this session (side panel → Settings → **Dev loop**; the Host must have `devLoop.enabled: true`, and this session must be on a restricted permission preset, not full access). After each turn that edits files, you then receive the page's console errors, failed requests and DOM changes as context, without calling browser tools yourself, so your edit tools stay available.
 - Otherwise, gather the browser evidence first, then ask the user to clear the taint before you edit. Delegating with `delegate_browser_task` keeps snapshots out of your context, but its summary taints your session too.
 
 ## Steps

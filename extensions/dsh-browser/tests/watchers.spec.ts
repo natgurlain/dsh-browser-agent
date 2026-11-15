@@ -206,6 +206,10 @@ describe('handleWatchHit', () => {
     expect(url.fire).not.toHaveBeenCalled()
     expect(url.registry.get('w-1')).toMatchObject({ fires: 0, lastMiss: expect.stringMatching(/suspended/) })
     // A site blocked after approval suspends network and content watchers on the approved origin too.
+    // A network match to a blocked third-party origin suspends too.
+    const third = await setup({ condition: { kind: 'network', pattern: '/collect' }, maxFires: 3 }, { pageHidden: (u: string) => u.startsWith('https://tracker.example') })
+    expect(await handleWatchHit({ watchId: 'w-1', matched: 'https://tracker.example/collect?x=1' }, sender, third.deps)).toEqual({ accepted: false, reason: 'blocked-site' })
+    expect(third.fire).not.toHaveBeenCalled()
     for (const condition of [{ kind: 'network', pattern: '/api' }, { kind: 'text', text: 'x', gone: false }] as const) {
       const net = await setup({ condition, maxFires: 3 }, { pageHidden: () => true })
       expect(await handleWatchHit({ watchId: 'w-1', matched: 'https://shop.example/api' }, sender, net.deps)).toEqual({ accepted: false, reason: 'blocked-site' })

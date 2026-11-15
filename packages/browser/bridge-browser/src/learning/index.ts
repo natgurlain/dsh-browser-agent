@@ -309,8 +309,13 @@ export function mountLearning(
             drivers: body.siteDrivers === undefined ? [] : parseSiteDrivers(body.siteDrivers),
           })
           sync()
-          // The user turned saved workflows off: their schedules end with them.
-          if (before?.workflows === true && body.workflows !== true) await revokeSchedules('saved workflows were turned off')
+          // The user turned saved workflows off (here, or while this browser
+          // was disconnected): their schedules end with them once no
+          // connected browser has the feature on.
+          const anyOn = [...states.values()].some((state) => state.workflows)
+          if (body.workflows !== true && !anyOn && (before?.workflows === true || before === undefined)) {
+            await revokeSchedules('saved workflows are turned off')
+          }
           return { ok: true, result: { tools: [...driverDisposers.keys(), ...(workflowDisposers === undefined ? [] : ['browser_workflow_run', 'browser_workflow_list'])] } }
         }
         if (method === LEARNING_METHODS.saveFixture) {

@@ -494,8 +494,15 @@ describe('learning mount', () => {
     await again.rpc(LEARNING_METHODS.state, { workflows: true }, context)
     again.disconnected('c')
     expect(tasks.has('s3')).toBe(true)
+    // Turned off while disconnected: the reconnecting browser reports it off and the schedule ends.
+    seed(['s4'])
+    await again.rpc(LEARNING_METHODS.state, { workflows: false }, { ...context, connection: 'c-reconnected' })
+    expect(tasks.has('s4')).toBe(false)
     // The kill switch revokes regardless of state.
-    await again.revokeStandingGrants()
+    seed(['s3'])
+    const killed = mountLearning(ctx, { requestTool: vi.fn() } as never, { toolTimeoutMs: 1000, workspacePath: root, scheduleFile: file, ownsSession: async () => true })
+    await killed.rpc(LEARNING_METHODS.state, { workflows: true }, context)
+    await killed.revokeStandingGrants()
     expect(tasks.size).toBe(0)
   })
 
