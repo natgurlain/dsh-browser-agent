@@ -21,15 +21,13 @@
  * @module
  */
 
-import { randomBytes } from 'node:crypto'
-import { constants } from 'node:fs'
-import { mkdir, open, rename, unlink, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { BridgeServer } from './server.ts'
 import { toolCallIdArg } from './server.ts'
+import { errorMessage } from './host-api.ts'
+import { readTrustedJson, serialQueue, writePrivateFile } from './private-file.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -94,27 +92,17 @@ export function memoryWatchRecords(now: () => number = Date.now): WatchRecordSto
  */
 export async function fileWatchRecords(file: string, warn: (message: string) => void, now: () => number = Date.now): Promise<WatchRecordStore> {
   const records = new Map<string, WatchRecord>()
-  await loadRecords(file, records, now).catch(() => {})
-  let writing = Promise.resolve()
-  const persist = async (): Promise<void> => {
-    await mkdir(dirname(file), { recursive: true })
-    const temp = `${file}.tmp-${randomBytes(8).toString('hex')}`
-    try {
-      await writeFile(temp, JSON.stringify(Object.fromEntries(records)), { mode: 0o600, flag: 'wx' })
-      await rename(temp, file)
-    } catch (error: unknown) {
-      await unlink(temp).catch(() => {})
-      throw error
-    }
-  }
+  const loaded = await readTrustedJson(file)
+  if ('value' in loaded) loadRecords(loaded.value, records, now)
+  const queue = serialQueue()
+  const persist = (): Promise<void> => writePrivateFile(file, JSON.stringify(Object.fromEntries(records)), 'the page watcher records')
   const save = async (): Promise<void> => {
     const current = now()
     for (const [id, record] of records) if (record.expiresAt <= current) records.delete(id)
     while (records.size > MAX_RECORDS) records.delete(records.keys().next().value as string)
-    writing = writing.then(persist, persist).catch((error: unknown) => {
-      warn(`browser bridge: could not persist page watchers: ${error instanceof Error ? error.message : String(error)}`)
+    await queue(persist).catch((error: unknown) => {
+      warn(`browser bridge: could not persist page watchers: ${errorMessage(error)}`)
     })
-    await writing
   }
   return {
     get: (id) => {
@@ -142,29 +130,14 @@ export async function fileWatchRecords(file: string, warn: (message: string) => 
   }
 }
 
-async function loadRecords(file: string, records: Map<string, WatchRecord>, now: () => number): Promise<void> {
-  let handle
-  try {
-    handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
-  } catch {
-    return
-  }
-  try {
-    const stat = await handle.stat()
-    if (!stat.isFile()) return
-    const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-    if (uid !== undefined && stat.uid !== uid) return
-    if (process.platform !== 'win32' && (stat.mode & 0o022) !== 0) return
-    const parsed = JSON.parse(await handle.readFile('utf8')) as unknown
-    if (typeof parsed !== 'object' || parsed === null) return
-    for (const [id, value] of Object.entries(parsed)) {
-      const record = value as Partial<WatchRecord>
-      if (typeof record.sessionId === 'string' && typeof record.expiresAt === 'number' && record.expiresAt > now()) {
-        records.set(id, { sessionId: record.sessionId, expiresAt: record.expiresAt })
-      }
+/** Keep the live, well-formed records of a trusted file. */
+function loadRecords(parsed: unknown, records: Map<string, WatchRecord>, now: () => number): void {
+  if (typeof parsed !== 'object' || parsed === null) return
+  for (const [id, value] of Object.entries(parsed)) {
+    const record = value as Partial<WatchRecord>
+    if (typeof record.sessionId === 'string' && typeof record.expiresAt === 'number' && record.expiresAt > now()) {
+      records.set(id, { sessionId: record.sessionId, expiresAt: record.expiresAt })
     }
-  } finally {
-    await handle.close()
   }
 }
 

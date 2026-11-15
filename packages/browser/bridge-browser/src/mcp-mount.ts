@@ -22,6 +22,7 @@ import { McpHttpServer, type McpCaller, type McpToolHost } from './mcp-server.ts
 import { EXTERNAL_SESSION_PREFIX, sanitizeRequesterLabel } from './protocol.ts'
 import type { SessionLedger } from './session-ledger.ts'
 import { readTokenFile, writeTokenFile } from './token.ts'
+import { writePrivateFile } from './private-file.ts'
 
 /** Token file name (under the dsh home). */
 export const MCP_TOKEN_FILE_NAME = 'browser-mcp-token'
@@ -97,7 +98,7 @@ export function mountMcpEndpoint(
         return
       }
       server = candidate
-      await writeTokenFile(JSON.stringify({ url: bound.url, pid: process.pid, startedAt: new Date().toISOString() }), endpointFile)
+      await writePrivateFile(endpointFile, `${JSON.stringify({ url: bound.url, pid: process.pid, startedAt: new Date().toISOString() })}\n`, 'the MCP endpoint file')
       ctx.logger.info(`browser bridge: MCP endpoint on ${bound.url} (token in ${dshHomePath(MCP_TOKEN_FILE_NAME)})`)
     })().catch((error: unknown) => {
       ctx.logger.warn(`browser bridge: MCP endpoint failed to start: ${error instanceof Error ? error.message : String(error)}`)

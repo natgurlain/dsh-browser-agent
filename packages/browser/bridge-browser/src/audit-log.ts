@@ -23,8 +23,9 @@
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { chmod, mkdir, open, readFile, rename, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, open, readFile, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
+import { writePrivateFile } from './private-file.ts'
 
 /**
  * Keyed chain (tamper evidence against anyone who can edit the log but not
@@ -544,9 +545,7 @@ export class AuditLog {
 
   /** Atomically anchor a log's head. */
   private async writeHead(file: string, key: Buffer, seq: number, hash: string): Promise<void> {
-    const temp = `${file}.head.tmp`
-    await writeFile(temp, JSON.stringify({ seq, hash, mac: headMac(key, file, seq, hash) }), { mode: 0o600 })
-    await rename(temp, `${file}.head`)
+    await writePrivateFile(`${file}.head`, JSON.stringify({ seq, hash, mac: headMac(key, file, seq, hash) }), 'the audit head anchor')
   }
 
   private ensureDirectory(): Promise<void> {

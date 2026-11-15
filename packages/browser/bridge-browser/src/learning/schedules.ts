@@ -16,9 +16,9 @@
  * @module @natgurlain/dsh-bridge-browser/src/learning/schedules
  */
 
-import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { serialQueue, writePrivateFile } from '../private-file.ts'
 import type { Workflow } from './workflow.ts'
 
 /** DSH's per-task delivery floor (seconds). */
@@ -91,7 +91,7 @@ export function schedulePrompt(workflow: Pick<Workflow, 'name'>, params: Record<
 /** Schedules created by this bridge, persisted so ownership survives restarts. */
 export class WorkflowSchedules {
   private cache: ScheduleRecordEntry[] | undefined
-  private queue: Promise<unknown> = Promise.resolve()
+  private readonly serialized = serialQueue()
 
   constructor(
     private readonly file: string,
@@ -99,6 +99,13 @@ export class WorkflowSchedules {
     private readonly ownsSession: (sessionId: string) => Promise<boolean>,
   ) {}
 
+  /**
+   * The recorded schedules. Unlike the ledger and watcher records this read
+   * has no ownership or mode check, on purpose: these records only let the
+   * bridge list and delete schedules (they grant no access), and an ignored
+   * file would make the kill switch revoke nothing while the schedules keep
+   * firing in DSH.
+   */
   private async records(): Promise<ScheduleRecordEntry[]> {
     if (this.cache !== undefined) return this.cache
     try {
@@ -115,22 +122,9 @@ export class WorkflowSchedules {
 
   private async persist(records: ScheduleRecordEntry[]): Promise<void> {
     await mkdir(dirname(this.file), { recursive: true, mode: 0o700 })
-    const temporary = `${this.file}.${randomUUID()}.tmp`
-    try {
-      await writeFile(temporary, `${JSON.stringify(records, null, 2)}\n`, { mode: 0o600 })
-      await rename(temporary, this.file)
-    } catch (error: unknown) {
-      await unlink(temporary).catch(() => {})
-      throw error
-    }
+    await writePrivateFile(this.file, `${JSON.stringify(records, null, 2)}\n`, 'the workflow schedule records')
     // Only a durable write updates what this process believes.
     this.cache = records
-  }
-
-  private serialized<T>(task: () => Promise<T>): Promise<T> {
-    const run = this.queue.then(task, task)
-    this.queue = run.catch(() => {})
-    return run
   }
 
   private service(): ScheduleServiceLike {
