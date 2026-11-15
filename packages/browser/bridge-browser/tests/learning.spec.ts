@@ -258,6 +258,19 @@ describe('workflow schedules', () => {
     expect(tasks.has(created.id)).toBe(false)
   })
 
+  it('revokes every schedule it created at once (kill switch, workflows off)', async () => {
+    const { service, tasks } = fakeSchedule()
+    const file = join(tempDir(), 'schedules.json')
+    const schedules = new WorkflowSchedules(file, () => service, async () => true)
+    const workflow = validateWorkflow({ ...baseWorkflow(), params: [{ name: 'contact', default: 'Ada' }], steps: (baseWorkflow().steps as unknown[]).filter((_s, i) => i !== 2) })
+    await schedules.create('owned', workflow, { kind: 'every', every_seconds: 60 })
+    await schedules.create('owned', workflow, { kind: 'every', every_seconds: 120 })
+    tasks.set('schedule-foreign', { id: 'schedule-foreign', status: 'active' })
+    expect(await schedules.revokeAll()).toEqual({ revoked: 2, failed: 0 })
+    expect([...tasks.keys()]).toEqual(['schedule-foreign'])
+    expect(await new WorkflowSchedules(file, () => service, async () => true).list()).toEqual([])
+  })
+
   it('refuses unattended runs of workflows with sensitive inputs', async () => {
     const { service } = fakeSchedule()
     const schedules = new WorkflowSchedules(join(tempDir(), 's.json'), () => service, async () => true)
@@ -427,6 +440,44 @@ describe('learning mount', () => {
     mount.disconnected('c2')
     mount.disconnected('c1')
     expect(registered.size).toBe(0)
+  })
+
+  it('turning workflows off or the kill switch revokes schedules; list and cancel work while off (review finding 6)', async () => {
+    const root = tempDir()
+    mkdirSync(root, { recursive: true })
+    const file = join(root, 's.json')
+    const tasks = new Map<string, { id: string; status: string }>()
+    const service: ScheduleServiceLike = {
+      create: vi.fn(async () => ({ id: 'x', status: 'active' })),
+      catalog: vi.fn(async () => [...tasks.values()]),
+      edit: vi.fn(async (request) => { tasks.delete(request.id); return {} }),
+    }
+    const seed = (ids: string[]) => {
+      for (const id of ids) tasks.set(id, { id, status: 'active' })
+      writeFileSync(file, JSON.stringify(ids.map((id) => ({ id, sessionId: 'owned', workflow: 'w', timing: { kind: 'every', every_seconds: 60 } }))))
+    }
+    const { ctx } = fakeCtx(root)
+    ;(ctx as unknown as { get: (name: string) => unknown }).get = (name: string) => name === 'schedule' ? service : undefined
+    seed(['s1', 's2'])
+    const mount = mountLearning(ctx, { requestTool: vi.fn() } as never, { toolTimeoutMs: 1000, workspacePath: root, scheduleFile: file, ownsSession: async () => true })
+    const context = { connection: 'c', allowsSession: async () => true }
+    // Off from the start: listing and cancelling still work.
+    expect(await mount.rpc(LEARNING_METHODS.scheduleList, {}, context)).toMatchObject({ ok: true, result: { schedules: [{ id: 's1' }, { id: 's2' }] } })
+    expect(await mount.rpc(LEARNING_METHODS.scheduleCancel, { id: 's1' }, context)).toMatchObject({ ok: true, result: { cancelled: true } })
+    // On, then off: the remaining schedule is deleted.
+    await mount.rpc(LEARNING_METHODS.state, { workflows: true }, context)
+    expect(tasks.has('s2')).toBe(true)
+    await mount.rpc(LEARNING_METHODS.state, { workflows: false }, context)
+    expect(tasks.size).toBe(0)
+    // A dropped connection is not the user turning it off: nothing revoked.
+    seed(['s3'])
+    const again = mountLearning(ctx, { requestTool: vi.fn() } as never, { toolTimeoutMs: 1000, workspacePath: root, scheduleFile: file, ownsSession: async () => true })
+    await again.rpc(LEARNING_METHODS.state, { workflows: true }, context)
+    again.disconnected('c')
+    expect(tasks.has('s3')).toBe(true)
+    // The kill switch revokes regardless of state.
+    await again.revokeStandingGrants()
+    expect(tasks.size).toBe(0)
   })
 
   it('refuses index-targeted or unsupported program steps', () => {

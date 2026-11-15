@@ -19,6 +19,8 @@ export interface AuditRpcContext {
   audit?: BridgeAuditObserver
   exportAudit?: (sessionId: string | undefined) => Promise<unknown>
   allowsSession?: (sessionId: string) => Promise<boolean>
+  /** The user engaged the kill switch: revoke standing grants (schedules, dev-loop links). */
+  onKillSwitch?: (connection: string | undefined) => void
 }
 
 /** One RPC answer. */
@@ -46,6 +48,7 @@ function record(payload: unknown, context: AuditRpcContext): AuditRpcAnswer {
   if (!isRecord(payload)) return badRequest('payload must be an object')
   if (payload.event === 'kill-switch') {
     context.audit?.killSwitch([], context.connection)
+    context.onKillSwitch?.(context.connection)
     return { ok: true, result: { recorded: context.audit !== undefined } }
   }
   if (typeof payload.callId !== 'string' || payload.callId === '') return badRequest('callId must be a non-empty string')

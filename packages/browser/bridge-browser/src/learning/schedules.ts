@@ -175,6 +175,31 @@ export class WorkflowSchedules {
     })
   }
 
+  /**
+   * Delete every schedule this bridge created (kill switch, workflows turned
+   * off): a schedule is a standing grant to run the browser unattended.
+   * Deletion failures are reported, and the record is dropped either way so
+   * a later list never resurrects it.
+   */
+  revokeAll(): Promise<{ revoked: number; failed: number }> {
+    return this.serialized(async () => {
+      const records = await this.records()
+      if (records.length === 0) return { revoked: 0, failed: 0 }
+      const service = this.schedule()
+      let failed = 0
+      for (const record of records) {
+        try {
+          if (service === undefined) throw new Error('no schedule service')
+          await service.edit({ id: record.id, action: 'delete' })
+        } catch {
+          failed += 1
+        }
+      }
+      await this.persist([])
+      return { revoked: records.length - failed, failed }
+    })
+  }
+
   /** Cancel (delete) one schedule this bridge created. */
   cancel(id: string): Promise<boolean> {
     return this.serialized(async () => {

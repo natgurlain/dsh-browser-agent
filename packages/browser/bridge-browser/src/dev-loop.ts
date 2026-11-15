@@ -201,6 +201,13 @@ export class DevLoop {
     return this.links.delete(sessionId)
   }
 
+  /** Forget every link (kill switch): a link is a standing grant to read the tab. */
+  unlinkAll(): number {
+    const sessions = [...this.links.keys()]
+    for (const sessionId of sessions) this.unlink(sessionId)
+    return sessions.length
+  }
+
   /** The current links (tests and diagnostics). */
   list(): DevLoopLink[] {
     return [...this.links.values()]

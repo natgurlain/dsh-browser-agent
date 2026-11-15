@@ -263,3 +263,13 @@ describe('ToolCallAuditor', () => {
     await vi.waitFor(() => { expect(onError).toHaveBeenCalled() })
   })
 })
+
+describe('kill switch RPC', () => {
+  it('revokes standing grants through onKillSwitch (review finding 6)', async () => {
+    const onKillSwitch = vi.fn()
+    const { handleAuditRpc } = await import('../src/audit-rpc.ts')
+    const { BRIDGE_AUDIT_RECORD_METHOD } = await import('../src/protocol.ts')
+    expect(await handleAuditRpc(BRIDGE_AUDIT_RECORD_METHOD, { event: 'kill-switch' }, { connection: 'c1', onKillSwitch })).toMatchObject({ ok: true })
+    expect(onKillSwitch).toHaveBeenCalledWith('c1')
+  })
+})

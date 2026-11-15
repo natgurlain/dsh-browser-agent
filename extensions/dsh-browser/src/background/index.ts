@@ -1035,6 +1035,8 @@ async function engageKillSwitch(): Promise<void> {
   programGrants.clear()
   // Standing watchers are standing grants: the kill switch revokes them too.
   void pageWatchers.clearAll()
+  // So are dev-loop links (the bridge drops its side and workflow schedules on the kill-switch record above).
+  void devLoop.clear()
   for (const call of unsettledToolCalls) {
     call.revocationRequested = true
     call.controller.abort()

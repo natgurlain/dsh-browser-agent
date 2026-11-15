@@ -55,6 +55,15 @@ describe('DevLoopController', () => {
     expect(await reloaded.list()).toHaveLength(1)
   })
 
+  it('the kill switch clears every link', async () => {
+    const { browser, stored } = fakeBrowser({ 1: { id: 1, url: 'http://localhost:3000/' } })
+    const controller = new DevLoopController(browser)
+    await controller.link({ sessionId: 'coding', tabId: 1, origin: 'http://localhost:3000' })
+    expect(await controller.clear()).toBe(1)
+    expect(await controller.list()).toEqual([])
+    expect(stored()).toEqual([])
+  })
+
   it('reads only while the linked tab is still on its origin', async () => {
     const tabs = { 1: { id: 1, url: 'http://localhost:3000/' } }
     const { browser } = fakeBrowser(tabs)

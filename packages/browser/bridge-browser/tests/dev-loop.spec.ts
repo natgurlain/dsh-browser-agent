@@ -140,6 +140,13 @@ describe('DevLoop', () => {
 })
 
 describe('dev loop ownership and fencing (review finding 3)', () => {
+  it('the kill switch removes every link', async () => {
+    const { devLoop } = harness()
+    await devLoop.link('coding', 'http://localhost:3000/', signal)
+    expect(devLoop.unlinkAll()).toBe(1)
+    expect(devLoop.list()).toEqual([])
+  })
+
   it('is off unless the Host enables it: nothing listed, linked or captured', async () => {
     const { devLoop, capture } = harness({ enabled: undefined })
     await expect(devLoop.candidates(signal)).rejects.toMatchObject({ code: 'forbidden', message: expect.stringMatching(/devLoop\.enabled/) })

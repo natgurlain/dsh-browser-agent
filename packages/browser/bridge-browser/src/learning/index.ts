@@ -86,6 +86,8 @@ export interface LearningOptions {
 export interface LearningMount {
   rpc: (method: string, payload: unknown, context: LearningRpcContext) => Promise<LearningRpcAnswer> | undefined
   disconnected: (connection: string) => void
+  /** The user's kill switch: revoke every standing grant (workflow schedules). */
+  revokeStandingGrants: () => Promise<void>
   dispose: () => void
 }
 
@@ -284,12 +286,22 @@ export function mountLearning(
     return sessionId
   }
 
+  const revokeSchedules = async (why: string): Promise<void> => {
+    try {
+      const { revoked, failed } = await schedules.revokeAll()
+      if (revoked > 0 || failed > 0) ctx.logger.info(`browser bridge: ${why}; revoked ${String(revoked)} workflow schedule(s)${failed > 0 ? `, ${String(failed)} could not be deleted` : ''}`)
+    } catch (error: unknown) {
+      ctx.logger.warn(`browser bridge: could not revoke workflow schedules: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   const rpc = (method: string, payload: unknown, context: LearningRpcContext): Promise<LearningRpcAnswer> | undefined => {
     if (!(Object.values(LEARNING_METHODS) as string[]).includes(method)) return undefined
     return (async (): Promise<LearningRpcAnswer> => {
       const body = isRecord(payload) ? payload : {}
       try {
         if (method === LEARNING_METHODS.state) {
+          const before = states.get(context.connection)
           states.set(context.connection, {
             workflows: body.workflows === true,
             fixtures: body.fixtures === true,
@@ -297,6 +309,8 @@ export function mountLearning(
             drivers: body.siteDrivers === undefined ? [] : parseSiteDrivers(body.siteDrivers),
           })
           sync()
+          // The user turned saved workflows off: their schedules end with them.
+          if (before?.workflows === true && body.workflows !== true) await revokeSchedules('saved workflows were turned off')
           return { ok: true, result: { tools: [...driverDisposers.keys(), ...(workflowDisposers === undefined ? [] : ['browser_workflow_run', 'browser_workflow_list'])] } }
         }
         if (method === LEARNING_METHODS.saveFixture) {
@@ -307,6 +321,14 @@ export function mountLearning(
           if (sessionId !== undefined) options.markTainted?.(sessionId)
           options.audit?.(sessionId, { tool: 'browser_failure_fixture', url: redactAuditUrl(fixture.url), decision: fixture.failure, resultDigest: auditResultDigest(fixture.page.content) })
           return { ok: true, result: saved }
+        }
+        // Listing and cancelling schedules always work, so a feature turned
+        // off (or a stale state) never strands a standing grant.
+        if (method === LEARNING_METHODS.scheduleList || method === LEARNING_METHODS.scheduleCancel) {
+          const sessionId = await ownedSession(body, context)
+          if (method === LEARNING_METHODS.scheduleList) return { ok: true, result: { schedules: await schedules.list(sessionId) } }
+          if (typeof body.id !== 'string') throw new Error('id must name a schedule')
+          return { ok: true, result: { cancelled: await schedules.cancel(body.id) } }
         }
         if (method === LEARNING_METHODS.programRun) {
           if (!featureOn(context.connection, 'watchMe')) return { ok: false, error: { code: 'disabled', message: 'Watch me is turned off in the extension settings' } }
@@ -335,11 +357,6 @@ export function mountLearning(
             const params = isRecord(body.params) ? Object.fromEntries(Object.entries(body.params).filter(([, value]) => typeof value === 'string')) as Record<string, string> : {}
             return { ok: true, result: await schedules.create(sessionId, workflow, parseScheduleTiming(body.timing), params) }
           }
-          case LEARNING_METHODS.scheduleList:
-            return { ok: true, result: { schedules: await schedules.list(sessionId) } }
-          case LEARNING_METHODS.scheduleCancel:
-            if (typeof body.id !== 'string') throw new Error('id must name a schedule')
-            return { ok: true, result: { cancelled: await schedules.cancel(body.id) } }
           case LEARNING_METHODS.programRun: {
             const program = parseProgram(body.steps)
             const controller = new AbortController()
@@ -367,6 +384,7 @@ export function mountLearning(
     disconnected: (connection) => {
       if (states.delete(connection)) sync()
     },
+    revokeStandingGrants: () => revokeSchedules('kill switch engaged'),
     dispose: () => {
       states.clear()
       sync()

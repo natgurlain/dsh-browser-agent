@@ -458,6 +458,12 @@ function mountBridge(
       taint.mark(sessionId, 'snapshot-injection')
     },
     purgeSession,
+    // The kill switch revokes standing grants on the Host too.
+    onKillSwitch: () => {
+      const unlinked = devLoop.unlinkAll()
+      if (unlinked > 0) ctx.logger.info(`browser bridge: kill switch engaged; removed ${String(unlinked)} dev loop link(s)`)
+      void learning?.revokeStandingGrants()
+    },
     extraRpc: (method, payload, context) => extraRpc(method, payload, context)
       ?? learning?.rpc(method, payload, {
         connection: context.connection,

@@ -255,6 +255,8 @@ export interface BridgeServerDeps {
    * Returns undefined for a method it does not own; checked after the audit
    * RPCs and before anything reaches the Host API.
    */
+  /** The extension reported its kill switch (`bridge.audit.record { event: 'kill-switch' }`). */
+  onKillSwitch?: (connection: string | undefined) => void
   extraRpc?: (method: string, payload: unknown, context: { connection: string; signal: AbortSignal }) =>
     Promise<{ ok: true; result: unknown } | { ok: false; error: { code: string; message: string } }> | undefined
   /**
@@ -907,6 +909,7 @@ export class BridgeServer {
       ownsCall: (callId: string) => this.pendingTools.get(callId)?.conn === conn,
       ...(this.deps.audit === undefined ? {} : { audit: this.deps.audit }),
       ...(this.deps.exportAudit === undefined ? {} : { exportAudit: this.deps.exportAudit }),
+      ...(this.deps.onKillSwitch === undefined ? {} : { onKillSwitch: this.deps.onKillSwitch }),
       ...(this.deps.sessionScope === undefined
         ? {}
         : { allowsSession: (sessionId: string) => this.deps.sessionScope!.allowsSession(sessionId, conn.abort.signal, 'read') }),

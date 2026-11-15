@@ -222,6 +222,15 @@ export class DevLoopController {
     return removed
   }
 
+  /** Forget every link (kill switch): links are standing grants to read a tab. */
+  async clear(): Promise<number> {
+    await this.ready
+    const count = this.links.size
+    this.links.clear()
+    await this.persist()
+    return count
+  }
+
   /** Current links (panel list; re-asserted to the bridge on panel open). */
   async list(): Promise<DevLoopTabLink[]> {
     await this.ready
