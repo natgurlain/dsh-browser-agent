@@ -5,7 +5,8 @@
  *   node scripts/dsh-matrix.mjs pin                  # the lockfile default in package.json, in place
  *   node scripts/dsh-matrix.mjs latest               # a dist-tag (latest, next, alpha, ...)
  *   node scripts/dsh-matrix.mjs 0.2.2-rc.3           # an exact version
- *   node scripts/dsh-matrix.mjs pin latest next --record   # several rows, written to docs/dsh-matrix.md
+ *   node scripts/dsh-matrix.mjs tested               # the pin and every other release listed as tested
+ *   node scripts/dsh-matrix.mjs tested latest next --record   # several rows, written to docs/dsh-matrix.md
  *
  * Non-pin targets run in a temporary copy of the repository (tracked and
  * untracked-but-not-ignored files) where every `@deepseek-ai/dsh*` entry in the
@@ -130,14 +131,23 @@ async function distTags() {
   return tags
 }
 
+/** The releases the bridge declares as tested (TESTED_DSH_VERSIONS in its src/dsh-support.ts). */
+export function testedVersions(source = readFileSync(join(root, BRIDGE, 'src', 'dsh-support.ts'), 'utf8')) {
+  const list = /export const TESTED_DSH_VERSIONS[^=]*= \[([^\]]*)\]/u.exec(source)
+  if (list === null) throw new Error('TESTED_DSH_VERSIONS not found in the bridge src/dsh-support.ts')
+  return [...list[1].matchAll(/'([^']+)'/gu)].map(match => match[1])
+}
+
 /**
- * Resolve targets to versions, one row per version; a version named by several
+ * Resolve targets to versions, one row per version; `tested` stands for the
+ * pin plus every other release the bridge lists as tested; a version named by several
  * targets (the pin and `latest`, say) runs once and carries every label.
  */
-export async function resolveTargets(targets, pinned, loadTags = distTags) {
+export async function resolveTargets(targets, pinned, loadTags = distTags, tested = testedVersions) {
   let tags
   const rows = new Map()
-  for (const target of targets) {
+  const expanded = targets.flatMap(target => target === 'tested' ? ['pin', ...tested().filter(version => version !== pinned)] : [target])
+  for (const target of expanded) {
     let version
     if (target === 'pin') version = pinned
     else if (EXACT_VERSION.test(target)) version = target
@@ -200,7 +210,7 @@ export function parseArgs(argv, env = process.env) {
     else throw new Error(`unknown argument: ${arg}`)
   }
   if (options.targets.length === 0) {
-    throw new Error('usage: node scripts/dsh-matrix.mjs <pin|dist-tag|version>... [--record [file]] [--probe-outside-range] [--max-workers n] [--keep] [--workdir dir] [--logs dir]')
+    throw new Error('usage: node scripts/dsh-matrix.mjs <pin|tested|dist-tag|version>... [--record [file]] [--probe-outside-range] [--max-workers n] [--keep] [--workdir dir] [--logs dir]')
   }
   return options
 }

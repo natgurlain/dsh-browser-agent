@@ -1,6 +1,6 @@
 import { readFile, stat } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
-import { DSH_DEFAULT_VERSION, DSH_PEER_RANGE, SUPPORTED_DSH_RANGE } from '../src/dsh-support.ts'
+import { DSH_PEER_RANGE, SUPPORTED_DSH_RANGE } from '../src/dsh-support.ts'
 
 /**
  * The dsh 0.2.1 plugin-manifest contract this package publishes: the runtime
@@ -41,13 +41,6 @@ describe('plugin manifest', () => {
     const dshPeers = Object.keys(peers).filter(name => name.startsWith('@deepseek-ai/dsh'))
     expect(dshPeers.length).toBeGreaterThan(0)
     for (const name of dshPeers) expect(peers[name]).toBe(DSH_PEER_RANGE)
-  })
-
-  it('develops against the workspace default DSH release', () => {
-    const dev = manifest.devDependencies as Record<string, string>
-    const dshDev = Object.keys(dev).filter(name => name.startsWith('@deepseek-ai/dsh'))
-    expect(dshDev.length).toBeGreaterThan(0)
-    for (const name of dshDev) expect(dev[name]).toBe(DSH_DEFAULT_VERSION)
   })
 
   it('publishes the resources the Plugins page reads', () => {

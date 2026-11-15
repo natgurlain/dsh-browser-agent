@@ -15,6 +15,7 @@ import {
   resolveTargets,
   rewriteDshVersions,
   STEP_COLUMNS,
+  testedVersions,
   updateRecord,
 } from '../dsh-matrix.mjs'
 
@@ -63,6 +64,14 @@ test('resolveTargets runs each version once and keeps every label', async () => 
   // The default version given by number is still the in-place pin row.
   assert.deepEqual(await resolveTargets(['0.2.2-rc.2'], '0.2.2-rc.2', tags), [{ version: '0.2.2-rc.2', labels: ['pin'], inPlace: true }])
   await assert.rejects(resolveTargets(['nightly'], '0.2.2-rc.2', tags), /no dist-tag "nightly" \(have: latest, next, stable\)/)
+  // `tested` is the pin plus the other releases the bridge lists; no registry lookup.
+  const offline = async () => { throw new Error('no network') }
+  assert.deepEqual(await resolveTargets(['tested', '0.2.2-rc.3'], '0.2.2-rc.2', offline, () => ['0.2.2-rc.2', '0.2.2-rc.3']), [
+    { version: '0.2.2-rc.2', labels: ['pin'], inPlace: true },
+    { version: '0.2.2-rc.3', labels: [], inPlace: false },
+  ])
+  assert.deepEqual(testedVersions("export const TESTED_DSH_VERSIONS: readonly string[] = ['1.0.0', '1.0.1']\n"), ['1.0.0', '1.0.1'])
+  assert.ok(testedVersions().length > 0)
   // Exact versions need no registry lookup.
   await resolveTargets(['pin', '1.2.3'], '0.2.2-rc.2', async () => { throw new Error('no network') })
 })

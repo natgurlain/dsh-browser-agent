@@ -1,12 +1,19 @@
 name: DSH compatibility matrix
 
-# Probes the bridge against DSH releases other than the exact pin.
-# Only the pin row can fail the workflow; latest/next rows report via the job
-# summary and warnings. The pin itself is enforced by the gate that ci.yml runs
-# (`pnpm gate`: its check-runtime and smoke-runtime steps). There is no separate
-# runtime workflow. Like every workflow here, this one has never run: GitHub
-# Actions is not available for this repository; run a row locally with
-# `node scripts/dsh-matrix.mjs <target>`.
+# Runs the bridge against DSH releases other than the workspace default.
+# `tested` is the default release plus every other release the bridge lists as
+# tested (TESTED_DSH_VERSIONS in packages/browser/bridge-browser/src/dsh-support.ts);
+# that row must pass. `latest` and `next` are dist-tags that upstream moves and
+# that may point outside the supported range (see docs/dsh-matrix.md for what
+# they resolved to and how those releases did), so those rows report through
+# the job summary and warnings without failing the workflow. The default
+# release is also enforced by the gate that ci.yml runs (`pnpm gate`: its
+# check-runtime and smoke-runtime steps).
+#
+# Like every workflow here, this one has never run: GitHub Actions is not
+# available for this repository. The results that count are the ones a local
+# run records in docs/dsh-matrix.md:
+#   node scripts/dsh-matrix.mjs tested latest next --record
 
 on:
   schedule:
@@ -14,9 +21,9 @@ on:
   workflow_dispatch:
     inputs:
       targets:
-        description: 'JSON array of targets: "pin", dist-tags, or exact versions'
+        description: 'JSON array of targets: "tested", "pin", dist-tags, or exact versions'
         required: false
-        default: '["pin", "latest", "next"]'
+        default: '["tested", "latest", "next"]'
 
 permissions:
   contents: read
@@ -29,12 +36,12 @@ jobs:
   matrix:
     name: DSH ${{ matrix.target }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    continue-on-error: ${{ matrix.target != 'pin' }}
+    timeout-minutes: 45
+    continue-on-error: ${{ matrix.target != 'pin' && matrix.target != 'tested' }}
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJSON(inputs.targets || '["pin", "latest", "next"]') }}
+        target: ${{ fromJSON(inputs.targets || '["tested", "latest", "next"]') }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -46,10 +53,10 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-      # The pin row runs in place against the committed lockfile; other rows
-      # install a rewritten temp copy inside scripts/dsh-matrix.mjs.
-      - if: matrix.target == 'pin'
-        run: pnpm install --frozen-lockfile
+      # The default release runs in place against the committed lockfile, and
+      # the script reads semver from that install; other releases install a
+      # rewritten temp copy inside scripts/dsh-matrix.mjs.
+      - run: pnpm install --frozen-lockfile
       - name: Typecheck, unit tests and runtime smoke against DSH ${{ matrix.target }}
         run: node scripts/dsh-matrix.mjs "$TARGET"
         env:
