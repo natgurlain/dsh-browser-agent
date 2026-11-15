@@ -179,15 +179,18 @@ export function LearningPanel({ locale, sessionId, connected }: { locale: UiLoca
                 onClick={() => report(client!.request('learning.watch.run'), (value) => String((value as { text?: string }).text ?? copy.done))}>
                 {copy.doRemaining(state.suggestion.remaining, state.suggestion.program.length, state.suggestion.more === true)}
               </button>
+              {state.suggestion.limited === 'indistinct' && <small>{copy.rowsIndistinct}</small>}
             </div>
           )}
           {state?.resume !== null && state?.resume !== undefined && (
             <div className="learning-suggestion">
-              <small>{copy.stoppedEarly(state.resume.rows)}</small>
-              <button className="primary" disabled={busy || !connected}
-                onClick={() => report(client!.request('learning.watch.continue'), (value) => String((value as { text?: string }).text ?? copy.done))}>
-                {copy.continueRemaining(state.resume.rows)}
-              </button>
+              <small>{copy.stoppedEarly(state.resume.rows, state.resume.skipped)}</small>
+              {state.resume.rows > 0 && (
+                <button className="primary" disabled={busy || !connected}
+                  onClick={() => report(client!.request('learning.watch.continue'), (value) => String((value as { text?: string }).text ?? copy.done))}>
+                  {copy.continueRemaining(state.resume.rows)}
+                </button>
+              )}
             </div>
           )}
         </div>

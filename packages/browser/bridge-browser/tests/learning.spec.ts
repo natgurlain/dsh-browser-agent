@@ -602,7 +602,7 @@ describe('learning mount', () => {
   it('runs "Do the remaining 38" (3 steps per row) as batches under one card, and reports rows done when a row breaks', async () => {
     const root = tempDir()
     const { ctx } = fakeCtx(root)
-    const target = (row: number, tag: string, role: string, name: string) => ({ tag, role, name, row: `Person ${String(row + 3)}` })
+    const target = (row: number, tag: string, role: string, name: string) => ({ tag, role, name, row: `Person ${String(row + 3)}`, rowKey: 'k' })
     const rows = (count: number) => Array.from({ length: count }, (_unused, row) => [
       { tool: 'browser_type', args: { selector: `#people > tr:nth-child(${String(row + 3)}) input`, text: `p${String(row)}`, replace: true }, target: target(row, 'input', 'textbox', 'Email') },
       { tool: 'browser_click', args: { selector: `#people > tr:nth-child(${String(row + 3)}) .invite` }, target: target(row, 'button', 'button', 'Invite') },
@@ -645,7 +645,7 @@ describe('learning mount', () => {
     const broken = await rpc({ sessionId: 's1', steps, rowSteps: 3 }) as { ok: true; result: { report: { status: string; stoppedAt: number }; text: string } }
     // Row 13 (nth-child 15) breaks at its second step: 12 rows done, nothing after it.
     expect(broken).toMatchObject({ ok: true, result: { report: { status: 'failed', stoppedAt: 37, rows: { done: 12, total: 38, steps: 114 } } } })
-    expect(broken.result.text).toMatch(/^Stopped after 12 of 38 rows\. Row 13: No element matches that selector\nRow 13 was left part-done \(1 of 3 steps ran\)\.\nNothing else was done\. You can continue with the rows that are left/)
+    expect(broken.result.text).toMatch(/^Stopped after 12 of 38 rows\. Row 13: No element matches that selector\nRow 13 was left part-done \(1 of 3 steps ran\); continuing skips it, so finish it by hand\.\nNothing else was done\. You can continue with the rows that are left/)
     expect(requestTool.mock.calls.filter(([name]) => name === 'browser_run')).toHaveLength(2)
     mount.dispose()
   })

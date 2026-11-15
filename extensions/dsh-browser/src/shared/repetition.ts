@@ -49,17 +49,28 @@ export interface WatchEvent {
 }
 
 /**
- * What a step's element looks like. Recorded for every row when a long
+ * What a step's element looks like, and which row it sits in. Recorded when
  * "do the remaining N" is offered, shown and bound on its approval card, and
- * compared with the page again just before the step runs.
+ * compared, inside the action, with the very element the step is about to
+ * act on.
  */
 export interface StepTarget {
   tag: string
   role: string
   /** Accessible name. */
   name: string
-  /** The row's identity: its first cell with words, else its first cell with text. */
+  /**
+   * The row's identity in a person's words, from the cells other than the
+   * element's own: the first cell with text and the first cell with words
+   * ("1042 · Paid"). Empty when the element sits in no recognisable row.
+   */
   row: string
+  /**
+   * A digest of everything the row says outside its controls (every cell's
+   * text; sensitive cells masked). Empty: not compared (no row, or a step
+   * after the first of its row, whose row text earlier steps may have changed).
+   */
+  rowKey: string
 }
 
 const TARGET_FIELD_MAX = 200
@@ -69,13 +80,29 @@ export function parseStepTarget(value: unknown): StepTarget | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const raw = value as Record<string, unknown>
   const keys = Object.keys(raw)
-  if (keys.length !== 4) return undefined
+  if (keys.length !== 5) return undefined
   const field = (key: string): string | undefined => typeof raw[key] === 'string' && (raw[key] as string).length <= TARGET_FIELD_MAX ? raw[key] as string : undefined
   const tag = field('tag')
   const role = field('role')
   const name = field('name')
   const row = field('row')
-  return tag === undefined || tag === '' || role === undefined || name === undefined || row === undefined ? undefined : { tag, role, name, row }
+  const rowKey = field('rowKey')
+  return tag === undefined || tag === '' || role === undefined || name === undefined || row === undefined || rowKey === undefined ? undefined : { tag, role, name, row, rowKey }
+}
+
+/**
+ * Whether the rows of an offer can be told apart: every step sits in a row
+ * with an identity, and no two rows share one. Only then may one approval
+ * cover more rows than a single program.
+ */
+export function rowsDistinct(targets: ReadonlyArray<ReadonlyArray<StepTarget | undefined>>): boolean {
+  const seen = new Set<string>()
+  for (const row of targets) {
+    const identity = row[0]?.row
+    if (identity === undefined || identity === '' || row.some((target) => target === undefined || target.row === '') || seen.has(identity)) return false
+    seen.add(identity)
+  }
+  return true
 }
 
 /**
@@ -263,7 +290,9 @@ export function buildProgram(pattern: RepetitionPattern, rows: ReadonlyArray<rea
   rows.forEach((cells, offset) => {
     const repetition = pattern.done + offset
     for (const [position, step] of pattern.steps.entries()) {
-      const target = targets?.[offset]?.[position]
+      const probed = targets?.[offset]?.[position]
+      // The whole row is compared at its first step; the steps after it may have changed what the row says.
+      const target = probed === undefined || position === 0 ? probed : { ...probed, rowKey: '' }
       const selector = instantiate(step.template, repetition)
       const value = step.value.kind === 'constant' ? step.value.value : step.value.kind === 'cell' ? (cells[step.value.cell] ?? '').trim() : undefined
       if (step.kind === 'click') push({ tool: 'browser_click', args: { selector } }, target)

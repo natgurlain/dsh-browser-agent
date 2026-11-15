@@ -6,7 +6,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { LearningRuntime, type LearningDeps } from '../src/background/learning.ts'
-import { detectRepetition, looksLikeStep, MAX_FINISH_STEPS, maxFinishRows, nameShape, parseStepTarget, type StepTarget, type WatchEvent } from '../src/shared/repetition.ts'
+import { detectRepetition, looksLikeStep, MAX_FINISH_STEPS, maxFinishRows, nameShape, parseStepTarget, rowsDistinct, type StepTarget, type WatchEvent } from '../src/shared/repetition.ts'
 import { memoryStorage } from './support/chrome.ts'
 
 const ORIGIN = 'https://crm.example'
@@ -17,10 +17,11 @@ let describe_: (row: number, position: number) => StepTarget | undefined
 let tabUrl = `${ORIGIN}/people`
 let documentId = 'doc-1'
 
+/** What the content script reports for one step's element: every step of a row carries the row's identity and digest. */
 const defaultTarget = (row: number, position: number): StepTarget => [
-  { tag: 'input', role: 'textbox', name: `Email ${String(row)}`, row: `Person ${String(row)}` },
-  { tag: 'button', role: 'button', name: 'Invite', row: `Person ${String(row)}` },
-  { tag: 'button', role: 'button', name: 'Confirm', row: `Person ${String(row)}` },
+  { tag: 'input', role: 'textbox', name: `Email ${String(row)}`, row: `Person ${String(row)}`, rowKey: `key-${String(row)}` },
+  { tag: 'button', role: 'button', name: 'Invite', row: `Person ${String(row)}`, rowKey: `key-${String(row)}` },
+  { tag: 'button', role: 'button', name: 'Confirm', row: `Person ${String(row)}`, rowKey: `key-${String(row)}` },
 ][position]!
 
 /** The program for `rows` rows starting at table row `from`, as the runtime builds it. */
@@ -31,7 +32,8 @@ const program = (rows: number, from = 3, withTargets = true): Array<{ tool: stri
     { tool: 'browser_click', args: { selector: `#people > tr:nth-child(${String(row)}) .invite` } },
     { tool: 'browser_click', args: { selector: `#people > tr:nth-child(${String(row)}) .confirm` } },
   ]
-  return withTargets ? steps.map((step, position) => ({ ...step, target: defaultTarget(row, position) })) : steps
+  // The whole row is compared at its first step only: later steps keep the identity, not the digest.
+  return withTargets ? steps.map((step, position) => ({ ...step, target: { ...defaultTarget(row, position), rowKey: position === 0 ? `key-${String(row)}` : '' } })) : steps
 }).flat()
 
 beforeEach(() => {
@@ -65,7 +67,8 @@ beforeEach(() => {
 
 const answer = (value: unknown) => ({ type: 'server-response', result: { ok: true, value } })
 const completed = (rows: number) => answer({ report: { status: 'completed', steps: Array.from({ length: rows * 3 }, () => ({})), rows: { done: rows, total: rows, steps: rows * 3 } }, text: `Done: all ${String(rows)} rows.` })
-const stopped = (done: number, total: number) => answer({ report: { status: 'failed', steps: Array.from({ length: done * 3 + 1 }, () => ({})), rows: { done, total, steps: total * 3 } }, text: `Stopped after ${String(done)} of ${String(total)} rows. Row ${String(done + 1)}: it no longer looks like the rows you approved (was “Invite”, now “Delete”). Nothing was done to it.` })
+/** A run that stopped at row `done + 1`, after `partial` of that row's steps had run. */
+const stopped = (done: number, total: number, partial = 0) => answer({ report: { status: 'failed', steps: [...Array.from({ length: done * 3 + partial }, () => ({ status: 'done' })), { status: 'failed' }], rows: { done, total, steps: total * 3 } }, text: `Stopped after ${String(done)} of ${String(total)} rows. Row ${String(done + 1)}: it no longer looks like the rows you approved (was “Invite”, now “Delete”). Nothing was done to it.` })
 
 async function watched() {
   const request = vi.fn(async (_method: string, _payload: unknown, _timeout?: number): Promise<unknown> => completed(1))
@@ -90,8 +93,8 @@ async function watched() {
     await learning.onWatchEvent(7, 0, { kind: 'click', css: `#people > tr:nth-child(${String(row)}) .invite`, label: 'Invite', tag: 'button', role: 'button', cells })
     await learning.onWatchEvent(7, 0, { kind: 'click', css: `#people > tr:nth-child(${String(row)}) .confirm`, label: 'Confirm', tag: 'button', role: 'button', cells })
   }
-  type Offer = { remaining: number; more: boolean; period: number; program: ReturnType<typeof program> }
-  const state = () => learning.snapshot() as { suggestion: Offer | null; resume: { rows: number } | null }
+  type Offer = { remaining: number; more: boolean; limited?: string; period: number; program: ReturnType<typeof program> }
+  const state = () => learning.snapshot() as { suggestion: Offer | null; resume: { rows: number; skipped?: string } | null }
   const sent = () => request.mock.calls.filter(([method]) => method === 'bridge.learning.program.run').map(([, payload]) => payload as { steps: ReturnType<typeof program>; rowSteps?: number; sessionId?: string })
   return { learning, request, state, sent }
 }
@@ -118,8 +121,8 @@ describe('the offer', () => {
     describe_ = (row, position) => row === 6 ? undefined : defaultTarget(row, position)
     const short = await watched()
     expect(short.state().suggestion).toMatchObject({ remaining: 3 })
-    // Within one program nothing changes: no element descriptions travel.
-    expect(short.state().suggestion!.program).toEqual(program(3, 3, false))
+    // F8: a short offer says what each element looks like too; the action checks it on the element it resolves.
+    expect(short.state().suggestion!.program).toEqual(program(3, 3))
     // A name that only differs by the row's own text or number is the same shape.
     expect(nameShape('Email 3')).toBe(nameShape('Email 41'))
     expect(nameShape('Invite Ada Lovelace', ['Ada Lovelace', 'ada@example.org'])).toBe(nameShape('Invite Linus', ['Linus']))
@@ -127,9 +130,9 @@ describe('the offer', () => {
     const events: WatchEvent[] = [1, 2].map((row) => ({ kind: 'click' as const, css: `#r${String(row)} button`, label: `Archive invoice ${String(row)}`, tag: 'button', role: 'button' }))
     const step = detectRepetition(events)!.steps[0]!
     expect(step).toMatchObject({ tag: 'button', role: 'button', shape: 'Archive invoice #' })
-    expect(looksLikeStep(step, { tag: 'button', role: 'button', name: 'Archive invoice 77', row: '' }, [])).toBe(true)
-    expect(looksLikeStep(step, { tag: 'button', role: 'button', name: 'Delete invoice 77', row: '' }, [])).toBe(false)
-    expect(looksLikeStep(step, { tag: 'a', role: 'button', name: 'Archive invoice 77', row: '' }, [])).toBe(false)
+    expect(looksLikeStep(step, { tag: 'button', role: 'button', name: 'Archive invoice 77', row: '', rowKey: '' }, [])).toBe(true)
+    expect(looksLikeStep(step, { tag: 'button', role: 'button', name: 'Delete invoice 77', row: '', rowKey: '' }, [])).toBe(false)
+    expect(looksLikeStep(step, { tag: 'a', role: 'button', name: 'Archive invoice 77', row: '', rowKey: '' }, [])).toBe(false)
   })
 
   it('does not go beyond one program when the page reports no element descriptions', async () => {
@@ -154,21 +157,55 @@ describe('the offer', () => {
     expect(maxFinishRows(1)).toBe(250)
   })
 
-  it('keeps a remainder that fits one program on the single browser_run path, unchanged', async () => {
+  it('F1: rows that cannot be told apart are never one series: the offer stays within one program and says why', async () => {
+    // A grid with no row identity at all (the content script reports row ''), 40 further "Delete" rows.
+    available = 40
+    describe_ = (row, position) => ({ ...defaultTarget(row, position), row: '', rowKey: '' })
+    const none = await watched()
+    expect(none.state().suggestion).toMatchObject({ remaining: 8, more: false, limited: 'indistinct' })
+    expect(none.state().suggestion!.program).toHaveLength(24)
+    // An id-less table whose rows all read the same ("Paid").
+    describe_ = (row, position) => ({ ...defaultTarget(row, position), row: 'Paid' })
+    expect((await watched()).state().suggestion).toMatchObject({ remaining: 8, limited: 'indistinct' })
+    // Two rows that share an identity among otherwise distinct ones.
+    describe_ = (row, position) => ({ ...defaultTarget(row, position), row: row === 30 ? 'Person 12' : `Person ${String(row)}` })
+    expect((await watched()).state().suggestion).toMatchObject({ remaining: 8, limited: 'indistinct' })
+    // One step of a row sits in no row.
+    describe_ = (row, position) => ({ ...defaultTarget(row, position), ...(row === 20 && position === 2 ? { row: '' } : {}) })
+    expect((await watched()).state().suggestion).toMatchObject({ remaining: 8, limited: 'indistinct' })
+    // The short run still goes as one ordinary program, each step with its element description.
+    const run = await watched()
+    await run.learning.runSuggestion('s1')
+    expect(run.sent()).toHaveLength(1)
+    expect(run.sent()[0]).not.toHaveProperty('rowSteps')
+    expect(run.sent()[0]!.steps).toHaveLength(24)
+    expect(run.learning.claimSeries('s1', run.sent()[0]!.steps, 7, 'doc-1')).toBe(false)
+    // Rows that can be told apart, and few enough for one program anyway: no limit to mention.
+    describe_ = defaultTarget
+    available = 8
+    expect((await watched()).state().suggestion).not.toHaveProperty('limited')
+    available = 40
+    expect((await watched()).state().suggestion).toMatchObject({ remaining: 40 })
+    expect(rowsDistinct([[defaultTarget(3, 0)], [defaultTarget(4, 0)]])).toBe(true)
+    expect(rowsDistinct([[defaultTarget(3, 0)], [defaultTarget(3, 0)]])).toBe(false)
+    expect(rowsDistinct([[undefined]])).toBe(false)
+  })
+
+  it('keeps a remainder that fits one program on the single browser_run path', async () => {
     available = 8
     const { learning, request, state } = await watched()
     expect(state().suggestion).toMatchObject({ remaining: 8, more: false })
     const probes = sendMessage.mock.calls.filter(([, message]) => (message as { type: string }).type === 'DSH_WATCH_PROBE').length
     await learning.runSuggestion('s1')
-    // Exactly the old payload: no row size, no element descriptions, and no second probe.
-    expect(request).toHaveBeenCalledWith('bridge.learning.program.run', { sessionId: 's1', steps: program(8, 3, false) }, 30 * 60_000)
+    // No row size and no second probe; each step says what its element looks like (F8).
+    expect(request).toHaveBeenCalledWith('bridge.learning.program.run', { sessionId: 's1', steps: program(8) }, 30 * 60_000)
     expect(sendMessage.mock.calls.filter(([, message]) => (message as { type: string }).type === 'DSH_WATCH_PROBE')).toHaveLength(probes)
-    expect(learning.claimSeries('s1', program(8, 3, false), 7, 'doc-1')).toBe(false)
+    expect(learning.claimSeries('s1', program(8), 7, 'doc-1')).toBe(false)
   })
 
   it('accepts only a well-formed element description', () => {
-    expect(parseStepTarget({ tag: 'button', role: 'button', name: 'Invite', row: 'Ada' })).toEqual({ tag: 'button', role: 'button', name: 'Invite', row: 'Ada' })
-    for (const bad of [null, 'button', [], { tag: 'button', role: 'button', name: 'Invite' }, { tag: '', role: '', name: '', row: '' }, { tag: 'button', role: 'button', name: 7, row: '' }, { tag: 'button', role: 'button', name: 'x', row: 'y', extra: 1 }, { tag: 'button', role: 'button', name: 'x'.repeat(201), row: '' }]) {
+    expect(parseStepTarget({ tag: 'button', role: 'button', name: 'Invite', row: 'Ada', rowKey: 'k' })).toEqual({ tag: 'button', role: 'button', name: 'Invite', row: 'Ada', rowKey: 'k' })
+    for (const bad of [null, 'button', [], { tag: 'button', role: 'button', name: 'Invite', row: 'Ada' }, { tag: '', role: '', name: '', row: '', rowKey: '' }, { tag: 'button', role: 'button', name: 7, row: '', rowKey: '' }, { tag: 'button', role: 'button', name: 'x', row: 'y', rowKey: 'k', extra: 1 }, { tag: 'button', role: 'button', name: 'x'.repeat(201), row: '', rowKey: '' }]) {
       expect(parseStepTarget(bad)).toBeUndefined()
     }
   })
@@ -193,7 +230,7 @@ describe('the run', () => {
     const shrunk = await watched()
     available = 5
     await shrunk.learning.runSuggestion('s1')
-    expect(shrunk.sent()).toEqual([{ sessionId: 's1', steps: program(5, 3, false) }])
+    expect(shrunk.sent()).toEqual([{ sessionId: 's1', steps: program(5) }])
   })
 
   it('lets exactly that program raise a series card: once, for that session, on the tab and document the user demonstrated on, only while the run is in flight', async () => {
@@ -238,6 +275,30 @@ describe('the run', () => {
     expect(killed.learning.claimSeries('s1', program(38), 7, 'doc-1')).toBe(false)
   })
 
+  it('F8: a run that ends does not disarm the kill-switch wait of a later run', async () => {
+    const { learning, request } = await watched()
+    let releaseFirst!: (value: unknown) => void
+    request.mockImplementationOnce(() => new Promise((resolve) => { releaseFirst = resolve }))
+    const first = learning.runSuggestion('s1')
+    await vi.waitFor(() => { expect(request).toHaveBeenCalled() })
+    // A second demonstration and a second long run start while the first is still waiting on the bridge.
+    await learning.startWatching(7)
+    for (const row of [1, 2]) {
+      const cells = [`Person ${String(row)}`, '', '']
+      await learning.onWatchEvent(7, 0, { kind: 'type', css: `#people > tr:nth-child(${String(row)}) input`, value: 'x', label: `Email ${String(row)}`, tag: 'input', role: 'textbox', cells })
+      await learning.onWatchEvent(7, 0, { kind: 'click', css: `#people > tr:nth-child(${String(row)}) .invite`, label: 'Invite', tag: 'button', role: 'button', cells })
+      await learning.onWatchEvent(7, 0, { kind: 'click', css: `#people > tr:nth-child(${String(row)}) .confirm`, label: 'Confirm', tag: 'button', role: 'button', cells })
+    }
+    request.mockImplementationOnce(() => new Promise(() => {}))
+    const second = learning.runSuggestion('s1')
+    await vi.waitFor(() => { expect(request).toHaveBeenCalledTimes(2) })
+    releaseFirst(completed(38))
+    await first
+    // The first run's end left the second one's wait in place: the kill switch still ends it.
+    learning.disarmSeries()
+    await expect(second).rejects.toThrow(/Stopped/)
+  })
+
   it('refuses when the watched tab left the site', async () => {
     const { learning, sent } = await watched()
     tabUrl = 'https://other.example/people'
@@ -275,6 +336,35 @@ describe('continuing a run that stopped part-way', () => {
     // The continuation is its own request: only its own program can raise a card.
     expect(learning.claimSeries('s1', program(18, 23), 7, 'doc-1')).toBe(false)
     expect(state().resume).toBeNull()
+  })
+
+  it('F7: a row left part-done is not repeated: the continuation starts after it, and the panel and the next card say so', async () => {
+    const { learning, request, state, sent } = await watched()
+    // Row 21 (table row 23) stopped at its second step: its first step had already run.
+    request.mockResolvedValueOnce(stopped(20, 38, 1))
+    await learning.runSuggestion('s1')
+    expect(state().resume).toEqual({ rows: 17, skipped: 'Person 23' })
+    let release!: (value: unknown) => void
+    request.mockImplementationOnce(() => new Promise((resolve) => { release = resolve }))
+    const continued = learning.continueRemaining('s1')
+    await vi.waitFor(() => { expect(sent()).toHaveLength(2) })
+    // The new run starts at table row 24; the row before it is left for the user.
+    expect(sent().at(-1)).toEqual({ sessionId: 's1', steps: program(17, 24), rowSteps: 3 })
+    // While it is in flight, its card (and only its card) gets the note.
+    expect(learning.cardNote('s1', program(17, 24))).toBe('“Person 23” was left part-done by the earlier run and is skipped here; finish it by hand.')
+    expect(learning.cardNote('s2', program(17, 24))).toBeUndefined()
+    expect(learning.cardNote('s1', program(18, 23))).toBeUndefined()
+    release(completed(17))
+    await continued
+    expect(learning.cardNote('s1', program(17, 24))).toBeUndefined()
+    expect(state().resume).toBeNull()
+    // The part-done row was the last one: nothing to continue, but the panel still names it.
+    const last = await watched()
+    last.request.mockResolvedValueOnce(stopped(37, 38, 2))
+    await last.learning.runSuggestion('s1')
+    expect(last.state().resume).toEqual({ rows: 0, skipped: 'Person 40' })
+    await expect(last.learning.continueRemaining('s1')).rejects.toThrow(/nothing to continue/)
+    expect(last.sent()).toHaveLength(1)
   })
 
   it('offers nothing when the card was denied, when the run finished, after a new demonstration, or after the kill switch', async () => {

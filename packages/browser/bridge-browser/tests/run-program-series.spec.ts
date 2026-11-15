@@ -11,6 +11,7 @@ import {
   parseProgram,
   parseProgramSeries,
   renderSeriesOutcome,
+  runProgram,
   runProgramSeries,
 } from '../src/run-program.ts'
 
@@ -29,9 +30,9 @@ const ok = (text: string) => ({ text })
 
 /** `rows` repetitions of type → click → select, as the extension builds them: each step says what its element looks like. */
 const seriesSteps = (rows: number) => Array.from({ length: rows }, (_unused, row) => [
-  { tool: 'browser_type', args: { selector: `#row-${String(row + 3)} input`, text: `p${String(row)}`, replace: true }, target: { tag: 'input', role: 'textbox', name: 'Email', row: `Person ${String(row + 3)}` } },
-  { tool: 'browser_click', args: { selector: `#row-${String(row + 3)} button` }, target: { tag: 'button', role: 'button', name: 'Archive', row: `Person ${String(row + 3)}` } },
-  { tool: 'browser_select', args: { selector: `#row-${String(row + 3)} select`, value: 'x' }, target: { tag: 'select', role: 'combobox', name: 'State', row: `Person ${String(row + 3)}` } },
+  { tool: 'browser_type', args: { selector: `#row-${String(row + 3)} input`, text: `p${String(row)}`, replace: true }, target: { tag: 'input', role: 'textbox', name: 'Email', row: `Person ${String(row + 3)}`, rowKey: 'k' } },
+  { tool: 'browser_click', args: { selector: `#row-${String(row + 3)} button` }, target: { tag: 'button', role: 'button', name: 'Archive', row: `Person ${String(row + 3)}`, rowKey: 'k' } },
+  { tool: 'browser_select', args: { selector: `#row-${String(row + 3)} select`, value: 'x' }, target: { tag: 'select', role: 'combobox', name: 'State', row: `Person ${String(row + 3)}`, rowKey: 'k' } },
 ]).flat()
 
 const run = (bridge: never, steps: ReturnType<typeof seriesSteps>, signal = new AbortController().signal) =>
@@ -95,7 +96,7 @@ describe('program series', () => {
     // Said plainly: how far it got, which row stopped it and why, what state that row is in, and what the user can do.
     expect(renderSeriesOutcome(outcome).split('\n').slice(0, 3)).toEqual([
       'Stopped after 20 of 38 rows. Row 21: it no longer looks like the rows you approved (was “Archive”, now “Delete”). Nothing was done to it.',
-      'Row 21 was left part-done (1 of 3 steps ran).',
+      'Row 21 was left part-done (1 of 3 steps ran); continuing skips it, so finish it by hand.',
       'Nothing else was done. You can continue with the rows that are left; a new card will show them as the page is now.',
     ])
   })
@@ -190,7 +191,7 @@ describe('program series', () => {
     expect(() => parseProgramSeries([{ tool: 'browser_click', args: { selector: '#a', index: 4 } }], 1)).toThrow(/by selector/)
     expect(() => parseProgramSeries([{ tool: 'browser_click', args: { selector: '#a' }, expect: { text: 'x' } }], 1)).toThrow(/expect/)
     // Every step says what its element looks like (the extension shows, binds and re-checks it).
-    const target = { tag: 'button', role: 'button', name: 'Archive', row: 'Invoice 1042' }
+    const target = { tag: 'button', role: 'button', name: 'Archive', row: 'Invoice 1042', rowKey: 'k' }
     expect(parseProgramSeries([{ tool: 'browser_click', args: { selector: '#a' }, target }], 1)).toEqual([{ tool: 'browser_click', args: { selector: '#a' }, target }])
     expect(() => parseProgramSeries([{ tool: 'browser_click', args: { selector: '#a' } }], 1)).toThrow(/describe its element/)
     expect(() => parseProgramSeries([{ tool: 'browser_click', args: { selector: '#a' }, target: { ...target, extra: 1 } }], 1)).toThrow(/describe its element/)
@@ -204,5 +205,20 @@ describe('program series', () => {
     expect(hasUnsafeKey({ a: [{ b: { proto: 1 } }], selector: '__proto__' })).toBe(false)
     // The model-facing tool keeps its own cap: it cannot start a series.
     expect(() => parseProgram(seriesSteps(9))).toThrow(/at most 25 steps/)
+  })
+
+  it('F8: a demonstrated program of 25 steps or fewer keeps its element descriptions; a model\'s program never carries any', async () => {
+    const steps = seriesSteps(2)
+    // The model-facing tool: `target` is not an argument it takes, so it is dropped.
+    expect(parseProgram(steps)).toEqual(steps.map((step) => ({ tool: step.tool, args: step.args })))
+    // The learning path keeps them, validated: the extension checks each inside the action.
+    expect(parseProgram(steps, true)).toEqual(steps)
+    expect(() => parseProgram([{ ...steps[0]!, target: { tag: 'input' } }], true)).toThrow(/target must describe an element/)
+    const { bridge, calls } = fakeBridge((name) => name === 'browser_run' ? { programId: 'p' } : ok('ok'))
+    await runProgram(bridge, parseProgram(steps, true), { signal: new AbortController().signal }, { toolTimeoutMs: 1000 })
+    // The card's call carries the descriptions; a step call carries the tool and its arguments only.
+    expect(calls[0]).toMatchObject({ name: 'browser_run', args: { steps } })
+    expect(calls[1]).toMatchObject({ name: 'browser_type', args: steps[0]!.args, program: { id: 'p', step: 0 } })
+    expect(calls[1]!.args).not.toHaveProperty('target')
   })
 })

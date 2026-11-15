@@ -24,7 +24,8 @@ import { approvalBinding } from '../security/payload-binding.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
-import { parseStepTarget, type StepTarget } from '../shared/repetition.ts'
+import type { StepTarget } from '../shared/repetition.ts'
+import { pageLocation } from './run-program.ts'
 import { DevToolsError } from './debugger-session.ts'
 import { InputStateStore } from './input-state.ts'
 import {
@@ -198,46 +199,45 @@ export interface TabManagementContext {
    */
   tabHidden?: (url: string) => boolean
   /**
-   * A program-series step ("do the remaining N"): what its element must still
-   * look like. The content script compares it with the page just before the
-   * action; on any difference the step fails and nothing is done to the page.
+   * A "do the remaining N" step: what its element must still look like and,
+   * for a series, the page it was approved on. The page is compared here, on
+   * the frames listed for this very step; the element is compared by the
+   * content script inside the action, on the element the action resolved. On
+   * any difference the step fails and nothing is done to the page.
    */
-  expectTarget?: StepTarget
+  expect?: StepExpectation
 }
 
-/**
- * Check a series step's element against what its approval card showed.
- * @returns a failure answer in the user's words, or undefined when it matches.
- */
-export async function verifyStepTarget(tabId: number, frame: TabFrame, call: ToolCall, expected: StepTarget): Promise<ToolAnswer | undefined> {
-  let result: { differs?: unknown; now?: unknown } | undefined
-  try {
-    const response = await chrome.tabs.sendMessage(
-      tabId,
-      { type: 'DSH_WATCH_CHECK', args: withoutFrame(call.args), target: expected },
-      frame.documentId === undefined ? { frameId: frame.frameId } : { documentId: frame.documentId },
-    ) as { ok?: boolean; result?: { differs?: unknown; now?: unknown } } | undefined
-    result = response?.ok === true ? response.result : undefined
-  } catch {
-    result = undefined
-  }
-  const differs = Array.isArray(result?.differs) ? result.differs.filter((field): field is string => typeof field === 'string') : ['missing']
-  if (differs.length === 0) return undefined
-  const now = parseStepTarget(result?.now)
-  const zh = getUiLocale() === 'zh'
-  const quote = (text: string): string => `“${text}”`
-  let what: string
-  if (now === undefined) {
-    what = zh ? '它的元素已不存在或已隐藏' : 'its element is gone or hidden'
-  } else {
-    // Say what changed in the words the card used: the label first, then the row, then the kind of element.
-    const field = differs.includes('name') ? 'name' : differs.includes('row') ? 'row' : differs.includes('role') ? 'role' : 'tag'
-    what = zh
-      ? `它与您批准的行不再一致（原为 ${quote(expected[field])}，现为 ${quote(now[field])}）`
-      : `it no longer looks like the rows you approved (was ${quote(expected[field])}, now ${quote(now[field])})`
-  }
-  return { ok: false, error: { code: 'action-failed', message: zh ? `${what}。未对它执行任何操作。` : `${what}. Nothing was done to it.` } }
+/** What a "do the remaining N" step must still find (see {@link TabManagementContext.expect}). */
+export interface StepExpectation {
+  target: StepTarget
+  /** A series only: the top document and its full location (query and fragment included). */
+  page?: { documentKey: string; location: string }
 }
+
+/** Expected targets of the calls being dispatched, read when their action message is built. */
+const stepExpectations = new WeakMap<ToolCall, StepTarget>()
+
+/**
+ * Whether a "do the remaining N" step may be dispatched at all: only a
+ * selector-targeted click, type or select on the content route carries the
+ * in-action element check, and a series step must still be on the document
+ * and location its card was approved on.
+ * @returns a failure answer in the user's words, or undefined when it may run.
+ */
+export function stepExpectationFailure(call: ToolCall, frames: TabFrame[], expect: StepExpectation): ToolAnswer | undefined {
+  const zh = getUiLocale() === 'zh'
+  if (!CHECKED_STEP_TOOLS.has(call.name) || inputRoute(call) !== 'content' || typeof call.args.selector !== 'string') {
+    return { ok: false, error: { code: 'action-failed', message: zh ? '此步骤无法与已批准的行核对，因此未执行。' : 'This step cannot be checked against an approved row, so it was not run.' } }
+  }
+  if (expect.page === undefined) return undefined
+  const top = frames.find((frame) => frame.frameId === 0)
+  if (top !== undefined && frameDocumentKey(top) === expect.page.documentKey && pageLocation(top.url) === expect.page.location) return undefined
+  return { ok: false, error: { code: 'action-failed', message: zh ? '页面已重新加载或已离开您批准时的页面。未执行任何操作。' : 'the page was reloaded or is no longer the one you approved this on. Nothing was done.' } }
+}
+
+/** Actions whose content-script implementation checks the element it resolved (content/actions.ts). */
+const CHECKED_STEP_TOOLS: ReadonlySet<string> = new Set(['browser_click', 'browser_type', 'browser_select'])
 
 /** Placeholder for the title and URL of a tab site policy hides. */
 const TAB_HIDDEN = '(hidden by site policy)'
@@ -411,6 +411,7 @@ async function sendAction(
   includePageDelta: boolean = false,
   shareContent: boolean = false,
 ): Promise<unknown> {
+  const expected = stepExpectations.get(call)
   return chrome.tabs.sendMessage(tabId, {
     type: 'DSH_ACTION',
     action: call.name,
@@ -418,6 +419,8 @@ async function sendAction(
     ...budget === undefined ? {} : { budget },
     ...includePageDelta ? { includePageDelta: true } : {},
     ...shareContent ? { shareContent: true } : {},
+    // A "do the remaining N" step: the content script compares the element this action resolves before acting on it.
+    ...expected === undefined ? {} : { expect: { target: expected, zh: getUiLocale() === 'zh' } },
   }, frame.documentId === undefined ? { frameId: frame.frameId } : { documentId: frame.documentId })
 }
 
@@ -2149,14 +2152,10 @@ export async function dispatchToolCall(
       if (targetStillAllowed?.() === false) return targetChanged()
     }
   }
-  if (tabManagement.expectTarget !== undefined) {
-    const frame = executionFrames.find((candidate) => candidate.frameId === requestedFrame(call.args))
-    const mismatch = frame === undefined
-      ? unavailable('The frame of this step is gone.')
-      : await verifyStepTarget(tab.id, frame, call, tabManagement.expectTarget)
-    if (mismatch !== undefined) return mismatch
-    if (isCancelled(call, signal)) return cancelled()
-    if (targetStillAllowed?.() === false) return targetChanged()
+  if (tabManagement.expect !== undefined) {
+    const refusal = stepExpectationFailure(call, executionFrames, tabManagement.expect)
+    if (refusal !== undefined) return refusal
+    stepExpectations.set(call, tabManagement.expect.target)
   }
   try {
     return await dispatchOnce(

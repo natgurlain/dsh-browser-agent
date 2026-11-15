@@ -366,8 +366,10 @@ export interface PanelCopy {
     done: string
     /** `steps`: the run's true total; `more`: rows are left beyond what one run does. */
     doRemaining: (remaining: number, steps?: number, more?: boolean) => string
-    /** A long run stopped part-way with `rows` rows left. */
-    stoppedEarly: (rows: number) => string
+    /** A long run stopped part-way with `rows` rows left; `skipped` names a row it left part-done. */
+    stoppedEarly: (rows: number, skipped?: string) => string
+    /** Why an offer stays within one program although more rows exist. */
+    rowsIndistinct: string
     continueRemaining: (rows: number) => string
     proposedDriver: string
     parameters: string
@@ -912,7 +914,8 @@ const EN: PanelCopy = {
       : steps !== undefined && steps > remaining
       ? `Do the remaining ${String(remaining)} like this (${String(steps)} steps)`
       : `Do the remaining ${String(remaining)} like this`,
-    stoppedEarly: (rows) => `The run stopped with ${String(rows)} rows left. Continuing looks at the page as it is now and asks you again.`,
+    stoppedEarly: (rows, skipped) => `${rows > 0 ? `The run stopped with ${String(rows)} rows left.` : 'The run stopped.'}${skipped === undefined ? '' : ` “${skipped}” was left part-done and is skipped; do it by hand.`}${rows > 0 ? ' Continuing looks at the page as it is now and asks you again.' : ''}`,
+    rowsIndistinct: 'These rows can\'t be told apart, so only 25 steps at a time.',
     continueRemaining: (rows) => `Continue with the ${String(rows)} rows left`,
     proposedDriver: 'Proposed site driver',
     parameters: 'Parameters',
@@ -1459,7 +1462,8 @@ const ZH: PanelCopy = {
       : steps !== undefined && steps > remaining
       ? `按同样方式完成剩余 ${String(remaining)} 项（共 ${String(steps)} 步）`
       : `按同样方式完成剩余 ${String(remaining)} 项`,
-    stoppedEarly: (rows) => `运行已停止，还剩 ${String(rows)} 行。继续时会按页面当前的样子重新询问您。`,
+    stoppedEarly: (rows, skipped) => `${rows > 0 ? `运行已停止，还剩 ${String(rows)} 行。` : '运行已停止。'}${skipped === undefined ? '' : `“${skipped}”只完成了一部分，已跳过；请手动完成。`}${rows > 0 ? '继续时会按页面当前的样子重新询问您。' : ''}`,
+    rowsIndistinct: '这些行无法相互区分，因此每次最多执行 25 步。',
     continueRemaining: (rows) => `继续处理剩下的 ${String(rows)} 行`,
     proposedDriver: '建议的站点驱动',
     parameters: '参数',

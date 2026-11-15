@@ -2651,8 +2651,13 @@ function routeToolCall(call: ToolCall): void {
   const programTarget = tabAffinity.resolveTarget(call.sessionId)
   const programTabId = programTarget.kind === 'target' ? programTarget.tab.tabId : undefined
   const programCover = programGrants.claim(call, programTabId)
-  // Anything else that may change the page ends a "do the remaining N" series there: its rows are no longer what the card showed.
-  if (endsSeries(call)) programGrants.onForeignAction(call.sessionId, programTabId)
+  // Anything else that may change the page ends a "do the remaining N" series: its rows are no longer what the card showed.
+  // In its own session now; on whichever tab the call turns out to act on once that tab is resolved (below).
+  const seriesForeign = endsSeries(call, programCover)
+  if (seriesForeign) programGrants.onForeignCall(call.sessionId)
+  const endSeriesOnTab = (target: { id?: number }): void => {
+    if (seriesForeign && target.id !== undefined) programGrants.onForeignTabAction(target.id)
+  }
   // A claimed step reports how it ended; only a step that was done lets its series go on.
   let programStepDone = false
   // A fleet worker's cards show under its parent's session; its allowlist is enforced here too (fleet.ts).
@@ -2714,7 +2719,7 @@ function routeToolCall(call: ToolCall): void {
   }).then(() => fleets.ready).then(() => {
     approvalSession = fleets.approvalSession(call.sessionId)
     fleetRefusal = fleets.refusal(call)
-  }).then(() => fleetRefusal !== undefined
+  }).then((): ToolAnswer | Promise<ToolAnswer> => fleetRefusal !== undefined
     ? { ok: false, error: { code: 'action-failed', message: fleetRefusal } } satisfies ToolAnswer
     : call.name === DEVLOOP_CAPTURE_TOOL
     // Dev loop: a read of the user-linked localhost tab only, under this
@@ -2761,6 +2766,7 @@ function routeToolCall(call: ToolCall): void {
         signal: controller.signal,
         // Only "Do the remaining N" runs longer than one program, and only as the extension built it.
         allowSeries: (sessionId, steps, tabId, documentKey) => learning.claimSeries(sessionId, steps, tabId, documentKey),
+        cardNote: (sessionId, steps) => learning.cardNote(sessionId, steps),
         onContinued: () => { activeCall.decision = 'program-approved' },
       })
     : call.name === 'browser_open_tab'
@@ -2783,7 +2789,7 @@ function routeToolCall(call: ToolCall): void {
       ? target
       : (policyTabOrigin = originFromUrl(target.url ?? ''), withCommitGate(activeCall, target, call.sessionId, () => learning.dispatchSiteDriver(
           call,
-          noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url)),
+          (endSeriesOnTab(target), noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url))),
           policy,
           approve(target.windowId),
           controller.signal,
@@ -2796,12 +2802,12 @@ function routeToolCall(call: ToolCall): void {
           budget,
           approve(target.windowId),
           controller.signal,
-          noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url)),
+          (endSeriesOnTab(target), noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url))),
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
           {
             unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit, policy: learning.wrapPolicy(call, target, policy), overlay: agentOverlay,
-            // A series step acts only on an element that still looks as its card showed it.
-            ...(programCover?.target === undefined ? {} : { expectTarget: programCover.target }),
+            // A "do the remaining N" step acts only on an element that still looks as its card showed it, on the page the card was approved on.
+            ...(programCover?.target === undefined ? {} : { expect: { target: programCover.target, ...(programCover.page === undefined ? {} : { page: programCover.page }) } }),
           },
         ))))
   )
@@ -2962,6 +2968,8 @@ async function dispatchDevToolsTool(call: ToolCall, activeCall: ActiveToolCall, 
   const target = await resolveToolTab(call.sessionId)
   if ('ok' in target) return target
   noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url))
+  // Developer tools can change the page: a "do the remaining N" series on this tab ends.
+  if (target.id !== undefined) programGrants.onForeignTabAction(target.id)
   if (signal.aborted) return devToolsCancelled()
   const frames = await listTabFrames(target.id!, target.url)
   await policyRuntime.ready

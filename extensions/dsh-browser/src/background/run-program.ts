@@ -27,32 +27,43 @@
  * Series ("do the remaining N" over more rows than one program holds): the
  * first `browser_run` call carries `series: { rowSteps, later }`, every step
  * beyond its own batch, and every step carries `target`: what its element
- * looked like (tag, role, accessible name, the row's identity). The card
- * states the true total, shows one line per row in a person's words, and
- * binds every step and target; it is answered in the browser only. Each later
- * batch arrives as its own `browser_run` call with `continues: <series id>`;
- * it raises no card and is accepted only when
+ * looked like and which row it sits in (tag, role, accessible name, the row's
+ * identity, a digest of what the row says). The extension offers a series
+ * only when the rows can be told apart (learning.ts). The card states the
+ * true total, shows one line per row in a person's words, and binds every
+ * step and target; it is answered in the browser only. Each later batch
+ * arrives as its own `browser_run` call with `continues: <series id>`; it
+ * raises no card and is accepted only when
  *
  * - every step of the batch before it was reported done (`settle`): a failed,
  *   denied, cancelled or expired step ends the series and its batch;
  * - its steps and targets hash to exactly the next approved ones;
- * - it is the same session and tab, on the same document and path the card
- *   was approved on (any top-frame navigation of the tab ends the series; so
- *   does a path change without a new document);
- * - no other tool call that may change the page reached that tab or session
- *   in between (`endsSeries`), the user did not take over, and the kill
- *   switch was not used;
+ * - it is the same session and tab, on the same document and URL (query and
+ *   fragment included) the card was answered on;
+ * - no other call that may change the page reached that session, or was
+ *   about to act on that tab, in between (`endsSeries`: only a claimed step
+ *   of a series batch is not foreign), the user did not take over, and the
+ *   kill switch was not used;
  * - it is within the series' lifetime, which also caps every batch.
  *
- * Just before a series step acts, the content script compares its element
- * with the step's target; any difference fails the step (and so ends the
- * series) with nothing done to the page. Anything else revokes the series;
- * there is no fallback card. A series is accepted only when this extension
- * itself built it from the user's demonstration, on the tab and document the
- * user demonstrated on (`allowSeries`), holds only selector-targeted
- * click/type/select steps, and at most MAX_SERIES_STEPS of them. Each batch is
- * a program grant, so every step keeps the checks above, and the continuation
- * call waits at the pause gate like any call.
+ * Every step is checked twice more. When it is dispatched, the tab must
+ * still be on that document and URL (tools.ts `stepExpectationFailure`, on
+ * the frames listed for that step). Inside the action, the content script
+ * compares the very element the action resolved with the step's target
+ * before doing anything to it. Either difference fails the step, and so ends
+ * the series, with nothing done to the row. A step that was claimed and is
+ * still waiting loses its cover when its approval is withdrawn. Anything else
+ * revokes the series; there is no fallback card. A series is accepted only
+ * when this extension itself built it from the user's demonstration, on the
+ * tab and document the user demonstrated on (`allowSeries`), holds only
+ * selector-targeted click/type/select steps, and at most MAX_SERIES_STEPS of
+ * them. An ordinary program the extension built from a demonstration carries
+ * targets too and gets the same in-action element check.
+ *
+ * What none of this can do: the page owns its DOM. A page built to deceive
+ * can keep an element's kind, label and row text while changing what a click
+ * does. The checks guard against an honest page changing underneath a run
+ * and against the agent, not against a hostile page.
  *
  * @module
  */
@@ -101,12 +112,16 @@ const SERIES_NEUTRAL_TOOLS: ReadonlySet<string> = new Set([
 ])
 
 /**
- * Whether a tool call that is not a step of a program may have changed the
- * page (or is about to): such a call ends a series on its tab or in its
+ * Whether a tool call may have changed the page (or is about to) without
+ * being part of a series: such a call ends a series on its tab or in its
  * session, because the rows are no longer known to be what the card showed.
+ * Only a call whose claim succeeded on a series batch, a continuation of a
+ * series, and a call that only looks are not foreign; a program tag alone
+ * (an unknown id, a step of an ordinary program) counts for nothing.
+ * @param cover - what the call's claim returned.
  */
-export function endsSeries(call: Pick<ToolCall, 'name' | 'args' | 'program'>): boolean {
-  if (call.program !== undefined) return false
+export function endsSeries(call: Pick<ToolCall, 'name' | 'args'>, cover: ProgramCover | undefined): boolean {
+  if (cover?.inSeries === true) return false
   if (call.name === 'browser_run') return call.args.continues === undefined
   return !SERIES_NEUTRAL_TOOLS.has(call.name)
 }
@@ -200,12 +215,14 @@ function seriesStepDigest(step: ProgramStepInput): string {
   return sha256Hex(canonicalJson({ tool: step.tool, args: step.args, target: step.target ?? null }))
 }
 
-/** Origin and path of a page: what a series stays on (query and fragment may change). */
+/**
+ * Where a page is: its whole URL, query and fragment included (a hash-routed
+ * app or a paginated list is another page under the same path).
+ */
 export function pageLocation(url: string | undefined): string | undefined {
   if (url === undefined) return undefined
   try {
-    const parsed = new URL(url)
-    return `${parsed.origin}${parsed.pathname}`
+    return new URL(url).href
   } catch {
     return undefined
   }
@@ -251,20 +268,22 @@ export function programOrigins(steps: ProgramStepInput[], frames: TabFrame[]): s
 export function programApprovalPrompt(steps: ProgramStepInput[], frames: TabFrame[], series?: ProgramSeriesInput): ApprovalPrompt {
   const origins = programOrigins(steps, frames)
   const top = frames.find((frame) => frame.frameId === 0)
-  const where = origins.join(', ') || 'the controlled tab'
-  const still = 'Steps that site rules, a tainted session, or strict mode protect still ask on their own.'
+  const zh = getUiLocale() === 'zh'
+  const where = origins.join(', ') || (zh ? '受控标签页' : 'the controlled tab')
   if (series !== undefined) return seriesApprovalPrompt(steps, series, origins, top)
   return {
     kind: 'action',
     action: 'browser_run',
-    summary: `Run a ${String(steps.length)}-step browser program on ${where} without asking between ordinary steps. ${still}`,
+    summary: zh
+      ? `在 ${where} 上运行一个 ${String(steps.length)} 步的浏览器程序，普通步骤之间不再询问。受站点规则、受污染会话或严格模式保护的步骤仍会单独询问。`
+      : `Run a ${String(steps.length)}-step browser program on ${where} without asking between ordinary steps. Steps that site rules, a tainted session, or strict mode protect still ask on their own.`,
     origins,
     canTrust: false,
     details: steps.map((step, index) => ({
       kind: 'text' as const,
-      label: `Step ${String(index + 1)}: ${step.tool}`,
+      label: zh ? `第 ${String(index + 1)} 步：${step.tool}` : `Step ${String(index + 1)}: ${step.tool}`,
       masked: false,
-      value: JSON.stringify(step.expect === undefined ? step.args : { ...step.args, expect: step.expect }, null, 2),
+      value: JSON.stringify({ ...step.args, ...(step.expect === undefined ? {} : { expect: step.expect }), ...(step.target === undefined ? {} : { target: step.target }) }, null, 2),
     })),
     binding: approvalBinding({
       action: 'browser_run',
@@ -337,15 +356,17 @@ interface ProgramGrant {
   series?: string
   /** A series batch: steps whose outcome was reported as done. The next step is claimable only when this equals `next`. */
   settled: number
-  /** A series batch: what each step's element must look like just before it runs. */
+  /** What each step's element must look like when its action resolves it ("do the remaining N"; every series batch). */
   targets?: Array<StepTarget | undefined>
+  /** Withdrawn (not merely used up): a step claimed earlier and still waiting loses its cover. */
+  revoked?: true
 }
 
 /** The page a series was approved on. */
 export interface SeriesPage {
   /** The top document (frameDocumentKey). */
   documentKey: string
-  /** Its origin and path ({@link pageLocation}). */
+  /** Its whole URL, query and fragment included ({@link pageLocation}). */
   location: string
 }
 
@@ -366,8 +387,12 @@ interface SeriesGrant {
 /** What an approved program covers for one claimed step. */
 export interface ProgramCover {
   covers(prompt: ApprovalPrompt): boolean
-  /** A series step: what its element must still look like, checked in the page just before it runs. */
+  /** What the step's element must still look like, compared inside the action on the element it resolves. */
   target?: StepTarget
+  /** A series step: the page it must still be on, compared when the step is dispatched. */
+  page?: SeriesPage
+  /** The step belongs to a series batch (it is not a foreign call for that series). */
+  inSeries?: true
 }
 
 /** Whether an approval card is an ordinary action card the program card can stand in for. */
@@ -406,7 +431,8 @@ export class ProgramGrants {
       next: 0,
       settled: 0,
       expiresAt: this.now() + PROGRAM_GRANT_TTL_MS,
-      ...(series === undefined ? {} : { series: id, targets: steps.map((step) => step.target) }),
+      ...(series === undefined ? {} : { series: id }),
+      ...(steps.some((step) => step.target !== undefined) ? { targets: steps.map((step) => step.target) } : {}),
     })
     if (series === undefined || page === undefined) return
     this.series.set(id, {
@@ -465,11 +491,9 @@ export class ProgramGrants {
   /**
    * Claim the program step a call says it is. Undefined (and the grant
    * revoked) when it is not the next approved step of that session's program.
-   * A series step must also follow a step that was reported done, on the
-   * path the series was approved on.
-   * @param url - the tab's current URL, when known.
+   * A series step must also follow a step that was reported done.
    */
-  claim(call: Pick<ToolCall, 'name' | 'args' | 'sessionId' | 'program'>, tabId?: number, url?: string): ProgramCover | undefined {
+  claim(call: Pick<ToolCall, 'name' | 'args' | 'sessionId' | 'program'>, tabId?: number): ProgramCover | undefined {
     const ref = call.program
     if (ref === undefined) return undefined
     const grant = this.grants.get(ref.id)
@@ -483,10 +507,9 @@ export class ProgramGrants {
       && (grant.series === undefined || (
         series !== undefined && series.expiresAt > this.now() && series.running === ref.id
         && grant.settled === grant.next
-        && (url === undefined || pageLocation(url) === series.page.location)
       ))
     if (!valid) {
-      this.grants.delete(ref.id)
+      this.drop(ref.id)
       // A batch that broke its approval ends the whole series.
       if (grant.series !== undefined) this.revokeSeries(grant.series)
       return undefined
@@ -501,9 +524,11 @@ export class ProgramGrants {
     const indexAfterNavigation = grant.navigated && usesSnapshotIndex(call.args)
     if (NAVIGATION_STEP_TOOLS.has(call.name)) grant.navigated = true
     return {
-      // The approval's lifetime also ends a step that waited (a pause, a card) past it.
-      covers: (prompt) => this.now() < expiresAt && !indexAfterNavigation && ordinaryActionCard(prompt) && prompt.origins.length > 0 && prompt.origins.every((origin) => origins.has(origin)),
+      // A step that waited (the pause gate, a card) is covered only while its approval still stands:
+      // not after its lifetime, and not after it was withdrawn (take over, a navigation, another call, the kill switch).
+      covers: (prompt) => grant.revoked !== true && this.now() < expiresAt && !indexAfterNavigation && ordinaryActionCard(prompt) && prompt.origins.length > 0 && prompt.origins.every((origin) => origins.has(origin)),
       ...(target === undefined ? {} : { target }),
+      ...(series === undefined ? {} : { page: series.page, inSeries: true as const }),
     }
   }
 
@@ -531,7 +556,15 @@ export class ProgramGrants {
   /** End a series: its remaining batches and the batch in flight. */
   revokeSeries(seriesId: string): void {
     this.series.delete(seriesId)
-    for (const [id, grant] of this.grants) if (grant.series === seriesId) this.grants.delete(id)
+    for (const [id, grant] of [...this.grants]) if (grant.series === seriesId) this.drop(id)
+  }
+
+  /** Withdraw a grant: steps it already handed a cover lose it. */
+  private drop(id: string): void {
+    const grant = this.grants.get(id)
+    if (grant === undefined) return
+    grant.revoked = true
+    this.grants.delete(id)
   }
 
   /** End every series matching `match` (all of them when absent). */
@@ -541,19 +574,25 @@ export class ProgramGrants {
 
   /**
    * The top frame of a tab navigated. A new document ends the tab's series; a
-   * same-document update (history API, fragment) ends it when the path changed.
+   * same-document update (history API, fragment) ends it when the URL changed
+   * at all: a hash route or another page of a list is another page.
    */
   onTopFrameNavigation(tabId: number, url: string | undefined, sameDocument: boolean): void {
     this.revokeSeriesWhere((series) => series.tabId === tabId && (!sameDocument || pageLocation(url) !== series.page.location))
   }
 
   /**
-   * A tool call that may change the page, and is not a step of the series,
-   * arrived for its session or its tab ({@link endsSeries}): the page is no
+   * A tool call that may change the page, and is not a step of a series
+   * batch, arrived in a series' session ({@link endsSeries}): the page is no
    * longer known to be what the card showed.
    */
-  onForeignAction(sessionId: string | undefined, tabId: number | undefined): void {
-    this.revokeSeriesWhere((series) => series.sessionId === sessionId || (tabId !== undefined && series.tabId === tabId))
+  onForeignCall(sessionId: string | undefined): void {
+    this.revokeSeriesWhere((series) => series.sessionId === sessionId)
+  }
+
+  /** Such a call, from any session, is about to act on this tab (known once its tab is resolved). */
+  onForeignTabAction(tabId: number): void {
+    this.revokeSeriesWhere((series) => series.tabId === tabId)
   }
 
   /** The user took over the page: nothing continues blind afterwards. */
@@ -563,7 +602,7 @@ export class ProgramGrants {
 
   /** Drop every grant (the kill switch). */
   clear(): void {
-    this.grants.clear()
+    for (const id of [...this.grants.keys()]) this.drop(id)
     this.series.clear()
   }
 
@@ -581,7 +620,7 @@ export class ProgramGrants {
 
   private sweep(): void {
     const now = this.now()
-    for (const [id, grant] of this.grants) if (grant.expiresAt <= now) this.grants.delete(id)
+    for (const [id, grant] of [...this.grants]) if (grant.expiresAt <= now) this.drop(id)
     for (const [id, series] of [...this.series]) if (series.expiresAt <= now) this.revokeSeries(id)
   }
 }
@@ -625,10 +664,26 @@ export interface ProgramApprovalDeps {
   allowSeries?: (sessionId: string | undefined, steps: ProgramStepInput[], tabId: number, documentKey: string | undefined) => boolean
   /** Told when a batch continued an approved series instead of raising a card (audit). */
   onContinued?: () => void
+  /**
+   * Something the user must know before approving this very program, in the
+   * extension's own words (a row an earlier run left part-done and this one
+   * skips). Shown first on the card. Absent for programs the extension did not build.
+   */
+  cardNote?: (sessionId: string | undefined, steps: ProgramStepInput[]) => string | undefined
 }
 
 /** Why a continuation was refused, in the user's terms (the panel shows it). */
-export const SERIES_ENDED = 'the approval no longer applies: the page was reloaded or left, something else acted on it, you took over, or too much time passed. Nothing more was done.'
+export function seriesEnded(zh = getUiLocale() === 'zh'): string {
+  return zh
+    ? '此前的批准已不再适用：页面已重新加载或已离开、有其他操作作用于该页面、您已接管，或时间过长。未再执行任何操作。'
+    : 'the approval no longer applies: the page was reloaded or left, something else acted on it, you took over, or too much time passed. Nothing more was done.'
+}
+
+/** Put the extension's own note first on a card (not part of the binding: it describes, it does not grant). */
+function withCardNote(prompt: ApprovalPrompt, note: string | undefined): ApprovalPrompt {
+  if (note === undefined || note === '') return prompt
+  return { ...prompt, details: [{ kind: 'text', label: getUiLocale() === 'zh' ? '请注意' : 'Please note', value: note, masked: false }, ...(prompt.details ?? [])] }
+}
 
 /** The wire answer shape (structurally a ToolAnswer). */
 export type ProgramAnswer = SettledAnswer
@@ -638,8 +693,8 @@ export type ProgramAnswer = SettledAnswer
  * grant its steps will claim.
  */
 export async function approveProgram(call: ToolCall, deps: ProgramApprovalDeps): Promise<ProgramAnswer> {
-  const inSeries = call.args.continues !== undefined || call.args.series !== undefined
-  const steps = parseProgramSteps(call.args.steps, inSeries)
+  // Element descriptions are kept wherever a program carries them: they only add a check (in the action, on the element it resolves).
+  const steps = parseProgramSteps(call.args.steps, true)
   if (typeof steps === 'string') return { ok: false, error: { code: 'bad-args', message: steps } }
   if (call.args.continues !== undefined && call.args.series !== undefined) return { ok: false, error: { code: 'bad-args', message: 'browser_run cannot both start and continue a series.' } }
   let series: ProgramSeriesInput | undefined
@@ -662,7 +717,7 @@ export async function approveProgram(call: ToolCall, deps: ProgramApprovalDeps):
     const continued = typeof call.args.continues === 'string'
       && deps.grants.continueSeries(call.args.continues, call.id, call.sessionId, steps, tab.id, page)
     if (!continued) {
-      return { ok: false, error: { code: 'action-failed', message: SERIES_ENDED } }
+      return { ok: false, error: { code: 'action-failed', message: seriesEnded() } }
     }
     deps.onContinued?.()
     return { ok: true, result: { text: `Next ${String(steps.length)} steps of the approved program.`, programId: call.id } }
@@ -671,7 +726,8 @@ export async function approveProgram(call: ToolCall, deps: ProgramApprovalDeps):
   if (series !== undefined && (page === undefined || deps.allowSeries?.(call.sessionId, [...steps, ...series.later], tab.id, page.documentKey) !== true)) {
     return { ok: false, error: { code: 'bad-args', message: 'A browser_run series runs only for the user\'s own "Do the remaining" request, on the tab it was shown on.' } }
   }
-  const prompt = programApprovalPrompt(steps, frames, series)
+  const note = deps.cardNote?.(call.sessionId, series === undefined ? steps : [...steps, ...series.later])
+  const prompt = withCardNote(programApprovalPrompt(steps, frames, series), note)
   const authorization = await deps.authorize(prompt, tab.windowId ?? 0)
   if (deps.signal.aborted) return cancelledAnswer()
   if (authorization !== 'approved') return notApprovedAnswer('The user denied the browser program.', 'The browser program', authorization)
@@ -680,9 +736,17 @@ export async function approveProgram(call: ToolCall, deps: ProgramApprovalDeps):
   if ('ok' in current || current.id !== tab.id) {
     return { ok: false, error: { code: 'action-failed', message: 'The controlled tab changed while the program card was open.' } }
   }
-  const refreshed = programApprovalPrompt(steps, await deps.listFrames(tab.id, current.url), series)
+  const framesNow = await deps.listFrames(tab.id, current.url)
+  const refreshed = programApprovalPrompt(steps, framesNow, series)
   if (refreshed.binding !== prompt.binding) {
     return { ok: false, error: { code: 'action-failed', message: 'The page changed while the program card was open. Call browser_snapshot again before retrying.' } }
+  }
+  if (series !== undefined) {
+    // A series is bound to the page as it is when the card is answered: a route change behind the open card ends it here.
+    const topNow = framesNow.find((frame) => frame.frameId === 0)
+    if (page === undefined || topNow === undefined || frameDocumentKey(topNow) !== page.documentKey || pageLocation(topNow.url) !== page.location) {
+      return { ok: false, error: { code: 'action-failed', message: getUiLocale() === 'zh' ? '在您查看批准卡片期间页面发生了变化，未执行任何操作。' : 'The page changed while the approval card was open, so nothing was run.' } }
+    }
   }
   deps.grants.approve(call.id, call.sessionId, steps, prompt.origins, tab.id, series, page)
   return { ok: true, result: { text: `Program of ${String(steps.length + (series?.later.length ?? 0))} steps approved.`, programId: call.id } }

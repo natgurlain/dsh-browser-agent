@@ -24,6 +24,7 @@ import { accessibleName, clip } from './extract.ts'
 import { roleOfElement, uniqueSelectorFor } from './find.ts'
 import type { ElementIds } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
+import { sha256Hex } from '../security/payload-binding.ts'
 import { resolveActionTarget } from './actions.ts'
 import { MAX_FINISH_STEPS, parseStepTarget, type StepTarget } from '../shared/repetition.ts'
 
@@ -216,18 +217,74 @@ function shown(el: Element): boolean {
   return true
 }
 
+/** Controls: their text is a label (checked as the step's name), not what the row says. */
+const CONTROLS = 'button, a[href], input, select, textarea, option, [role="button"], [role="link"], [contenteditable=""], [contenteditable="true"]'
+const ROW_IDENTITY_MAX = 120
+
 /**
- * What an element looks like, for "do the remaining N": recorded when the
- * offer is built, shown on the card, and compared again just before the step.
+ * The repeating container an element sits in: a table row, an ARIA row, a
+ * list item, or else the nearest ancestor that has a sibling of the same tag
+ * and classes (a row of a grid built from plain elements).
+ */
+export function rowContainerOf(el: Element): Element | undefined {
+  const semantic = el.closest('tr, [role="row"], li')
+  if (semantic !== null) return semantic
+  const shape = (node: Element): string => `${node.tagName} ${[...node.classList].sort().join(' ')}`
+  for (let node = el.parentElement; node !== null && node !== document.body && node !== document.documentElement; node = node.parentElement) {
+    const parent: Element | null = node.parentElement
+    if (parent === null) return undefined
+    const own = shape(node)
+    if ([...parent.children].some((sibling) => sibling !== node && shape(sibling) === own)) return node
+  }
+  return undefined
+}
+
+/** What an element says outside its controls, whitespace collapsed. */
+function plainText(root: Element): string {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  const parts: string[] = []
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+    const holder = node.parentElement
+    const control = holder?.closest(CONTROLS)
+    if (control !== null && control !== undefined && root.contains(control)) continue
+    parts.push(node.nodeValue ?? '')
+  }
+  return parts.join(' ').replace(/\s+/gu, ' ').trim()
+}
+
+/**
+ * Which row an element sits in: a short identity for the approval card and a
+ * digest of everything the row says. The identity is built from the cells
+ * other than the element's own: the first with text (an id or a number
+ * counts) and the first with words. Sensitive cells are masked, as elsewhere.
+ */
+export function rowIdentityOf(el: Element): { row: string; rowKey: string } {
+  const container = rowContainerOf(el)
+  if (container === undefined) return { row: '', rowKey: '' }
+  const cells = [...container.querySelectorAll(':scope > td, :scope > th, :scope > [role="cell"], :scope > [role="gridcell"]')]
+  const source = (cells.length > 0 ? cells : [...container.children]).slice(0, MAX_CELLS)
+  const text = (cell: Element): string => isSensitiveField(cell) || cell.querySelector('input[type="password"]') !== null ? '' : clip(plainText(cell), CELL_MAX)
+  const texts = source.map(text)
+  const others = source.map((cell, index) => cell.contains(el) ? '' : texts[index]!).filter((cell) => cell !== '')
+  const first = others[0]
+  const worded = others.find((cell) => /\p{L}/u.test(cell))
+  const named = first === undefined ? [] : worded === undefined || worded === first ? [first] : [first, worded]
+  // No other cell says anything: what the row itself says around its controls (a list item "Ada [Archive]").
+  const row = named.length > 0 ? named.join(' · ') : plainText(container)
+  return { row: clip(row, ROW_IDENTITY_MAX), rowKey: sha256Hex(texts.join('␟')).slice(0, 32) }
+}
+
+/**
+ * What an element looks like and which row it sits in, for "do the remaining
+ * N": recorded when the offer is built, shown on the card, and compared again
+ * inside the action.
  */
 export function stepTargetOf(el: Element): StepTarget {
-  const cells = (rowCells(el) ?? []).map((cell) => cell.trim()).filter((cell) => cell !== '')
   return {
     tag: el.tagName.toLowerCase(),
     role: roleOfElement(el),
     name: clip(accessibleName(el), LABEL_MAX),
-    // The row's identity: its first cell with words (a leading number or checkbox column says little), else its first cell with text.
-    row: cells.find((cell) => /\p{L}/u.test(cell)) ?? cells[0] ?? '',
+    ...rowIdentityOf(el),
   }
 }
 
@@ -265,23 +322,45 @@ export function probeRows(selectors: readonly (readonly string[])[]): string[][]
 }
 
 /**
- * Whether the element a step would act on still is what the approval card
- * showed. Resolves the target exactly as the action does.
- * Only what the card showed is compared (tag, role, accessible name, the
- * row's identity): styling, a spinner, or changes elsewhere on the page do
- * not matter.
- * @returns the fields that differ (empty: it matches) and what the element is now; `missing` when nothing resolves or it is hidden.
+ * Whether an element still is what the approval card showed. Only that is
+ * compared (tag, role, accessible name, the row's identity, and at a row's
+ * first step everything the row says outside its controls): styling, a
+ * spinner, a control's own label elsewhere in the row, or changes elsewhere
+ * on the page do not matter.
+ * @returns the fields that differ (empty: it matches) and what the element is now; `missing` when it is hidden.
  */
-export function stepTargetDiffers(args: Record<string, unknown>, ids: ElementIds, expected: StepTarget): { differs: string[]; now?: StepTarget } {
-  let el: Element
-  try {
-    el = resolveActionTarget(args, ids)
-  } catch {
-    return { differs: ['missing'] }
-  }
+export function stepTargetDiffers(el: Element, expected: StepTarget): { differs: string[]; now?: StepTarget } {
   if (!shown(el)) return { differs: ['missing'] }
   const now = stepTargetOf(el)
-  return { differs: (['tag', 'role', 'name', 'row'] as const).filter((key) => now[key] !== expected[key]), now }
+  const fields = expected.rowKey === '' ? (['tag', 'role', 'name', 'row'] as const) : (['tag', 'role', 'name', 'row', 'rowKey'] as const)
+  return { differs: fields.filter((key) => now[key] !== expected[key]), now }
+}
+
+/**
+ * The in-action check of a "do the remaining N" step: called with the very
+ * element the action resolved, before anything is done to it.
+ * @param expected - the step's target as the background sent it (validated here).
+ * @param zh - whether to phrase the refusal in Chinese.
+ * @throws Error saying, in the user's words, what no longer matches.
+ */
+export function assertStepTarget(el: Element, expected: unknown, zh: boolean): void {
+  const target = parseStepTarget(expected)
+  const checked = target === undefined ? { differs: ['missing'] } : stepTargetDiffers(el, target)
+  if (checked.differs.length === 0) return
+  const quote = (text: string): string => `“${text}”`
+  let what: string
+  if (target === undefined || checked.now === undefined) {
+    what = zh ? '它的元素已不存在或已隐藏' : 'its element is gone or hidden'
+  } else {
+    // In the words the card used: the label first, then which row it is, then the kind of element.
+    const field = (['name', 'row', 'role', 'tag'] as const).find((key) => checked.differs.includes(key))
+    what = field === undefined
+      ? (zh ? '它所在的行与您批准时相比有变化' : 'something in its row changed since you approved it')
+      : zh
+        ? `它与您批准的行不再一致（原为 ${quote(target[field])}，现为 ${quote(checked.now[field])}）`
+        : `it no longer looks like the rows you approved (was ${quote(target[field])}, now ${quote(checked.now[field])})`
+  }
+  throw new Error(zh ? `${what}。未对它执行任何操作。` : `${what}. Nothing was done to it.`)
 }
 
 // ---- Site driver execution ----
@@ -348,11 +427,6 @@ export function handleLearningMessage(message: { type?: string } & Record<string
     case 'DSH_WATCH_PROBE': {
       const selectors = Array.isArray(message.selectors) ? message.selectors.filter((set): set is string[] => Array.isArray(set) && set.every((s) => typeof s === 'string')) : []
       sendResponse({ ok: true, result: probeRowTargets(selectors.slice(0, MAX_FINISH_STEPS + 1)) })
-      return false
-    }
-    case 'DSH_WATCH_CHECK': {
-      const expected = parseStepTarget(message.target)
-      sendResponse({ ok: true, result: expected === undefined ? { differs: ['missing'] } : stepTargetDiffers((message.args ?? {}) as Record<string, unknown>, ids, expected) })
       return false
     }
     case 'DSH_SITE_DRIVER_FETCH':

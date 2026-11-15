@@ -101,16 +101,19 @@ export interface SeriesTarget {
   tag: string
   role: string
   name: string
+  /** The row's identity in a person's words. */
   row: string
+  /** A digest of what the row says outside its controls ('' when not compared). */
+  rowKey: string
 }
 
 const TARGET_FIELD_MAX = 200
 
 function parseSeriesTarget(value: unknown): SeriesTarget | undefined {
-  if (!isRecord(value) || Object.keys(value).length !== 4) return undefined
-  const { tag, role, name, row } = value
+  if (!isRecord(value) || Object.keys(value).length !== 5) return undefined
+  const { tag, role, name, row, rowKey } = value
   const fits = (field: unknown): field is string => typeof field === 'string' && field.length <= TARGET_FIELD_MAX
-  return fits(tag) && tag !== '' && fits(role) && fits(name) && fits(row) ? { tag, role, name, row } : undefined
+  return fits(tag) && tag !== '' && fits(role) && fits(name) && fits(row) && fits(rowKey) ? { tag, role, name, row, rowKey } : undefined
 }
 
 /** Keys that name an object's prototype machinery: never a tool argument. */
@@ -174,10 +177,13 @@ function optionalString(guard: Record<string, unknown>, key: string, where: stri
 /**
  * Validate a model-supplied program.
  * @param raw - the `steps` argument.
+ * @param targets - keep each step's `target` (a program the extension built
+ *   from the user's demonstration, never a model's): the extension compares it
+ *   with the element the step resolves.
  * @returns the normalized steps.
  * @throws ProgramError naming the first problem.
  */
-export function parseProgram(raw: unknown): ProgramStep[] {
+export function parseProgram(raw: unknown, targets = false): ProgramStep[] {
   if (!Array.isArray(raw) || raw.length === 0) throw new ProgramError('steps must be a non-empty array')
   if (raw.length > MAX_PROGRAM_STEPS) throw new ProgramError(`a program holds at most ${String(MAX_PROGRAM_STEPS)} steps`)
   return raw.map((entry, index) => {
@@ -220,6 +226,11 @@ export function parseProgram(raw: unknown): ProgramStep[] {
         throw new ProgramError(`${at} names no condition`)
       }
       step.expect = guard
+    }
+    if (targets && entry.target !== undefined) {
+      const target = parseSeriesTarget(entry.target)
+      if (target === undefined) throw new ProgramError(`${where}.target must describe an element (tag, role, name, row, rowKey)`)
+      step.target = target
     }
     return step
   })
@@ -361,7 +372,7 @@ export function parseProgramSeries(raw: unknown, rowSteps: unknown): ProgramStep
     if (entry.expect !== undefined) throw new ProgramError(`${where} must not carry an expect`)
     if (hasUnsafeKey(entry.args)) throw new ProgramError(`${where}.args must not use the names __proto__, constructor or prototype`)
     const target = parseSeriesTarget(entry.target)
-    if (target === undefined) throw new ProgramError(`${where} must describe its element (target: tag, role, name, row)`)
+    if (target === undefined) throw new ProgramError(`${where} must describe its element (target: tag, role, name, row, rowKey)`)
     return { tool: entry.tool as ProgramStep['tool'], args: { ...entry.args }, target }
   })
 }
@@ -482,7 +493,7 @@ export function renderSeriesOutcome(outcome: ProgramOutcome): string {
     const row = Math.floor((failed.step - 1) / rowSteps) + 1
     lines.push(`${after}. Row ${String(row)}: ${failed.text}`)
     const partial = ran - rows.done * rowSteps
-    if (partial > 0) lines.push(`Row ${String(row)} was left part-done (${String(partial)} of ${String(rowSteps)} steps ran).`)
+    if (partial > 0) lines.push(`Row ${String(row)} was left part-done (${String(partial)} of ${String(rowSteps)} steps ran); continuing skips it, so finish it by hand.`)
   } else {
     lines.push(`${after}: ${outcome.message ?? (outcome.stop === 'cancelled' ? 'the run was cancelled' : 'the run could not continue')}.`)
   }

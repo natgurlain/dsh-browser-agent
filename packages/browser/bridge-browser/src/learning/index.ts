@@ -151,7 +151,8 @@ export function browserRunRunner(bridge: Pick<BridgeServer, 'requestTool'>, tool
         ...(outcome.rows === undefined ? {} : { rows: outcome.rows }),
       } as ReplayReport
     }
-    const parsed = parseBrowserRunProgram(steps.map((step) => ({ tool: step.tool, args: step.args })))
+    // A demonstrated program says what each step's element looks like; the extension checks it inside the action.
+    const parsed = parseBrowserRunProgram(steps.map((step) => ({ tool: step.tool, args: step.args, ...((step as { target?: unknown }).target === undefined ? {} : { target: (step as { target?: unknown }).target }) })), true)
     const outcome = await runBrowserRun(bridge, parsed, exec, { toolTimeoutMs })
     const status: ReplayReport['status'] = outcome.stop === 'completed' ? 'completed' : outcome.stop === 'cancelled' ? 'cancelled' : 'failed'
     return {
@@ -182,7 +183,7 @@ export function parseProgram(value: unknown, rowSteps?: unknown): ProgramStep[] 
       throw new Error(`program step ${String(index + 1)} is not a supported browser action`)
     }
     if (step.args.index !== undefined) throw new Error(`program step ${String(index + 1)} must use a selector, not a snapshot index`)
-    return { tool: step.tool, args: { ...step.args } }
+    return { tool: step.tool, args: { ...step.args }, ...(step.target === undefined ? {} : { target: step.target }) }
   })
 }
 

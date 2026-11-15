@@ -7,7 +7,7 @@
  * - `DSH_INPUT_SETUP`: focus/selection/geometry for the debugger-driven
  *   pointer and keyboard (input-support.ts), never model-facing;
  * - `DSH_WATCH_ARM`: standing page watchers (watch.ts);
- * - `DSH_LEARN_*`, `DSH_WATCH` / `DSH_WATCH_PROBE` / `DSH_WATCH_CHECK`, `DSH_SITE_DRIVER_FETCH`:
+ * - `DSH_LEARN_*`, `DSH_WATCH` / `DSH_WATCH_PROBE`, `DSH_SITE_DRIVER_FETCH`:
  *   the default-off learning features (learning.ts);
  * - `DSH_SELECTION_WATCH` / `DSH_SELECTION_RESET`, `DSH_TARGET_INFO`,
  *   `DSH_BUDGET`, `DSH_ABORT`: selection reports, the approval-time
@@ -28,7 +28,7 @@ import { abortRunningActions, runAction, ActionError, resolveActionTarget, typeT
 import { AgentOverlay, type OverlayCopy, type PointKind } from './overlay.ts'
 import { ElementIds } from './ids.ts'
 import { handleInputSetup } from './input-support.ts'
-import { handleLearningMessage, setWatching } from './learning.ts'
+import { assertStepTarget, handleLearningMessage, setWatching } from './learning.ts'
 import { SelectionWatcher } from './selection.ts'
 import { armPageWatch } from './watch.ts'
 import type { InputSetupRequest } from '../shared/input-setup.ts'
@@ -38,6 +38,8 @@ import type { SnapshotBudget } from './snapshot.ts'
 let budget: SnapshotBudget = { maxItems: 60, maxForms: 30, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS }
 
 const ids = new ElementIds()
+/** Actions that compare the element they resolved with an approved row before acting (actions.ts `checkTarget`). */
+const CHECKED_ACTIONS: ReadonlySet<string> = new Set(['browser_click', 'browser_type', 'browser_select'])
 
 const selectionWatcher = new SelectionWatcher((selection) => {
   void chrome.runtime.sendMessage({ type: 'DSH_SELECTION', selection }).catch(() => {})
@@ -142,15 +144,33 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
     budget?: Partial<SnapshotBudget>
     includePageDelta?: boolean
     shareContent?: boolean
+    /** A "do the remaining N" step: what its element must still look like, and the language of a refusal. */
+    expect?: { target?: unknown; zh?: boolean }
   }
   const action = actionMsg.action ?? ''
   const args = actionMsg.args ?? {}
   const actionBudget = actionMsg.budget === undefined ? budget : { ...budget, ...actionMsg.budget }
+  const expected = actionMsg.expect
+  // Only the actions that make this check on the element they resolved may carry it: anything else would run unchecked.
+  if (expected !== undefined && !CHECKED_ACTIONS.has(action)) {
+    sendResponse({ ok: false, error: { code: 'action-failed', message: `${action} cannot be checked against an approved row.` } })
+    return
+  }
   void runAction(action, args, {
     ids,
     budget: actionBudget,
     includePageDelta: actionMsg.includePageDelta === true,
     shareContent: actionMsg.shareContent === true,
+    ...(expected === undefined ? {} : {
+      // Runs inside the action, on the very element it resolved, before anything is done to it.
+      checkTarget: (el: Element): void => {
+        try {
+          assertStepTarget(el, expected.target, expected.zh === true)
+        } catch (error: unknown) {
+          throw new ActionError('action-failed', error instanceof Error ? error.message : String(error))
+        }
+      },
+    }),
   }).then(
     (result) => { sendResponse({ ok: true, result }) },
     (error: unknown) => {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { describeElement, handleLearningMessage, probeRows, rowCells, stepTargetOf, sanitizedDom, sensitiveFieldCount, setWatching, pageTokens, siteDriverFetch } from '../src/content/learning.ts'
+import { describeElement, handleLearningMessage, probeRows, rowCells, sanitizedDom, sensitiveFieldCount, setWatching, pageTokens, siteDriverFetch } from '../src/content/learning.ts'
 import { ElementIds } from '../src/content/ids.ts'
 import { buildDriverRequest, validateSiteDriver } from '@natgurlain/dsh-bridge-browser/src/learning/site-drivers.ts'
 
@@ -121,8 +121,8 @@ describe('handleLearningMessage', () => {
     add.mockRestore()
     remove.mockRestore()
     const probe = handle({ type: 'DSH_WATCH_PROBE', selectors: [['#people > tbody > tr:nth-child(2) > td:nth-child(4) > button'], 'junk', [1]] })
-    // Each row comes with what its step's element looks like; the row's identity is its first cell with words.
-    expect(probe.responses[0]).toEqual({ ok: true, result: { rows: [['2', 'Grace', '', 'Invite']], targets: [[{ tag: 'button', role: 'button', name: 'Invite', row: 'Grace' }]] } })
+    // Each row comes with what its step's element looks like and which row it sits in (learning-row-identity.spec.ts).
+    expect(probe.responses[0]).toEqual({ ok: true, result: { rows: [['2', 'Grace', '', 'Invite']], targets: [[{ tag: 'button', role: 'button', name: 'Invite', row: '2 · Grace', rowKey: expect.stringMatching(/^[0-9a-f]{32}$/u) }]] } })
   })
 
   it('does not count a hidden row: the probe stops at the first element the user cannot see', () => {
@@ -136,41 +136,6 @@ describe('handleLearningMessage', () => {
     ;(document.querySelector(button(3)) as HTMLElement).style.display = ''
     ;(document.querySelector('#people') as HTMLElement).style.visibility = 'hidden'
     expect(probeRows([[button(1)]])).toHaveLength(0)
-  })
-
-  it('checks a series step against what its card showed: a relabelled, replaced, moved or hidden row differs; styling and other rows do not', () => {
-    const selector = '#people > tbody > tr:nth-child(3) > td:nth-child(4) > button'
-    const expected = stepTargetOf(document.querySelector(selector)!)
-    expect(expected).toEqual({ tag: 'button', role: 'button', name: 'Invite', row: 'Linus' })
-    const check = () => (handle({ type: 'DSH_WATCH_CHECK', args: { selector }, target: expected }).responses[0] as { ok: boolean; result: { differs: string[]; now?: unknown } }).result
-    expect(check()).toEqual({ differs: [], now: expected })
-    // Benign changes: styling, a spinner next to the button, another row relabelled, something added elsewhere.
-    const element = document.querySelector(selector) as HTMLElement
-    element.className = 'busy primary'
-    element.style.color = 'red'
-    element.closest('td')!.insertAdjacentHTML('beforeend', '<span class="spinner" aria-hidden="true"></span>')
-    document.querySelector('#people tr:nth-child(1) button')!.textContent = 'Invited'
-    document.body.insertAdjacentHTML('afterbegin', '<div class="toast">Saved</div>')
-    expect(check().differs).toEqual([])
-    // The button now does something else.
-    element.textContent = 'Delete'
-    expect(check()).toEqual({ differs: ['name'], now: { ...expected, name: 'Delete' } })
-    element.textContent = 'Invite'
-    // The selector now lands on another person's row (rows were reordered or one was removed).
-    document.querySelector('#people tr:nth-child(3) td:nth-child(2)')!.textContent = 'Margaret'
-    expect(check().differs).toEqual(['row'])
-    document.querySelector('#people tr:nth-child(3) td:nth-child(2)')!.textContent = 'Linus'
-    // Another kind of element under the same selector.
-    element.setAttribute('role', 'link')
-    expect(check().differs).toEqual(['role'])
-    element.removeAttribute('role')
-    // Hidden or gone.
-    element.setAttribute('hidden', '')
-    expect(check()).toEqual({ differs: ['missing'] })
-    element.remove()
-    expect(check()).toEqual({ differs: ['missing'] })
-    // A malformed expectation never passes.
-    expect((handle({ type: 'DSH_WATCH_CHECK', args: { selector: '#save' }, target: { tag: 'button' } }).responses[0] as { result: { differs: string[] } }).result.differs).toEqual(['missing'])
   })
 
   it('runs a site-driver fetch asynchronously and refuses another origin', async () => {

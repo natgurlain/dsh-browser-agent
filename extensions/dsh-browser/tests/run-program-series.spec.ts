@@ -23,14 +23,16 @@ import {
   programApprovalPrompt,
   ProgramGrants,
   SERIES_GRANT_TTL_MS,
+  pageLocation,
   SERIES_STEP_TOOLS,
   stepDigest,
   type ProgramStepInput,
 } from '../src/background/run-program.ts'
 import { approvalNotificationClass, hostApprovalReason } from '../src/background/approval-notifications.ts'
-import { verifyStepTarget } from '../src/background/tools.ts'
+import { stepExpectationFailure } from '../src/background/tools.ts'
 import { canonicalJson } from '../src/security/payload-binding.ts'
 import { MAX_FINISH_STEPS, RUN_BATCH_STEPS, type StepTarget } from '../src/shared/repetition.ts'
+import { setUiLocalePreference } from '../src/i18n.ts'
 import type { ApprovalPrompt } from '../src/security/approval.ts'
 import type { TabFrame } from '../src/background/frames.ts'
 
@@ -42,9 +44,9 @@ const rowSteps = (rows: number, from = 3): ProgramStepInput[] => Array.from({ le
   const row = at + from
   const person = `Person ${String(row)}`
   return [
-    { tool: 'browser_type', args: { selector: `#people > tr:nth-child(${String(row)}) input`, text: person, replace: true }, target: { tag: 'input', role: 'textbox', name: `Email ${String(row)}`, row: person } },
-    { tool: 'browser_click', args: { selector: `#people > tr:nth-child(${String(row)}) .invite` }, target: { tag: 'button', role: 'button', name: 'Invite', row: person } },
-    { tool: 'browser_click', args: { selector: `#people > tr:nth-child(${String(row)}) .confirm` }, target: { tag: 'button', role: 'button', name: 'Confirm', row: person } },
+    { tool: 'browser_type', args: { selector: `#people > tr:nth-child(${String(row)}) input`, text: person, replace: true }, target: { tag: 'input', role: 'textbox', name: `Email ${String(row)}`, row: person, rowKey: `key-${String(row)}` } },
+    { tool: 'browser_click', args: { selector: `#people > tr:nth-child(${String(row)}) .invite` }, target: { tag: 'button', role: 'button', name: 'Invite', row: person, rowKey: '' } },
+    { tool: 'browser_click', args: { selector: `#people > tr:nth-child(${String(row)}) .confirm` }, target: { tag: 'button', role: 'button', name: 'Confirm', row: person, rowKey: '' } },
   ]
 }).flat()
 
@@ -127,7 +129,7 @@ describe('series card', () => {
     expect(changed((later) => [...later.slice(0, -1), { ...later.at(-1)!, target: { ...later.at(-1)!.target!, name: 'Delete' } }])).not.toBe(prompt.binding)
     expect(changed((later) => later.slice(0, -3))).not.toBe(prompt.binding)
     // A row with no words for its element falls back to its role.
-    expect(describeSeriesRow([{ tool: 'browser_click', args: { selector: '#x' }, target: { tag: 'button', role: 'button', name: '', row: '' } }])).toBe('Click “button”')
+    expect(describeSeriesRow([{ tool: 'browser_click', args: { selector: '#x' }, target: { tag: 'button', role: 'button', name: '', row: '', rowKey: '' } }])).toBe('Click “button”')
     expect(describeSeriesRow(all.slice(0, 3), true)).toBe('输入 “Email 3” ← “Person 3” → 点击 “Invite” → 点击 “Confirm” — Person 3')
   })
 
@@ -156,7 +158,7 @@ describe('series card', () => {
     expect(parseProgramSeries('all of them', first)).toMatch(/object/)
     const one = rowSteps(1).slice(1, 2)
     const bad = (step: unknown) => parseProgramSeries({ rowSteps: 1, later: [step] }, one)
-    const target: StepTarget = { tag: 'button', role: 'button', name: 'Invite', row: 'Ada' }
+    const target: StepTarget = { tag: 'button', role: 'button', name: 'Invite', row: 'Ada', rowKey: 'k' }
     expect(bad({ tool: 'browser_click', args: { selector: '#a' }, target })).toMatchObject({ rowSteps: 1 })
     expect(bad({ tool: 'browser_navigate', args: { url: 'https://evil.example' }, target })).toMatch(/only selector-targeted/)
     expect(bad({ tool: 'browser_get_text', args: { selector: '#a' }, target })).toMatch(/only selector-targeted/)
@@ -184,7 +186,7 @@ describe('series card', () => {
       expect(parseProgramSteps([{ tool: 'browser_click', args }])).toMatch(/argument name a program cannot carry/)
     }
     expect(parseProgramSteps([{ tool: 'browser_click', args: { selector: '#a' }, expect: JSON.parse('{"__proto__":{"text":"x"}}') }])).toMatch(/cannot carry/)
-    const target: StepTarget = { tag: 'button', role: 'button', name: 'Invite', row: 'Ada' }
+    const target: StepTarget = { tag: 'button', role: 'button', name: 'Invite', row: 'Ada', rowKey: 'k' }
     expect(parseProgramSeries({ rowSteps: 1, later: [{ tool: 'browser_click', args: extra, target }] }, [{ tool: 'browser_click', args: plain, target }])).toMatch(/invalid step/)
     expect(parseProgramSteps([{ tool: 'browser_click', args: plain }])).toEqual([{ tool: 'browser_click', args: plain }])
   })
@@ -209,10 +211,23 @@ describe('series approval', () => {
     expect(await approveProgram({ id: 'x', name: 'browser_run', sessionId: 's1', args: { steps: all } }, d)).toMatchObject({ ok: false, error: { message: expect.stringMatching(/at most 25 steps/) } })
     expect(await approveProgram({ id: 'x', name: 'browser_run', sessionId: 's1', args: { steps: all.slice(0, 24), series: { rowSteps: 3, later: all.slice(24) }, continues: 'run-0' } }, d)).toMatchObject({ ok: false, error: { code: 'bad-args' } })
     expect(d.authorize).not.toHaveBeenCalled()
-    // An ordinary program is exactly as before: no description kept, no series bookkeeping.
+    // An ordinary program keeps its card and has no series bookkeeping; a demonstrated one still says what each
+    // element must look like, so its steps get the same in-action check (and the card shows and binds it).
     expect(await approveProgram({ id: 'p', name: 'browser_run', sessionId: 's1', args: { steps: all.slice(0, 3) } }, d)).toEqual({ ok: true, result: { text: 'Program of 3 steps approved.', programId: 'p' } })
     expect(d.grants.seriesSize).toBe(0)
-    expect(claim(d.grants, 'p', all[0]!, 0)!.target).toBeUndefined()
+    const ordinary = claim(d.grants, 'p', all[0]!, 0)!
+    expect(ordinary.target).toEqual(all[0]!.target)
+    expect(ordinary.page).toBeUndefined()
+    expect(ordinary.inSeries).toBeUndefined()
+    const shown = d.authorize.mock.calls.at(-1)![0]
+    expect(shown.details).toHaveLength(3)
+    expect((shown.details![0] as { value: string }).value).toContain('"rowKey": "key-3"')
+    const bare = all.slice(0, 3).map((step) => ({ tool: step.tool, args: step.args }))
+    expect(programApprovalPrompt(bare, frames).binding).not.toBe(programApprovalPrompt(all.slice(0, 3), frames).binding)
+    expect((programApprovalPrompt(bare, frames).details![0] as { value: string }).value).not.toContain('target')
+    const plain = deps()
+    await approveProgram({ id: 'q', name: 'browser_run', sessionId: 's1', args: { steps: bare } }, plain)
+    expect(claim(plain.grants, 'q', all[0]!, 0)!.target).toBeUndefined()
   })
 
   it('runs 38 rows (114 steps) on one card: each later batch continues without a card, and nothing runs beyond the approved steps', async () => {
@@ -328,13 +343,10 @@ describe('series approval', () => {
     midBatch.grants.onTopFrameNavigation(7, `${ORIGIN}/people`, false)
     expect(midBatch.grants.size).toBe(0)
     expect(claim(midBatch.grants, 'run-0', all[1]!, 1)).toBeUndefined()
-    // A same-document update ends it only when the path changes; another tab's navigation never does.
+    // Another tab's navigation never does (same-document changes: see F3).
     const spa = await readyForSecondBatch()
-    spa.d.grants.onTopFrameNavigation(7, `${ORIGIN}/people?sort=name#row-9`, true)
     spa.d.grants.onTopFrameNavigation(8, `${ORIGIN}/elsewhere`, false)
     expect(spa.d.grants.seriesSize).toBe(1)
-    spa.d.grants.onTopFrameNavigation(7, `${ORIGIN}/people/9`, true)
-    expect(spa.d.grants.seriesSize).toBe(0)
   })
 
   it('P2: a batch continues only after every step was reported done; a step that failed, was denied, or never reported ends the series and its batch', async () => {
@@ -421,25 +433,60 @@ describe('series approval', () => {
     expect(held.covers(card())).toBe(false)
   })
 
-  it('ends when another tool call that may change the page reaches its tab or session; reads do not end it', async () => {
-    expect(endsSeries({ name: 'browser_click', args: { selector: '#x' } })).toBe(true)
-    expect(endsSeries({ name: 'browser_navigate', args: { url: `${ORIGIN}/x` } })).toBe(true)
-    expect(endsSeries({ name: 'browser_console_eval', args: {} })).toBe(true)
-    expect(endsSeries({ name: 'browser_run', args: { steps: [] } })).toBe(true)
+  it('F5: only a claimed step of a series batch, its continuation, or a call that only looks is not foreign; a program tag alone counts for nothing', async () => {
+    const seriesCover = { covers: () => true, inSeries: true as const }
+    const ordinaryCover = { covers: () => true }
+    expect(endsSeries({ name: 'browser_click', args: { selector: '#x' } }, undefined)).toBe(true)
+    expect(endsSeries({ name: 'browser_navigate', args: { url: `${ORIGIN}/x` } }, undefined)).toBe(true)
+    expect(endsSeries({ name: 'browser_console_eval', args: {} }, undefined)).toBe(true)
+    expect(endsSeries({ name: 'browser_run', args: { steps: [] } }, undefined)).toBe(true)
     // The series' own calls, and calls that only look.
-    expect(endsSeries({ name: 'browser_run', args: { steps: [], continues: 'run-0' } })).toBe(false)
-    expect(endsSeries({ name: 'browser_click', args: { selector: '#x' }, program: { id: 'run-0', step: 0 } })).toBe(false)
-    for (const name of ['browser_snapshot', 'browser_get_text', 'browser_wait', 'browser_screenshot']) expect(endsSeries({ name, args: {} })).toBe(false)
+    expect(endsSeries({ name: 'browser_run', args: { steps: [], continues: 'run-0' } }, undefined)).toBe(false)
+    expect(endsSeries({ name: 'browser_click', args: { selector: '#x' } }, seriesCover)).toBe(false)
+    for (const name of ['browser_snapshot', 'browser_get_text', 'browser_wait', 'browser_screenshot']) expect(endsSeries({ name, args: {} }, undefined)).toBe(false)
+    // A step of an ordinary program running in the same session is foreign to the series.
+    expect(endsSeries({ name: 'browser_click', args: { selector: '#x' } }, ordinaryCover)).toBe(true)
 
+    // A call tagged with an unknown program id: its claim fails, so it is foreign and ends the series.
+    const all = rowSteps(20)
+    const tagged = deps()
+    await approveProgram(firstCall(all), tagged)
+    const stray = { name: 'browser_click', args: { selector: '#people .delete-all' }, sessionId: 's1', program: { id: 'no-such-program', step: 0 } }
+    const strayCover = tagged.grants.claim(stray, 7)
+    expect(strayCover).toBeUndefined()
+    expect(endsSeries(stray, strayCover)).toBe(true)
+    tagged.grants.onForeignCall('s1')
+    expect(tagged.grants.seriesSize).toBe(0)
+    expect(claim(tagged.grants, 'run-0', all[0]!, 0)).toBeUndefined()
+    // An ordinary program interleaving in the same session: its step claims, but not on a series batch.
+    const mixed = deps()
+    await approveProgram(firstCall(all), mixed)
+    mixed.grants.approve('other', 's1', [{ tool: 'browser_click', args: { selector: '#elsewhere' } }], [ORIGIN], 7)
+    const otherStep = { name: 'browser_click', args: { selector: '#elsewhere' }, sessionId: 's1', program: { id: 'other', step: 0 } }
+    const otherCover = mixed.grants.claim(otherStep, 7)
+    expect(otherCover).toBeDefined()
+    expect(endsSeries(otherStep, otherCover)).toBe(true)
+    // The series' own step is not foreign.
+    const own = deps()
+    await approveProgram(firstCall(all), own)
+    expect(endsSeries({ name: all[0]!.tool, args: all[0]!.args }, claim(own.grants, 'run-0', all[0]!, 0))).toBe(false)
+  })
+
+  it('F6: ends for its session when a foreign call arrives, and for its tab when a foreign call from any session is about to act on that tab', async () => {
     const sameSession = await readyForSecondBatch()
-    sameSession.d.grants.onForeignAction('s1', undefined)
+    sameSession.d.grants.onForeignCall('s1')
     expect(sameSession.d.grants.seriesSize).toBe(0)
     expect(await approveProgram(nextCall(sameSession.next, 'run-1'), sameSession.d)).toMatchObject(refused)
+    // Another session's call resolves, at dispatch, to the series' tab.
     const sameTab = await readyForSecondBatch()
-    sameTab.d.grants.onForeignAction('another-session', 7)
+    sameTab.d.grants.onForeignCall('another-session')
+    expect(sameTab.d.grants.seriesSize).toBe(1)
+    sameTab.d.grants.onForeignTabAction(7)
     expect(sameTab.d.grants.seriesSize).toBe(0)
+    // Another session acting on another tab leaves it alone.
     const unrelated = await readyForSecondBatch()
-    unrelated.d.grants.onForeignAction('another-session', 8)
+    unrelated.d.grants.onForeignCall('another-session')
+    unrelated.d.grants.onForeignTabAction(8)
     expect(unrelated.d.grants.seriesSize).toBe(1)
     expect((await approveProgram(nextCall(unrelated.next, 'run-1'), unrelated.d)).ok).toBe(true)
   })
@@ -460,40 +507,159 @@ describe('series approval', () => {
     expect(await approveProgram(nextCall(cancelled.next, 'run-1'), { ...cancelled.d, signal: AbortSignal.abort() })).toMatchObject({ ok: false })
     expect(cancelled.d.grants.size).toBe(0)
   })
-})
 
-describe('the check just before a series step', () => {
-  const frame: TabFrame = { frameId: 0, parentFrameId: -1, documentId: 'doc-1', url: `${ORIGIN}/people` }
-  const expected: StepTarget = { tag: 'button', role: 'button', name: 'Archive', row: 'Invoice 1042' }
-  const call = { id: 'c', name: 'browser_click', args: { selector: '#row-21 .archive', frame: 0 } }
-  const answerWith = (response: unknown) => {
-    const sendMessage = vi.fn(async () => response)
-    ;(globalThis as { chrome?: unknown }).chrome = { tabs: { sendMessage } }
-    return sendMessage
-  }
-
-  it('lets the step run when its element still looks as the card showed it', async () => {
-    const sendMessage = answerWith({ ok: true, result: { differs: [], now: expected } })
-    expect(await verifyStepTarget(7, frame, call, expected)).toBeUndefined()
-    // The page is asked about the very element the action would resolve, in the document the step targets.
-    expect(sendMessage).toHaveBeenCalledWith(7, { type: 'DSH_WATCH_CHECK', args: { selector: '#row-21 .archive' }, target: expected }, { documentId: 'doc-1' })
+  it('F4: a step that was claimed and is still waiting (the pause gate, a card) loses its cover when its approval is withdrawn', async () => {
+    const withdrawals: Array<[string, (grants: ProgramGrants) => void]> = [
+      ['take over', (grants) => { grants.onTakeOver() }],
+      ['top-frame navigation', (grants) => { grants.onTopFrameNavigation(7, `${ORIGIN}/billing`, false) }],
+      ['foreign call in the session', (grants) => { grants.onForeignCall('s1') }],
+      ['foreign call on the tab', (grants) => { grants.onForeignTabAction(7) }],
+      ['kill switch', (grants) => { grants.clear() }],
+    ]
+    for (const [what, withdraw] of withdrawals) {
+      const all = rowSteps(20)
+      const d = deps()
+      expect((await approveProgram(firstCall(all), d)).ok).toBe(true)
+      // The step arrives and is claimed, then waits: Pause, the user takes over and edits the page, Resume.
+      const cover = claim(d.grants, 'run-0', all[0]!, 0)!
+      expect(cover.covers(card()), what).toBe(true)
+      withdraw(d.grants)
+      expect(d.grants.seriesSize, what).toBe(0)
+      expect(cover.covers(card()), what).toBe(false)
+    }
+    // The same for an ordinary program on the kill switch; a program that simply ran out keeps its last step covered.
+    const ordinary = new ProgramGrants()
+    ordinary.approve('p', 's1', rowSteps(1), [ORIGIN], 7)
+    const held = claim(ordinary, 'p', rowSteps(1)[0]!, 0)!
+    ordinary.clear()
+    expect(held.covers(card())).toBe(false)
+    const finished = new ProgramGrants()
+    finished.approve('p', 's1', rowSteps(1).slice(0, 1), [ORIGIN], 7)
+    const last = claim(finished, 'p', rowSteps(1)[0]!, 0)!
+    expect(finished.size).toBe(0)
+    expect(last.covers(card())).toBe(true)
+    // A series batch that ran to its end is used up, not withdrawn.
+    const done = await readyForSecondBatch()
+    expect((await approveProgram(nextCall(done.next, 'run-1'), done.d)).ok).toBe(true)
+    const finalCover = claim(done.d.grants, 'run-1', done.next[0]!, 0)!
+    done.d.grants.settle({ id: 'run-1', step: 0 }, true)
+    expect(finalCover.covers(card())).toBe(true)
   })
 
-  it('fails the step, in plain words, when the row was relabelled, replaced, hidden or cannot be checked', async () => {
-    answerWith({ ok: true, result: { differs: ['name'], now: { ...expected, name: 'Delete' } } })
-    expect(await verifyStepTarget(7, frame, call, expected)).toEqual({ ok: false, error: { code: 'action-failed', message: 'it no longer looks like the rows you approved (was “Archive”, now “Delete”). Nothing was done to it.' } })
-    answerWith({ ok: true, result: { differs: ['row'], now: { ...expected, row: 'Invoice 2000' } } })
-    expect((await verifyStepTarget(7, frame, call, expected))!.error!.message).toContain('(was “Invoice 1042”, now “Invoice 2000”)')
-    answerWith({ ok: true, result: { differs: ['tag', 'role'], now: { ...expected, tag: 'a', role: 'link' } } })
-    expect((await verifyStepTarget(7, frame, call, expected))!.error!.message).toContain('(was “button”, now “link”)')
-    answerWith({ ok: true, result: { differs: ['missing'] } })
-    expect((await verifyStepTarget(7, frame, call, expected))!.error!.message).toBe('its element is gone or hidden. Nothing was done to it.')
-    // No answer, a refusal, or a thrown error: never run unchecked.
-    for (const response of [undefined, { ok: false }, { ok: true, result: {} }]) {
-      answerWith(response)
-      expect(await verifyStepTarget(7, frame, call, expected)).toMatchObject({ ok: false, error: { code: 'action-failed' } })
+  it('F3: a route change while the card is open, another page of a list, or a hash route is another page: the series is refused or ends', async () => {
+    // The page is read before the card and again after it is answered: a history-API route change behind the open card is caught.
+    let reads = 0
+    const moved: TabFrame[] = [{ frameId: 0, parentFrameId: -1, documentId: 'doc-1', url: `${ORIGIN}/billing/cards` }]
+    const behindCard = deps({ listFrames: async () => (reads++ === 0 ? frames : moved) })
+    const all = rowSteps(20)
+    expect(await approveProgram(firstCall(all), behindCard)).toMatchObject({ ok: false, error: { code: 'action-failed', message: expect.stringMatching(/page changed while the approval card was open/) } })
+    expect(behindCard.authorize).toHaveBeenCalledTimes(1)
+    expect(behindCard.grants.size).toBe(0)
+    expect(behindCard.grants.seriesSize).toBe(0)
+    expect(claim(behindCard.grants, 'run-0', all[0]!, 0)).toBeUndefined()
+    // The whole URL is the page: the query and the fragment are part of it.
+    expect(pageLocation(`${ORIGIN}/people?page=2`)).not.toBe(pageLocation(`${ORIGIN}/people`))
+    expect(pageLocation(`${ORIGIN}/people#/billing/cards`)).not.toBe(pageLocation(`${ORIGIN}/people`))
+    expect(pageLocation('not a url')).toBeUndefined()
+    for (const url of [`${ORIGIN}/people?page=2`, `${ORIGIN}/people#/billing/cards`, `${ORIGIN}/people/9`]) {
+      const routed = await readyForSecondBatch()
+      routed.d.grants.onTopFrameNavigation(7, url, true)
+      expect(routed.d.grants.seriesSize, url).toBe(0)
+      const asked = await readyForSecondBatch()
+      expect(await approveProgram(nextCall(asked.next, 'run-1'), { ...asked.d, listFrames: async () => [{ ...frames[0]!, url }] }), url).toMatchObject(refused)
     }
-    ;(globalThis as { chrome?: unknown }).chrome = { tabs: { sendMessage: vi.fn(async () => { throw new Error('Receiving end does not exist') }) } }
-    expect(await verifyStepTarget(7, frame, call, expected)).toMatchObject({ ok: false })
+    // A same-document event that leaves the URL as it was, and another tab's navigation, change nothing.
+    const still = await readyForSecondBatch()
+    still.d.grants.onTopFrameNavigation(7, `${ORIGIN}/people`, true)
+    still.d.grants.onTopFrameNavigation(8, `${ORIGIN}/elsewhere`, false)
+    expect(still.d.grants.seriesSize).toBe(1)
+  })
+
+  it('F7: the card of a continuation says first which row the earlier run left part-done and this one skips', async () => {
+    const all = rowSteps(20)
+    const note = '“Person 23” was left part-done by the earlier run and is skipped here; finish it by hand.'
+    const cardNote = vi.fn(() => note)
+    const d = deps({ cardNote })
+    expect((await approveProgram(firstCall(all), d)).ok).toBe(true)
+    // The extension is asked about the whole program; its note comes first on the card and does not change what is bound.
+    expect(cardNote).toHaveBeenCalledWith('s1', all)
+    const shown = d.authorize.mock.calls[0]![0]
+    expect(shown.details![0]).toEqual({ kind: 'text', label: 'Please note', value: note, masked: false })
+    expect(shown.details![1]).toMatchObject({ kind: 'rows' })
+    expect(shown.binding).toBe(programApprovalPrompt(all.slice(0, 24), frames, { rowSteps: 3, later: all.slice(24) }).binding)
+    // An ordinary continuation (25 steps or fewer) carries it too; a program without a note is unchanged.
+    const short = deps({ cardNote })
+    await approveProgram({ id: 'p', name: 'browser_run', sessionId: 's1', args: { steps: all.slice(0, 3) } }, short)
+    expect(short.authorize.mock.calls[0]![0].details![0]).toMatchObject({ label: 'Please note', value: note })
+    const plain = deps({ cardNote: () => undefined })
+    await approveProgram({ id: 'p', name: 'browser_run', sessionId: 's1', args: { steps: all.slice(0, 3) } }, plain)
+    expect(plain.authorize.mock.calls[0]![0].details).toHaveLength(3)
+  })
+})
+
+describe('F8: the cards and refusals are localised', () => {
+  it('speaks Chinese when the interface does: both program cards, the note, and the refusals', async () => {
+    setUiLocalePreference('zh')
+    try {
+      const all = rowSteps(20)
+      const series = programApprovalPrompt(all.slice(0, 24), frames, { rowSteps: 3, later: all.slice(24) })
+      expect(series.summary).toMatch(/^在 https:\/\/crm\.example 的 20 行上重复同一个 3 步操作：共 60 步/u)
+      expect((series.details![0] as { rows: Array<{ label: string }> }).rows[0]!.label).toBe('输入 “Email 3” ← “Person 3” → 点击 “Invite” → 点击 “Confirm” — Person 3')
+      const ordinary = programApprovalPrompt(all.slice(0, 3), frames)
+      expect(ordinary.summary).toMatch(/^在 https:\/\/crm\.example 上运行一个 3 步的浏览器程序/u)
+      expect(ordinary.details![0]).toMatchObject({ label: '第 1 步：browser_type' })
+      const noted = deps({ cardNote: () => '注意' })
+      await approveProgram({ id: 'p', name: 'browser_run', sessionId: 's1', args: { steps: all.slice(0, 3) } }, noted)
+      expect(noted.authorize.mock.calls[0]![0].details![0]).toMatchObject({ label: '请注意', value: '注意' })
+      const d = deps()
+      expect(await approveProgram(nextCall(all.slice(24, 48), 'run-1'), d)).toMatchObject({ ok: false, error: { message: expect.stringMatching(/^此前的批准已不再适用/u) } })
+      const page = { documentKey: 'doc-1', location: `${ORIGIN}/people` }
+      const target = all[0]!.target!
+      expect(stepExpectationFailure({ id: 'c', name: 'browser_click', args: { selector: '#a' } }, [], { target, page })!.error!.message).toBe('页面已重新加载或已离开您批准时的页面。未执行任何操作。')
+      expect(stepExpectationFailure({ id: 'c', name: 'browser_press', args: { key: 'Enter' } }, frames, { target })!.error!.message).toBe('此步骤无法与已批准的行核对，因此未执行。')
+    } finally {
+      setUiLocalePreference('auto')
+    }
+  })
+})
+
+describe('what a "do the remaining N" step must still find when it is dispatched', () => {
+  const page = { documentKey: 'doc-1', location: `${ORIGIN}/people` }
+  const target: StepTarget = { tag: 'button', role: 'button', name: 'Archive', row: '1042 · Paid', rowKey: 'k' }
+  const click = { id: 'c', name: 'browser_click', args: { selector: '#row-21 .archive' } }
+
+  it('F3: a series step is refused when the tab is on another document or URL than the card was approved on', () => {
+    expect(stepExpectationFailure(click, frames, { target, page })).toBeUndefined()
+    const elsewhere = (frame: Partial<TabFrame>): TabFrame[] => [{ ...frames[0]!, ...frame }]
+    for (const moved of [
+      elsewhere({ documentId: 'doc-2' }),
+      elsewhere({ url: `${ORIGIN}/billing` }),
+      elsewhere({ url: `${ORIGIN}/people?page=2` }),
+      elsewhere({ url: `${ORIGIN}/people#/billing/cards` }),
+      [],
+    ]) {
+      expect(stepExpectationFailure(click, moved, { target, page })).toEqual({ ok: false, error: { code: 'action-failed', message: 'the page was reloaded or is no longer the one you approved this on. Nothing was done.' } })
+    }
+    // Firefox reports no document id: the document key falls back to the URL, and the URL is still compared.
+    const firefox: TabFrame[] = [{ frameId: 0, parentFrameId: -1, url: `${ORIGIN}/people` }]
+    const firefoxPage = { documentKey: `${ORIGIN}/people`, location: `${ORIGIN}/people` }
+    expect(stepExpectationFailure(click, firefox, { target, page: firefoxPage })).toBeUndefined()
+    expect(stepExpectationFailure(click, [{ ...firefox[0]!, url: `${ORIGIN}/people?page=2` }], { target, page: firefoxPage })).toMatchObject({ ok: false })
+    // An ordinary demonstrated program has no page binding of its own: only the element check travels.
+    expect(stepExpectationFailure(click, [], { target })).toBeUndefined()
+  })
+
+  it('F2: only an action that checks the element it resolves may carry an expected element', () => {
+    // Routes and tools whose content-script action does not make the comparison are refused rather than run unchecked.
+    const refusal = { ok: false, error: { code: 'action-failed', message: 'This step cannot be checked against an approved row, so it was not run.' } }
+    expect(stepExpectationFailure({ id: 'c', name: 'browser_click', args: { selector: '#a', trusted: true } }, frames, { target, page })).toEqual(refusal)
+    expect(stepExpectationFailure({ id: 'c', name: 'browser_type', args: { selector: '#a', text: 'x', mode: 'keystrokes' } }, frames, { target, page })).toEqual(refusal)
+    expect(stepExpectationFailure({ id: 'c', name: 'browser_click', args: { index: 4 } }, frames, { target, page })).toEqual(refusal)
+    expect(stepExpectationFailure({ id: 'c', name: 'browser_press', args: { key: 'Enter' } }, frames, { target, page })).toEqual(refusal)
+    expect(stepExpectationFailure({ id: 'c', name: 'browser_navigate', args: { url: `${ORIGIN}/x` } }, frames, { target, page })).toEqual(refusal)
+    for (const call of [
+      { id: 'c', name: 'browser_type', args: { selector: '#a', text: 'x', replace: true } },
+      { id: 'c', name: 'browser_select', args: { selector: '#a', value: 'x' } },
+    ]) expect(stepExpectationFailure(call, frames, { target, page })).toBeUndefined()
   })
 })

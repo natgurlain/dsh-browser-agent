@@ -68,6 +68,8 @@ export interface ReplayReport {
 export interface ProgramStep {
   tool: string
   args: Record<string, unknown>
+  /** "Do the remaining N": what the step's element looked like (validated by run-program.ts, checked by the extension). */
+  target?: unknown
 }
 
 /** Replay options. */
