@@ -1,7 +1,10 @@
 /**
- * Page actions: click/type/press/scroll/navigate/get_text/wait, executed in
- * the content script against the real page (preserving login state), each
- * returning a short text status. Navigations return a fresh full snapshot
+ * Page actions: snapshot, click, type, press, scroll, select, extract,
+ * clipboard paste, navigate/back/forward/reload, get_text and wait, executed
+ * in the content script against the real page (preserving login state), each
+ * returning a short text status. Results of actions that change the page
+ * (click, type, press, scroll, select, clipboard) carry a post-action
+ * verification report. Navigations return a fresh full snapshot
  * because the document — and the id registry — reset.
  *
  * All browser action results use structured text, so a

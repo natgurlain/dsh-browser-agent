@@ -1,11 +1,24 @@
 /**
- * Content script entry: listens for DSH_ACTION messages from the background
- * service worker, runs the action against the real page, and answers with a
- * text-only result. Starts the DOM watcher that marks the snapshot dirty, and
- * the panel-gated watcher that reports what the user highlights.
+ * Content script entry. Routes the background's messages:
  *
- * The content script is the only part that touches the page; the bridge and
- * the model never see page internals beyond the structured text snapshots.
+ * - `DSH_ACTION`: run a browser action against the real page and answer with
+ *   a text result (actions.ts);
+ * - `DSH_OVERLAY`: the on-page agent overlay (overlay.ts);
+ * - `DSH_INPUT_SETUP`: focus/selection/geometry for the debugger-driven
+ *   pointer and keyboard (input-support.ts), never model-facing;
+ * - `DSH_WATCH_ARM`: standing page watchers (watch.ts);
+ * - `DSH_LEARN_*`, `DSH_WATCH` / `DSH_WATCH_PROBE`, `DSH_SITE_DRIVER_FETCH`:
+ *   the default-off learning features (learning.ts);
+ * - `DSH_SELECTION_WATCH` / `DSH_SELECTION_RESET`, `DSH_TARGET_INFO`,
+ *   `DSH_BUDGET`, `DSH_ABORT`: selection reports, the approval-time
+ *   sensitivity probe, snapshot budgets and the kill switch.
+ *
+ * On load it announces `DSH_CONTENT_READY`; the reply restores the selection
+ * watcher, the overlay and "Watch me" on the new document.
+ *
+ * The content script is the only part that touches the page. What leaves it
+ * is structured text (snapshots, action results, matched excerpts), masked
+ * values, and sanitized fixtures, each gated by the background.
  *
  * @module
  */

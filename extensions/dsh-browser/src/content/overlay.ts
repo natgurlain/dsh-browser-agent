@@ -142,7 +142,7 @@ export class AgentOverlay {
     private readonly doc: Document = document,
   ) {}
 
-  /** The host element, once created (tests and the snapshot filter use it). */
+  /** The host element, once created (tests use it). */
   hostElement(): HTMLElement | undefined {
     return this.host
   }
