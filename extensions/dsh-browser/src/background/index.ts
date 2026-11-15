@@ -26,7 +26,9 @@
  *   panel → bg: { type: 'request-status' }
  *   panel → bg: { type: 'discovery.start', id }
  *   panel → bg: { type: 'discovery.cancel' }
- *   panel → bg: { type: 'pair.start', id, code }
+ *   panel → bg: { type: 'pair.start', id }
+ *   panel → bg: { type: 'pair.cancel' }
+ *   bg → panel: { type: 'pair.code', id, code, answerTimeoutMs }
  *   bg → panel: { type: 'pair.result', id, ok, reason? }
  *   panel → bg: { type: 'kill-switch.engage' }
  *   panel → bg: { type: 'kill-switch.release' }
@@ -90,7 +92,7 @@ import { BRIDGE_CONFIG_PATH, BRIDGE_PATH, DEVTOOLS_CAPS_VERSION, parseBridgeConf
 import { BridgeClient, type BridgeFailure, type BridgeState } from './bridge.ts'
 import { createRpc } from './rpc.ts'
 import { discoverInstances, planDiscovery, portOfUrl, readBridgeConfig } from './discovery.ts'
-import { extensionOrigin, pairWithAnyBridge, type PairingFailure } from './pairing.ts'
+import { browserName, extensionOrigin, pairWithBridge, type PairingFailure } from './pairing.ts'
 import { frameDocumentKey, listTabFrames } from './frames.ts'
 import {
   dispatchOpenTab,
@@ -3213,39 +3215,40 @@ async function startBridge(): Promise<void> {
   bridge.start(url, settings.token)
 }
 
-/** One pairing at a time: a second request while one runs is refused, not queued. */
-let pairingInFlight = false
+/** The pairing request in flight, if any: one at a time, and a new one withdraws the old. */
+let activePairing: AbortController | undefined
 
 /**
- * One-step pairing (pairing.ts): exchange the code the user read off their
- * DSH host for the bridge token, store it like a typed token, and connect.
- * The filled-in bridge address is asked first, then every local instance;
- * only a bridge with a pairing window open for this code can answer.
- * @param code - the code as typed in the panel.
+ * One-step pairing (pairing.ts): ask the DSH host for the bridge token, show
+ * the code the user compares there, and once they approve store the token
+ * like a typed one and connect. The request goes to the bridge this install
+ * is already trying to reach: the address in use, else the filled-in one,
+ * else the first local instance discovery finds.
+ * @param onCode - receives the code to display while the request waits.
  * @returns the failure, or `undefined` once the token is stored.
  */
-async function pairWithHost(code: string): Promise<PairingFailure | undefined> {
-  if (pairingInFlight) return 'timeout'
-  pairingInFlight = true
+async function pairWithHost(onCode: (code: string, answerTimeoutMs: number) => void): Promise<PairingFailure | undefined> {
+  activePairing?.abort()
+  const controller = new AbortController()
+  activePairing = controller
   try {
     await settingsReady
-    // The filled-in address first (the user's choice); local instances are
-    // asked as well unless that address is a remote one.
     const filledIn = settings.bridgeUrl === '' ? undefined : normalizeBridgeUrl(settings.bridgeUrl, BRIDGE_PATH)
-    const urls: string[] = filledIn === undefined ? [] : [filledIn]
-    if (filledIn === undefined || isLocalBridgeAddress(filledIn)) {
+    let url = connectedAddress ?? filledIn
+    if (url === undefined) {
       await discoveryMemory
-      const instances = await discoverInstances(planDiscovery({
+      url = (await discoverInstances(planDiscovery({
         ...(lastBridgeUrl === undefined ? {} : { rememberedUrl: lastBridgeUrl }),
+        excludeUrls: [...rejectedBridgeUrls],
       }), {
         probe: (port, timeoutMs) => readBridgeConfig(port, timeoutMs),
-        shouldContinue: () => true,
-      }, { stopAtFirstHit: false })
-      for (const instance of instances) if (!urls.includes(instance.wsUrl)) urls.push(instance.wsUrl)
+        shouldContinue: () => !controller.signal.aborted,
+      }, { stopAtFirstHit: true }))[0]?.wsUrl
     }
-    const paired = await pairWithAnyBridge(urls, code, extensionOrigin())
+    if (controller.signal.aborted) return 'cancelled'
+    if (url === undefined) return 'unreachable'
+    const paired = await pairWithBridge(url, { origin: extensionOrigin(), name: browserName(), onCode, signal: controller.signal })
     if (!paired.ok) return paired.reason
-    const discovered = paired.url !== filledIn
     await persistSettings({ token: paired.token })
     // A new token is a new connection: drop what belonged to the old one.
     forgetStandingHost()
@@ -3253,15 +3256,15 @@ async function pairWithHost(code: string): Promise<PairingFailure | undefined> {
     rejectedBridgeUrls.clear()
     discoveryLatch = 'idle'
     persistDiscoveryLatch('idle')
-    // The peer proved the code the user read on their own host: prefer it next time.
-    if (discovered) rememberBridgeUrl(paired.url)
+    // The user approved this bridge on their own host: prefer it next time.
+    if (url !== filledIn) rememberBridgeUrl(url)
     if (panelPorts.size > 0) {
       await startBridge()
       broadcastStatus()
     }
     return undefined
   } finally {
-    pairingInFlight = false
+    if (activePairing === controller) activePairing = undefined
   }
 }
 
@@ -3505,6 +3508,8 @@ chrome.runtime.onConnect.addListener((port) => {
             const connectionChanged = settings.bridgeUrl !== previousConnection.bridgeUrl
               || settings.token !== previousConnection.token
             if (connectionChanged) {
+              // A pairing request still waiting was addressed to the previous bridge.
+              activePairing?.abort()
               // The hint and the headless address belong to the previous connection.
               forgetStandingHost()
               setBridgeRefusal(undefined)
@@ -3596,18 +3601,21 @@ chrome.runtime.onConnect.addListener((port) => {
         break
       }
       case 'pair.start': {
-        // Only the extension's own panel reaches this port; the code never leaves the worker except in the exchange.
-        const request = message as { id?: unknown; code?: unknown }
-        if (typeof request.id !== 'string' || typeof request.code !== 'string') break
+        // Only the extension's own panel reaches this port. The panel gets the code to display, never the token.
+        const request = message as { id?: unknown }
+        if (typeof request.id !== 'string') break
         const id = request.id
-        void pairWithHost(request.code).then(
+        const post = (reply: unknown): void => { try { port.postMessage(reply) } catch { /* panel closed */ } }
+        void pairWithHost((code, answerTimeoutMs) => { post({ type: 'pair.code', id, code, answerTimeoutMs }) }).then(
           reason => reason,
           (): PairingFailure => 'unreachable',
         ).then((reason) => {
-          try {
-            port.postMessage(reason === undefined ? { type: 'pair.result', id, ok: true } : { type: 'pair.result', id, ok: false, reason })
-          } catch { /* panel closed */ }
+          post(reason === undefined ? { type: 'pair.result', id, ok: true } : { type: 'pair.result', id, ok: false, reason })
         })
+        break
+      }
+      case 'pair.cancel': {
+        activePairing?.abort()
         break
       }
       case 'kill-switch.engage':
@@ -3809,6 +3817,8 @@ chrome.runtime.onConnect.addListener((port) => {
     const panelSessionId = panelActiveSessions.get(port)
     panelActiveSessions.delete(port)
     panelPorts.delete(port)
+    // Nobody is left to compare the code: withdraw a pairing request that is still waiting.
+    if (panelPorts.size === 0) activePairing?.abort()
     if (panelSessionId !== undefined) void checkpointSessionPage(panelSessionId)
     interactionResponses.removePort(port)
     if (panelWindowId !== undefined && !hasPanelInWindow(panelWindowId)) {

@@ -75,7 +75,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { DEVLOOP_CAPTURE_TIMEOUT_MS, DevLoop, withDevLoopMethods } from './dev-loop.ts'
 import { mountLearning, type LearningMount } from './learning/index.ts'
 import { errorMessage } from './host-api.ts'
-import { PAIRED_EXTENSIONS_FILE_NAME, PairingWindows, readPairedExtensionIds, writePairedExtensionIds } from './pairing-host.ts'
+import { PAIRED_EXTENSIONS_FILE_NAME, PairingRequests, readPairedExtensionIds, writePairedExtensionIds } from './pairing-host.ts'
 import { mountPairingControls, PAIRING_COMMAND_NAME, type PairingCommandRegistry, type PairingFetchRegistry } from './pairing-mount.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -155,11 +155,19 @@ export interface Config {
   /**
    * Chrome extension IDs allowed to connect (`chrome-extension://<id>` Origin).
    * Defaults to the manifest-keyed ID; replace it for a differently keyed
-   * development build. Extensions that paired with a one-time code (a Web
+   * development build. Extensions the user approved through pairing (a Web
    * Store or Brave build) are allowed in addition, from
    * `<dsh home>/browser-paired-extensions.json`.
    */
   allowedChromeExtensionIds?: string[]
+  /**
+   * Let an extension without a token ask to pair (the user approves each
+   * request in DSH after comparing a short code). Defaults to true. Set it to
+   * false to accept only the installer-provisioned or pasted token and the
+   * configured extension IDs: unknown extensions are then refused at the
+   * Origin check, and extensions approved earlier stay allowed.
+   */
+  pairing?: boolean
   /**
    * Let the extension use full-access permission presets: switch a session to
    * one, and prompt or inject into a session running one. Defaults to false:
@@ -228,6 +236,7 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   beacon: z.boolean().default(DEFAULT_BEACON),
   beaconPorts: z.array(z.number().step(1).min(1).max(65535)).default([...BEACON_PORTS]),
   allowedChromeExtensionIds: z.array(z.string().pattern(/^[a-p]{32}$/)).default([PINNED_CHROME_EXTENSION_ID]),
+  pairing: z.boolean().default(true),
   allowDangerFullAccess: z.boolean().default(false),
   safePermissionPresets: z.array(z.string()).default([]),
   forwardedPorts: z.array(z.number().step(1).min(1).max(65535)).default([]),
@@ -288,7 +297,7 @@ export async function apply(ctx: Context, resolved: ResolvedConfig): Promise<voi
   }
   const ledger = await fileSessionLedger(dshHomePath(SESSION_LEDGER_FILE_NAME), message => { ctx.logger.warn(message) })
   const watchRecords = await fileWatchRecords(dshHomePath(WATCH_RECORDS_FILE_NAME), message => { ctx.logger.warn(message) })
-  // Chrome extension IDs that paired with a one-time code on an earlier run.
+  // Chrome extension IDs the user approved through pairing on an earlier run.
   const pairedFile = dshHomePath(PAIRED_EXTENSIONS_FILE_NAME)
   const pairedExtensionIds = await readPairedExtensionIds(pairedFile)
   mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection), ledger, watchRecords, { file: pairedFile, ids: pairedExtensionIds })
@@ -392,14 +401,14 @@ function mountBridge(
   })
   ctx.on('agent/status', ({ agent, status }) => { void devLoop.noteStatus(String(agent.id), status) })
   const killSwitch = createKillSwitchHandler({ devLoop, learning: () => learning, info: (message) => { ctx.logger.info(message) } })
-  // One-step pairing for extensions without a token (store builds, Firefox).
-  // No window is open until the user asks for one through dsh itself.
-  const pairing = new PairingWindows()
+  // One-step pairing for extensions without a token (store builds, Firefox):
+  // they ask, and nothing is released until the user approves through dsh itself.
+  const pairing = new PairingRequests()
   const pairedIds = [...paired.ids]
   let pairedWrites: Promise<void> = Promise.resolve()
   server = new BridgeServer({
     token: tokenRes.token,
-    pairing,
+    ...(resolved.pairing ? { pairing } : {}),
     onPaired: ({ origin, chromeExtensionId }) => {
       ctx.logger.info(`browser bridge: paired ${origin === '' ? 'a client without an extension origin' : origin}`)
       if (chromeExtensionId === undefined || pairedIds.includes(chromeExtensionId)) return
@@ -485,7 +494,8 @@ function mountBridge(
   ctx.effect(() => () => server.close(), 'bridge-browser: bridge server')
 
   // Host-side pairing controls: both sit behind dsh's own authentication.
-  ctx.effect(() => {
+  if (!resolved.pairing) ctx.logger.info('browser bridge: pairing disabled by configuration')
+  else ctx.effect(() => {
     let disposers: Array<() => unknown> = []
     try {
       const routes = optionalService<{ fetch?: PairingFetchRegistry }>(ctx, 'connection')?.fetch
@@ -498,10 +508,10 @@ function mountBridge(
       ctx.logger.warn(`browser bridge: could not register the pairing controls: ${errorMessage(error)}`)
     }
     if (disposers.length === 0) {
-      ctx.logger.warn(`browser bridge: this dsh offers no pairing control (neither the /api route nor /${PAIRING_COMMAND_NAME}); extensions without a token must paste it`)
+      ctx.logger.warn(`browser bridge: this dsh offers no pairing control (neither the /api route nor /${PAIRING_COMMAND_NAME}); pairing requests cannot be approved, so extensions without a token must paste it`)
     }
     return async () => {
-      pairing.cancel()
+      pairing.denyAll()
       for (const dispose of disposers.reverse()) await dispose()
     }
   }, 'bridge-browser: pairing controls')

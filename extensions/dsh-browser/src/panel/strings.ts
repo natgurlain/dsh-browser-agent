@@ -14,14 +14,18 @@ export interface PanelCopy {
     title: string
     /** Lead shown when the bridge refused this install or it has no token yet. */
     needed: string
+    /** What pairing is, shown before a request was made (Settings). */
     help: string
+    start: string
+    retry: string
+    asking: string
     codeLabel: string
-    placeholder: string
-    pair: string
-    pairing: string
+    /** The call to action under the code. */
+    approve: string
+    approveHelp: string
     paired: string
     /** One message per `PairingFailure` of the background. */
-    failure: Record<'invalid-code' | 'closed' | 'wrong-code' | 'unreachable' | 'unsupported' | 'version-mismatch' | 'untrusted' | 'timeout', string>
+    failure: Record<'denied' | 'expired' | 'busy' | 'unreachable' | 'unsupported' | 'version-mismatch' | 'untrusted' | 'cancelled', string>
   }
   approval: {
     eyebrow: string
@@ -507,22 +511,24 @@ const EN: PanelCopy = {
   },
   pairing: {
     title: 'Pair with DSH',
-    needed: 'This browser is not paired with DSH yet.',
-    help: 'On the computer that runs DSH, open DSH Settings → General → "Pair a browser" (or run /browser-pair in a DSH chat). Type the code it shows here. The code works once and expires after 5 minutes.',
+    needed: 'This browser is not connected to DSH yet.',
+    help: 'Connect this browser to the DSH on this computer. You approve it once in DSH; there is no token to copy.',
+    start: 'Pair with DSH',
+    retry: 'Ask again',
+    asking: 'Asking DSH…',
     codeLabel: 'Pairing code',
-    placeholder: 'XXXX-XXXX',
-    pair: 'Pair',
-    pairing: 'Pairing…',
+    approve: 'Approve in DeepSeek Harness',
+    approveHelp: 'DeepSeek Harness now shows "Pair a browser" with a code. If it is the same code as here, click Approve there. The same prompt is under Settings → General; in a terminal session, run /browser-pair approve followed by the code.',
     paired: 'Paired. Connecting…',
     failure: {
-      'invalid-code': 'A pairing code has 8 letters and digits, like ABCD-EFGH.',
-      closed: 'DSH is not showing a pairing code right now. Start pairing in DSH, then enter the new code.',
-      'wrong-code': 'That code did not match. Check it, or start pairing again in DSH for a new code.',
-      unreachable: 'No DSH was found on this computer. Start DSH, then try again.',
-      unsupported: 'This DSH browser plugin is too old to pair. Update it, or paste the token instead.',
+      denied: 'The request was denied in DSH.',
+      expired: 'Nobody approved the request in time. Open DSH, then ask again.',
+      busy: 'DSH has too many pairing requests waiting. Deny the ones you do not recognise in DSH, then ask again.',
+      unreachable: 'No DSH was found on this computer. Start DSH, then ask again.',
+      unsupported: 'This DSH browser plugin cannot pair (it is too old, or pairing is unavailable). Update it, or paste the token instead.',
       'version-mismatch': 'The DSH plugin and this extension are different versions. Update them together.',
-      untrusted: 'The answer did not come from the DSH that shows your code, so nothing was saved. Try again.',
-      timeout: 'Pairing took too long. Try again.',
+      untrusted: 'The exchange with DSH was interrupted or altered, so nothing was saved. Ask again.',
+      cancelled: 'Pairing was cancelled.',
     },
   },
   approval: {
@@ -1061,22 +1067,24 @@ const ZH: PanelCopy = {
   },
   pairing: {
     title: '与 DSH 配对',
-    needed: '此浏览器尚未与 DSH 配对。',
-    help: '在运行 DSH 的电脑上，打开 DSH 设置 → 通用 →「配对浏览器」（或在 DSH 对话中运行 /browser-pair），然后在这里输入显示的配对码。配对码只能使用一次，5 分钟后失效。',
+    needed: '此浏览器尚未连接到 DSH。',
+    help: '将此浏览器连接到本机的 DSH。只需在 DSH 中批准一次，无需复制令牌。',
+    start: '与 DSH 配对',
+    retry: '重新请求',
+    asking: '正在请求 DSH…',
     codeLabel: '配对码',
-    placeholder: 'XXXX-XXXX',
-    pair: '配对',
-    pairing: '配对中…',
+    approve: '请在 DeepSeek Harness 中批准',
+    approveHelp: 'DeepSeek Harness 此时会显示「配对浏览器」和一个配对码。如果与此处的配对码相同，请在那里点击「批准」。同样的提示也在 设置 → 通用 中；在终端会话中，可运行 /browser-pair approve 加上配对码。',
     paired: '配对成功，正在连接…',
     failure: {
-      'invalid-code': '配对码由 8 位字母和数字组成，例如 ABCD-EFGH。',
-      closed: 'DSH 当前没有显示配对码。请先在 DSH 中开始配对，再输入新的配对码。',
-      'wrong-code': '配对码不匹配。请核对后重试，或在 DSH 中重新开始配对以获取新的配对码。',
-      unreachable: '未在本机找到 DSH。请启动 DSH 后重试。',
-      unsupported: '此 DSH 浏览器插件版本过旧，不支持配对。请更新插件，或改为粘贴令牌。',
+      denied: '该请求已在 DSH 中被拒绝。',
+      expired: '请求未在有效时间内获得批准。请打开 DSH 后重新请求。',
+      busy: 'DSH 中等待处理的配对请求过多。请在 DSH 中拒绝不认识的请求，然后重新请求。',
+      unreachable: '未在本机找到 DSH。请启动 DSH 后重新请求。',
+      unsupported: '此 DSH 浏览器插件无法配对（版本过旧或配对不可用）。请更新插件，或改为粘贴令牌。',
       'version-mismatch': 'DSH 插件与此扩展的版本不一致，请同时更新两者。',
-      untrusted: '收到的应答并非来自显示配对码的 DSH，因此未保存任何内容。请重试。',
-      timeout: '配对超时，请重试。',
+      untrusted: '与 DSH 的交换被中断或篡改，因此未保存任何内容。请重新请求。',
+      cancelled: '配对已取消。',
     },
   },
   approval: {

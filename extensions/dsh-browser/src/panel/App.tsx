@@ -3171,7 +3171,9 @@ export function App(): React.JSX.Element {
       <TaintBanner sessionId={sessionRef.current} locale={locale} />
       <WatchersCard locale={locale} />
       {needsPairing && !killSwitchEngaged
-        ? <PairingCard api={api} copy={copy.pairing} needed onPaired={adoptPairedToken} />
+        // A token that stopped working may be a relay in the way: there the user asks, not the panel.
+        // Keyed by the bridge address: a request is for one bridge, so a new address asks anew.
+        ? <PairingCard key={bridgeAddress ?? ''} api={api} copy={copy.pairing} needed autoStart={bridgeFailure !== 'token-mismatch'} onPaired={adoptPairedToken} />
         : null}
       {showTextSize && (
         <TextSizePanel scale={uiScale} copy={copy}

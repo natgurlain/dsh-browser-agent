@@ -10,17 +10,16 @@ import {
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import {
   createPairingShare,
-  derivePairingKeys,
+  derivePairingSession,
   formatPairingCode,
   sealPairingToken,
-  verifyPairingClientConfirmation,
+  verifyPairingCommitment,
   type PairingContext,
 } from '@natgurlain/dsh-bridge-browser/src/pairing.ts'
 import {
-  PAIRING_COOLDOWN_MS,
-  PAIRING_MAX_ATTEMPTS,
-  PAIRING_WINDOW_MS,
-  PairingWindows,
+  MAX_PENDING_PAIRINGS,
+  PAIRING_REQUEST_TTL_MS,
+  PairingRequests,
 } from '@natgurlain/dsh-bridge-browser/src/pairing-host.ts'
 import {
   TEST_CAPS,
@@ -28,10 +27,12 @@ import {
   closeTestBridges,
   connectClient,
   openSocket,
+  sendHello,
   startTestBridge,
+  waitFor,
   webSocketWithOrigin,
 } from '../../../packages/browser/bridge-browser/tests/support/bridge-client.ts'
-import { extensionOrigin, pairWithAnyBridge, pairWithBridge, type PairingResult } from '../src/background/pairing.ts'
+import { browserName, extensionOrigin, pairWithBridge, type PairingResult } from '../src/background/pairing.ts'
 import { FakeWebSocket } from './support/fake-websocket.ts'
 
 /** A store build: a Chrome extension ID the bridge has never been told about. */
@@ -47,228 +48,286 @@ afterEach(async () => {
   await closeTestBridges()
 })
 
-/** A real bridge with a pairing window the spec controls, and a clock it moves. */
+/** A real bridge whose pairing requests the spec answers, and a clock it moves. */
 async function startBridge() {
   let at = 5_000_000
-  const windows = new PairingWindows(() => at)
+  const requests = new PairingRequests(() => at)
   const onPaired = vi.fn()
-  const started = await startTestBridge({ pairing: windows, onPaired })
-  const begin = (): string => {
-    const result = windows.start()
-    if (!result.ok) throw new Error('pairing is cooling down')
-    return result.code
-  }
-  return { ...started, windows, onPaired, begin, advance: (ms: number) => { at += ms } }
+  const started = await startTestBridge({ pairing: requests, onPaired })
+  return { ...started, requests, onPaired, advance: (ms: number) => { at += ms } }
 }
 
-/** Run the extension's pairing client the way a browser would: its sockets carry `origin`. */
-function pairAs(origin: string | undefined, url: string, code: string, believed: string = origin ?? ''): Promise<PairingResult> {
+/**
+ * Run the extension's pairing client the way a browser would: its sockets
+ * carry `origin`. Resolves `shown` with the code the panel would display.
+ */
+function askAs(origin: string | undefined, url: string, options: { believed?: string; name?: string; signal?: AbortSignal } = {}) {
   vi.stubGlobal('WebSocket', webSocketWithOrigin(origin))
-  return pairWithBridge(url, code, believed)
+  let show!: (code: string) => void
+  const shown = new Promise<string>((resolve) => { show = resolve })
+  const result = pairWithBridge(url, {
+    origin: options.believed ?? origin ?? '',
+    name: options.name ?? 'Brave',
+    onCode: show,
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+  })
+  return { shown, result }
 }
 
 describe('pairing against a real bridge', () => {
-  it('pairs a store-installed extension with the code the host shows, then connects normally', async () => {
+  it('shows the code the host shows, and pairs once the user approves it there', async () => {
     const h = await startBridge()
-    // Typed the way it is displayed, in lower case.
-    const result = await pairAs(STORE_ORIGIN, h.url, formatPairingCode(h.begin()).toLowerCase())
+    const asking = askAs(STORE_ORIGIN, h.url)
+    const code = await asking.shown
+    expect(code).toMatch(/^[A-HJ-NP-Z2-9]{3}-[A-HJ-NP-Z2-9]{3}$/u)
+    // "Brave wants to connect, code …" on the host: the same code.
+    await waitFor(() => h.requests.list().length === 1)
+    const [prompt] = h.requests.list()
+    expect(prompt).toMatchObject({ origin: STORE_ORIGIN, name: 'Brave' })
+    expect(formatPairingCode(prompt!.code)).toBe(code)
+
+    h.requests.approve(prompt!.id)
+    const result = await asking.result
     expect(result).toEqual({ ok: true, token: TEST_TOKEN })
     expect(h.onPaired).toHaveBeenCalledExactlyOnceWith({ origin: STORE_ORIGIN, chromeExtensionId: STORE_ID })
     const client = await connectClient(h.url, TEST_CAPS, { origin: STORE_ORIGIN, token: (result as { token: string }).token })
     expect(client.frames.some(frame => frame.t === 'hello.ok')).toBe(true)
   })
 
-  it('reports a wrong code and learns no token', async () => {
+  it('learns no token from a denied or an unanswered request', async () => {
     const h = await startBridge()
-    const code = h.begin()
-    const wrong = code.startsWith('A') ? `B${code.slice(1)}` : `A${code.slice(1)}`
-    expect(await pairAs(STORE_ORIGIN, h.url, wrong)).toEqual({ ok: false, reason: 'wrong-code' })
+    const denied = askAs(STORE_ORIGIN, h.url)
+    await denied.shown
+    await waitFor(() => h.requests.list().length === 1)
+    h.requests.deny(h.requests.list()[0]!.id)
+    expect(await denied.result).toEqual({ ok: false, reason: 'denied' })
+
+    const ignored = askAs(STORE_ORIGIN, h.url)
+    await ignored.shown
+    await waitFor(() => h.requests.list().length === 1)
+    h.advance(PAIRING_REQUEST_TTL_MS)
+    // The bridge's own clock ran out; reading the queue settles the expiry.
+    expect(h.requests.list()).toEqual([])
+    expect(await ignored.result).toEqual({ ok: false, reason: 'expired' })
     expect(h.onPaired).not.toHaveBeenCalled()
-    expect(h.windows.status()).toMatchObject({ state: 'open', attemptsLeft: PAIRING_MAX_ATTEMPTS - 1 })
+    // Neither is allowed afterwards.
+    const hello = await openSocket(h.url, STORE_ORIGIN)
+    await sendHello(hello.ws, TEST_TOKEN, TEST_CAPS)
+    expect((await hello.closed).code).toBe(BRIDGE_CLOSE_CODES.originRejected)
   })
 
-  it('cannot pair when no window is open, with a used code, or with an expired one', async () => {
+  it('is approved at most once: a replayed approval, by id or by code, pairs nobody', async () => {
     const h = await startBridge()
-    // Nothing started on the host: an unknown extension is refused at the Origin check.
-    expect(await pairAs(STORE_ORIGIN, h.url, 'ABCDEFGH')).toEqual({ ok: false, reason: 'closed' })
-    // The pinned (developer) build reaches the bridge and is told the same.
-    expect(await pairAs(`chrome-extension://${PINNED_CHROME_EXTENSION_ID}`, h.url, 'ABCDEFGH')).toEqual({ ok: false, reason: 'closed' })
+    const first = askAs(STORE_ORIGIN, h.url)
+    const code = await first.shown
+    await waitFor(() => h.requests.list().length === 1)
+    const [prompt] = h.requests.list()
+    expect(h.requests.approveCode('ZZZ-ZZZ')).toBe('none')
+    expect(h.requests.approveCode(code)).toBe('approved')
+    expect((await first.result).ok).toBe(true)
 
-    const code = h.begin()
-    expect((await pairAs(STORE_ORIGIN, h.url, code)).ok).toBe(true)
-    // Replayed: by the same extension and by another one.
-    expect(await pairAs(STORE_ORIGIN, h.url, code)).toEqual({ ok: false, reason: 'closed' })
-    expect(await pairAs(OTHER_ORIGIN, h.url, code)).toEqual({ ok: false, reason: 'closed' })
-
-    const late = h.begin()
-    h.advance(PAIRING_WINDOW_MS)
-    expect(await pairAs(OTHER_ORIGIN, h.url, late)).toEqual({ ok: false, reason: 'closed' })
+    const second = askAs(OTHER_ORIGIN, h.url)
+    const otherCode = await second.shown
+    await waitFor(() => h.requests.list().length === 1)
+    expect(otherCode).not.toBe(code)
+    expect(h.requests.approve(prompt!.id)).toBe(false)
+    expect(h.requests.approveCode(code)).toBe('none')
+    h.requests.denyAll()
+    expect(await second.result).toEqual({ ok: false, reason: 'denied' })
     expect(h.onPaired).toHaveBeenCalledTimes(1)
   })
 
-  it('stops being offered an exchange once the attempts are used up', async () => {
+  it('is turned away while the host already has its fill of waiting requests', async () => {
     const h = await startBridge()
-    const code = h.begin()
-    const wrong = code.startsWith('A') ? `B${code.slice(1)}` : `A${code.slice(1)}`
-    for (let index = 0; index < PAIRING_MAX_ATTEMPTS; index += 1) {
-      expect(await pairAs(STORE_ORIGIN, h.url, wrong)).toEqual({ ok: false, reason: 'wrong-code' })
+    const flood = []
+    for (let index = 0; index < MAX_PENDING_PAIRINGS; index += 1) {
+      const one = askAs(OTHER_ORIGIN, h.url)
+      await one.shown
+      flood.push(one)
     }
-    expect(await pairAs(STORE_ORIGIN, h.url, code)).toEqual({ ok: false, reason: 'closed' })
-    expect(h.windows.start().ok).toBe(false)
-    h.advance(PAIRING_COOLDOWN_MS)
-    expect((await pairAs(STORE_ORIGIN, h.url, h.begin())).ok).toBe(true)
+    const real = askAs(STORE_ORIGIN, h.url)
+    expect(await real.result).toEqual({ ok: false, reason: 'busy' })
+    h.requests.denyAll()
+    for (const one of flood) expect(await one.result).toEqual({ ok: false, reason: 'denied' })
+    // With the queue cleared the real extension gets its prompt.
+    const again = askAs(STORE_ORIGIN, h.url)
+    await again.shown
+    await waitFor(() => h.requests.list().length === 1)
+    h.requests.approve(h.requests.list()[0]!.id)
+    expect((await again.result).ok).toBe(true)
   })
 
-  it('does not complete through another extension: the exchange is bound to the origin that runs it', async () => {
+  it('does not complete through another extension: the code is bound to the origin that asks', async () => {
     const h = await startBridge()
-    const code = h.begin()
     // Another extension carries this extension's exchange on its own socket
-    // (the bridge sees the other Origin; this code believes it is the store build).
-    expect(await pairAs(OTHER_ORIGIN, h.url, code, STORE_ORIGIN)).toEqual({ ok: false, reason: 'untrusted' })
+    // while this code believes it is the store build: the bridge sees the
+    // other Origin and refuses the request outright.
+    const relayed = askAs(OTHER_ORIGIN, h.url, { believed: STORE_ORIGIN })
+    expect(await relayed.result).toEqual({ ok: false, reason: 'untrusted' })
+    expect(h.requests.list()).toEqual([])
     expect(h.onPaired).not.toHaveBeenCalled()
-    // The other extension is not allowed afterwards either.
-    h.windows.cancel()
-    expect((await (await openSocket(h.url, OTHER_ORIGIN)).closed).code).toBe(BRIDGE_CLOSE_CODES.originRejected)
+  })
+
+  it('withdraws its request from the host when the panel cancels', async () => {
+    const h = await startBridge()
+    const controller = new AbortController()
+    const asking = askAs(STORE_ORIGIN, h.url, { signal: controller.signal })
+    await asking.shown
+    await waitFor(() => h.requests.list().length === 1)
+    const [prompt] = h.requests.list()
+    controller.abort()
+    expect(await asking.result).toEqual({ ok: false, reason: 'cancelled' })
+    await waitFor(() => h.requests.list().length === 0)
+    expect(h.requests.approve(prompt!.id)).toBe(false)
   })
 
   it('leaves a connected, already-paired extension untouched while another one pairs', async () => {
     const h = await startBridge()
     const pinned = await connectClient(h.url, TEST_CAPS, { origin: `chrome-extension://${PINNED_CHROME_EXTENSION_ID}` })
-    expect((await pairAs(STORE_ORIGIN, h.url, h.begin())).ok).toBe(true)
+    const asking = askAs(STORE_ORIGIN, h.url)
+    await asking.shown
+    await waitFor(() => h.requests.list().length === 1)
+    h.requests.approve(h.requests.list()[0]!.id)
+    expect((await asking.result).ok).toBe(true)
     expect(h.bridge.connectionCount()).toBe(1)
     expect((await pinned.rpc('session.list', {})).ok).toBe(true)
   })
+
+  it('reports a bridge that does not pair', async () => {
+    const plain = await startTestBridge()
+    expect(await askAs(STORE_ORIGIN, plain.url).result).toEqual({ ok: false, reason: 'unsupported' })
+  })
 })
 
-/** Play the bridge half of an exchange on a fake socket, keyed with `code`. */
-async function playBridge(socket: FakeWebSocket, code: string, token: string, origin = ''): Promise<boolean> {
+type Sent = { t?: string; nonce: string; commit: string; share: string; opening: string; origin: string; name: string }
+const sentFrame = (socket: FakeWebSocket, t: string): Promise<Sent> => vi.waitFor(() => {
+  const frame = socket.sent.find(sent => (sent as Sent).t === t)
+  expect(frame).toBeDefined()
+  return frame as Sent
+})
+
+/** Play the bridge half up to the waiting state; returns how to approve with `token`. */
+async function playBridge(socket: FakeWebSocket) {
   const serverNonce = createBridgeNonce()
   socket.open()
   socket.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: serverNonce })
-  const hello = await vi.waitFor(() => {
-    const frame = socket.sent.find((sent): sent is { t: 'pair.hello'; nonce: string; share: string; origin: string } => (sent as { t?: unknown }).t === 'pair.hello')
-    expect(frame).toBeDefined()
-    return frame!
-  })
-  expect(hello.origin).toBe(origin)
-  const context: PairingContext = { code, serverNonce, clientNonce: hello.nonce, endpoint: bridgeEndpointOfUrl(socket.url)!, origin }
-  const own = createPairingShare(context)
-  const keys = derivePairingKeys(context, own.secret, hello.share, own.share, 'server')!
+  const request = await sentFrame(socket, 'pair.request')
+  const own = createPairingShare()
   socket.receive({ t: 'pair.share', share: own.share })
-  const confirm = await vi.waitFor(() => {
-    const frame = socket.sent.find((sent): sent is { t: 'pair.confirm'; mac: string } => (sent as { t?: unknown }).t === 'pair.confirm')
-    expect(frame).toBeDefined()
-    return frame!
-  })
-  if (!verifyPairingClientConfirmation(keys, confirm.mac)) {
-    socket.close(BRIDGE_CLOSE_CODES.pairingFailed, 'pairing failed: the code did not match')
-    return false
-  }
-  socket.receive({ t: 'pair.ok', ...sealPairingToken(keys, token) })
-  return true
+  const reveal = await sentFrame(socket, 'pair.reveal')
+  expect(verifyPairingCommitment(request.commit, reveal.share, reveal.opening)).toBe(true)
+  const context: PairingContext = { serverNonce, clientNonce: request.nonce, endpoint: bridgeEndpointOfUrl(socket.url)!, origin: request.origin, name: request.name }
+  const session = derivePairingSession(context, own.secret, reveal.share, own.share, 'server')!
+  return { request, session, approve: (token: string) => { socket.receive({ t: 'pair.ok', ...sealPairingToken(session, token) }) } }
 }
 
 describe('pairing client', () => {
-  it('refuses input that cannot be a code without dialing', async () => {
-    vi.stubGlobal('WebSocket', FakeWebSocket)
-    expect(await pairWithBridge(URL_A, 'ABCD', '')).toEqual({ ok: false, reason: 'invalid-code' })
-    expect(await pairWithBridge(URL_A, 'ABCD-EFG0', '')).toEqual({ ok: false, reason: 'invalid-code' })
-    expect(await pairWithBridge('not a url', 'ABCDEFGH', '')).toEqual({ ok: false, reason: 'unreachable' })
-    expect(FakeWebSocket.instances).toHaveLength(0)
-  })
+  const options = (extra: Partial<Parameters<typeof pairWithBridge>[1]> = {}) => ({ origin: '', name: 'Brave', onCode: vi.fn(), ...extra })
 
-  it('accepts the token only from a peer that proves the same code', async () => {
+  it('commits before it sees the bridge\'s share and accepts the token only from the peer of its exchange', async () => {
     vi.stubGlobal('WebSocket', FakeWebSocket)
-    const paired = pairWithBridge(URL_A, 'abcd-efgh', '')
-    expect(await playBridge(FakeWebSocket.instances[0]!, 'ABCDEFGH', 'the-real-bridge-token')).toBe(true)
-    expect(await paired).toEqual({ ok: true, token: 'the-real-bridge-token' })
-    // The code is never sent, in any frame.
-    expect(JSON.stringify(FakeWebSocket.instances[0]!.sent)).not.toMatch(/ABCDEFGH|abcd-efgh/u)
-  })
-
-  it('rejects a squatter that answers without knowing the code', async () => {
-    vi.stubGlobal('WebSocket', FakeWebSocket)
-    // The impostor runs the exchange with a guess and hands over a token of its own.
-    const guessed = pairWithBridge(URL_A, 'ABCDEFGH', '')
+    const settings = options({ name: 'Brave' })
+    const paired = pairWithBridge(URL_A, settings)
     const socket = FakeWebSocket.instances[0]!
-    const serverNonce = createBridgeNonce()
-    socket.open()
-    socket.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: serverNonce })
-    const hello = await vi.waitFor(() => {
-      const frame = socket.sent.find((sent): sent is { t: 'pair.hello'; nonce: string; share: string } => (sent as { t?: unknown }).t === 'pair.hello')
-      expect(frame).toBeDefined()
-      return frame!
-    })
-    const context: PairingContext = { code: 'ZZZZZZZZ', serverNonce, clientNonce: hello.nonce, endpoint: bridgeEndpointOfUrl(URL_A)!, origin: '' }
-    const own = createPairingShare(context)
-    const keys = derivePairingKeys(context, own.secret, hello.share, own.share, 'server')!
-    socket.receive({ t: 'pair.share', share: own.share })
-    await vi.waitFor(() => { expect(socket.sent.some(sent => (sent as { t?: unknown }).t === 'pair.confirm')).toBe(true) })
-    socket.receive({ t: 'pair.ok', ...sealPairingToken(keys, 'attacker-chosen-token') })
-    expect(await guessed).toEqual({ ok: false, reason: 'untrusted' })
+    const bridge = await playBridge(socket)
+    // The request carried a commitment and no share; the share came only after the bridge's.
+    expect(bridge.request).not.toHaveProperty('share')
+    expect(bridge.request.name).toBe('Brave')
+    await vi.waitFor(() => { expect(settings.onCode).toHaveBeenCalledExactlyOnceWith(formatPairingCode(bridge.session.code), expect.any(Number)) })
+    // The code is displayed, never sent.
+    expect(JSON.stringify(socket.sent)).not.toContain(bridge.session.code)
+    bridge.approve('the-real-bridge-token')
+    expect(await paired).toEqual({ ok: true, token: 'the-real-bridge-token' })
+    expect(socket.readyState).toBe(FakeWebSocket.CLOSED)
+  })
 
-    // One that reflects the client's own share back gets no further.
-    const reflected = pairWithBridge(URL_A, 'ABCDEFGH', '')
-    const mirror = FakeWebSocket.instances[1]!
-    mirror.open()
-    mirror.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: createBridgeNonce() })
-    await vi.waitFor(() => { expect(mirror.sent).toHaveLength(1) })
-    mirror.receive({ t: 'pair.share', share: (mirror.sent[0] as { share: string }).share })
-    await vi.waitFor(() => { expect(mirror.sent).toHaveLength(2) })
-    mirror.receive({ t: 'pair.ok', box: 'abcd', mac: (mirror.sent[1] as { mac: string }).mac })
-    expect(await reflected).toEqual({ ok: false, reason: 'untrusted' })
+  it('rejects a token that does not come from its own exchange', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    // A squatter completes the exchange (so a code is shown, which the host
+    // never shows) and then replays a pair.ok recorded from another exchange.
+    const victim = pairWithBridge(URL_A, options())
+    await playBridge(FakeWebSocket.instances[0]!)
+    const elsewhere = pairWithBridge(URL_A, options())
+    const other = await playBridge(FakeWebSocket.instances[1]!)
+    FakeWebSocket.instances[0]!.receive({ t: 'pair.ok', ...sealPairingToken(other.session, 'attacker-chosen-token') })
+    expect(await victim).toEqual({ ok: false, reason: 'untrusted' })
+    other.approve('fine')
+    expect(await elsewhere).toEqual({ ok: true, token: 'fine' })
 
-    // A degenerate share (1) would fix the key: refused before confirming anything.
-    const degenerate = pairWithBridge(URL_A, 'ABCDEFGH', '')
+    // A degenerate share (1) would fix the key: refused, nothing revealed, no code shown.
+    const settings = options()
+    const degenerate = pairWithBridge(URL_A, settings)
     const fixed = FakeWebSocket.instances[2]!
     fixed.open()
     fixed.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: createBridgeNonce() })
-    await vi.waitFor(() => { expect(fixed.sent).toHaveLength(1) })
+    await sentFrame(fixed, 'pair.request')
     fixed.receive({ t: 'pair.share', share: '1'.padStart(768, '0') })
     expect(await degenerate).toEqual({ ok: false, reason: 'untrusted' })
     expect(fixed.sent).toHaveLength(1)
+    expect(settings.onCode).not.toHaveBeenCalled()
   })
 
   it('maps what the bridge says to a reason the panel can explain', async () => {
     vi.stubGlobal('WebSocket', FakeWebSocket)
     const run = async (act: (socket: FakeWebSocket) => void | Promise<void>): Promise<PairingResult> => {
       const before = FakeWebSocket.instances.length
-      const result = pairWithBridge(URL_A, 'ABCDEFGH', '')
+      const result = pairWithBridge(URL_A, options())
       await act(FakeWebSocket.instances[before]!)
       return result
     }
-    const afterHello = async (socket: FakeWebSocket): Promise<void> => {
+    const requested = async (socket: FakeWebSocket): Promise<void> => {
       socket.open()
       socket.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: createBridgeNonce() })
-      await vi.waitFor(() => { expect(socket.sent).toHaveLength(1) })
+      await sentFrame(socket, 'pair.request')
     }
-    // Nothing listening.
     expect(await run((socket) => { socket.close(1006) })).toEqual({ ok: false, reason: 'unreachable' })
-    // Refused at the Origin check (unknown extension, no window open).
-    expect(await run((socket) => { socket.open(); socket.close(BRIDGE_CLOSE_CODES.originRejected) })).toEqual({ ok: false, reason: 'closed' })
-    expect(await run(async (socket) => { await afterHello(socket); socket.close(BRIDGE_CLOSE_CODES.pairingClosed) })).toEqual({ ok: false, reason: 'closed' })
-    // The request itself was refused (endpoint or origin did not describe the socket).
-    expect(await run(async (socket) => { await afterHello(socket); socket.close(BRIDGE_CLOSE_CODES.pairingFailed) })).toEqual({ ok: false, reason: 'untrusted' })
-    // A bridge that predates pairing does not know the frame.
-    expect(await run(async (socket) => { await afterHello(socket); socket.close(1008, 'unparseable frame') })).toEqual({ ok: false, reason: 'unsupported' })
+    // A bridge without pairing refuses an unknown extension at the Origin check; an older one does not know the frame.
+    expect(await run((socket) => { socket.open(); socket.close(BRIDGE_CLOSE_CODES.originRejected) })).toEqual({ ok: false, reason: 'unsupported' })
+    expect(await run(async (socket) => { await requested(socket); socket.close(1008, 'unparseable frame') })).toEqual({ ok: false, reason: 'unsupported' })
+    // Too many requests waiting.
+    expect(await run(async (socket) => { await requested(socket); socket.close(BRIDGE_CLOSE_CODES.pairingClosed) })).toEqual({ ok: false, reason: 'busy' })
+    // The request did not describe the socket (something sits in between).
+    expect(await run(async (socket) => { await requested(socket); socket.close(BRIDGE_CLOSE_CODES.pairingFailed) })).toEqual({ ok: false, reason: 'untrusted' })
+    // Answers while waiting.
+    expect(await run(async (socket) => { await playBridge(socket); socket.close(BRIDGE_CLOSE_CODES.pairingDenied) })).toEqual({ ok: false, reason: 'denied' })
+    expect(await run(async (socket) => { await playBridge(socket); socket.close(BRIDGE_CLOSE_CODES.pairingClosed) })).toEqual({ ok: false, reason: 'expired' })
+    expect(await run(async (socket) => { await playBridge(socket); socket.close(1006) })).toEqual({ ok: false, reason: 'unreachable' })
     // Another handshake version: a token would not help.
     expect(await run((socket) => {
       socket.open()
       socket.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION + 1, nonce: createBridgeNonce() })
     })).toEqual({ ok: false, reason: 'version-mismatch' })
+    expect(await pairWithBridge('not a url', options())).toEqual({ ok: false, reason: 'unreachable' })
   })
 
-  it('gives up after its time budget', async () => {
+  it('gives up after its time budgets and when cancelled', async () => {
     vi.useFakeTimers()
     vi.stubGlobal('WebSocket', FakeWebSocket)
-    const silent = pairWithBridge(URL_A, 'ABCDEFGH', '', 1_000)
+    // Nothing answers the exchange.
+    const silent = pairWithBridge(URL_A, options({ exchangeTimeoutMs: 1_000 }))
     FakeWebSocket.instances[0]!.open()
     await vi.advanceTimersByTimeAsync(1_000)
-    expect(await silent).toEqual({ ok: false, reason: 'timeout' })
+    expect(await silent).toEqual({ ok: false, reason: 'unreachable' })
     expect(FakeWebSocket.instances[0]!.readyState).toBe(FakeWebSocket.CLOSED)
-    const absent = pairWithBridge(URL_A, 'ABCDEFGH', '', 1_000)
-    await vi.advanceTimersByTimeAsync(1_000)
-    expect(await absent).toEqual({ ok: false, reason: 'unreachable' })
+
+    // Nobody answers the prompt.
+    const settings = options({ exchangeTimeoutMs: 1_000, answerTimeoutMs: 5_000 })
+    const unanswered = pairWithBridge(URL_A, settings)
+    const socket = FakeWebSocket.instances[1]!
+    socket.open()
+    socket.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: createBridgeNonce() })
+    socket.receive({ t: 'pair.share', share: createPairingShare().share })
+    expect(settings.onCode).toHaveBeenCalledWith(expect.stringMatching(/^.{3}-.{3}$/u), 5_000)
+    // The exchange budget no longer applies once the code is shown.
+    await vi.advanceTimersByTimeAsync(4_999)
+    expect(socket.readyState).toBe(FakeWebSocket.OPEN)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(await unanswered).toEqual({ ok: false, reason: 'expired' })
+
+    const controller = new AbortController()
+    controller.abort()
+    expect(await pairWithBridge(URL_A, options({ signal: controller.signal }))).toEqual({ ok: false, reason: 'cancelled' })
+    expect(FakeWebSocket.instances).toHaveLength(2)
   })
 
   it('reads its own origin only when it is an extension origin', () => {
@@ -278,31 +337,17 @@ describe('pairing client', () => {
     expect(extensionOrigin({ origin: STORE_ORIGIN })).toBe(STORE_ORIGIN)
     expect(extensionOrigin({ origin: 'moz-extension://per-install-uuid' })).toBe('moz-extension://per-install-uuid')
   })
-})
 
-describe('pairing with one of several local bridges', () => {
-  const urls = ['ws://127.0.0.1:3080/ext/bridge', 'ws://127.0.0.1:43189/ext/bridge', 'ws://127.0.0.1:43190/ext/bridge']
-
-  it('asks each bridge until one has the window open for this code', async () => {
-    const pairOne = vi.fn(async (url: string): Promise<PairingResult> => url === urls[1]
-      ? { ok: true, token: 'token-of-second' }
-      : { ok: false, reason: 'closed' })
-    expect(await pairWithAnyBridge(urls, 'ABCDEFGH', STORE_ORIGIN, pairOne)).toEqual({ ok: true, token: 'token-of-second', url: urls[1] })
-    expect(pairOne.mock.calls.map(call => call[0])).toEqual(urls.slice(0, 2))
-    expect(pairOne).toHaveBeenCalledWith(urls[0], 'ABCDEFGH', STORE_ORIGIN)
-  })
-
-  it('stops at a wrong code, skips squatters, and reports the most telling failure', async () => {
-    const wrong = vi.fn(async (url: string): Promise<PairingResult> => ({ ok: false, reason: url === urls[1] ? 'wrong-code' : 'untrusted' }))
-    expect(await pairWithAnyBridge(urls, 'ABCDEFGH', '', wrong)).toEqual({ ok: false, reason: 'wrong-code' })
-    expect(wrong).toHaveBeenCalledTimes(2)
-
-    const none = vi.fn(async (url: string): Promise<PairingResult> => ({ ok: false, reason: url === urls[0] ? 'untrusted' : url === urls[1] ? 'closed' : 'unreachable' }))
-    expect(await pairWithAnyBridge(urls, 'ABCDEFGH', '', none)).toEqual({ ok: false, reason: 'closed' })
-    expect(none).toHaveBeenCalledTimes(3)
-
-    expect(await pairWithAnyBridge([], 'ABCDEFGH', '', none)).toEqual({ ok: false, reason: 'unreachable' })
-    expect(await pairWithAnyBridge(urls, 'nope', '', none)).toEqual({ ok: false, reason: 'invalid-code' })
-    expect(none).toHaveBeenCalledTimes(3)
+  it('names the browser the way the user knows it', () => {
+    const chromium = (brand: string) => ({ userAgentData: { brands: [{ brand: 'Not_A Brand' }, { brand: 'Chromium' }, { brand }] }, userAgent: 'Mozilla/5.0 Chrome/140.0' })
+    expect(browserName({ brave: {}, ...chromium('Chromium') })).toBe('Brave')
+    expect(browserName(chromium('Brave'))).toBe('Brave')
+    expect(browserName(chromium('Google Chrome'))).toBe('Chrome')
+    expect(browserName(chromium('Microsoft Edge'))).toBe('Edge')
+    expect(browserName(chromium('Chromium'))).toBe('Chromium')
+    expect(browserName({ userAgent: 'Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0' })).toBe('Firefox')
+    expect(browserName({ userAgent: 'Mozilla/5.0 Chrome/140.0 Safari/537.36' })).toBe('Chrome')
+    expect(browserName({})).toBe('Browser')
+    expect(browserName(undefined)).toBe('Browser')
   })
 })

@@ -1,16 +1,16 @@
 /**
- * Extension half of one-step pairing: obtain the bridge token with the short
- * code the user read off their DSH host, for builds that have no
- * installer-written `bridge-token` file (Web Store, Brave, Firefox).
+ * Extension half of one-step pairing: ask the local DSH host for the bridge
+ * token, for builds that have no installer-written `bridge-token` file (Web
+ * Store, Brave, Firefox).
  *
- * The exchange is a password-authenticated key exchange keyed by the code
- * (see the bridge's pairing.ts). Nothing received on the socket is trusted
- * until the peer's `pair.ok` verifies under the exchange key, which only a
- * peer holding the same code can produce: a process squatting on a probed
- * port cannot hand this extension a token of its choosing, and learns nothing
- * about the code it could test offline. The transcript binds this extension's
- * own origin and the endpoint it dialed, so the exchange cannot be relayed
- * through another extension or another port.
+ * The extension asks; the user answers in DSH. Both sides display a short
+ * code derived from a key agreement (see the bridge's pairing.ts), and the
+ * user approves in DSH only when the two codes are the same. A process
+ * squatting on a probed port, or anything relaying the exchange, ends up
+ * with a different code on the host side, so the user's approval never
+ * reaches it; and the token arrives encrypted under a key that only the
+ * approved exchange's two ends hold. Nothing received on the socket is
+ * stored unless it opens under that key.
  *
  * @module
  */
@@ -22,42 +22,64 @@ import {
   bridgeDialUrl,
   bridgeEndpointOfUrl,
   createBridgeNonce,
+  isPairingName,
   isServerFrame,
   parseBridgeFrame,
   type ClientFrame,
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import {
+  createPairingOpening,
   createPairingShare,
-  derivePairingKeys,
-  normalizePairingCode,
+  derivePairingSession,
+  formatPairingCode,
   openPairingToken,
-  pairingClientConfirmation,
+  pairingCommitment,
   type PairingContext,
-  type PairingKeys,
+  type PairingSession,
 } from '@natgurlain/dsh-bridge-browser/src/pairing.ts'
 
-/** How long one exchange may take end to end. */
-export const PAIRING_TIMEOUT_MS = 8_000
+/** How long the exchange may take before the code exists. */
+export const PAIRING_EXCHANGE_TIMEOUT_MS = 8_000
+
+/**
+ * How long the request waits for the user's answer. Slightly longer than the
+ * bridge's own limit (two minutes), which normally ends the wait first.
+ */
+export const PAIRING_ANSWER_TIMEOUT_MS = 125_000
 
 /**
  * Why pairing did not produce a token:
- * - `invalid-code`: what was typed cannot be a pairing code;
- * - `closed`: the bridge has no pairing window open (not started on the host,
- *   expired, already used, or out of attempts);
- * - `wrong-code`: the bridge ran the exchange and the code did not match;
- * - `unreachable`: nothing answered at the address;
+ * - `denied`: the user denied the request in DSH;
+ * - `expired`: nobody answered in time;
+ * - `busy`: the bridge has too many requests waiting, or does not pair;
+ * - `unreachable`: nothing answered at the address, or DSH went away;
  * - `unsupported`: the bridge is too old to pair;
  * - `version-mismatch`: the bridge speaks another handshake version, so a
  *   token would not help;
- * - `untrusted`: the peer could not prove the code, or the exchange was
- *   altered on the way;
- * - `timeout`: the exchange did not finish in time.
+ * - `untrusted`: the exchange was altered on the way, or the answer did not
+ *   come from the peer of this exchange;
+ * - `cancelled`: the panel withdrew the request.
  */
 export type PairingFailure =
-  | 'invalid-code' | 'closed' | 'wrong-code' | 'unreachable' | 'unsupported' | 'version-mismatch' | 'untrusted' | 'timeout'
+  | 'denied' | 'expired' | 'busy' | 'unreachable' | 'unsupported' | 'version-mismatch' | 'untrusted' | 'cancelled'
 
-/** Outcome of one pairing attempt. */
+/** Outcome of one pairing request. */
 export type PairingResult = { ok: true; token: string } | { ok: false; reason: PairingFailure }
+
+/** What one pairing request needs besides the address. */
+export interface PairingOptions {
+  /** This extension's origin (see {@link extensionOrigin}). */
+  origin: string
+  /** Browser name for the prompt in DSH (see {@link browserName}). */
+  name: string
+  /** Called once, with the formatted code to display, when the request is waiting for the user's answer. */
+  onCode: (code: string, answerTimeoutMs: number) => void
+  /** Aborting withdraws the request (the prompt disappears in DSH). */
+  signal?: AbortSignal
+  /** Budgets; the defaults are the constants above. */
+  exchangeTimeoutMs?: number
+  answerTimeoutMs?: number
+}
 
 /**
  * This extension's own origin (`chrome-extension://<id>` or
@@ -72,25 +94,45 @@ export function extensionOrigin(
   return typeof origin === 'string' && /^(?:chrome|moz)-extension:\/\//u.test(origin) ? origin : ''
 }
 
+/** Browser brands as they appear in `navigator.userAgentData.brands`, most specific first. */
+const BRANDS = ['Brave', 'Microsoft Edge', 'Opera', 'Vivaldi', 'Google Chrome', 'Chromium'] as const
+
 /**
- * Run one pairing exchange against one bridge.
+ * The browser's name as the user knows it, for the prompt in DSH ("Brave
+ * wants to connect"). It is a label, not an identity: the code is what the
+ * user compares.
+ * @param nav - where to read it from (the worker's own navigator by default).
+ */
+export function browserName(
+  nav: { brave?: unknown; userAgent?: unknown; userAgentData?: { brands?: unknown } } | undefined = (globalThis as { navigator?: object }).navigator,
+): string {
+  if (nav?.brave !== undefined) return 'Brave'
+  const brands = Array.isArray(nav?.userAgentData?.brands)
+    ? (nav.userAgentData.brands as Array<{ brand?: unknown }>).map(entry => entry?.brand).filter((brand): brand is string => typeof brand === 'string')
+    : []
+  const brand = BRANDS.find(candidate => brands.includes(candidate))
+  if (brand !== undefined) return brand === 'Google Chrome' ? 'Chrome' : brand === 'Microsoft Edge' ? 'Edge' : brand
+  const agent = typeof nav?.userAgent === 'string' ? nav.userAgent : ''
+  if (/\bFirefox\//u.test(agent)) return 'Firefox'
+  if (/\bEdg\//u.test(agent)) return 'Edge'
+  if (/\bChrome\//u.test(agent)) return 'Chrome'
+  return 'Browser'
+}
+
+/**
+ * Run one pairing request against one bridge: exchange keys, show the code,
+ * wait for the user's answer in DSH.
  * @param url - bridge WebSocket URL.
- * @param codeInput - the code as the user typed it.
- * @param origin - this extension's origin (see {@link extensionOrigin}).
- * @param timeoutMs - budget for the whole exchange.
+ * @param options - identity, the code callback, cancellation.
  * @returns the token, or why there is none. Never throws.
  */
-export function pairWithBridge(
-  url: string,
-  codeInput: string,
-  origin: string,
-  timeoutMs: number = PAIRING_TIMEOUT_MS,
-): Promise<PairingResult> {
-  const code = normalizePairingCode(codeInput)
-  if (code === undefined) return Promise.resolve({ ok: false, reason: 'invalid-code' })
+export function pairWithBridge(url: string, options: PairingOptions): Promise<PairingResult> {
   const dialUrl = bridgeDialUrl(url)
   const endpoint = bridgeEndpointOfUrl(dialUrl)
   if (endpoint === undefined) return Promise.resolve({ ok: false, reason: 'unreachable' })
+  if (options.signal?.aborted === true) return Promise.resolve({ ok: false, reason: 'cancelled' })
+  const name = isPairingName(options.name) ? options.name : 'Browser'
+  const answerTimeoutMs = options.answerTimeoutMs ?? PAIRING_ANSWER_TIMEOUT_MS
 
   return new Promise<PairingResult>((resolve) => {
     let socket: WebSocket
@@ -100,20 +142,24 @@ export function pairWithBridge(
       resolve({ ok: false, reason: 'unreachable' })
       return
     }
-    type Stage = 'challenge' | 'share' | 'ok' | 'done'
+    type Stage = 'challenge' | 'share' | 'waiting' | 'done'
     let stage: Stage = 'challenge'
     let opened = false
     let context: PairingContext | undefined
-    let own: ReturnType<typeof createPairingShare> | undefined
-    let keys: PairingKeys | undefined
+    const own = createPairingShare()
+    const opening = createPairingOpening()
+    let session: PairingSession | undefined
+    const onAbort = (): void => { finish({ ok: false, reason: 'cancelled' }) }
     const finish = (result: PairingResult): void => {
       if (stage === 'done') return
       stage = 'done'
       clearTimeout(timer)
+      options.signal?.removeEventListener('abort', onAbort)
       resolve(result)
       try { socket.close() } catch { /* already closed */ }
     }
-    const timer = setTimeout(() => { finish({ ok: false, reason: opened ? 'timeout' : 'unreachable' }) }, timeoutMs)
+    let timer = setTimeout(() => { finish({ ok: false, reason: 'unreachable' }) }, options.exchangeTimeoutMs ?? PAIRING_EXCHANGE_TIMEOUT_MS)
+    options.signal?.addEventListener('abort', onAbort, { once: true })
     const send = (frame: ClientFrame): void => { socket.send(JSON.stringify(frame)) }
 
     socket.addEventListener('open', () => { opened = true })
@@ -127,22 +173,27 @@ export function pairWithBridge(
             finish({ ok: false, reason: 'version-mismatch' })
             return
           }
-          context = { code, serverNonce: frame.nonce, clientNonce: createBridgeNonce(), endpoint, origin }
-          own = createPairingShare(context)
-          send({ t: 'pair.hello', v: PAIRING_PROTOCOL_VERSION, nonce: context.clientNonce, endpoint, origin, share: own.share })
+          context = { serverNonce: frame.nonce, clientNonce: createBridgeNonce(), endpoint, origin: options.origin, name }
+          // Committed before the bridge's share is known, revealed after.
+          send({
+            t: 'pair.request', v: PAIRING_PROTOCOL_VERSION, nonce: context.clientNonce, endpoint, origin: options.origin, name,
+            commit: pairingCommitment(own.share, opening),
+          })
           stage = 'share'
-        } else if (stage === 'share' && frame.t === 'pair.share' && context !== undefined && own !== undefined) {
-          keys = derivePairingKeys(context, own.secret, own.share, frame.share, 'client')
-          if (keys === undefined) {
+        } else if (stage === 'share' && frame.t === 'pair.share' && context !== undefined) {
+          session = derivePairingSession(context, own.secret, own.share, frame.share, 'client')
+          if (session === undefined) {
             finish({ ok: false, reason: 'untrusted' })
             return
           }
-          send({ t: 'pair.confirm', mac: pairingClientConfirmation(keys) })
-          stage = 'ok'
-        } else if (stage === 'ok' && frame.t === 'pair.ok' && keys !== undefined) {
-          // Only a peer that derived the same keys from the same code can
-          // produce this; anything else is not the bridge the user is pairing with.
-          const token = openPairingToken(keys, frame.box, frame.mac)
+          send({ t: 'pair.reveal', share: own.share, opening })
+          stage = 'waiting'
+          clearTimeout(timer)
+          timer = setTimeout(() => { finish({ ok: false, reason: 'expired' }) }, answerTimeoutMs)
+          options.onCode(formatPairingCode(session.code), answerTimeoutMs)
+        } else if (stage === 'waiting' && frame.t === 'pair.ok' && session !== undefined) {
+          // Only the peer of this exchange can produce a box that opens.
+          const token = openPairingToken(session, frame.box, frame.mac)
           finish(token === undefined ? { ok: false, reason: 'untrusted' } : { ok: true, token })
         }
       } catch {
@@ -151,68 +202,29 @@ export function pairWithBridge(
     })
     socket.addEventListener('close', (event: CloseEvent) => {
       if (stage === 'done') return
-      const confirmed = stage === 'ok'
+      const waiting = stage === 'waiting'
       switch (event.code) {
+        case BRIDGE_CLOSE_CODES.pairingDenied:
+          finish({ ok: false, reason: 'denied' })
+          return
         case BRIDGE_CLOSE_CODES.pairingClosed:
-        // An extension the bridge does not know yet is refused at the Origin
-        // check unless a pairing window is open.
-        case BRIDGE_CLOSE_CODES.originRejected:
-          finish({ ok: false, reason: 'closed' })
+          finish({ ok: false, reason: waiting ? 'expired' : 'busy' })
           return
         case BRIDGE_CLOSE_CODES.pairingFailed:
-          // After our confirmation: the code. Before it: the request itself
-          // did not describe this socket (something sits in between).
-          finish({ ok: false, reason: confirmed ? 'wrong-code' : 'untrusted' })
+          finish({ ok: false, reason: 'untrusted' })
           return
+        // A bridge that does not pair refuses an unknown extension at the
+        // Origin check; one that predates pairing closes on the unknown frame.
+        case BRIDGE_CLOSE_CODES.originRejected:
         case 1008:
-          // A bridge that predates pairing closes on the unknown first frame.
-          finish({ ok: false, reason: stage === 'challenge' ? 'unreachable' : 'unsupported' })
+          finish({ ok: false, reason: 'unsupported' })
           return
         default:
-          finish({ ok: false, reason: opened ? 'untrusted' : 'unreachable' })
+          finish({ ok: false, reason: 'unreachable' })
       }
     })
     socket.addEventListener('error', () => {
       if (!opened) finish({ ok: false, reason: 'unreachable' })
     })
   })
-}
-
-/** Rank of a failure when several bridges were tried: the most telling one is reported. */
-const FAILURE_RANK: Record<PairingFailure, number> = {
-  'wrong-code': 7,
-  'closed': 6,
-  'version-mismatch': 5,
-  'unsupported': 4,
-  'untrusted': 3,
-  'timeout': 2,
-  'unreachable': 1,
-  'invalid-code': 0,
-}
-
-/**
- * Pair with whichever of several local bridges has a pairing window open for
- * this code. A bridge that verified the exchange and found the code wrong
- * ends the search: the remaining ones are not asked.
- * @param urls - candidate bridge URLs, in order of preference.
- * @param codeInput - the code as the user typed it.
- * @param origin - this extension's origin.
- * @param pairOne - one exchange (injectable for tests).
- * @returns the token and the bridge that issued it, or the most telling failure.
- */
-export async function pairWithAnyBridge(
-  urls: readonly string[],
-  codeInput: string,
-  origin: string,
-  pairOne: (url: string, code: string, origin: string) => Promise<PairingResult> = pairWithBridge,
-): Promise<{ ok: true; token: string; url: string } | { ok: false; reason: PairingFailure }> {
-  if (normalizePairingCode(codeInput) === undefined) return { ok: false, reason: 'invalid-code' }
-  let reason: PairingFailure = 'unreachable'
-  for (const url of urls) {
-    const result = await pairOne(url, codeInput, origin)
-    if (result.ok) return { ok: true, token: result.token, url }
-    if (FAILURE_RANK[result.reason] > FAILURE_RANK[reason]) reason = result.reason
-    if (result.reason === 'wrong-code') break
-  }
-  return { ok: false, reason }
 }

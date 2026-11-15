@@ -20,7 +20,16 @@ export async function apply(ctx, config) {
     assert.equal(request.method, 'POST')
     const chunks = []
     for await (const chunk of request) chunks.push(chunk)
-    const { name, args, cancelAfterMs, rpc, skill } = JSON.parse(Buffer.concat(chunks).toString())
+    const { name, args, cancelAfterMs, rpc, skill, api } = JSON.parse(Buffer.concat(chunks).toString())
+    if (api !== undefined) {
+      // An authenticated owner request on dsh's shared `/api` channel, the way
+      // the DSH Web page reaches a plugin's exact route (pairing controls).
+      const answer = await ctx.connection.createSharedFetchHandler('/api').fetch(new Request(`http://127.0.0.1${api.path}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(api.body),
+      }), peer)
+      response.end(JSON.stringify({ status: answer.status, body: await answer.json().catch(() => null) }))
+      return
+    }
     if (skill !== undefined) {
       // The host's real skill registry (learning smoke: saved workflows as skills).
       const skills = ctx.get('skills')

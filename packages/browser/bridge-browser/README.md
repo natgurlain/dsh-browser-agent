@@ -11,6 +11,7 @@ Page snapshots contain structured text with numbered controls and masked form fi
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `token` | `string` | generated | Fixed bearer token. When absent, a token is generated on first boot and saved to `~/.dsh/ext-bridge-token` (chmod 0600). The boot log shows the file path. |
+| `pairing` | `boolean` | `true` | Let an extension without a token (a store or Brave build, Firefox) ask to pair; the user approves each request in DSH after comparing a six-character code. `false` accepts only the provisioned or pasted token and the configured extension IDs. |
 | `toolTimeoutMs` | `number` | 90000 | Per-tool-call budget, leaving time for the extension's 60-second approval window. |
 | `snapshotMaxChars` | `number` | 32000 | Upper bound on one rendered snapshot's characters, minimum 500 (also negotiated to the extension via `hello.ok` caps). |
 | `maxInteractiveItems` | `number` | 60 | Upper bound on interactive inventory items per snapshot. |
@@ -185,4 +186,5 @@ Rules that still hold:
 
 - One active extension connection at a time.
 - Accessible cross-origin iframes are snapshotted and operated with stable `(frame, index)` addresses. Restricted or short-lived frames are reported as unavailable without failing the whole page snapshot.
-- Token rotation is manual (edit `~/.dsh/ext-bridge-token` or set `token` in config); no expiry.
+- Token rotation is manual (edit `~/.dsh/ext-bridge-token` or set `token` in config); no expiry. An extension that obtained the token by pairing must pair again after a rotation.
+- Pairing (for extensions without an installer-written token) relies on the user comparing a six-character code before approving the prompt in DSH; see `docs/store/README.md`. Approved Chrome extension IDs are kept in `~/.dsh/browser-paired-extensions.json`; delete an entry there and restart DSH to revoke one (rotate the token as well, since the extension still holds it).

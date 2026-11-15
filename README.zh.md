@@ -189,7 +189,7 @@ pnpm install
 pnpm --filter dsh-browser-extension run build:firefox
 ```
 
-桥地址仍会自动探测。Firefox 附加组件不由安装器安装，因此需要把 `~/.dsh/ext-bridge-token` 中的桥接 token 复制到扩展设置中（dsh 启动日志会报告该文件路径）。签名发布时可直接使用同一份 `dist-firefox/` 产物。
+桥地址仍会自动探测。Firefox 附加组件不由安装器安装：打开侧边栏后，DSH 中会出现配对提示，确认其中的配对码与侧边栏显示的相同后点击批准即可（见 [docs/store/README.md](docs/store/README.md#pairing-a-store-installed-extension)）。把 `~/.dsh/ext-bridge-token` 中的桥接 token 粘贴到扩展设置中仍可作为备用方式。签名发布时可直接使用同一份 `dist-firefox/` 产物。
 
 ### 启动与使用
 
@@ -213,7 +213,7 @@ Chrome 本机使用无需配置：安装器会把桥接 token 放到已安装的
 
 - 确认 DSH 正在运行。安装或更新后，重启 DSH 并重新打开侧栏。
 - 打开**设置 → 自动检测**，选择需要连接的 DSH 实例。
-- 使用 Firefox 时，在设置中填写 `~/.dsh/ext-bridge-token` 中的 token。
+- Firefox 或从商店安装的版本会在侧边栏显示配对码：在 DSH 中批准显示相同配对码的提示（或运行 `/browser-pair approve <配对码>`）。备用方式：在设置中填写 `~/.dsh/ext-bridge-token` 中的 token。
 - 连接远程 DSH 时，在设置中填写服务器地址和对应的桥接 token。
 - 如果插件配置固定了自己的 `token`，请把该 token 粘贴到扩展设置中；已安装扩展里的副本只跟随 `~/.dsh/ext-bridge-token`。
 - 更新后请同时重新加载扩展并重启 DSH：桥接握手带有版本号，旧版扩展或插件会被拒绝，并以「protocol version mismatch」关闭连接。
@@ -223,7 +223,7 @@ Chrome 本机使用无需配置：安装器会把桥接 token 放到已安装的
 - 所有客户端（包括本机回环）都通过桥接令牌完成双向 HMAC 质询-应答（握手 v3）；令牌本身不经过网络，扩展会拒绝无法反向证明令牌的桥接。
 - 两侧证明都绑定扩展实际拨号的地址和端口，桥接会与它接受的套接字核对，因此从其他端口转发握手的本地进程无法完成握手。握手之后每一帧（双向）都带有按连接派生的密钥和严格递增序号的 MAC；未封装、重放、乱序或篡改的帧会直接断开连接。帧只做认证、不加密。经端口转发（Docker `-p`、SSH 隧道）以不同端口访问桥接时会被拒绝，除非在插件配置 `forwardedPorts` 中列出该回环端口**并且**设置 `allowForwardedPorts: true`。在转发端口上监听的程序位于中间，可以读取每一帧（会话记录、页面内容），因此只列出你控制的转发：在列出的端口空闲时绑定它的本地进程可以借它中转。双方声明的能力（caps）也绑定在两侧证明中（协议 v4），即使是受信任的转发也无法开启开发者工具组或修改快照上限。桥接 URL 中的 DNS 名称仅在桥接监听回环地址时被接受；局域网或远程桥接必须用 IP 地址连接。
 - 插件配置中固定的 `token` 至少 32 个可打印字符且具备足够熵（例如 `openssl rand -hex 32`），否则插件启动失败，因为截获的握手可让本地观察者离线猜测弱 token。
-- Chrome 连接只接受 manifest key 固定的扩展 ID（`klmdgljhcjbbpjcplbanjeclilghnaoh`）。若使用不同 key 的构建或 Web Store 版本，请在 bridge-browser 插件配置中设置 `allowedChromeExtensionIds`；用 `pnpm --filter dsh-browser-extension run build:store` 构建商店包，该命令会去掉商店不接受的 `key`。
+- Chrome 连接只接受 manifest key 固定的扩展 ID（`klmdgljhcjbbpjcplbanjeclilghnaoh`）。其他构建（Web Store 或 Brave 安装的版本）在用户于 DSH 中批准其配对请求后即被接受，其 ID 记录在 `~/.dsh/browser-paired-extensions.json`；bridge-browser 插件配置中的 `allowedChromeExtensionIds` 仍可用于不经配对直接允许某个构建。用 `pnpm --filter dsh-browser-extension run build:store` 构建商店包，该命令会去掉商店不接受的 `key`。
 - 桥只转发扩展实际用到的 Host 方法。扩展只能在桥接自己创建的会话中发送提示、修改设置、注入页面快照或删除会话：`session.create` 总是新建会话（忽略扩展传入的 `sessionId`、`cwd`、`workspaceId`），归属记录在 `~/.dsh/browser-bridge-sessions.json` 和桥接工作区目录中。桌面端和 CLI 会话不再出现在侧边栏的历史列表中；它们驱动浏览器时，仍可查看历史（用于审批）和停止，但不能从浏览器发送提示。子代理会话始终不可访问。
 - 新的浏览器会话即使宿主默认是完全访问，也会以受限预设启动；切换到完全访问预设，以及在当前运行完全访问预设的会话中发送提示、注入或执行命令都会被拒绝。只有宿主预设表中沙箱为 `read-only` 或 `workspace-write` 的预设（或列在 `safePermissionPresets` 中的预设）被视为受限；未知预设、改名的完全访问预设以及 `custom` 都会被拒绝，`/permission` 只接受严格的 `/permission <preset>` 形式。在插件配置中设置 `allowDangerFullAccess: true` 可解除这些限制。
 - 中转站的已存密钥只会发送到保存时的地址：用不同地址测试模型列表需要重新输入密钥；修改中转站地址但未重新输入密钥时，已存密钥会被清除。

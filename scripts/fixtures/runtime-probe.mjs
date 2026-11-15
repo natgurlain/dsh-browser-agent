@@ -58,6 +58,30 @@ export async function apply(ctx, config) {
       })
     },
   }), 'runtime-smoke-probe: owner invoke route')
+  // An authenticated owner request on dsh's shared `/api` channel, the way the
+  // DSH Web page reaches a plugin's exact route (the smoke has no browser cookie).
+  const ownerApi = ctx.connection.createSharedFetchHandler('/api')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/smoke/owner-api',
+    handler: (req, res) => {
+      let body = ''
+      req.on('data', chunk => { body += chunk })
+      req.on('end', async () => {
+        try {
+          const { path, body: payload } = JSON.parse(body)
+          const response = await ownerApi.fetch(new Request(`http://127.0.0.1${path}`, {
+            method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
+          }), peer)
+          res.writeHead(response.status, { 'content-type': response.headers.get('content-type') ?? 'text/plain' })
+          res.end(await response.text())
+        } catch (error) {
+          res.writeHead(500)
+          res.end(String(error))
+        }
+      })
+    },
+  }), 'runtime-smoke-probe: owner api route')
   // Stand-in for another owner client (the DSH web UI or CLI) answering
   // approvals: browser approvals forwarded by the bridge reach dsh's real
   // approval service, which asks every answerer. Only browser tools are

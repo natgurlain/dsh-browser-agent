@@ -111,6 +111,13 @@ interface DiscoveryResultMessage {
   error?: { code?: unknown; message?: unknown }
 }
 
+interface PairCodeMessage {
+  type: 'pair.code'
+  id: string
+  /** The code to display while the request waits for the user's answer in DSH. */
+  code: string
+}
+
 interface PairResultMessage {
   type: 'pair.result'
   id: string
@@ -219,7 +226,7 @@ interface DevToolsDetachResultMessage {
   error?: { message?: unknown }
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | TabAffinityReturnResultMessage | SelectionMessage | SessionResumeHintMessage | DevToolsStatusMessage | DevToolsDetachResultMessage | DiscoveryProgressMessage | DiscoveryResultMessage | PairResultMessage | KillSwitchMessage | PauseStateMessage
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | TabAffinityReturnResultMessage | SelectionMessage | SessionResumeHintMessage | DevToolsStatusMessage | DevToolsDetachResultMessage | DiscoveryProgressMessage | DiscoveryResultMessage | PairCodeMessage | PairResultMessage | KillSwitchMessage | PauseStateMessage
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -274,11 +281,14 @@ export interface PanelApi {
   cancelDiscovery(): Promise<void>
   onDiscoveryProgress(callback: (progress: DiscoveryProgress) => void): () => void
   /**
-   * Pair with the local DSH host using the one-time code it shows. Resolves
-   * once the token is stored; rejects with a {@link PanelRpcError} whose
-   * `code` is the background's `PairingFailure`.
+   * Ask the local DSH host to pair. `onCode` receives the code to display
+   * while the request waits for the user's approval in DSH. Resolves once the
+   * token is stored; rejects with a {@link PanelRpcError} whose `code` is the
+   * background's `PairingFailure`.
    */
-  pair(code: string): Promise<void>
+  pair(onCode: (code: string) => void): Promise<void>
+  /** Withdraw a pairing request that is still waiting. */
+  cancelPairing(): Promise<void>
   /** Scope this panel's selections to its own browser window. */
   registerWindow(windowId: number): Promise<void>
   setActiveSession(sessionId: string, isNew?: boolean): Promise<void>
@@ -323,7 +333,7 @@ export function connectPanel(): PanelApi {
   const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null, discovery: DiscoveryStatus, address?: string, failure?: BridgeFailure, standing?: StandingStatus) => void>()
   const discoveryProgressListeners = new Set<(progress: DiscoveryProgress) => void>()
   const pendingScans = new Map<string, { resolve: (instances: BridgeInstance[]) => void; reject: (error: Error) => void }>()
-  const pendingPairs = new Map<string, { resolve: () => void; reject: (error: Error) => void }>()
+  const pendingPairs = new Map<string, { resolve: () => void; reject: (error: Error) => void; onCode: (code: string) => void }>()
   const eventListeners = new Set<(frame: ServerFrame) => void>()
   const approvalListeners = new Set<(request: ApprovalRequest) => void>()
   const approvalResolvedListeners = new Set<(id: string) => void>()
@@ -408,6 +418,9 @@ export function connectPanel(): PanelApi {
         ))
         break
       }
+      case 'pair.code':
+        if (typeof msg.code === 'string') pendingPairs.get(msg.id)?.onCode(msg.code)
+        break
       case 'pair.result': {
         const entry = pendingPairs.get(msg.id)
         if (entry === undefined) return
@@ -801,17 +814,20 @@ export function connectPanel(): PanelApi {
       discoveryProgressListeners.add(callback)
       return () => { discoveryProgressListeners.delete(callback) }
     },
-    pair(code) {
+    pair(onCode) {
       const id = crypto.randomUUID()
       return new Promise<void>((resolve, reject) => {
-        const entry = { resolve, reject }
+        const entry = { resolve, reject, onCode }
         pendingPairs.set(id, entry)
-        void send({ type: 'pair.start', id, code }).catch((cause: unknown) => {
+        void send({ type: 'pair.start', id }).catch((cause: unknown) => {
           if (pendingPairs.get(id) !== entry) return
           pendingPairs.delete(id)
           reject(connectionError(cause))
         })
       })
+    },
+    cancelPairing() {
+      return send({ type: 'pair.cancel' })
     },
   }
 }

@@ -1,29 +1,33 @@
 /**
  * One-step pairing: how an extension without a bridge token (a Web Store or
- * Brave build, Firefox) obtains it from a short code the user reads off the
- * DSH host.
+ * Brave build, Firefox) obtains it after the user approves it on the DSH host.
  *
- * The code is short (8 symbols, 40 bits), so it must never be testable
- * offline. Both halves therefore run a balanced PAKE (CPace-style, in the
- * prime-order subgroup of the RFC 3526 3072-bit MODP group):
+ * The extension asks; the user answers on the host. What ties the two
+ * together is a short code that both sides compute and display, and that the
+ * user compares before approving. The exchange is a Diffie-Hellman key
+ * agreement with a short authentication string, in the prime-order subgroup
+ * of the RFC 3526 3072-bit MODP group:
  *
- *   g  = H(code, Ns, Nc, endpoint, origin)^2 mod p      (the code picks the generator)
- *   Yc = g^a,  Ys = g^b                                  (fresh secrets a, b)
- *   K  = (Ys^2)^a = (Yc^2)^b
- *   keys = HMAC(K-derived master, label)                 (confirm-client, confirm-server, token)
+ *   client → commit = HMAC(opening, Yc)              (Yc = g^a, not yet shown)
+ *   bridge → Ys = g^b
+ *   client → Yc, opening                              (the bridge checks the commitment)
+ *   K = (Ys^2)^a = (Yc^2)^b
+ *   master = HMAC(label, K ‖ transcript)
+ *   code   = 30 bits of HMAC(master, "code")          (shown by the extension and by the host)
  *
- * Someone who sees or takes part in an exchange without the code learns
- * nothing they can test guesses against: a share is a uniformly distributed
- * group element whatever the code, and each run lets an active party check
- * exactly one guess (its own generator). The bridge caps the runs per code
- * (pairing-host.ts). The client confirms first, so the bridge reveals nothing
- * derived from the code until a client has proven it; the token then travels
- * encrypted under a key only the two halves hold.
+ * The transcript names both nonces, the endpoint the client dialed, the
+ * extension origin and browser name as each half sees them, and both shares.
+ * Someone in the middle (a local process on the port the extension probed,
+ * another extension relaying frames) ends up with two different keys, hence
+ * two different codes, and cannot steer them to match: the client is bound
+ * to its share before it sees the bridge's, and the bridge sends its share
+ * before it sees the client's. A match by luck has probability 2^-30 per
+ * request, and every request needs the user's own approval.
  *
- * The transcript both confirmations cover names both nonces, the endpoint the
- * client dialed, the extension origin as each half sees it, and both shares,
- * so a relay (another extension, a local process on another port) cannot
- * splice itself between the halves.
+ * Only after approval does the bridge send the token, encrypted and
+ * authenticated under keys derived from the same master, so an observer of
+ * the loopback traffic reads nothing, and nobody but the approved socket's
+ * peer can decrypt it.
  *
  * Portable: runs unchanged in node and in the extension's service worker
  * (BigInt, the synchronous SHA-256 of protocol.ts, WebCrypto randomness).
@@ -44,17 +48,16 @@ import {
 /** Symbols of a pairing code: 32 of them, without the look-alikes I, O, 0 and 1. */
 export const PAIRING_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
-/** Symbols in one pairing code (5 bits each: 40 bits). */
-export const PAIRING_CODE_LENGTH = 8
+/** Symbols in one pairing code (5 bits each: 30 bits). */
+export const PAIRING_CODE_LENGTH = 6
 
 /** Longest token a pairing exchange carries (matches the extension's own token bound). */
 export const PAIRING_TOKEN_MAX_BYTES = 1024
 
 /**
  * RFC 3526 group 15: a 3072-bit safe prime (p = 2q + 1 with q prime), so the
- * squares form a subgroup of prime order q and every element except 1 and
- * p - 1 has order q or 2q. pairing.spec checks these digits against node's
- * built-in `modp15`.
+ * squares form a subgroup of prime order q. pairing.spec checks these digits
+ * against node's built-in `modp15`.
  */
 export const PAIRING_PRIME_HEX = [
   'ffffffffffffffffc90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b139b22514a08798e3404dd',
@@ -68,22 +71,24 @@ export const PAIRING_PRIME_HEX = [
 ].join('')
 
 const P = BigInt(`0x${PAIRING_PRIME_HEX}`)
+/** 4 = 2^2 is a square, so it generates the subgroup of prime order q. */
+const G = 4n
 const LABEL = `dsh-pair/v${String(PAIRING_PROTOCOL_VERSION)}`
 const utf8 = new TextEncoder()
 const CODE_SHAPE = new RegExp(`^[${PAIRING_CODE_ALPHABET}]{${String(PAIRING_CODE_LENGTH)}}$`, 'u')
 
-/** What one exchange is bound to; both halves must agree on every field. */
+/** The public facts one exchange is bound to; both halves must agree on every field. */
 export interface PairingContext {
-  /** The normalized pairing code. */
-  code: string
   /** The bridge's `challenge` nonce. */
   serverNonce: string
-  /** The client's `pair.hello` nonce. */
+  /** The client's `pair.request` nonce. */
   clientNonce: string
   /** The endpoint the client dialed (the bridge checks it against its socket). */
   endpoint: BridgeEndpoint
   /** The client's extension origin (`chrome-extension://<id>`, `moz-extension://<uuid>`, or empty). */
   origin: string
+  /** The browser name the host shows on its approval prompt. */
+  name: string
 }
 
 /** One half's secret exponent and the share it sends. */
@@ -92,42 +97,29 @@ export interface PairingShare {
   share: string
 }
 
-/** Keys both halves derive from a completed exchange. */
-export interface PairingKeys {
-  /** Canonical transcript both confirmations cover. */
+/** What both halves derive from a completed exchange. */
+export interface PairingSession {
+  /** The code both sides display, unformatted. */
+  code: string
+  /** Canonical transcript the token MAC covers. */
   transcript: string
-  clientConfirmKey: Uint8Array
-  serverConfirmKey: Uint8Array
+  macKey: Uint8Array
   tokenKey: Uint8Array
 }
 
 /**
- * A fresh pairing code from the platform CSPRNG.
- * @returns {@link PAIRING_CODE_LENGTH} symbols of {@link PAIRING_CODE_ALPHABET}.
- */
-export function generatePairingCode(): string {
-  const bytes = new Uint8Array(PAIRING_CODE_LENGTH)
-  globalThis.crypto.getRandomValues(bytes)
-  let code = ''
-  // 256 is a multiple of 32, so the low five bits are uniform.
-  for (const byte of bytes) code += PAIRING_CODE_ALPHABET[byte & 31]
-  return code
-}
-
-/**
- * Canonical form of a code as the user typed it: case, spaces and dashes are
- * ignored. Nothing is guessed (a `0` or `1` is simply not a code symbol).
- * @param input - what the user typed or pasted.
- * @returns the code, or `undefined` when it cannot be one.
+ * Canonical form of a code as typed (the `/browser-pair approve` path): case,
+ * spaces and dashes are ignored; nothing is guessed.
+ * @returns the code, or `undefined` when the input cannot be one.
  */
 export function normalizePairingCode(input: string): string | undefined {
   const code = input.replace(/[\s-]/gu, '').toUpperCase()
   return CODE_SHAPE.test(code) ? code : undefined
 }
 
-/** A code as shown to the user: two groups of four. */
+/** A code as shown to the user: two groups of three. */
 export function formatPairingCode(code: string): string {
-  return `${code.slice(0, 4)}-${code.slice(4)}`
+  return `${code.slice(0, 3)}-${code.slice(3)}`
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -168,26 +160,10 @@ function shareHex(value: bigint): string {
   return value.toString(16).padStart(PAIRING_SHARE_HEX_LENGTH, '0')
 }
 
-/** Fields that cannot contain `|` are joined bare; the origin is length-prefixed. */
-function contextText(context: PairingContext): string {
-  return `${context.serverNonce}|${context.clientNonce}|${context.endpoint.host}|${String(context.endpoint.port)}|${String(context.origin.length)}:${context.origin}`
-}
-
-/**
- * The generator one code selects for one exchange: a hash of the code and the
- * exchange's public context, reduced into the group and squared into the
- * prime-order subgroup. 416 hash bytes (128 bits more than the prime) keep
- * the reduction's bias negligible.
- */
-function pairingGenerator(context: PairingContext): bigint {
-  const message = utf8.encode(`${String(context.code.length)}:${context.code}|${contextText(context)}`)
-  const key = utf8.encode(`${LABEL}|generator`)
-  const blocks: Uint8Array[] = []
-  for (let counter = 0; counter < 13; counter += 1) blocks.push(hmacSha256(key, concat(Uint8Array.of(counter), message)))
-  const reduced = BigInt(`0x${toHex(concat(...blocks))}`) % P
-  // 0, 1 and p - 1 square to 0 or 1; a hash lands there with negligible probability.
-  const base = reduced < 2n || reduced === P - 1n ? 2n : reduced
-  return base * base % P
+function randomHex256(): string {
+  const bytes = new Uint8Array(32)
+  globalThis.crypto.getRandomValues(bytes)
+  return toHex(bytes)
 }
 
 /**
@@ -203,57 +179,75 @@ export function isPairingShare(share: unknown): share is string {
 
 /**
  * One half's contribution to an exchange.
- * @param context - what the exchange is bound to (this half's view).
  * @returns a fresh 256-bit secret and the share to send.
  */
-export function createPairingShare(context: PairingContext): PairingShare {
-  const bytes = new Uint8Array(32)
-  globalThis.crypto.getRandomValues(bytes)
-  // Never 0 or 1: the share must not be the identity or the bare generator.
-  const secret = BigInt(`0x${toHex(bytes)}`) + 2n
-  return { secret, share: shareHex(modPow(pairingGenerator(context), secret, P)) }
+export function createPairingShare(): PairingShare {
+  const secret = BigInt(`0x${randomHex256()}`) + 2n
+  return { secret, share: shareHex(modPow(G, secret, P)) }
+}
+
+/** A fresh opening value for {@link pairingCommitment} (32 random bytes, hex). */
+export function createPairingOpening(): string {
+  return randomHex256()
 }
 
 /**
- * Derive the exchange keys from this half's secret and the peer's share.
+ * The client's commitment to its share. It hides the share (the opening is
+ * 256 random bits) and binds the client to it (HMAC-SHA256 under a key the
+ * committer chose still has to collide to open two ways).
+ * @param share - the client's share.
+ * @param opening - the opening value, revealed with the share.
+ */
+export function pairingCommitment(share: string, opening: string): string {
+  return toHex(hmacSha256(fromHex(opening), utf8.encode(`${LABEL}|commit|${share}`)))
+}
+
+/** Whether a revealed share and opening match the commitment sent first. */
+export function verifyPairingCommitment(commit: string, share: string, opening: string): boolean {
+  return isBridgeHex256(commit) && isBridgeHex256(opening) && isPairingShareHex(share)
+    && constantTimeEqual(pairingCommitment(share, opening), commit)
+}
+
+/** Fixed-format fields are joined bare; free text is length-prefixed so it cannot bleed into a neighbour. */
+function transcriptOf(context: PairingContext, clientShare: string, serverShare: string): string {
+  return `${LABEL}|${context.serverNonce}|${context.clientNonce}|${context.endpoint.host}|${String(context.endpoint.port)}`
+    + `|${String(context.origin.length)}:${context.origin}|${String(context.name.length)}:${context.name}|${clientShare}|${serverShare}`
+}
+
+/**
+ * Derive the code and the token keys from this half's secret and the peer's share.
  * @param context - what the exchange is bound to (this half's view).
  * @param secret - this half's secret from {@link createPairingShare}.
- * @param clientShare - the share the client sent.
+ * @param clientShare - the share the client revealed.
  * @param serverShare - the share the bridge sent.
  * @param role - which half is deriving (it uses the other one's share).
- * @returns the keys, or `undefined` when the peer's share is unusable.
+ * @returns the session, or `undefined` when the peer's share is unusable.
  */
-export function derivePairingKeys(
+export function derivePairingSession(
   context: PairingContext,
   secret: bigint,
   clientShare: string,
   serverShare: string,
   role: 'client' | 'server',
-): PairingKeys | undefined {
+): PairingSession | undefined {
   const peer = role === 'client' ? serverShare : clientShare
   if (!isPairingShare(peer) || !isPairingShareHex(clientShare) || !isPairingShareHex(serverShare)) return undefined
   const value = BigInt(`0x${peer}`)
   // Squaring first puts any share into the prime-order subgroup.
   const shared = modPow(value * value % P, secret, P)
   if (shared <= 1n) return undefined
-  const transcript = `${LABEL}|${contextText(context)}|${clientShare}|${serverShare}`
+  const transcript = transcriptOf(context, clientShare, serverShare)
   const master = hmacSha256(utf8.encode(`${LABEL}|master`), concat(fromHex(shareHex(shared)), utf8.encode(transcript)))
+  const digest = hmacSha256(master, utf8.encode('code'))
+  let code = ''
+  // 256 is a multiple of 32, so the low five bits of each byte are uniform.
+  for (let index = 0; index < PAIRING_CODE_LENGTH; index += 1) code += PAIRING_CODE_ALPHABET[digest[index]! & 31]
   return {
+    code,
     transcript,
-    clientConfirmKey: hmacSha256(master, utf8.encode('confirm|client')),
-    serverConfirmKey: hmacSha256(master, utf8.encode('confirm|server')),
-    tokenKey: hmacSha256(master, utf8.encode('token')),
+    macKey: hmacSha256(master, utf8.encode('token-mac')),
+    tokenKey: hmacSha256(master, utf8.encode('token-key')),
   }
-}
-
-/** The client's key confirmation (`pair.confirm.mac`). */
-export function pairingClientConfirmation(keys: PairingKeys): string {
-  return toHex(hmacSha256(keys.clientConfirmKey, utf8.encode(keys.transcript)))
-}
-
-/** Whether a received `pair.confirm.mac` proves the client derived the same keys. */
-export function verifyPairingClientConfirmation(keys: PairingKeys, mac: string): boolean {
-  return isBridgeHex256(mac) && constantTimeEqual(pairingClientConfirmation(keys), mac)
 }
 
 function keystream(key: Uint8Array, length: number): Uint8Array {
@@ -265,39 +259,39 @@ function keystream(key: Uint8Array, length: number): Uint8Array {
   return out
 }
 
-function serverConfirmation(keys: PairingKeys, box: string): string {
-  return toHex(hmacSha256(keys.serverConfirmKey, utf8.encode(`${keys.transcript}|${box}`)))
+function tokenMac(session: PairingSession, box: string): string {
+  return toHex(hmacSha256(session.macKey, utf8.encode(`${session.transcript}|${box}`)))
 }
 
 /**
- * Encrypt the bridge token for the client that just confirmed. The key is
- * used for this one message only (it is derived from fresh shares), so a
- * keystream XOR with a MAC over the ciphertext is sufficient.
- * @param keys - the exchange keys.
+ * Encrypt the bridge token for the approved client. The key is used for this
+ * one message only (it comes from fresh shares), so a keystream XOR with a
+ * MAC over the ciphertext is sufficient.
+ * @param session - the exchange's session.
  * @param token - the bridge token.
  * @returns the `pair.ok` fields.
  */
-export function sealPairingToken(keys: PairingKeys, token: string): { box: string; mac: string } {
+export function sealPairingToken(session: PairingSession, token: string): { box: string; mac: string } {
   const plain = utf8.encode(token)
   if (plain.length === 0 || plain.length > PAIRING_TOKEN_MAX_BYTES) throw new Error('bridge token is empty or too long to pair')
-  const stream = keystream(keys.tokenKey, plain.length)
+  const stream = keystream(session.tokenKey, plain.length)
   const box = toHex(plain.map((byte, index) => byte ^ stream[index]!))
-  return { box, mac: serverConfirmation(keys, box) }
+  return { box, mac: tokenMac(session, box) }
 }
 
 /**
- * Verify the bridge's confirmation and decrypt the token.
- * @param keys - the exchange keys.
+ * Verify and decrypt the token of a `pair.ok`.
+ * @param session - the exchange's session.
  * @param box - `pair.ok.box`.
  * @param mac - `pair.ok.mac`.
- * @returns the token, or `undefined` when the peer did not prove the code
- *   (it is not the bridge the user started pairing on) or the token is malformed.
+ * @returns the token, or `undefined` when the message was not produced by the
+ *   peer of this exchange or the token is malformed.
  */
-export function openPairingToken(keys: PairingKeys, box: string, mac: string): string | undefined {
+export function openPairingToken(session: PairingSession, box: string, mac: string): string | undefined {
   if (!/^(?:[0-9a-f]{2})+$/u.test(box) || box.length > PAIRING_TOKEN_MAX_BYTES * 2) return undefined
-  if (!isBridgeHex256(mac) || !constantTimeEqual(serverConfirmation(keys, box), mac)) return undefined
+  if (!isBridgeHex256(mac) || !constantTimeEqual(tokenMac(session, box), mac)) return undefined
   const cipher = fromHex(box)
-  const stream = keystream(keys.tokenKey, cipher.length)
+  const stream = keystream(session.tokenKey, cipher.length)
   const token = new TextDecoder().decode(cipher.map((byte, index) => byte ^ stream[index]!))
   return /^[\x21-\x7e]{1,1024}$/u.test(token) ? token : undefined
 }
