@@ -28,6 +28,8 @@ import type { CallPolicyHook, ToolCall } from './tools.ts'
 
 export const MAX_FLEET_TASKS = 8
 export const FLEET_GROUP_TITLE = 'DSH fleet'
+/** chrome.storage.session key of the live fleets. */
+export const FLEETS_STORAGE_KEY = 'dshFleets'
 /** Mirrors the bridge's FLEET_READ_TOOLS / FLEET_ACTION_TOOLS (a spec keeps them equal). */
 export const FLEET_READ_TOOLS: ReadonlySet<string> = new Set(['browser_snapshot', 'browser_get_text', 'browser_wait', 'browser_pdf_text'])
 export const FLEET_ACTION_TOOLS: ReadonlySet<string> = new Set([
@@ -46,6 +48,34 @@ interface Fleet {
   parentSessionId: string | undefined
   children: string[]
   tabIds: number[]
+  allowActions: boolean
+}
+
+/**
+ * Where live fleets persist (chrome.storage.session in the extension): a
+ * worker restart must keep enforcing the children's allowlists and must still
+ * be able to release their tabs.
+ */
+export interface FleetStore {
+  get(): Promise<unknown>
+  set(value: unknown): Promise<void>
+}
+
+interface StoredFleet {
+  fleetId: string
+  parentSessionId?: string
+  children: string[]
+  tabIds: number[]
+  allowActions: boolean
+}
+
+function isStoredFleet(value: unknown): value is StoredFleet {
+  const fleet = value as Partial<StoredFleet> | null
+  return typeof fleet === 'object' && fleet !== null && typeof fleet.fleetId === 'string'
+    && (fleet.parentSessionId === undefined || typeof fleet.parentSessionId === 'string')
+    && Array.isArray(fleet.children) && fleet.children.every((id) => typeof id === 'string')
+    && Array.isArray(fleet.tabIds) && fleet.tabIds.every((id) => typeof id === 'number')
+    && fleet.children.length === fleet.tabIds.length && typeof fleet.allowActions === 'boolean'
 }
 
 /** A tab the fleet opened. */
@@ -165,10 +195,46 @@ export function fleetApprovalPrompt(request: FleetRequest, forcedReasons: readon
   }
 }
 
-/** Live fleets of this worker. */
+/** Live fleets (persisted through {@link FleetStore} when one is given). */
 export class FleetRegistry {
   private readonly children = new Map<string, FleetChild>()
   private readonly fleets = new Map<string, Fleet>()
+  readonly ready: Promise<void>
+
+  constructor(private readonly store?: FleetStore) {
+    this.ready = this.load()
+  }
+
+  private async load(): Promise<void> {
+    if (this.store === undefined) return
+    let stored: unknown
+    try {
+      stored = await this.store.get()
+    } catch {
+      return
+    }
+    if (!Array.isArray(stored)) return
+    for (const entry of stored) {
+      if (!isStoredFleet(entry) || this.fleets.has(entry.fleetId)) continue
+      const fleet: Fleet = { parentSessionId: entry.parentSessionId, children: [...entry.children], tabIds: [...entry.tabIds], allowActions: entry.allowActions }
+      this.fleets.set(entry.fleetId, fleet)
+      for (const [index, childId] of fleet.children.entries()) {
+        this.children.set(childId, { fleetId: entry.fleetId, parentSessionId: fleet.parentSessionId, tabId: fleet.tabIds[index]!, allowActions: fleet.allowActions })
+      }
+    }
+  }
+
+  private async save(): Promise<void> {
+    if (this.store === undefined) return
+    const value: StoredFleet[] = [...this.fleets].map(([fleetId, fleet]) => ({
+      fleetId,
+      ...fleet.parentSessionId === undefined ? {} : { parentSessionId: fleet.parentSessionId },
+      children: fleet.children,
+      tabIds: fleet.tabIds,
+      allowActions: fleet.allowActions,
+    }))
+    await this.store.set(value).catch(() => undefined)
+  }
 
   /** Whether a call from a fleet child names a tool outside its allowlist (the refusal message), else undefined. */
   refusal(call: Pick<ToolCall, 'name' | 'sessionId'>): string | undefined {
@@ -194,6 +260,7 @@ export class FleetRegistry {
 
   /** `browser_fanout`: approve the fleet, then open, group, and bind its tabs. */
   async open(call: ToolCall, deps: FleetDeps): Promise<FleetAnswer> {
+    await this.ready
     if (this.isChild(call.sessionId)) return failed('A fleet worker cannot start another fleet.')
     const request = parseFleetRequest(call.args)
     if (typeof request === 'string') return failed(request, 'bad-args')
@@ -208,7 +275,7 @@ export class FleetRegistry {
       return { ok: false, error: { code: authorization === 'timed-out' ? 'timeout' : 'action-failed', message: authorization === 'denied' ? 'The user declined the tab fleet.' : `The tab fleet was not approved (${authorization}).` } }
     }
     const fleetId = `fleet-${(deps.newId ?? (() => crypto.randomUUID()))().slice(0, 8)}`
-    const fleet: Fleet = { parentSessionId: call.sessionId, children: [], tabIds: [] }
+    const fleet: Fleet = { parentSessionId: call.sessionId, children: [], tabIds: [], allowActions: request.allowActions }
     this.fleets.set(fleetId, fleet)
     const tabs: { childId: string; tabId: number; url: string }[] = []
     try {
@@ -220,6 +287,8 @@ export class FleetRegistry {
         fleet.tabIds.push(tab.id)
         fleet.children.push(childId)
         this.children.set(childId, { fleetId, parentSessionId: call.sessionId, tabId: tab.id, allowActions: request.allowActions })
+        // Persisted before the binding: a restart in between still knows the child.
+        await this.save()
         deps.bindChild(childId, tab)
         tabs.push({ childId, tabId: tab.id, url: task.url })
       }
@@ -248,6 +317,7 @@ export class FleetRegistry {
       this.children.delete(childId)
       deps.unbindChild(childId, fleet.tabIds[index]!)
     }
+    await this.save()
     if (closeTabs) {
       for (const tabId of fleet.tabIds) await deps.closeTab(tabId).catch(() => {})
     }
@@ -256,13 +326,20 @@ export class FleetRegistry {
 
   /** Release from the bridge: only the fleet's parent session may release it. */
   async releaseCall(call: ToolCall, deps: Pick<FleetDeps, 'unbindChild' | 'closeTab'>): Promise<FleetAnswer> {
+    await this.ready
     const fleetId = call.args.fleetId
     if (typeof fleetId !== 'string') return failed('fleetId is required.', 'bad-args')
     if (this.fleets.get(fleetId)?.parentSessionId !== call.sessionId) return failed('No such fleet for this session.', 'bad-args')
     return this.release(fleetId, call.args.closeTabs !== false, deps)
   }
 
-  /** Fleets alive (tests and the kill switch). */
+  /** Kill switch: unbind every fleet's children; their tabs stay open for the user. */
+  async releaseAll(deps: Pick<FleetDeps, 'unbindChild' | 'closeTab'>): Promise<void> {
+    await this.ready
+    for (const fleetId of [...this.fleets.keys()]) await this.release(fleetId, false, deps)
+  }
+
+  /** Fleets alive. */
   get size(): number {
     return this.fleets.size
   }

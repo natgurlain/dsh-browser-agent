@@ -79,6 +79,8 @@ const MAX_RECORDED_STEPS = 100
 const MAX_WATCH_EVENTS = 60
 const MAX_PROPOSALS = 10
 const AGENT_QUIET_MS = 1_500
+const STRAY_STOP_INTERVAL_MS = 30_000
+const MAX_STRAY_STOP_TABS = 50
 const NO_SESSION = '(no-session)'
 const PROGRAM_RUN_TIMEOUT_MS = 30 * 60_000
 /** One `browser_run` holds at most this many steps. */
@@ -218,6 +220,8 @@ export class LearningRuntime {
   private workflowsTurnedOff = false
   private suggestion: WatchSuggestion | undefined
   private lastAgentActivity = new Map<number, number>()
+  /** When each tab was last told to stop a recorder this worker does not know about. */
+  private readonly strayStops = new Map<number, number>()
   readonly ready: Promise<void>
   private readonly storage: chrome.storage.StorageArea
   private readonly now: () => number
@@ -673,7 +677,14 @@ export class LearningRuntime {
   /** One trusted user event from the watched tab. */
   async onWatchEvent(tabId: number, frameId: number, raw: unknown): Promise<void> {
     const watch = this.watch
-    if (watch === undefined || watch.tabId !== tabId || frameId !== 0 || !isRecord(raw)) return
+    if (watch === undefined || watch.tabId !== tabId) {
+      // The page-side recorder outlived this worker's Watch me state (worker
+      // restart, or a stop that never reached the tab): tell it to stop
+      // instead of waking the worker on every user event.
+      this.stopStrayRecorder(tabId)
+      return
+    }
+    if (frameId !== 0 || !isRecord(raw)) return
     // Trusted events the agent causes (debugger input) are not the user's.
     const last = this.lastAgentActivity.get(tabId)
     if (this.deps.agentActiveOnTab(tabId) || (last !== undefined && this.now() - last < AGENT_QUIET_MS)) return
@@ -689,6 +700,14 @@ export class LearningRuntime {
     watch.events.push(event)
     if (watch.events.length > MAX_WATCH_EVENTS) watch.events.splice(0, watch.events.length - MAX_WATCH_EVENTS)
     await this.refreshSuggestion()
+  }
+
+  private stopStrayRecorder(tabId: number): void {
+    const last = this.strayStops.get(tabId)
+    if (last !== undefined && this.now() - last < STRAY_STOP_INTERVAL_MS) return
+    this.strayStops.set(tabId, this.now())
+    if (this.strayStops.size > MAX_STRAY_STOP_TABS) this.strayStops.delete(this.strayStops.keys().next().value!)
+    void chrome.tabs.sendMessage(tabId, { type: 'DSH_WATCH', enabled: false }, { frameId: 0 }).catch(() => {})
   }
 
   private async refreshSuggestion(): Promise<void> {

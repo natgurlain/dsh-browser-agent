@@ -88,7 +88,7 @@ import { AgentOverlayController } from './agent-overlay.ts'
 import { DialogController } from './dialogs.ts'
 import { approveProgram, coverByProgram, ProgramGrants } from './run-program.ts'
 import { PageWatcherRuntime } from './watcher-runtime.ts'
-import { FLEET_GROUP_TITLE, FleetRegistry, type FleetDeps } from './fleet.ts'
+import { FLEET_GROUP_TITLE, FLEETS_STORAGE_KEY, FleetRegistry, type FleetDeps } from './fleet.ts'
 import {
   isApprovalDecision,
   type ApprovalAuthorization,
@@ -638,7 +638,13 @@ const devToolsGrants = new DevToolsGrants()
 /** Approved browser_run programs; each step claims its own grant (run-program.ts). */
 const programGrants = new ProgramGrants()
 /** Tab fleets (fleet.ts): children's tool allowlists, their tabs, and where their cards show. */
-const fleets = new FleetRegistry()
+const fleets = new FleetRegistry({
+  get: async () => {
+    const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
+    return area === undefined ? undefined : (await area.get(FLEETS_STORAGE_KEY))[FLEETS_STORAGE_KEY]
+  },
+  set: async (value) => { await (chrome.storage as { session?: chrome.storage.StorageArea }).session?.set({ [FLEETS_STORAGE_KEY]: value }) },
+})
 /** Standing page watchers (watchers.ts); fires wake only sessions the bridge owns. */
 const pageWatchers = new PageWatcherRuntime({
   enabled: () => settingsLoaded && settings.allowPageWatchers,
@@ -1033,6 +1039,8 @@ async function engageKillSwitch(): Promise<void> {
   sessionTrustedActionOrigins.clear()
   devToolsGrants.clear()
   programGrants.clear()
+  // Fleet children lose their tab bindings; the tabs stay open for the user.
+  void fleets.releaseAll(fleetDeps(AbortSignal.abort(), async () => 'denied'))
   // Standing watchers are standing grants: the kill switch revokes them too.
   void pageWatchers.clearAll()
   // So are dev-loop links (the bridge drops its side and workflow schedules on the kill-switch record above).
@@ -2327,8 +2335,9 @@ function routeToolCall(call: ToolCall): void {
   const programTarget = tabAffinity.resolveTarget(call.sessionId)
   const programCover = programGrants.claim(call, programTarget.kind === 'target' ? programTarget.tab.tabId : undefined)
   // A fleet worker's cards show under its parent's session; its allowlist is enforced here too (fleet.ts).
-  const approvalSession = fleets.approvalSession(call.sessionId)
-  const fleetRefusal = fleets.refusal(call)
+  // Both are read once the persisted fleets are loaded, before any dispatch path runs.
+  let approvalSession = call.sessionId
+  let fleetRefusal: string | undefined
   const approve = (windowId: number): ((prompt: ApprovalPrompt) => Promise<ApprovalAuthorization>) => coverByProgram(
     programCover,
     auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(prompt, controller.signal, windowId, approvalSession, unrestrictedAccess, undefined, call.id, onPrompt)),
@@ -2371,6 +2380,9 @@ function routeToolCall(call: ToolCall): void {
   const dispatch = (): Promise<ToolAnswer> => policyRuntime.ready.then(() => {
     // A subagent or fork of a tainted session: the Host says so on the call.
     if (call.tainted === true) policyRuntime.markHostTaint(call.sessionId)
+  }).then(() => fleets.ready).then(() => {
+    approvalSession = fleets.approvalSession(call.sessionId)
+    fleetRefusal = fleets.refusal(call)
   }).then(() => fleetRefusal !== undefined
     ? { ok: false, error: { code: 'action-failed', message: fleetRefusal } } satisfies ToolAnswer
     : call.name === DEVLOOP_CAPTURE_TOOL

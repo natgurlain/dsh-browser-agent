@@ -54,6 +54,35 @@ describe('fleet card and allowlists', () => {
 })
 
 describe('FleetRegistry', () => {
+  it('survives a worker restart: allowlists, card routing and release still apply (M1)', async () => {
+    let stored: unknown
+    const store = { get: async () => stored, set: async (value: unknown) => { stored = structuredClone(value) } }
+    const first = new FleetRegistry(store)
+    await first.ready
+    const d = deps()
+    await first.open({ id: 'x', name: 'browser_fanout', args, sessionId: 'parent' }, d.deps)
+    const restarted = new FleetRegistry(store)
+    await restarted.ready
+    expect(restarted.refusal({ name: 'browser_click', sessionId: 'c1' })).toMatch(/read-only/)
+    expect(restarted.approvalSession('c2')).toBe('parent')
+    expect(await restarted.releaseCall({ id: 'r', name: 'browser_fleet_release', args: { fleetId: 'fleet-abcdef12' }, sessionId: 'parent' }, d.deps)).toMatchObject({ ok: true })
+    expect(d.closed).toEqual([100, 101])
+    const afterRelease = new FleetRegistry(store)
+    await afterRelease.ready
+    expect(afterRelease.isChild('c1')).toBe(false)
+  })
+
+  it('releaseAll unbinds every child and keeps their tabs open (kill switch, M1)', async () => {
+    const registry = new FleetRegistry()
+    const d = deps()
+    await registry.open({ id: 'x', name: 'browser_fanout', args, sessionId: 'parent' }, d.deps)
+    await registry.releaseAll(d.deps)
+    expect(d.unbound).toEqual(['c1', 'c2'])
+    expect(d.closed).toEqual([])
+    expect(registry.isChild('c1')).toBe(false)
+    expect(registry.size).toBe(0)
+  })
+
   it('opens background tabs bound to each child, enforces read-only allowlists, and routes cards to the parent', async () => {
     const registry = new FleetRegistry()
     const d = deps()

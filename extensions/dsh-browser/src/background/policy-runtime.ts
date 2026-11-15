@@ -23,6 +23,8 @@ import { isDevToolsTool } from './authorization.ts'
 
 export const POLICY_PORT_NAME = 'dsh-policy'
 export const TAINT_STORAGE_KEY = 'dshSessionTaint'
+/** Sessions the user put in strict mode (same storage area as taint: the browser session). */
+export const STRICT_SESSIONS_STORAGE_KEY = 'dshStrictSessions'
 /** Bridge RPC that clears the Host-side taint guard for one session. */
 export { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 
@@ -63,7 +65,10 @@ export class PolicyRuntime {
   readonly taint: TaintTracker
   readonly ready: Promise<void>
   private readonly calls = new Map<string, CallRecord>()
-  /** Agent sessions the user put in strict mode from the panel (this worker's lifetime). */
+  /**
+   * Agent sessions the user put in strict mode from the panel. Persisted next
+   * to taint: a worker restart must not silently turn the commit gate off.
+   */
   private readonly strictSessions = new Set<string>()
   private readonly ports = new Set<chrome.runtime.Port>()
 
@@ -78,8 +83,20 @@ export class PolicyRuntime {
     this.taint.onChange(() => { this.broadcast() })
     this.ready = Promise.all([
       this.taint.ready,
+      this.loadStrictSessions(),
       loadManagedPolicy().then((policy) => { this.setManaged(policy) }),
     ]).then(() => undefined)
+  }
+
+  private async loadStrictSessions(): Promise<void> {
+    const storage = this.options.storage
+    if (storage === undefined) return
+    try {
+      const stored = (await storage.get(STRICT_SESSIONS_STORAGE_KEY))[STRICT_SESSIONS_STORAGE_KEY]
+      if (Array.isArray(stored)) for (const key of stored) if (typeof key === 'string') this.strictSessions.add(key)
+    } catch {
+      // Storage unavailable: strict sites from settings still apply.
+    }
   }
 
   setManaged(policy: ManagedPolicy): void {
@@ -204,6 +221,7 @@ export class PolicyRuntime {
     const key = taintKey(sessionId)
     if (enabled) this.strictSessions.add(key)
     else this.strictSessions.delete(key)
+    void this.options.storage?.set({ [STRICT_SESSIONS_STORAGE_KEY]: [...this.strictSessions] }).catch(() => {})
     this.broadcast()
   }
 

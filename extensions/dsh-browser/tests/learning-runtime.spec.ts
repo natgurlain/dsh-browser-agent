@@ -273,4 +273,18 @@ describe('learning runtime', () => {
     await learning.onWatchEvent(7, 0, { kind: 'click', css: '#a' })
     expect((learning.snapshot().watching as { events: number }).events).toBe(0)
   })
+
+  it('tells a tab still recording for a forgotten Watch me (worker restart) to stop, once per tab (M1)', async () => {
+    let now = 10_000
+    const { learning } = runtime({ now: () => now }, { dshLearningSettings: { watchMe: true } })
+    await learning.ready
+    sendMessage.mockResolvedValue({ ok: true })
+    await learning.onWatchEvent(7, 0, { kind: 'click', css: '#a' })
+    await learning.onWatchEvent(7, 0, { kind: 'click', css: '#b' })
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(sendMessage).toHaveBeenCalledWith(7, { type: 'DSH_WATCH', enabled: false }, { frameId: 0 })
+    now += 60_000
+    await learning.onWatchEvent(7, 0, { kind: 'click', css: '#c' })
+    expect(sendMessage).toHaveBeenCalledTimes(2)
+  })
 })

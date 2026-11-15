@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { isExtensionPageSender, PolicyRuntime, POLICY_PORT_NAME } from '../src/background/policy-runtime.ts'
+import { memoryStorage } from './support/chrome.ts'
 
 beforeEach(() => {
   vi.stubGlobal('chrome', {
@@ -67,5 +68,22 @@ describe('PolicyRuntime', () => {
     expect(clearBridgeTaint).toHaveBeenCalledWith('s1')
     expect(policy.get('s1')).toBeUndefined()
     expect(policy.get('s2')).toBeDefined()
+  })
+
+  it('keeps per-session strict mode across a worker restart (M1)', async () => {
+    const storage = memoryStorage()
+    const options = { settings: () => ({ siteRules: [], siteDefaultsEnabled: true }), unrestricted: () => false, clearBridgeTaint: vi.fn(async () => {}), storage: storage.area }
+    const before = new PolicyRuntime(options)
+    await before.ready
+    before.setStrictSession('s1', true)
+    await vi.waitFor(() => { expect(storage.area.set).toHaveBeenCalled() })
+    const after = new PolicyRuntime(options)
+    await after.ready
+    expect(after.strictFor('s1', undefined)).toBe(true)
+    expect(after.strictFor('s2', undefined)).toBe(false)
+    after.setStrictSession('s1', false)
+    const third = new PolicyRuntime(options)
+    await third.ready
+    expect(third.strictFor('s1', undefined)).toBe(false)
   })
 })
