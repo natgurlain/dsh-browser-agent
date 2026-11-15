@@ -49,6 +49,7 @@ import { canReturnToControlledTab } from './tab-handoff.ts'
 import { QuestionCard } from './QuestionCard.tsx'
 import { UpdateCard } from './UpdateCard.tsx'
 import { UninstallCard } from './UninstallCard.tsx'
+import { PairingCard } from './PairingCard.tsx'
 import { MessageImages } from './MessageImages.tsx'
 import type { QuestionAnswer } from './questions.ts'
 import {
@@ -2676,6 +2677,18 @@ export function App(): React.JSX.Element {
       : { ...current, trustedActionOrigins: current.trustedActionOrigins.filter((candidate) => candidate !== origin) })
   }
 
+  // Pairing stores the token in the background; mirror it into the form so a
+  // later Save does not write the old (empty) field back over it.
+  const adoptPairedToken = (): void => {
+    void chrome.storage.local.get('dshSettings').then((stored) => {
+      const token = (stored.dshSettings as Partial<PanelSettings> | undefined)?.token
+      if (typeof token === 'string') setSettings((prev) => prev === null ? prev : { ...prev, token })
+    }).catch(() => {})
+  }
+  // The bridge is reachable but this install cannot authenticate: offer pairing up front.
+  const needsPairing = state !== 'connected'
+    && (bridgeFailure === 'no-token' || bridgeFailure === 'origin-rejected' || bridgeFailure === 'token-mismatch')
+
   // 状态栏只显示连接状态；快照上限是技术细节，在设置页说明（见 hint）。
   // Discovery can end in a confirmed miss; that is more useful than "未连接".
   // A refusal only the user can fix outranks the generic transport state.
@@ -2870,6 +2883,7 @@ export function App(): React.JSX.Element {
               ? null
               : <small className="device-connected" data-testid="standing-work">{copy.settings.staysConnected(standing)}</small>}
           </div>
+          <PairingCard api={api} copy={copy.pairing} needed={needsPairing} onPaired={adoptPairedToken} />
           <label>
             <span>Token</span>
             <small>{copy.settings.tokenHelp}</small>
@@ -3156,6 +3170,9 @@ export function App(): React.JSX.Element {
       </header>
       <TaintBanner sessionId={sessionRef.current} locale={locale} />
       <WatchersCard locale={locale} />
+      {needsPairing && !killSwitchEngaged
+        ? <PairingCard api={api} copy={copy.pairing} needed onPaired={adoptPairedToken} />
+        : null}
       {showTextSize && (
         <TextSizePanel scale={uiScale} copy={copy}
           onStep={(direction) => changeUiScale(stepUiScale(uiScaleRef.current, direction))}

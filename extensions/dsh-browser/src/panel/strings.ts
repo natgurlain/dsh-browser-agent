@@ -8,7 +8,21 @@ export interface PanelCopy {
   /** Status shown when the startup pass found no local dsh at all. */
   statusNotFound: string
   /** Specific refusals reported by the bridge (shown instead of the transport state). */
-  bridgeFailure: Record<'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy', string>
+  bridgeFailure: Record<'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy' | 'no-token', string>
+  /** One-step pairing with the DSH host (PairingCard). */
+  pairing: {
+    title: string
+    /** Lead shown when the bridge refused this install or it has no token yet. */
+    needed: string
+    help: string
+    codeLabel: string
+    placeholder: string
+    pair: string
+    pairing: string
+    paired: string
+    /** One message per `PairingFailure` of the background. */
+    failure: Record<'invalid-code' | 'closed' | 'wrong-code' | 'unreachable' | 'unsupported' | 'version-mismatch' | 'untrusted' | 'timeout', string>
+  }
   approval: {
     eyebrow: string
     readTitle: string
@@ -485,10 +499,31 @@ const EN: PanelCopy = {
   },
   statusNotFound: 'No service found',
   bridgeFailure: {
-    'token-mismatch': 'Token mismatch or untrusted bridge: check the bridge token in Settings',
+    'token-mismatch': 'Token mismatch or untrusted bridge: pair with DSH again, or check the token in Settings',
     'version-mismatch': 'Version mismatch: update the dsh plugin and the extension together',
-    'origin-rejected': 'Unrecognized extension ID: add it to allowedChromeExtensionIds',
+    'origin-rejected': 'DSH does not know this extension yet: pair with DSH',
     busy: 'Bridge busy, retrying…',
+    'no-token': 'Not paired with DSH yet',
+  },
+  pairing: {
+    title: 'Pair with DSH',
+    needed: 'This browser is not paired with DSH yet.',
+    help: 'On the computer that runs DSH, open DSH Settings → General → "Pair a browser" (or run /browser-pair in a DSH chat). Type the code it shows here. The code works once and expires after 5 minutes.',
+    codeLabel: 'Pairing code',
+    placeholder: 'XXXX-XXXX',
+    pair: 'Pair',
+    pairing: 'Pairing…',
+    paired: 'Paired. Connecting…',
+    failure: {
+      'invalid-code': 'A pairing code has 8 letters and digits, like ABCD-EFGH.',
+      closed: 'DSH is not showing a pairing code right now. Start pairing in DSH, then enter the new code.',
+      'wrong-code': 'That code did not match. Check it, or start pairing again in DSH for a new code.',
+      unreachable: 'No DSH was found on this computer. Start DSH, then try again.',
+      unsupported: 'This DSH browser plugin is too old to pair. Update it, or paste the token instead.',
+      'version-mismatch': 'The DSH plugin and this extension are different versions. Update them together.',
+      untrusted: 'The answer did not come from the DSH that shows your code, so nothing was saved. Try again.',
+      timeout: 'Pairing took too long. Try again.',
+    },
   },
   approval: {
     eyebrow: 'Security check',
@@ -637,8 +672,8 @@ const EN: PanelCopy = {
       ...mcp ? ['MCP clients'] : [],
     ].join(', ')}`,
     detectSource: { fixed: 'fixed port', beacon: 'beacon' },
-    tokenHelp: 'Required by Firefox and remote deployments',
-    tokenPlaceholder: 'Required for Firefox / remote deployments',
+    tokenHelp: 'Filled in by pairing. Paste it by hand only for remote deployments or when pairing is unavailable',
+    tokenPlaceholder: 'Set by pairing, or paste for remote deployments',
     pageSharing: 'Page content sharing',
     pageSharingHelp: 'Control when the assistant can read page text',
     sharingAuto: 'Share automatically (default)',
@@ -1018,10 +1053,31 @@ const ZH: PanelCopy = {
   },
   statusNotFound: '未找到服务',
   bridgeFailure: {
-    'token-mismatch': '令牌不匹配或桥接不可信：请在设置中检查桥接令牌',
+    'token-mismatch': '令牌不匹配或桥接不可信：请重新与 DSH 配对，或在设置中检查令牌',
     'version-mismatch': '版本不匹配：请同时更新 dsh 插件和扩展',
-    'origin-rejected': '扩展 ID 未被允许：请将其加入 allowedChromeExtensionIds',
+    'origin-rejected': 'DSH 尚不认识此扩展：请与 DSH 配对',
     busy: '桥接繁忙，正在重试…',
+    'no-token': '尚未与 DSH 配对',
+  },
+  pairing: {
+    title: '与 DSH 配对',
+    needed: '此浏览器尚未与 DSH 配对。',
+    help: '在运行 DSH 的电脑上，打开 DSH 设置 → 通用 →「配对浏览器」（或在 DSH 对话中运行 /browser-pair），然后在这里输入显示的配对码。配对码只能使用一次，5 分钟后失效。',
+    codeLabel: '配对码',
+    placeholder: 'XXXX-XXXX',
+    pair: '配对',
+    pairing: '配对中…',
+    paired: '配对成功，正在连接…',
+    failure: {
+      'invalid-code': '配对码由 8 位字母和数字组成，例如 ABCD-EFGH。',
+      closed: 'DSH 当前没有显示配对码。请先在 DSH 中开始配对，再输入新的配对码。',
+      'wrong-code': '配对码不匹配。请核对后重试，或在 DSH 中重新开始配对以获取新的配对码。',
+      unreachable: '未在本机找到 DSH。请启动 DSH 后重试。',
+      unsupported: '此 DSH 浏览器插件版本过旧，不支持配对。请更新插件，或改为粘贴令牌。',
+      'version-mismatch': 'DSH 插件与此扩展的版本不一致，请同时更新两者。',
+      untrusted: '收到的应答并非来自显示配对码的 DSH，因此未保存任何内容。请重试。',
+      timeout: '配对超时，请重试。',
+    },
   },
   approval: {
     eyebrow: '安全检查',
@@ -1170,8 +1226,8 @@ const ZH: PanelCopy = {
       ...mcp ? ['MCP 客户端'] : [],
     ].join('、')}`,
     detectSource: { fixed: '固定端口', beacon: '信标' },
-    tokenHelp: 'Firefox 和远程部署需要填写',
-    tokenPlaceholder: 'Firefox / 远程部署时填写',
+    tokenHelp: '配对后自动填写。仅远程部署或无法配对时才需手动粘贴',
+    tokenPlaceholder: '由配对填写，远程部署时可粘贴',
     pageSharing: '页面内容共享',
     pageSharingHelp: '控制助手何时可以读取页面文字',
     sharingAuto: '自动共享（默认）',

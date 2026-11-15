@@ -16,8 +16,8 @@
  * closes the socket. Frames are authenticated, not encrypted. The token itself
  * never crosses the wire.
  *
- * Token source: the user's settings field when filled in (Firefox, custom
- * deployments), otherwise the `bridge-token` file the installer and the dsh
+ * Token source: the settings field when filled in (typed by the user, or
+ * stored there by one-step pairing, see pairing.ts), otherwise the `bridge-token` file the installer and the dsh
  * plugin keep inside the unpacked Chrome extension directory. That file is not
  * a web-accessible resource, so pages and other extensions cannot read it.
  *
@@ -75,9 +75,11 @@ export type BridgeState = 'connecting' | 'connected' | 'reconnecting' | 'stopped
  *   relaying the connection);
  * - `version-mismatch`: the plugin and extension speak different protocols;
  * - `origin-rejected`: the bridge does not allow this extension's ID;
- * - `busy`: the bridge is refusing unauthenticated sockets for now.
+ * - `busy`: the bridge is refusing unauthenticated sockets for now;
+ * - `no-token`: a bridge answers, but this install has no token yet (a store
+ *   build before pairing): nothing was dialed.
  */
-export type BridgeFailure = 'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy'
+export type BridgeFailure = 'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy' | 'no-token'
 
 /** Map a bridge close code to a {@link BridgeFailure}. */
 export function failureOfCloseCode(code: number): BridgeFailure | undefined {
@@ -248,6 +250,8 @@ export class BridgeClient {
         // Without a secret the handshake cannot succeed; wait for the installer
         // or the dsh plugin to provision it (or for the user to paste one).
         console.warn('dsh bridge: no bridge token is configured or provisioned; skipping connection attempt')
+        // Reported so the panel can offer pairing instead of a bare "reconnecting".
+        this.failure = 'no-token'
         if (!this.retryAllowed()) return
         this.emitState('reconnecting')
         await this.waitBeforeRetry()
@@ -475,8 +479,10 @@ export class BridgeClient {
 
   private async waitBeforeRetry(): Promise<void> {
     this.attempt += 1
-    const ceiling = this.failure === undefined || this.failure === 'busy' ? BACKOFF_MAX_MS : REFUSED_RETRY_MS
-    const cap = this.failure === undefined || this.failure === 'busy'
+    // A missing token keeps the ordinary cadence: the installer or a pairing may provide it any moment.
+    const transient = this.failure === undefined || this.failure === 'busy' || this.failure === 'no-token'
+    const ceiling = transient ? BACKOFF_MAX_MS : REFUSED_RETRY_MS
+    const cap = transient
       ? Math.min(ceiling, BACKOFF_BASE_MS * 2 ** Math.max(0, this.attempt - 1))
       : ceiling
     const delay = cap / 2 + Math.random() * (cap / 2)

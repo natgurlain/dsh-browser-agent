@@ -2385,6 +2385,57 @@ textarea:focus-visible {
   text-align: right;
 }
 
+/* One-step pairing: a short code typed once, exchanged for the bridge token. */
+.pairing-card {
+  display: grid;
+  gap: 7px;
+  padding: 13px;
+  border-bottom: 1px solid var(--line);
+  font-size: calc(11px * var(--ui-scale));
+}
+
+.app > .pairing-card {
+  margin: 10px 12px 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.pairing-card p {
+  margin: 0;
+  color: var(--faint);
+  line-height: 1.45;
+}
+
+.pairing-card .pairing-needed {
+  color: var(--ink);
+}
+
+.pairing-form {
+  display: flex;
+  gap: 8px;
+}
+
+.pairing-form input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pairing-form button {
+  flex: none;
+}
+
+.pairing-status:empty {
+  display: none;
+}
+
+.pairing-status.settings-error {
+  color: var(--danger);
+}
+
 /* Discovery: manual detection button plus the instance picker it fills. */
 .bridge-detection {
   display: grid;

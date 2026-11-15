@@ -26,6 +26,8 @@
  *   panel → bg: { type: 'request-status' }
  *   panel → bg: { type: 'discovery.start', id }
  *   panel → bg: { type: 'discovery.cancel' }
+ *   panel → bg: { type: 'pair.start', id, code }
+ *   bg → panel: { type: 'pair.result', id, ok, reason? }
  *   panel → bg: { type: 'kill-switch.engage' }
  *   panel → bg: { type: 'kill-switch.release' }
  *   panel → bg: { type: 'agent.pause', mode: 'after-step' | 'take-over' }
@@ -88,6 +90,7 @@ import { BRIDGE_CONFIG_PATH, BRIDGE_PATH, DEVTOOLS_CAPS_VERSION, parseBridgeConf
 import { BridgeClient, type BridgeFailure, type BridgeState } from './bridge.ts'
 import { createRpc } from './rpc.ts'
 import { discoverInstances, planDiscovery, portOfUrl, readBridgeConfig } from './discovery.ts'
+import { extensionOrigin, pairWithAnyBridge, type PairingFailure } from './pairing.ts'
 import { frameDocumentKey, listTabFrames } from './frames.ts'
 import {
   dispatchOpenTab,
@@ -3210,6 +3213,58 @@ async function startBridge(): Promise<void> {
   bridge.start(url, settings.token)
 }
 
+/** One pairing at a time: a second request while one runs is refused, not queued. */
+let pairingInFlight = false
+
+/**
+ * One-step pairing (pairing.ts): exchange the code the user read off their
+ * DSH host for the bridge token, store it like a typed token, and connect.
+ * The filled-in bridge address is asked first, then every local instance;
+ * only a bridge with a pairing window open for this code can answer.
+ * @param code - the code as typed in the panel.
+ * @returns the failure, or `undefined` once the token is stored.
+ */
+async function pairWithHost(code: string): Promise<PairingFailure | undefined> {
+  if (pairingInFlight) return 'timeout'
+  pairingInFlight = true
+  try {
+    await settingsReady
+    // The filled-in address first (the user's choice); local instances are
+    // asked as well unless that address is a remote one.
+    const filledIn = settings.bridgeUrl === '' ? undefined : normalizeBridgeUrl(settings.bridgeUrl, BRIDGE_PATH)
+    const urls: string[] = filledIn === undefined ? [] : [filledIn]
+    if (filledIn === undefined || isLocalBridgeAddress(filledIn)) {
+      await discoveryMemory
+      const instances = await discoverInstances(planDiscovery({
+        ...(lastBridgeUrl === undefined ? {} : { rememberedUrl: lastBridgeUrl }),
+      }), {
+        probe: (port, timeoutMs) => readBridgeConfig(port, timeoutMs),
+        shouldContinue: () => true,
+      }, { stopAtFirstHit: false })
+      for (const instance of instances) if (!urls.includes(instance.wsUrl)) urls.push(instance.wsUrl)
+    }
+    const paired = await pairWithAnyBridge(urls, code, extensionOrigin())
+    if (!paired.ok) return paired.reason
+    const discovered = paired.url !== filledIn
+    await persistSettings({ token: paired.token })
+    // A new token is a new connection: drop what belonged to the old one.
+    forgetStandingHost()
+    setBridgeRefusal(undefined)
+    rejectedBridgeUrls.clear()
+    discoveryLatch = 'idle'
+    persistDiscoveryLatch('idle')
+    // The peer proved the code the user read on their own host: prefer it next time.
+    if (discovered) rememberBridgeUrl(paired.url)
+    if (panelPorts.size > 0) {
+      await startBridge()
+      broadcastStatus()
+    }
+    return undefined
+  } finally {
+    pairingInFlight = false
+  }
+}
+
 /**
  * Enumerate every local instance for the settings picker.
  *
@@ -3538,6 +3593,21 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       case 'discovery.cancel': {
         activeScan?.controller.abort()
+        break
+      }
+      case 'pair.start': {
+        // Only the extension's own panel reaches this port; the code never leaves the worker except in the exchange.
+        const request = message as { id?: unknown; code?: unknown }
+        if (typeof request.id !== 'string' || typeof request.code !== 'string') break
+        const id = request.id
+        void pairWithHost(request.code).then(
+          reason => reason,
+          (): PairingFailure => 'unreachable',
+        ).then((reason) => {
+          try {
+            port.postMessage(reason === undefined ? { type: 'pair.result', id, ok: true } : { type: 'pair.result', id, ok: false, reason })
+          } catch { /* panel closed */ }
+        })
         break
       }
       case 'kill-switch.engage':

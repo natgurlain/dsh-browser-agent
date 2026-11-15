@@ -33,6 +33,7 @@ export function fakePanelApi(overrides: Partial<PanelApi> = {}): PanelApi {
     startDiscovery: vi.fn(async () => []),
     cancelDiscovery: vi.fn(async () => {}),
     onDiscoveryProgress: vi.fn(() => unsubscribe),
+    pair: vi.fn(async () => {}),
     engageKillSwitch: vi.fn(async () => undefined),
     releaseKillSwitch: vi.fn(async () => undefined),
     onKillSwitch: vi.fn(() => unsubscribe),

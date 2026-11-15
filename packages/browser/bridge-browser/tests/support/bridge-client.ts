@@ -132,6 +132,24 @@ export function openSocket(url: string, origin?: string): Promise<TestSocket> {
   })
 }
 
+/**
+ * A browser-shaped `WebSocket` class (one-argument constructor,
+ * `addEventListener`) whose sockets present `origin`, the way a browser sets
+ * the Origin of an extension's sockets. For specs that run the extension's
+ * own client code against a real bridge (`vi.stubGlobal('WebSocket', ...)`).
+ */
+export function webSocketWithOrigin(origin?: string): typeof WebSocket {
+  return class OriginWebSocket extends WebSocket {
+    constructor(url: string | URL) {
+      super(url, origin === undefined ? {} : { headers: { origin } })
+      openSockets.add(this)
+      this.on('close', () => { openSockets.delete(this) })
+      // A refused upgrade must not surface as an unhandled 'error' event.
+      this.on('error', () => {})
+    }
+  } as unknown as typeof WebSocket
+}
+
 /** The close code and reason a test socket saw, once closed. */
 export function closeOf(ws: WebSocket): { code: number; reason: string } | undefined {
   return closeBySocket.get(ws)
