@@ -139,6 +139,26 @@ describe('learning runtime', () => {
     expect(learning.stepsFor('s1')).toEqual([])
   })
 
+  it('probes once, before the action: the landed-page policy re-check of a navigating click is not re-probed (H1)', async () => {
+    const { learning } = runtime({}, { dshLearningSettings: { workflows: true } })
+    await learning.ready
+    sendMessage.mockImplementation(async (_tab: number, message: { args: { index?: number } }) => message.args.index === 4
+      ? { ok: true, result: { role: 'link', name: 'Next page', css: 'a.next' } }
+      : { ok: false, error: { message: 'No element at that index' } })
+    const click = call('browser_click', { index: 4 })
+    const hook = learning.wrapPolicy(click, { id: 7, url: tabUrl }, policy)!
+    hook(click, { reads: [], acts: [] })
+    // tools.ts judges the page the click landed on with a snapshot-shaped copy of the call.
+    hook({ ...click, name: 'browser_snapshot', args: {} }, { reads: [], acts: [] })
+    // A second policy pass for the same call (content-script recovery) does not re-probe either.
+    hook(click, { reads: [], acts: [] })
+    learning.recordResult(click, { ok: true, result: { text: 'ok' } }, { tabId: 7, url: tabUrl })
+    await flush()
+    await flush()
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(learning.stepsFor('s1')).toEqual([expect.objectContaining({ tool: 'browser_click', locator: { role: 'link', name: 'Next page', css: 'a.next' } })])
+  })
+
   it('hands "Do the remaining N" to the bridge as one browser_run program, with no card of its own', async () => {
     const { learning, request } = runtime({}, { dshLearningSettings: { watchMe: true } })
     await learning.ready

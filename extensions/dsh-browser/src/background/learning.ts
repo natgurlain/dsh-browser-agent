@@ -300,9 +300,16 @@ export class LearningRuntime {
    */
   wrapPolicy(call: ToolCall, target: { id?: number; url?: string; windowId?: number }, hook: CallPolicyHook | undefined): CallPolicyHook | undefined {
     if (hook === undefined) return hook
+    let probed = false
     return (policyCall, targets) => {
       const decision = hook(policyCall, targets)
-      if (decision.kind !== 'deny' && target.id !== undefined && !this.deps.halted()) this.startProbes(call, target.id, target.url, target.windowId)
+      // Probe only for this call's own policy pass, and only once: the same
+      // hook later judges the page a navigation landed on (a snapshot-shaped
+      // copy of the call), where the old index/selector means nothing.
+      if (!probed && policyCall.name === call.name && decision.kind !== 'deny' && target.id !== undefined && !this.deps.halted()) {
+        probed = true
+        this.startProbes(call, target.id, target.url, target.windowId)
+      }
       return decision
     }
   }
