@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { BridgeState } from '../src/background/bridge.ts'
 import type { PanelApi } from '../src/panel/api.ts'
+import { fakePanelApi } from './support/panel-api.ts'
 import { BRIDGE_SESSION_PURGE_METHOD, type ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 
 let panelApi: PanelApi
@@ -50,37 +51,16 @@ describe('panel session transitions', () => {
       throw new Error(`unexpected RPC: ${method}`)
     })
     const unsubscribe = (): void => {}
-    panelApi = {
+    panelApi = fakePanelApi({
       rpc: async <T = unknown>(method: string, payload?: unknown): Promise<T> =>
         await rpc(method, payload) as T,
-      respond: vi.fn(async () => undefined),
       onStatus: vi.fn((callback) => { onStatus = callback; return unsubscribe }),
       onEvent: vi.fn((callback) => { onEvent = callback; return unsubscribe }),
-      onApprovalRequest: vi.fn(() => unsubscribe),
-      onApprovalResolved: vi.fn(() => unsubscribe),
-      onTabAffinity: vi.fn(() => unsubscribe),
-      onSelection: vi.fn(() => unsubscribe),
       onSessionResumeHint: vi.fn((callback) => { onResumeHint = callback; return unsubscribe }),
-      respondToApproval: vi.fn(async () => {}),
-      resolveTabAffinity: vi.fn(async () => {}),
-      rebindTabAffinity: vi.fn(async () => {}),
-      returnToControlledTab: vi.fn(async () => {}),
-      clearSelection: vi.fn(async () => {}),
-      registerWindow: vi.fn(async () => {}),
       setActiveSession: vi.fn()
         .mockResolvedValueOnce(undefined)
         .mockRejectedValueOnce(new Error('runtime port unavailable')),
-      updateSettings: vi.fn(async () => {}),
-      onDevToolsStatus: vi.fn(() => unsubscribe),
-      detachDevTools: vi.fn(async () => undefined),
-      requestStatus: vi.fn(async () => {}),
-      startDiscovery: vi.fn(async () => []),
-      cancelDiscovery: vi.fn(async () => {}),
-      onDiscoveryProgress: vi.fn(() => unsubscribe),
-      engageKillSwitch: vi.fn(async () => undefined),
-      releaseKillSwitch: vi.fn(async () => undefined),
-      onKillSwitch: vi.fn(() => () => {}),
-    }
+    })
 
     root = createRoot(document.querySelector('#root')!)
   })
