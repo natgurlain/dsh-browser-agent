@@ -138,6 +138,8 @@ export interface PanelCopy {
     autoResumeSessionHelp: string
     showAgentOverlay: string
     showAgentOverlayHelp: string
+    allowPageWatchers: string
+    allowPageWatchersHelp: string
     trustedOrigins: string
     trustedOriginsHelp: string
     trustedOriginInput: string
@@ -541,6 +543,8 @@ const EN: PanelCopy = {
     autoResumeSessionHelp: 'Reopen the conversation associated with this tab and page path; other pages start a new conversation',
     showAgentOverlay: 'Show the agent on the page',
     showAgentOverlayHelp: 'A ghost cursor and outline mark each target before the agent acts, and controlled tabs get a colored frame with a Stop button',
+    allowPageWatchers: 'Allow the agent to watch pages',
+    allowPageWatchersHelp: 'The agent may ask to keep watching a page and wake itself when something changes. Each watcher needs your approval; turning this off cancels them all',
     trustedOrigins: 'Always-allowed domains',
     trustedOriginsHelp: 'The approval dialog can trust a domain for the current side-panel session only. Domains added here permanently skip action confirmation when every known origin is trusted. Wildcards include the base domain and subdomains, and stay scoped to their scheme and port; `*.example.com` defaults to HTTPS.',
     trustedOriginInput: 'Domain to always trust (e.g. https://example.com or https://*.example.com)',
@@ -958,6 +962,8 @@ const ZH: PanelCopy = {
     autoResumeSessionHelp: '重新打开当前标签页此页面的会话；其他页面会新建会话',
     showAgentOverlay: '在页面上显示助手操作',
     showAgentOverlayHelp: '助手操作前用光标和高亮框标出目标，受控标签页显示彩色边框和停止按钮',
+    allowPageWatchers: '允许助手监视页面',
+    allowPageWatchersHelp: '助手可以请求持续监视页面，并在页面变化时自行唤醒。每个监视都需要您批准；关闭此项会取消全部监视',
     trustedOrigins: '永久免确认域名',
     trustedOriginsHelp: '审批框可只信任本次侧栏会话。这里添加的域名仅在所有已知来源均受信任时免除操作确认。通配符包含主域及其子域，并严格区分协议和端口；`*.example.com` 默认使用 HTTPS。',
     trustedOriginInput: '要永久信任的域名（如 https://example.com 或 https://*.example.com）',

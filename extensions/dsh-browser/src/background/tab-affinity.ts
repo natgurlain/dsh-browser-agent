@@ -81,6 +81,11 @@ export class TabAffinityController {
     this.sessionTabs.set(sessionId, { ...tab })
   }
 
+  /** Forget a session's tab binding (a released fleet worker); true when one existed. */
+  unbindSession(sessionId: string): boolean {
+    return this.sessionTabs.delete(sessionId)
+  }
+
   sessionMap(): Record<string, AffinityTab> {
     const result: Record<string, AffinityTab> = {}
     for (const [sid, tab] of this.sessionTabs.entries()) {

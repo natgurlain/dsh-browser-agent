@@ -23,7 +23,8 @@
     "managed_schema": "managed-schema.json"
   },
   "optional_permissions": [
-    "downloads"
+    "downloads",
+    "tabGroups"
   ],
   "host_permissions": [
     "<all_urls>"

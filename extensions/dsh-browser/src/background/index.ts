@@ -87,6 +87,8 @@ import { capturePauseBaseline, prepareResume, type PauseBaseline, type ResumeFlo
 import { AgentOverlayController } from './agent-overlay.ts'
 import { DialogController } from './dialogs.ts'
 import { approveProgram, coverByProgram, ProgramGrants } from './run-program.ts'
+import { PageWatcherRuntime } from './watcher-runtime.ts'
+import { FLEET_GROUP_TITLE, FleetRegistry, type FleetDeps } from './fleet.ts'
 import {
   isApprovalDecision,
   type ApprovalAuthorization,
@@ -195,6 +197,8 @@ export interface Settings {
   settingsVersion: number
   /** Show the ghost cursor, target outlines, and the "AI controlling" frame on pages. */
   showAgentOverlay: boolean
+  /** Let the agent create standing page watchers (browser_watch); each one still needs its own card. */
+  allowPageWatchers: boolean
 }
 
 /** Current settings schema; see {@link Settings.settingsVersion}. */
@@ -217,6 +221,7 @@ const SETTINGS_DEFAULTS: Settings = {
   strictSites: [],
   settingsVersion: SETTINGS_VERSION,
   showAgentOverlay: true,
+  allowPageWatchers: false,
 }
 
 /** Longest no-panel approval window the bridge's hold can cover. */
@@ -622,6 +627,16 @@ const sessionTrustedActionOrigins = new Set<string>()
 const devToolsGrants = new DevToolsGrants()
 /** Approved browser_run programs; each step claims its own grant (run-program.ts). */
 const programGrants = new ProgramGrants()
+/** Tab fleets (fleet.ts): children's tool allowlists, their tabs, and where their cards show. */
+const fleets = new FleetRegistry()
+/** Standing page watchers (watchers.ts); fires wake only sessions the bridge owns. */
+const pageWatchers = new PageWatcherRuntime({
+  enabled: () => settingsLoaded && settings.allowPageWatchers,
+  blocked: () => killSwitchEngaged || pauseGate.holding(),
+  shareContent: () => unrestrictedAccessEnabled() || settings.sharePageContent !== 'off',
+  rpc: (method, payload) => gatewayRpc(method, payload),
+  noteTaint: (sessionId, origin) => { policyRuntime.recordInjection(sessionId, origin) },
+})
 /** Tool calls that are either withdrawable or completing an already-dispatched action. */
 interface ActiveToolCall {
   controller: AbortController
@@ -740,10 +755,13 @@ async function persistSettings(next: Partial<Settings>): Promise<void> {
   const changesDevTools = typeof next.allowDevTools === 'boolean'
   const revokesDevTools = changesDevTools && (settings.allowDevTools || devToolsGrants.hasAny()) && !updated.allowDevTools
   const togglesOverlay = settings.showAgentOverlay !== updated.showAgentOverlay
+  const togglesWatchers = settings.allowPageWatchers !== updated.allowPageWatchers
   settings = updated
   if (!updated.unrestrictedBrowserAccess) unrestrictedAccessActive = false
   if (revokesDevTools) devToolsGrants.clear()
   if (togglesOverlay) refreshActionBadges()
+  // Turning page watchers off revokes every standing watcher.
+  if (togglesWatchers) void (updated.allowPageWatchers ? Promise.resolve() : pageWatchers.clearAll()).then(() => { pageWatchers.broadcast() })
   syncSelectionWatch()
   let accessTransition: Promise<void> | undefined
   if (revokesUnrestrictedAccess) {
@@ -818,6 +836,7 @@ function normalizeUserSettings(candidate: Settings): Settings {
       : [],
     settingsVersion: SETTINGS_VERSION,
     showAgentOverlay: candidate.showAgentOverlay !== false,
+    allowPageWatchers: candidate.allowPageWatchers === true,
   }
 }
 
@@ -1003,6 +1022,8 @@ async function engageKillSwitch(): Promise<void> {
   sessionTrustedActionOrigins.clear()
   devToolsGrants.clear()
   programGrants.clear()
+  // Standing watchers are standing grants: the kill switch revokes them too.
+  void pageWatchers.clearAll()
   for (const call of unsettledToolCalls) {
     call.revocationRequested = true
     call.controller.abort()
@@ -2216,9 +2237,12 @@ function routeToolCall(call: ToolCall): void {
   const policy = auditedPolicy(activeCall, policyRuntime.hook(call.id, call.sessionId, unrestrictedAccess))
   // browser_run: an approved program stands in for this step's ordinary card only (run-program.ts).
   const programCover = programGrants.claim(call)
+  // A fleet worker's cards show under its parent's session; its allowlist is enforced here too (fleet.ts).
+  const approvalSession = fleets.approvalSession(call.sessionId)
+  const fleetRefusal = fleets.refusal(call)
   const approve = (windowId: number): ((prompt: ApprovalPrompt) => Promise<ApprovalAuthorization>) => coverByProgram(
     programCover,
-    auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(prompt, controller.signal, windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt)),
+    auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(prompt, controller.signal, windowId, approvalSession, unrestrictedAccess, undefined, call.id, onPrompt)),
     () => { activeCall.decision = 'program-approved' },
   )
   let policyTabOrigin: string | undefined
@@ -2258,10 +2282,23 @@ function routeToolCall(call: ToolCall): void {
   const dispatch = (): Promise<ToolAnswer> => policyRuntime.ready.then(() => {
     // A subagent or fork of a tainted session: the Host says so on the call.
     if (call.tainted === true) policyRuntime.markHostTaint(call.sessionId)
-  }).then(() => isTabManagementTool(call.name)
+  }).then(() => fleetRefusal !== undefined
+    ? { ok: false, error: { code: 'action-failed', message: fleetRefusal } } satisfies ToolAnswer
+    : call.name === 'browser_fanout'
+    ? fleets.open(call, fleetDeps(controller.signal, (prompt, windowId) => auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(shown, controller.signal, windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt))(prompt)))
+    : call.name === 'browser_fleet_release'
+    ? fleets.releaseCall(call, fleetDeps(controller.signal, async () => 'denied'))
+    : isTabManagementTool(call.name)
     ? managementDispatch()
     : isDevToolsTool(call.name)
     ? dispatchDevToolsTool(call, controller.signal)
+    : call.name === 'browser_watch' || call.name === 'browser_watches'
+    ? pageWatchers.dispatch(call, {
+        resolveTab: (sessionId) => resolveToolTab(sessionId),
+        allowsTab: (tabId, sessionId) => tabAffinity.allowsTarget(tabId, sessionId),
+        authorize: (prompt, windowId) => auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(shown, controller.signal, windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt))(prompt),
+        signal: controller.signal,
+      })
     : call.name === 'browser_run'
     ? approveProgram(call, {
         grants: programGrants,
@@ -2361,6 +2398,42 @@ function routeToolCall(call: ToolCall): void {
     runtimeLease.touch()
     runtimeKeeper.update()
   })
+}
+
+/** Browser operations for a tab fleet (fleet.ts). */
+function fleetDeps(signal: AbortSignal, authorize: FleetDeps['authorize']): FleetDeps {
+  return {
+    signal,
+    authorize,
+    parentWindow: async (sessionId) => {
+      const target = await resolveToolTab(sessionId)
+      if (!('ok' in target) && target.windowId !== undefined) return target.windowId
+      return (await chrome.windows.getLastFocused().catch(() => undefined))?.id
+    },
+    createTab: (url, windowId) => chrome.tabs.create({ url, active: false, ...(windowId === undefined ? {} : { windowId }) }),
+    groupTabs: async (tabIds, windowId) => {
+      if (typeof chrome.tabs.group !== 'function' || tabIds.length === 0) return false
+      const granted = await chrome.permissions.contains({ permissions: ['tabGroups'] }).catch(() => false)
+      if (!granted || chrome.tabGroups === undefined) return false
+      const groupId = await chrome.tabs.group({ tabIds, ...(windowId === undefined ? {} : { createProperties: { windowId } }) })
+      await chrome.tabGroups.update(groupId, { title: FLEET_GROUP_TITLE, color: 'blue', collapsed: false })
+      return true
+    },
+    bindChild: (childId, tab) => {
+      const summary = summarizeTab(tab as chrome.tabs.Tab)
+      if (summary === null) return
+      tabAffinity.bindSession(childId, summary)
+      persistTabAffinity()
+      broadcastTabAffinity()
+    },
+    unbindChild: (childId) => {
+      if (tabAffinity.unbindSession(childId)) {
+        persistTabAffinity()
+        broadcastTabAffinity()
+      }
+    },
+    closeTab: (tabId) => chrome.tabs.remove(tabId),
+  }
 }
 
 /** Hold the call while the user has paused the agent, then run it (or fail it closed). */
@@ -2833,6 +2906,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
 
 chrome.runtime.onConnect.addListener((port) => {
   if (policyRuntime.connect(port)) return
+  if (pageWatchers.connect(port)) return
   if (port.name !== 'dsh-panel') return
   const wasIdle = panelPorts.size === 0
   const tabAffinityRebinds = new Map<string, {

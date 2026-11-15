@@ -42,3 +42,28 @@ describe('fileSessionLedger', () => {
     expect(warnLink).toHaveBeenCalledWith(expect.stringContaining('symlink'))
   })
 })
+
+describe('fleet children in the ledger', () => {
+  it('owns a child only through an owned parent, and persists the link', async () => {
+    const file = join(temp(), 'ledger.json')
+    const ledger = await fileSessionLedger(file, () => {})
+    await ledger.add('parent')
+    await ledger.addChild!('child', 'parent')
+    await ledger.addChild!('orphan', 'someone-elses-session')
+    expect(ledger.has('child')).toBe(true)
+    expect(ledger.has('orphan')).toBe(false)
+    const reloaded = await fileSessionLedger(file, () => {})
+    expect(reloaded.has('child')).toBe(true)
+    expect(reloaded.has('parent')).toBe(true)
+    expect(reloaded.has('orphan')).toBe(false)
+  })
+
+  it('applies the same rule in memory', async () => {
+    const { memorySessionLedger } = await import('../src/session-ledger.ts')
+    const ledger = memorySessionLedger(['p'])
+    await ledger.addChild!('c', 'p')
+    await ledger.addChild!('x', 'not-owned')
+    await ledger.addChild!('p', 'p')
+    expect([ledger.has('c'), ledger.has('x'), ledger.has('p')]).toEqual([true, false, true])
+  })
+})

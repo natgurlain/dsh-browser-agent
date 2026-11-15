@@ -37,6 +37,7 @@ import { registerScreenshotTool } from './screenshot-tools.ts'
 import { registerPdfTool } from './pdf-tools.ts'
 import { registerBrowserDevTools } from './devtools-tools.ts'
 import { registerRunProgramTool } from './run-program.ts'
+import { FleetChildren, registerFanoutTool, type FleetSubagents } from './fanout.ts'
 import { BRIDGE_WATCH_FIRE_METHOD, fileWatchRecords, handleWatchFire, registerWatchTools, WakeLimiter, type WatchRecordStore } from './watchers.ts'
 import {
   BEACON_PORTS,
@@ -348,6 +349,7 @@ function mountBridge(
   const auditLog = resolved.auditLogPath === '' ? undefined : new AuditLog(resolved.auditLogPath)
   // Page watchers wake only sessions this bridge owns, at a bounded rate (watchers.ts).
   const wakeLimiter = new WakeLimiter()
+  const fleetChildren = new FleetChildren()
   const extraRpc = (method: string, payload: unknown, context: { signal: AbortSignal }) => method === BRIDGE_WATCH_FIRE_METHOD
     ? handleWatchFire(payload, context.signal, {
         records: watchRecords,
@@ -458,7 +460,16 @@ function mountBridge(
     })
     const disposeRun = registerRunProgramTool(ctx, server, { toolTimeoutMs: resolved.toolTimeoutMs })
     const disposeWatch = registerWatchTools(ctx, server, watchRecords, { toolTimeoutMs: resolved.toolTimeoutMs })
+    // Tab fleets: subagents on their own background tabs, restricted before their first step (fanout.ts).
+    const disposeFanout = registerFanoutTool(ctx, {
+      bridge: server,
+      subagents: () => ctx.get('subagents' as never) as FleetSubagents | undefined,
+      children: fleetChildren,
+      ledger,
+      taint: (sessionId) => { taint.mark(sessionId, 'browser_fanout') },
+    }, { toolTimeoutMs: resolved.toolTimeoutMs, provider: 'spawn' })
     return () => {
+      disposeFanout()
       disposeWatch()
       disposeRun()
       disposePdf()

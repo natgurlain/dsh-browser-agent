@@ -89,6 +89,9 @@ export const HOST_APPROVALS_CAPS_VERSION = 1
  */
 export const BRIDGE_AUDIT_RECORD_METHOD = 'bridge.audit.record'
 
+/** Internal RPC: a standing page watcher fired; the bridge wakes its owning session (watchers.ts). */
+export const BRIDGE_WATCH_FIRE_METHOD = 'bridge.watch.fire'
+
 /** Internal RPC: read and verify one session's audit log for the panel's export. */
 export const BRIDGE_AUDIT_EXPORT_METHOD = 'bridge.audit.export'
 

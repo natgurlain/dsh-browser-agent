@@ -50,7 +50,7 @@ function stubContext(): Context {
   }
   return {
     webServer: { host: '127.0.0.1', port: 0, registerUpgrade: () => () => {}, register: () => () => {} },
-    tools: { register: () => () => {} },
+    tools: { register: () => () => {}, guard: () => () => {} },
     agents: { get: () => undefined },
     get: (key: string) => key === 'typertGateway' ? gateway : key === 'connection' ? connection : undefined,
     on: () => () => {},

@@ -16,6 +16,7 @@ import { AgentOverlay, type OverlayCopy, type PointKind } from './overlay.ts'
 import { ElementIds } from './ids.ts'
 import { handleInputSetup } from './input-support.ts'
 import { SelectionWatcher } from './selection.ts'
+import { armPageWatch } from './watch.ts'
 import type { InputSetupRequest } from '../shared/input-setup.ts'
 import type { SnapshotBudget } from './snapshot.ts'
 
@@ -48,6 +49,11 @@ export interface ToolResult {
 function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, sendResponse: (response: unknown) => void): true | undefined {
   if (typeof message !== 'object' || message === null) return
   const msg = message as { type?: string }
+  if (msg.type === 'DSH_WATCH_ARM') {
+    // Standing page watchers the user approved for this tab (top frame only).
+    armPageWatch((message as { watches?: unknown }).watches)
+    return
+  }
   if (msg.type === 'DSH_INPUT_SETUP') {
     // Internal trusted-input plumbing: focus/selection/geometry for the
     // background's debugger-driven pointer and keyboard. Never model-facing.

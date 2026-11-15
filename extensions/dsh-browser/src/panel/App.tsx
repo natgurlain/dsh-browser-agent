@@ -15,6 +15,7 @@ import type { BridgeFailure, BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
 import { SitePolicySettings } from './SitePolicySettings.tsx'
 import { TaintBanner } from './TaintBanner.tsx'
+import { WatchersCard } from './WatchersCard.tsx'
 import { connectPanel, PanelRpcError, type AgentPauseState, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type PanelApi, type PanelSettings } from './api.ts'
 import { StepTimeline } from './StepTimeline.tsx'
 import { AgentControls } from './AgentControls.tsx'
@@ -1102,6 +1103,7 @@ export function App(): React.JSX.Element {
         strictSites: raw?.strictSites ?? [],
         settingsVersion: raw?.settingsVersion ?? 1,
         showAgentOverlay: raw?.showAgentOverlay ?? true,
+        allowPageWatchers: raw?.allowPageWatchers ?? false,
       })
     })
   }, [])
@@ -2989,6 +2991,21 @@ export function App(): React.JSX.Element {
             />
             <span className="setting-toggle-control" aria-hidden="true"><span /></span>
           </label>
+          <label className="setting-toggle">
+            <span className="setting-toggle-copy">
+              <strong>{copy.settings.allowPageWatchers}</strong>
+              <small>{copy.settings.allowPageWatchersHelp}</small>
+            </span>
+            <input
+              className="setting-toggle-input"
+              type="checkbox"
+              checked={settings?.allowPageWatchers ?? false}
+              onChange={(event) => setSettings((current) => current === null
+                ? current
+                : { ...current, allowPageWatchers: event.target.checked })}
+            />
+            <span className="setting-toggle-control" aria-hidden="true"><span /></span>
+          </label>
         </div>
         <section className="audit-export" aria-labelledby="audit-title">
           <span id="audit-title" className="audit-export-copy">
@@ -3178,6 +3195,7 @@ export function App(): React.JSX.Element {
         </div>
       </header>
       <TaintBanner sessionId={sessionRef.current} locale={locale} />
+      <WatchersCard locale={locale} />
       {showTextSize && (
         <TextSizePanel scale={uiScale} copy={copy}
           onStep={(direction) => changeUiScale(stepUiScale(uiScaleRef.current, direction))}

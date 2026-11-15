@@ -38,8 +38,10 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 
+import { BRIDGE_WATCH_FIRE_METHOD } from './protocol.ts'
+
 /** Extension → bridge RPC: a watcher's condition was met. */
-export const BRIDGE_WATCH_FIRE_METHOD = 'bridge.watch.fire'
+export { BRIDGE_WATCH_FIRE_METHOD }
 /** Longest a watcher may live. */
 export const MAX_WATCH_MINUTES = 24 * 60
 /** Matched page text kept in a wake message. */
@@ -214,7 +216,7 @@ export function createWatchWakeMessage(fire: WatchFire): UserMessage {
     `The instruction you gave for this watcher: ${fire.prompt}`,
   ]
   if (fire.matched !== undefined && fire.matched !== '') {
-    lines.push('Matched page content:', wrapUntrustedPageText(fire.matched))
+    lines.push('Matched page content:', wrapUntrustedPageText(fire.matched.slice(0, MAX_MATCHED_CHARS)))
   } else {
     lines.push('No page content is included (page content sharing is off or nothing textual matched). Take a browser_snapshot if you need it.')
   }

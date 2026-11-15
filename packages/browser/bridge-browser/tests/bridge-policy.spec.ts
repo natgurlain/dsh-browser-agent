@@ -143,6 +143,21 @@ describe('session ownership', () => {
     expect(ledger.has('created')).toBe(true)
   })
 
+  it('treats tab-fleet subagents of an owned session as owned and still refuses other subagents', async () => {
+    const ledger = memorySessionLedger(['mine'])
+    const { policy, call } = harness({}, { ledger })
+    const signal = new AbortController().signal
+    await ledger.addChild!('fleet-child', 'mine')
+    await ledger.addChild!('child', 'desktop-private')
+    expect(await policy.allowsSession('fleet-child', signal, 'own')).toBe(true)
+    expect(await policy.allowsSession('fleet-child', signal, 'read')).toBe(true)
+    expect(await call('session.history', { sessionId: 'fleet-child' })).toMatchObject({ ok: true })
+    // A subagent of a session the bridge does not own stays out of scope.
+    expect(await policy.allowsSession('child', signal, 'read')).toBe(false)
+    expect(await policy.allowsSession('child', signal, 'own')).toBe(false)
+    expect(await call('session.history', { sessionId: 'child' })).toMatchObject({ ok: false, error: { code: 'forbidden' } })
+  })
+
   it('refuses sessions that are neither bridge-created nor listed for the panel', async () => {
     const { call, inner } = harness()
     for (const method of ['session.history', 'session.prompt', 'session.setPermission', 'commands.execute', 'session.cancel', 'session.attachment']) {
