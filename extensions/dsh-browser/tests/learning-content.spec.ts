@@ -48,6 +48,13 @@ describe('learning content helpers', () => {
     expect(html).not.toContain("onclick")
   })
 
+  it('masks a sensitive contenteditable even after a removed script sibling', () => {
+    document.body.innerHTML = '<script>1</script><div><div contenteditable aria-label="password">hunter2-secret</div></div><div contenteditable aria-label="Notes">plain-notes</div>'
+    const html = sanitizedDom()
+    expect(html).not.toContain('hunter2-secret')
+    expect(html).toContain('plain-notes')
+  })
+
   it('finds CSRF meta tags and cookies only for matching', () => {
     document.cookie = 'csrftoken=cookie-token-1234'
     const tokens = pageTokens()

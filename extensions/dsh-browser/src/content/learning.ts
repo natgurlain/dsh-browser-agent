@@ -129,15 +129,21 @@ export function sanitizedDom(): string {
     }
     if (sensitive) copy.setAttribute('data-dsh-masked', 'true')
   })
+  // Pair live and cloned editing hosts by index before anything is removed
+  // from the clone: a selector computed afterwards would point at the wrong node.
+  const liveEditable = [...document.querySelectorAll('[contenteditable]')]
+  const copyEditable = [...clone.querySelectorAll('[contenteditable]')]
+  liveEditable.forEach((field, index) => {
+    const copy = copyEditable[index]
+    if (copy === undefined || !isSensitiveField(field)) return
+    copy.textContent = maskValue(field.textContent ?? '')
+    copy.setAttribute('data-dsh-masked', 'true')
+  })
   for (const node of clone.querySelectorAll('script, noscript, iframe[srcdoc], object, embed')) node.remove()
   for (const node of clone.querySelectorAll('*')) {
     for (const attribute of [...node.attributes]) {
       if (/^on/iu.test(attribute.name) || /^\s*javascript:/iu.test(attribute.value)) node.removeAttribute(attribute.name)
     }
-  }
-  for (const node of clone.querySelectorAll('[contenteditable]')) {
-    const original = document.querySelector(uniqueSelectorFor(node))
-    if (original !== null && isSensitiveField(original)) node.textContent = maskValue(node.textContent ?? '')
   }
   const html = `<!doctype html>\n<!-- dsh-browser fixture: ${location.href.replace(/--/gu, '- -')} -->\n${clone.outerHTML}`
   return html.length > FIXTURE_MAX_CHARS ? html.slice(0, FIXTURE_MAX_CHARS) : html
