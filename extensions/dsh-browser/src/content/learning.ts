@@ -126,7 +126,9 @@ export function sanitizedDom(): string {
   })
   // Pair live and cloned editing hosts by index before anything is removed
   // from the clone: a selector computed afterwards would point at the wrong node.
-  const liveEditable = [...document.querySelectorAll('[contenteditable]')]
+  // Descendants of <html> only: the clone's querySelectorAll never matches the
+  // clone root, so including a contenteditable <html> would shift every pair.
+  const liveEditable = [...document.documentElement.querySelectorAll('[contenteditable]')]
   const copyEditable = [...clone.querySelectorAll('[contenteditable]')]
   liveEditable.forEach((field, index) => {
     const copy = copyEditable[index]

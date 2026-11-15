@@ -71,6 +71,8 @@ export class PolicyRuntime {
    * to taint: a worker restart must not silently turn the commit gate off.
    */
   private readonly strictSessions = new Set<string>()
+  /** Set once the persisted strict sessions are loaded; toggles before that wait for it. */
+  private strictLoaded = false
   private readonly ports = new Set<chrome.runtime.Port>()
 
   constructor(private readonly options: PolicyRuntimeOptions) {
@@ -91,13 +93,17 @@ export class PolicyRuntime {
 
   private async loadStrictSessions(): Promise<void> {
     const storage = this.options.storage
-    if (storage === undefined) return
+    if (storage === undefined) {
+      this.strictLoaded = true
+      return
+    }
     try {
       const stored = (await storage.get(STRICT_SESSIONS_STORAGE_KEY))[STRICT_SESSIONS_STORAGE_KEY]
       if (Array.isArray(stored)) for (const key of stored) if (typeof key === 'string') this.strictSessions.add(key)
     } catch {
       // Storage unavailable: strict sites from settings still apply.
     }
+    this.strictLoaded = true
   }
 
   setManaged(policy: ManagedPolicy): void {
@@ -216,6 +222,13 @@ export class PolicyRuntime {
   }
 
   setStrictSession(sessionId: string | undefined, enabled: boolean): void {
+    // A toggle that arrives before the stored set loads (the message that woke
+    // the worker) would persist only itself and forget the other strict sessions,
+    // and a load landing after it could undo a disable. Apply it once loaded.
+    if (!this.strictLoaded) {
+      void this.ready.then(() => { this.setStrictSession(sessionId, enabled) })
+      return
+    }
     const key = taintKey(sessionId)
     if (enabled) this.strictSessions.add(key)
     else this.strictSessions.delete(key)

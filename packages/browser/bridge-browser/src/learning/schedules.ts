@@ -148,7 +148,15 @@ export class WorkflowSchedules {
         target: { kind: 'session', sessionId },
       })
       const records = await this.records()
-      await this.persist([...records, { id: created.id, sessionId, workflow: workflow.name, timing, ...(install === undefined ? {} : { install }) }])
+      const next = [...records, { id: created.id, sessionId, workflow: workflow.name, timing, ...(install === undefined ? {} : { install }) }]
+      try {
+        await this.persist(next)
+      } catch (error: unknown) {
+        // Never leave a live DSH schedule this bridge cannot list, cancel or revoke:
+        // undo it, and if even that fails keep it in memory for the kill switch.
+        await this.service().edit({ id: created.id, action: 'delete' }).catch(() => { this.cache = next })
+        throw error
+      }
       return { id: created.id, sessionId, workflow: workflow.name, timing, status: String(created.status ?? 'active') }
     })
   }
