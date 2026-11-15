@@ -54,6 +54,7 @@ import { isLoopbackBindAddress, startDiscoveryBeacon, type DiscoveryBeacon } fro
 import { withSessionDeferral } from './session-deferral.ts'
 import { withSessionWorkspace } from './session-workspace.ts'
 import { createSessionPurger } from './session-purge.ts'
+import { createKillSwitchHandler, createSessionForgetter, createSnapshotInjector } from './bridge-hooks.ts'
 import { installedTokenMismatch, resolveToken, syncInstalledExtensionToken } from './token.ts'
 import { withBridgePolicy } from './bridge-policy.ts'
 import { installSessionTaint, SessionTaintRegistry, withTaintMethods } from './session-taint.ts'
@@ -315,22 +316,16 @@ function mountBridge(
     browserContext.activate(agent)
   })
 
-  const purgeSession = createSessionPurger(ctx, api, SESSIONS_ROOT, (sessionId) => forgetSession(sessionId))
-  /**
-   * Drop the in-memory and durable per-session state a purged session leaves
-   * behind (install binding, taint, wake history, listing cache, watcher
-   * records, workflow schedules). Taint and the install binding stay while a
-   * child session is linked under it: the child inherits both through it.
-   */
-  const forgetSession = async (sessionId: string): Promise<void> => {
-    if (taint.forget(sessionId)) server.forgetSession(sessionId)
-    wakeLimiter.forget(sessionId)
-    fenced.forgetSession(sessionId)
-    await watchRecords.removeSession(sessionId).catch((error: unknown) => {
-      ctx.logger.warn(`browser bridge: could not drop the purged session's page watchers: ${error instanceof Error ? error.message : String(error)}`)
-    })
-    await learning?.forgetSession(sessionId)
-  }
+  const forgetSession = createSessionForgetter({
+    taint,
+    forgetAffinity: (sessionId) => { server.forgetSession(sessionId) },
+    wakeLimiter: { forget: (sessionId) => { wakeLimiter.forget(sessionId) } },
+    policy: { forgetSession: (sessionId) => { fenced.forgetSession(sessionId) } },
+    watchRecords,
+    learning: () => learning,
+    warn: (message) => { ctx.logger.warn(message) },
+  })
+  const purgeSession = createSessionPurger(ctx, api, SESSIONS_ROOT, forgetSession)
 
   // Least privilege: the extension reaches only what its panel uses, in scope.
   const fenced = withBridgePolicy(api, {
@@ -385,6 +380,7 @@ function mountBridge(
     devLoop.noteToolResult(exec.agent === undefined ? undefined : String(exec.agent.id), exec.name, result.isError)
   })
   ctx.on('agent/status', ({ agent, status }) => { void devLoop.noteStatus(String(agent.id), status) })
+  const killSwitch = createKillSwitchHandler({ devLoop, learning: () => learning, info: (message) => { ctx.logger.info(message) } })
   server = new BridgeServer({
     token: tokenRes.token,
     // An MCP client's external session is the bridge's own: the panel may clear its taint too.
@@ -401,17 +397,10 @@ function mountBridge(
       maxInteractiveItems: resolved.maxInteractiveItems,
       devTools: { version: DEVTOOLS_CAPS_VERSION },
     },
-    injectBrowserSnapshot: (sessionId, snapshot, reason) => {
-      browserContext.inject(sessionId, snapshot, reason)
-      taint.mark(sessionId, 'snapshot-injection')
-    },
+    injectBrowserSnapshot: createSnapshotInjector((sessionId, snapshot, reason) => browserContext.inject(sessionId, snapshot, reason), taint),
     purgeSession,
     // The kill switch revokes standing grants on the Host too.
-    onKillSwitch: () => {
-      const unlinked = devLoop.unlinkAll()
-      if (unlinked > 0) ctx.logger.info(`browser bridge: kill switch engaged; removed ${String(unlinked)} dev loop link(s)`)
-      void learning?.revokeStandingGrants()
-    },
+    onKillSwitch: () => { void killSwitch() },
     extraRpc: (method, payload, context) => extraRpc(method, payload, context)
       ?? learning?.rpc(method, payload, {
         connection: context.connection,
