@@ -3,9 +3,11 @@
 # it downloads uninstall.mjs from a tagged release and runs it only after its SHA-256 matched
 # that release's SHA256SUMS.
 #
-#   uninstall.ps1 [--release latest|vX.Y.Z] [uninstall.mjs options…]
+#   uninstall.ps1 [--release latest|vX.Y.Z] [--lang en|zh] [uninstall.mjs options…]
 #
 # DSH_BROWSER_VERSION is the environment form of --release; the default is the latest release.
+# DSH_BROWSER_LANG is the environment form of --lang; the default is Chinese when the Windows
+# display language is Chinese and English otherwise. One language is printed per run.
 # The download path of this script has never been run on Windows (see RELEASING.md).
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -21,7 +23,7 @@ $ProgressPreference = 'SilentlyContinue'
 # resolves the release (the latest one when -Tag is empty), downloads SHA256SUMS and the
 # named assets into <dir>, checks every asset's SHA-256 against SHA256SUMS and returns the
 # resolved tag. Any failure (download error, missing SHA256SUMS, missing or duplicated line,
-# digest mismatch) throws after recording a bilingual message in $script:ReleaseFailure.
+# digest mismatch) throws after recording its message (Chinese, English) in $script:ReleaseFailure.
 # Callers must not read, unpack or run anything in <dir> before it returns. "{tag}" in an
 # asset name is replaced by the resolved tag.
 #
@@ -34,10 +36,38 @@ $ReleaseApiUrl = if ($env:DSH_BROWSER_GITHUB_API_URL) { $env:DSH_BROWSER_GITHUB_
 $ReleaseTagPattern = '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
 $script:ReleaseFailure = $null
 
+# One language per run. DSH_BROWSER_LANG=en|zh decides; otherwise Chinese when the Windows
+# display language is Chinese, and English for everything else. Every message is written as
+# a pair, Chinese first and English second, and exactly one of the two is printed.
+$ReleaseLang = 'en'
+$ReleaseLangWanted = ([string]$env:DSH_BROWSER_LANG).ToLowerInvariant()
+if ($ReleaseLangWanted.StartsWith('zh')) {
+  $ReleaseLang = 'zh'
+} elseif (-not $ReleaseLangWanted.StartsWith('en')) {
+  try { if ((Get-UICulture).Name -like 'zh*') { $ReleaseLang = 'zh' } } catch { }
+}
+
+function Get-ReleaseText {
+  <# The Chinese or the English text, whichever matches the run's language. #>
+  param([string]$Zh, [string]$En)
+  if ($ReleaseLang -eq 'zh') { return $Zh }
+  return $En
+}
+
+function Set-ReleaseLang {
+  <# The --lang option: $true when the value is en or zh. Child processes inherit the choice. #>
+  param([string]$Value)
+  $wanted = $Value.ToLowerInvariant()
+  if ($wanted -ne 'en' -and $wanted -ne 'zh') { return $false }
+  $script:ReleaseLang = $wanted
+  $env:DSH_BROWSER_LANG = $wanted
+  return $true
+}
+
 function Stop-Release {
   param([string]$Zh, [string]$En)
   $script:ReleaseFailure = @($Zh, $En)
-  throw "dsh-browser release: $En"
+  throw "dsh-browser release: $(Get-ReleaseText $Zh $En)"
 }
 
 function Assert-ReleaseBase {
@@ -243,8 +273,8 @@ function Get-VerifiedRelease {
     }
   }
 
-  Write-Host ("Verified: {0} file(s) of {1} match SHA256SUMS." -f $Assets.Count, $Tag)
-  Write-Host ("   已校验：{0} 的 {1} 个文件与 SHA256SUMS 一致。" -f $Tag, $Assets.Count)
+  Write-Host (Get-ReleaseText ("已校验：{0} 的 {1} 个文件与 SHA256SUMS 一致。" -f $Tag, $Assets.Count) `
+      ("Verified: {0} file(s) of {1} match SHA256SUMS." -f $Assets.Count, $Tag))
   return $Tag
 }
 # <<< release-fetch
@@ -261,10 +291,24 @@ for ($index = 0; $index -lt $Arguments.Count; $index++) {
     $Wanted = [string]$Arguments[$index]
   } elseif ($argument.StartsWith('--release=')) {
     $Wanted = $argument.Substring('--release='.Length)
+  } elseif (($argument -eq '--lang' -and $index + 1 -lt $Arguments.Count) -or $argument.StartsWith('--lang=')) {
+    # Not forwarded: uninstall.mjs reads DSH_BROWSER_LANG, set below.
+    if ($argument -eq '--lang') {
+      $index++
+      $value = [string]$Arguments[$index]
+    } else {
+      $value = $argument.Substring('--lang='.Length)
+    }
+    if (-not (Set-ReleaseLang $value)) {
+      [Console]::Error.WriteLine((Get-ReleaseText "错误：--lang 只接受 en 或 zh：$value" "Error: --lang accepts en or zh: $value"))
+      exit 1
+    }
   } else {
     $Forwarded += $argument
   }
 }
+# uninstall.mjs prints in the language chosen here.
+$env:DSH_BROWSER_LANG = $ReleaseLang
 if ($Wanted -eq 'latest') { $Wanted = '' }
 if ($Wanted -match '^[0-9]') { $Wanted = "v$Wanted" }
 
@@ -285,8 +329,7 @@ try {
     } catch {
       # Anything Get-VerifiedRelease did not explain itself is a real error: let it surface.
       if (-not $script:ReleaseFailure) { throw }
-      [Console]::Error.WriteLine("Error: $($script:ReleaseFailure[1])")
-      [Console]::Error.WriteLine("错误：$($script:ReleaseFailure[0])")
+      [Console]::Error.WriteLine((Get-ReleaseText "错误：$($script:ReleaseFailure[0])" "Error: $($script:ReleaseFailure[1])"))
     }
   }
 

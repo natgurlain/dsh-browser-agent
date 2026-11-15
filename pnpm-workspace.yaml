@@ -3,7 +3,8 @@ packages:
   - extensions/*
   - packages/*/*
 
-# The DSH peer providers are provided explicitly by the workspace, all at 0.2.2-rc.2.
+# The DSH peer providers are provided explicitly by the workspace, all at the default
+# release 0.2.2-rc.2; the bridge plugin declares a wider supported range, see docs/dsh-matrix.md.
 autoInstallPeers: false
 
 # The OpenTelemetry SDK's peer range requires an API below 1.10.0.

@@ -6,10 +6,10 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { readdirSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createServer as createTcpServer } from 'node:net'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 
@@ -19,12 +19,23 @@ export const root = fileURLToPath(new URL('../../', import.meta.url))
 /** Caps of a text-only test client (a stand-in browser extension). */
 export const BASE_CAPS = Object.freeze({ textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 })
 
-/** Where the dsh CLI and the bridge package live, with requires rooted at each. */
-export function resolveDsh() {
+/**
+ * Where the dsh CLI and the bridge package live, with requires rooted at each.
+ *
+ * `DSH_SMOKE_CLI` names the `lib/bin.js` of a DSH installed somewhere else.
+ * The smoke then runs that host against this checkout's bridge, which keeps
+ * its own node_modules: the layout of a linked checkout loaded by a DSH of
+ * another release (the desktop app, a global install). `hostVersion` is the
+ * version of the DSH that will run, whichever it is.
+ */
+export function resolveDsh(env = process.env) {
   const require = createRequire(join(root, 'package.json'))
   const bridge = join(root, 'packages/browser/bridge-browser')
-  const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
-  return { root, bridge, cli, require, bridgeRequire: createRequire(join(bridge, 'package.json')) }
+  const external = env.DSH_SMOKE_CLI !== undefined && env.DSH_SMOKE_CLI !== ''
+  const cli = external ? resolve(env.DSH_SMOKE_CLI) : join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
+  const hostManifest = JSON.parse(readFileSync(join(dirname(dirname(realpathSync(cli))), 'package.json'), 'utf8'))
+  assert.equal(hostManifest.name, '@deepseek-ai/dsh', `${cli} is not the lib/bin.js of an @deepseek-ai/dsh package`)
+  return { root, bridge, cli, external, hostVersion: hostManifest.version, require, bridgeRequire: createRequire(join(bridge, 'package.json')) }
 }
 
 /**

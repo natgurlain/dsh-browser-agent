@@ -19,7 +19,13 @@ import { smokeDevLoop } from './fixtures/devloop-smoke.mjs'
 const dsh = resolveDsh()
 assertBridgeBuilt(dsh)
 const { root, cli, bridge, bridgeRequire } = dsh
-const expectedVersion = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).dependencies['@deepseek-ai/dsh']
+// The DSH that runs: the workspace's own, or the one DSH_SMOKE_CLI names (see resolveDsh).
+const expectedVersion = dsh.hostVersion
+if (dsh.external) console.log(`Host: DSH ${expectedVersion} at ${cli}; bridge: this checkout, with its own node_modules`)
+else {
+  assert.equal(expectedVersion, JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).dependencies['@deepseek-ai/dsh'],
+    'the installed DSH is the release the root package.json names')
+}
 const { default: WebSocket } = await import(pathToFileURL(bridgeRequire.resolve('ws')).href)
 const {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BEACON_PORTS, BRIDGE_CONFIG_PATH,
@@ -30,6 +36,15 @@ const {
 const { phase3Reply } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-model.mjs')).href)
 /** What the Phase 3 conversations (watcher wake, fleet workers) showed the model. */
 const phase3State = {}
+/**
+ * Host features that a supported DSH release is known to lack. The checks for
+ * them are replaced by a check of the degraded behaviour, and the final line
+ * says so; on every other release a missing feature fails the smoke.
+ * - archive-cleanup: worktrees.cleanupOf and the worktree/cleanup event.
+ * - continuation: the conversationContinuation projection and the empty
+ *   retry prompt that continues a turn after a transport failure.
+ */
+const HOST_GAPS = { '0.2.2-rc.1': ['archive-cleanup', 'continuation'] }[expectedVersion] ?? []
 const temp = await mkdtemp(join(tmpdir(), 'dsh-runtime-smoke-'))
 const home = join(temp, 'home')
 const marker = join(temp, 'observation.json')
@@ -654,7 +669,13 @@ try {
 
   await stop()
   rpc = await start(true)
-  assert.equal((await observation()).source, 'prepared')
+  const reopenedHost = await observation()
+  assert.equal(reopenedHost.source, 'prepared')
+  // Only the releases named here may lack the archive-cleanup report; on any
+  // other host its absence is a failure, not a reason to skip the checks.
+  const reportsArchiveCleanup = reopenedHost.archiveCleanup === true
+  assert.equal(reportsArchiveCleanup, !HOST_GAPS.includes('archive-cleanup'),
+    `DSH ${expectedVersion}: unexpected archive-cleanup support (worktrees.cleanupOf ${reportsArchiveCleanup ? 'present' : 'missing'})`)
   for (const entry of worktreeSessions) {
     const worktree = await observation(`${marker}.${entry.sessionId}`)
     await rpc('session.history', { sessionId: entry.sessionId })
@@ -664,6 +685,15 @@ try {
     await rpc('skills.list', { sessionId: entry.sessionId })
     assert.equal((await rpc('session.state', { sessionId: entry.sessionId })).active, false,
       'browsing history and composer directories must leave the Agent inactive')
+    if (!reportsArchiveCleanup) {
+      // The host neither reports nor lets the bridge wait for the worktree
+      // cleanup: the purge archives and removes the session as it did before
+      // that wait existed. What the host does with the worktree is its own.
+      await rpc(BRIDGE_SESSION_PURGE_METHOD, { sessionId: entry.sessionId })
+      assert.equal((await rpc('session.list', {})).items.some(item => item.sessionId === entry.sessionId), false,
+        'a purged session is gone from the list')
+      continue
+    }
     if (entry.failCleanup) {
       // 暂时撤销隔离仓库配置的读取权限，验证真实 Git 失败后的归档恢复和重试。
       const gitConfig = join(worktreeRepository, '.git/config')
@@ -798,20 +828,31 @@ try {
   await rpc.event('session/projection', sessionId, projection => projection.seq > originalCursor
     && projection.changes.some(change => change.key === 'permissions' && change.val.currentValue === 'read-only'))
   await rpc.event('session/state', sessionId, state => state.cursor > originalCursor)
-  const failed = await rpc.event('session/projection', retrySession, projection => projection.changes.some(change => (
-    change.key === 'conversationContinuation' && typeof change.val === 'number'
-  )))
-  const failureSeq = failed.frame.payload.seq
-  await rpc.event('session/state', retrySession, state => !state.running && state.cursor >= failureSeq)
-  await rpc('session.prompt', { sessionId: retrySession, mode: 'queue', content: [] })
-  await rpc.event('session/event', retrySession, payload => payload.event.type === 'turn/end' && payload.event.seq > failureSeq)
-  const retried = await rpc('session.history', { sessionId: retrySession })
-  const messages = retried.events.filter(({ event }) => event.type === 'user/message').map(({ event }) => event.data)
-  assert.equal(messages.filter(message => message.source.kind === 'user').length, 1)
-  assert.ok(messages.some(message => message.source.kind === 'retry' && message.content.length === 0))
-  const endings = retried.events.filter(({ event }) => event.type === 'turn/end')
-  assert.equal(endings.length, 2)
-  assert.ok(endings.every(({ event }) => event.data.reason.kind === 'error' && event.data.reason.error.code === 'TRANSPORT'))
+  if (HOST_GAPS.includes('continuation')) {
+    // No continuation on this host: the failed turn ends with the transport
+    // error and the session stays usable (the prompt below runs on it).
+    await rpc.event('session/event', retrySession, payload => payload.event.type === 'turn/end')
+    const ended = await rpc('session.history', { sessionId: retrySession })
+    const endings = ended.events.filter(({ event }) => event.type === 'turn/end')
+    assert.equal(endings.length, 1)
+    assert.equal(endings[0].event.data.reason.kind, 'error')
+    assert.equal(ended.events.some(({ event }) => event.type === 'user/message' && event.data.source?.kind === 'retry'), false)
+  } else {
+    const failed = await rpc.event('session/projection', retrySession, projection => projection.changes.some(change => (
+      change.key === 'conversationContinuation' && typeof change.val === 'number'
+    )))
+    const failureSeq = failed.frame.payload.seq
+    await rpc.event('session/state', retrySession, state => !state.running && state.cursor >= failureSeq)
+    await rpc('session.prompt', { sessionId: retrySession, mode: 'queue', content: [] })
+    await rpc.event('session/event', retrySession, payload => payload.event.type === 'turn/end' && payload.event.seq > failureSeq)
+    const retried = await rpc('session.history', { sessionId: retrySession })
+    const messages = retried.events.filter(({ event }) => event.type === 'user/message').map(({ event }) => event.data)
+    assert.equal(messages.filter(message => message.source.kind === 'user').length, 1)
+    assert.ok(messages.some(message => message.source.kind === 'retry' && message.content.length === 0))
+    const endings = retried.events.filter(({ event }) => event.type === 'turn/end')
+    assert.equal(endings.length, 2)
+    assert.ok(endings.every(({ event }) => event.data.reason.kind === 'error' && event.data.reason.error.code === 'TRANSPORT'))
+  }
 
   // A prompt whose text looks like a command stays a prompt: it must not
   // switch the preset on the Host's side either.
@@ -824,7 +865,10 @@ try {
   assert.equal((await rpc('session.permissions', { sessionId: retrySession })).current, 'read-only',
     'prompt text must never act as a /permission command')
 
-  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), multi-client bridge with per-install replacement and session routing, browser approvals forwarded to dsh and answered by another owner client (allow and deny), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, MCP clients through the stdio shim on an external session (requester-labelled cards answered in the browser, audit log, Host methods refused), the browser agent preset (browser_* tools only), delegation to it via delegate_browser_task, and bundled skills, the closed dev loop (localhost link, capture after an editing turn, read-only injection without prompting), browser context, a page watcher waking only its owned session (untrusted boundary, rate limit), a tab fleet of real subagents restricted to read tools with structured results, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
+  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), multi-client bridge with per-install replacement and session routing, browser approvals forwarded to dsh and answered by another owner client (allow and deny), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, MCP clients through the stdio shim on an external session (requester-labelled cards answered in the browser, audit log, Host methods refused), the browser agent preset (browser_* tools only), delegation to it via delegate_browser_task, and bundled skills, the closed dev loop (localhost link, capture after an editing turn, read-only injection without prompting), browser context, a page watcher waking only its owned session (untrusted boundary, rate limit), a tab fleet of real subagents restricted to read tools with structured results, a real transport failure, and session deletion'
+    + (HOST_GAPS.length === 0
+      ? ', including continuation after the transport failure and worktree cleanup failure and retry'
+      : ` (DSH ${expectedVersion} lacks ${HOST_GAPS.join(' and ')}: continuation after the transport failure and the worktree cleanup wait, failure and retry were NOT exercised)`))
   succeeded = true
 } catch (error) {
   console.error(host?.log ?? '(DSH was not running)')

@@ -45,6 +45,14 @@ import {
   stepUiScale,
   uiScaleAtLimit,
 } from './ui-scale.ts'
+import {
+  applyTheme,
+  getThemePreference,
+  saveThemePreference,
+  watchSystemTheme,
+  watchThemePreference,
+  type ThemePreference,
+} from './theme.ts'
 import { canReturnToControlledTab } from './tab-handoff.ts'
 import { QuestionCard } from './QuestionCard.tsx'
 import { UpdateCard } from './UpdateCard.tsx'
@@ -916,6 +924,7 @@ interface HistoryPage {
 export function App(): React.JSX.Element {
   const [locale, setLocale] = useState<UiLocale>(() => getUiLocale())
   const [localePreference, setLocalePreference] = useState<UiLocalePreference>(() => getUiLocalePreference())
+  const [themePreference, setThemePreference] = useState<ThemePreference>(() => getThemePreference())
   const copy = PANEL_COPY[locale]
   const [api] = useState<PanelApi>(() => connectPanel())
   const [state, setState] = useState<BridgeState>('stopped')
@@ -1113,6 +1122,26 @@ export function App(): React.JSX.Element {
     saveUiLocalePreference(next)
     setLocalePreference(getUiLocalePreference())
     setLocale(getUiLocale())
+  }
+
+  // Colour theme: `theme.ts` owns the document attribute and the storage; this
+  // view only mirrors the preference for the Settings control. `main.tsx`
+  // applies the theme before React renders; applying it again here keeps a
+  // panel mounted any other way consistent. The storage watcher catches a
+  // change made from another side-panel window, and the system watcher keeps
+  // an `auto` panel in step with the browser/OS scheme.
+  useEffect(() => {
+    applyTheme(getThemePreference())
+    const stopPreference = watchThemePreference(setThemePreference)
+    const stopSystem = watchSystemTheme()
+    return () => {
+      stopPreference()
+      stopSystem()
+    }
+  }, [])
+
+  function changeTheme(next: ThemePreference): void {
+    setThemePreference(saveThemePreference(next))
   }
 
   // Settings: seed from storage, then let the panel own the form.
@@ -2833,6 +2862,19 @@ export function App(): React.JSX.Element {
               <option value="auto">{copy.settings.languageAuto}</option>
               <option value="en">{copy.settings.languageEnglish}</option>
               <option value="zh">{copy.settings.languageChinese}</option>
+            </select>
+          </label>
+          <label>
+            <span>{copy.settings.theme}</span>
+            <small>{copy.settings.themeHelp}</small>
+            <select
+              className="theme-select"
+              value={themePreference}
+              onChange={(event) => changeTheme(event.target.value as ThemePreference)}
+            >
+              <option value="auto">{copy.settings.themeAuto}</option>
+              <option value="light">{copy.settings.themeLight}</option>
+              <option value="dark">{copy.settings.themeDark}</option>
             </select>
           </label>
         </div>

@@ -176,7 +176,18 @@ It does not cover:
 
 ## DSH compatibility
 
-The DSH runtime is pinned exactly (see root `package.json`, enforced by
-`scripts/check-runtime.mjs`). `.github/workflows/dsh-matrix.yml` runs nightly against the
-pin plus the `latest` and `next` dist-tags via `node scripts/dsh-matrix.mjs <target>`;
-non-pin rows only report. Check its job summary before moving the pin.
+The workspace installs one exact DSH release (root `package.json`, enforced by
+`scripts/check-runtime.mjs`). The bridge declares a wider range (`engines.dsh` and its DSH
+peers) that covers the releases with an all-pass row in `docs/dsh-matrix.md`. Before a
+release, and before changing the default release or the range, refresh that record:
+
+```sh
+node scripts/dsh-matrix.mjs tested latest next --record
+```
+
+It needs the npm registry and takes a few minutes per release. Add a release to
+`TESTED_DSH_VERSIONS` (`packages/browser/bridge-browser/src/dsh-support.ts`) only when its
+row passes every step; `pnpm test:scripts` fails when the list, the record, the manifests
+and the printed start hints disagree. `.github/workflows/dsh-matrix.yml` would run the same
+script nightly (the `tested` row must pass, `latest` and `next` only report), but Actions
+has never run for this repository.

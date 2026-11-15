@@ -104,7 +104,8 @@ describe('delegate_browser_task', () => {
     await vi.waitFor(() => { expect(startActivation).toHaveBeenCalled() })
     controller.abort()
     controller.abort()
-    expect(dispose).toHaveBeenCalledOnce()
+    // Whether the abort lands before or after the tool attached its listener, the child is disposed once.
+    await vi.waitFor(() => { expect(dispose).toHaveBeenCalledOnce() })
     finish({ output: [], stopReason: 'cancelled' })
     await expect(running).resolves.toMatchObject({ stopReason: 'cancelled' })
     expect(dispose).toHaveBeenCalledOnce()
