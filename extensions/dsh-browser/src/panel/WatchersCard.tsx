@@ -1,13 +1,14 @@
 /**
  * Active page watchers (background/watchers.ts) with a Cancel control.
  *
- * Talks to the background over its own port (`dsh-watchers`) so it does not
- * depend on the main panel message protocol. Renders nothing while no
+ * Talks to the background over its own port (`dsh-watchers`, side-port.ts) so
+ * it does not depend on the main panel message protocol. Renders nothing while no
  * watcher is active.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import type { UiLocale } from '../i18n.ts'
+import { useSidePort } from './side-port.ts'
 
 const PORT_NAME = 'dsh-watchers'
 
@@ -34,26 +35,11 @@ function isWatcherView(value: unknown): value is WatcherView {
 /** Subscribe to the watcher list. */
 export function usePageWatchers(): { watchers: WatcherView[]; cancel: (id: string) => void } {
   const [watchers, setWatchers] = useState<WatcherView[]>([])
-  const portRef = useRef<chrome.runtime.Port | null>(null)
-  useEffect(() => {
-    let port: chrome.runtime.Port
-    try {
-      port = chrome.runtime.connect({ name: PORT_NAME })
-    } catch {
-      return
-    }
-    portRef.current = port
-    port.onMessage.addListener((message: unknown) => {
-      const msg = message as { type?: unknown; watchers?: unknown }
-      if (msg?.type === 'watchers.state' && Array.isArray(msg.watchers)) setWatchers(msg.watchers.filter(isWatcherView))
-    })
-    port.postMessage({ type: 'watchers.subscribe' })
-    return () => {
-      portRef.current = null
-      try { port.disconnect() } catch { /* already closed */ }
-    }
-  }, [])
-  return { watchers, cancel: (id) => { portRef.current?.postMessage({ type: 'watchers.cancel', id }) } }
+  const post = useSidePort(PORT_NAME, { type: 'watchers.subscribe' }, (message) => {
+    const msg = message as { type?: unknown; watchers?: unknown }
+    if (msg?.type === 'watchers.state' && Array.isArray(msg.watchers)) setWatchers(msg.watchers.filter(isWatcherView))
+  })
+  return { watchers, cancel: (id) => { post({ type: 'watchers.cancel', id }) } }
 }
 
 function remaining(expiresAt: number, locale: UiLocale): string {
