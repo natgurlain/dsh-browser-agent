@@ -33,6 +33,21 @@ describe('parseLocatorQuery', () => {
   })
 })
 
+describe('findElements role vocabulary', () => {
+  it('accepts the role names the inventory prints, as well as the ARIA ones (finding 9)', () => {
+    document.body.innerHTML = '<input id="q" aria-label="Query"><input id="n" type="number" aria-label="Qty"><textarea id="t" aria-label="Notes"></textarea><select id="s" aria-label="Size"><option>M</option></select><div id="e" contenteditable="true" aria-label="Body">x</div>'
+    const ids = (role: string): string[] => findElements({ role, limit: 10 }).map((found) => found.element.id)
+    expect(ids('input')).toEqual(['q', 'n'])
+    expect(ids('textarea')).toEqual(['t'])
+    expect(ids('select')).toEqual(['s'])
+    expect(ids('contenteditable')).toEqual(['e'])
+    expect(ids('spinbutton')).toEqual(['n'])
+    // ARIA names keep working, including textbox for a number field as before.
+    expect(ids('textbox')).toEqual(expect.arrayContaining(['q', 'n', 't']))
+    expect(ids('combobox')).toEqual(['s'])
+  })
+})
+
 describe('findElements', () => {
   it('finds a non-semantic element by its own text and reports geometry', () => {
     document.body.innerHTML = '<div class="bar"><div class="item" id="file-item">File</div><div class="item">Edit</div></div>'

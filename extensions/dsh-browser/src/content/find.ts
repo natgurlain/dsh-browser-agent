@@ -84,6 +84,25 @@ export function roleOfElement(el: Element): string {
   return 'generic'
 }
 
+/**
+ * The snapshot inventory prints its own role names for form controls
+ * (snapshot.ts `roleOf`); a role read from it must find the element here too.
+ */
+const INVENTORY_ROLES: Record<string, (el: Element) => boolean> = {
+  input: (el) => el instanceof HTMLInputElement && roleOfElement(el) === 'textbox',
+  spinbutton: (el) => el instanceof HTMLInputElement && el.type === 'number',
+  textarea: (el) => el instanceof HTMLTextAreaElement,
+  select: (el) => el instanceof HTMLSelectElement,
+  contenteditable: (el) => el instanceof HTMLElement && !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)
+    && (el.isContentEditable === true || ['', 'true', 'plaintext-only'].includes(el.getAttribute('contenteditable') ?? 'false')),
+}
+
+/** Whether an element has a role, by its ARIA name or the inventory's name. */
+export function roleMatches(el: Element, wanted: string): boolean {
+  if (roleOfElement(el) === wanted) return true
+  return INVENTORY_ROLES[wanted]?.(el) === true && (el.getAttribute('role') ?? '').trim() === ''
+}
+
 /** Whether an element can take keyboard focus, even when it has no size (editor proxies). */
 export function isFocusableElement(el: Element): boolean {
   if (!(el instanceof HTMLElement)) {
@@ -259,7 +278,7 @@ function candidates(query: LocatorQuery): Element[] {
     if (matched.length >= MAX_MATCHES || scanned >= MAX_SCANNED_ELEMENTS) break
     scanned += 1
     if (SKIPPED_TAGS.has(el.tagName.toLowerCase())) continue
-    if (query.role !== undefined && roleOfElement(el) !== query.role) continue
+    if (query.role !== undefined && !roleMatches(el, query.role)) continue
     if (needle !== undefined && !matchesText(el, needle)) continue
     matched.push(el)
   }
