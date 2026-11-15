@@ -197,22 +197,35 @@ export class WorkflowSchedules {
    * @param install - only schedules created from this install (plus older records that name none).
    */
   revokeAll(install?: string): Promise<{ revoked: number; failed: number }> {
-    return this.serialized(async () => {
-      const all = await this.records()
-      const records = install === undefined ? all : all.filter((record) => record.install === undefined || record.install === install)
-      if (records.length === 0) return { revoked: 0, failed: 0 }
-      const service = this.schedule()
-      const deleted: ScheduleRecordEntry[] = []
-      for (const record of records) {
-        try {
-          if (service === undefined) throw new Error('no schedule service')
-          await service.edit({ id: record.id, action: 'delete' })
-          deleted.push(record)
-        } catch { /* counted below; the record stays so the panel can retry */ }
-      }
-      if (deleted.length > 0) await this.persist(all.filter((record) => !deleted.includes(record)))
-      return { revoked: deleted.length, failed: records.length - deleted.length }
-    })
+    return this.serialized(async () => this.revokeWhere(
+      (record) => install === undefined || record.install === undefined || record.install === install,
+    ))
+  }
+
+  /**
+   * Delete the schedules targeting one (purged) session. Like
+   * {@link revokeAll}, a record whose delete failed is kept.
+   */
+  revokeSession(sessionId: string): Promise<{ revoked: number; failed: number }> {
+    return this.serialized(async () => this.revokeWhere((record) => record.sessionId === sessionId))
+  }
+
+  /** Delete the matching schedules; keep the records of those whose delete failed. Call inside {@link serialized}. */
+  private async revokeWhere(matches: (record: ScheduleRecordEntry) => boolean): Promise<{ revoked: number; failed: number }> {
+    const all = await this.records()
+    const records = all.filter(matches)
+    if (records.length === 0) return { revoked: 0, failed: 0 }
+    const service = this.schedule()
+    const deleted: ScheduleRecordEntry[] = []
+    for (const record of records) {
+      try {
+        if (service === undefined) throw new Error('no schedule service')
+        await service.edit({ id: record.id, action: 'delete' })
+        deleted.push(record)
+      } catch { /* counted below; the record stays so the panel can retry */ }
+    }
+    if (deleted.length > 0) await this.persist(all.filter((record) => !deleted.includes(record)))
+    return { revoked: deleted.length, failed: records.length - deleted.length }
   }
 
   /** Cancel (delete) one schedule this bridge created. */

@@ -180,6 +180,8 @@ export interface BridgePolicyApi extends BrowserHostApi {
    * never attach to a full-access session.
    */
   unsafePreset(sessionId: string, signal: AbortSignal): Promise<string | undefined>
+  /** Drop a purged session from the read-tier listing cache. */
+  forgetSession(sessionId: string): void
 }
 
 function forbidden(message: string): HostRpcResult {
@@ -489,6 +491,7 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
   return {
     allowsSession,
     unsafePreset: strictUnsafePresetOf,
+    forgetSession: (sessionId) => { listable.delete(sessionId) },
     events: (signal) => api.events(signal),
     respond: (rpcId, result, signal) => api.respond(rpcId, result, signal),
     call,

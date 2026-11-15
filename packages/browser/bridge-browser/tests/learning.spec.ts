@@ -324,6 +324,18 @@ describe('workflow schedules', () => {
     expect(readdirSync(dir)).toEqual(['schedules.json'])
   })
 
+  it('revokes only the schedules of a purged session', async () => {
+    const { service, tasks } = fakeSchedule()
+    const file = join(tempDir(), 'schedules.json')
+    const schedules = new WorkflowSchedules(file, () => service, async () => true)
+    const workflow = validateWorkflow({ ...baseWorkflow(), params: [{ name: 'contact', default: 'Ada' }], steps: (baseWorkflow().steps as unknown[]).filter((_s, i) => i !== 2) })
+    const gone = await schedules.create('gone', workflow, { kind: 'every', every_seconds: 60 })
+    const kept = await schedules.create('kept', workflow, { kind: 'every', every_seconds: 60 })
+    expect(await schedules.revokeSession('gone')).toEqual({ revoked: 1, failed: 0 })
+    expect(tasks.has(gone.id)).toBe(false)
+    expect((await schedules.list()).map((entry) => entry.id)).toEqual([kept.id])
+  })
+
   it('refuses unattended runs of workflows with sensitive inputs', async () => {
     const { service } = fakeSchedule()
     const schedules = new WorkflowSchedules(join(tempDir(), 's.json'), () => service, async () => true)

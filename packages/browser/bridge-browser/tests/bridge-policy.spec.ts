@@ -115,10 +115,23 @@ describe('session ownership', () => {
   })
 
   it('answers session.list with only the bridge\'s own, non-subagent sessions', async () => {
-    const { call } = harness()
+    const { call } = harness({}, { ledger: memorySessionLedger(['listed', 'child']) })
     await call('session.create', {})
     const listed = await call('session.list', {}) as { ok: true; value: { items: Array<{ sessionId: string }> } }
-    expect(listed.value.items.map((item) => item.sessionId)).toEqual([])
+    // 'child' is owned but a subagent; 'earlier-bridge' is listed but not owned.
+    expect(listed.value.items.map((item) => item.sessionId)).toEqual(['listed'])
+  })
+
+  it('forgets a purged session from the read-tier listing cache', async () => {
+    let items = [{ sessionId: 'listed', origin: 'user' }]
+    const { policy } = harness({ 'session.list': () => ({ ok: true, value: { items } }) })
+    const signal = new AbortController().signal
+    expect(await policy.allowsSession('listed', signal)).toBe(true)
+    items = []
+    // Still cached until forgotten.
+    expect(await policy.allowsSession('listed', signal)).toBe(true)
+    policy.forgetSession('listed')
+    expect(await policy.allowsSession('listed', signal)).toBe(false)
   })
 
   it('projects workspace.list down to archived ids of the bridge\'s own sessions', async () => {

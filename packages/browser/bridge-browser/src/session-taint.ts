@@ -243,6 +243,18 @@ export class SessionTaintRegistry {
   isTainted(sessionId: string): boolean {
     return this.effective(sessionId) !== undefined
   }
+
+  /**
+   * Drop a purged session's entry and lineage link. Refused (returns false)
+   * while another session is linked under it: its children are tainted (and
+   * bound to an install) through it, so forgetting it would loosen them.
+   */
+  forget(sessionId: string): boolean {
+    for (const parent of this.parents.values()) if (parent === sessionId) return false
+    this.entries.delete(sessionId)
+    this.parents.delete(sessionId)
+    return true
+  }
 }
 
 /** Model-facing reason for a denied tool in a tainted session. */

@@ -65,6 +65,8 @@ export interface WatchRecordStore {
   get(watchId: string): WatchRecord | undefined
   add(watchId: string, record: WatchRecord): Promise<void>
   remove(watchId: string): Promise<void>
+  /** Drop every record a (purged) session owns. */
+  removeSession(sessionId: string): Promise<void>
 }
 
 /** In-memory store (tests, or when no dsh home is writable). */
@@ -81,6 +83,9 @@ export function memoryWatchRecords(now: () => number = Date.now): WatchRecordSto
     },
     add: async (id, record) => { records.set(id, record) },
     remove: async (id) => { records.delete(id) },
+    removeSession: async (sessionId) => {
+      for (const [id, record] of records) if (record.sessionId === sessionId) records.delete(id)
+    },
   }
 }
 
@@ -124,6 +129,16 @@ export async function fileWatchRecords(file: string, warn: (message: string) => 
     remove: async (id) => {
       if (!records.delete(id)) return
       await save()
+    },
+    removeSession: async (sessionId) => {
+      let changed = false
+      for (const [id, record] of records) {
+        if (record.sessionId === sessionId) {
+          records.delete(id)
+          changed = true
+        }
+      }
+      if (changed) await save()
     },
   }
 }
@@ -169,6 +184,11 @@ export class WakeLimiter {
     recent.push(now)
     this.wakes.set(sessionId, recent)
     return { ok: true }
+  }
+
+  /** Drop a purged session's history. */
+  forget(sessionId: string): void {
+    this.wakes.delete(sessionId)
   }
 }
 

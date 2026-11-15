@@ -604,6 +604,14 @@ export class BridgeServer {
     }
   }
 
+  /**
+   * Forget a purged session's install binding. The caller decides whether
+   * that is safe (no child session inherits the binding through it).
+   */
+  forgetSession(sessionId: string): void {
+    this.sessionAffinity.delete(sessionId)
+  }
+
   private affinityOf(sessionId: string): string | undefined {
     let current: string | undefined = sessionId
     const seen = new Set<string>()

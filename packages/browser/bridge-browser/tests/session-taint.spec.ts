@@ -123,6 +123,21 @@ describe('session taint (Host side)', () => {
   })
 })
 
+describe('forgetting a purged session', () => {
+  it('drops its entry and link, but not while a child is linked under it', () => {
+    const registry = new SessionTaintRegistry()
+    registry.link('kid', 'parent')
+    registry.mark('parent', 'browser_get_text')
+    // The child is tainted through the parent: forgetting the parent would launder it.
+    expect(registry.forget('parent')).toBe(false)
+    expect(registry.isTainted('kid')).toBe(true)
+    expect(registry.forget('kid')).toBe(true)
+    expect(registry.parentOf('kid')).toBeUndefined()
+    expect(registry.forget('parent')).toBe(true)
+    expect(registry.isTainted('parent')).toBe(false)
+  })
+})
+
 describe('session taint lineage and scoping (P2 hardening)', () => {
   const sub = (id: string, parentSession?: string, cwd?: string) => ({
     id,

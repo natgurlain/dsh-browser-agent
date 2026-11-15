@@ -312,6 +312,20 @@ describe('tool routing', () => {
     expect(toolCalls(b)).toHaveLength(0)
   })
 
+  it('forgets a purged session\'s install binding', async () => {
+    const h = await startBridge()
+    const a = await connectClient(h.url, identity('client-aaaa'))
+    const b = await connectClient(h.url, identity('client-bbbb'))
+    await a.rpc('session.prompt', { sessionId: 's-a', text: 'go' })
+    a.ws.close()
+    await waitFor(() => h.bridge.connectionCount() === 1)
+    h.bridge.forgetSession('s-a')
+    const call = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1_000, 's-a')
+    void call.catch(() => {})
+    await nextToolCall(b)
+    expect(toolCalls(b)).toHaveLength(1)
+  })
+
   it('fails instead of falling back when the affine client lacks the capability', async () => {
     const h = await startBridge()
     const plain = await connectClient(h.url, identity('client-plan'))

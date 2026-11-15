@@ -16,7 +16,7 @@ import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { SessionPurgeError, assertPurgeableSessionId, purgeSessionFiles } from '../src/session-purge.ts'
+import { SessionPurgeError, assertPurgeableSessionId, createSessionPurger, purgeSessionFiles } from '../src/session-purge.ts'
 
 const resolveModule = (name: string): string => pathToFileURL(createRequire(import.meta.url).resolve(name)).href
 
@@ -329,4 +329,43 @@ describe('purgeSessionFiles', () => {
       await ctx.fiber.dispose()
     }
   }, 15_000)
+})
+
+describe('createSessionPurger', () => {
+  function purgerHarness(running: string[]) {
+    const methods: string[] = []
+    const api = {
+      call: vi.fn(async (call: { method: string }) => {
+        methods.push(call.method)
+        if (call.method === 'session.list') return { ok: true as const, value: { items: running.map((sessionId) => ({ sessionId, running: true })) } }
+        if (call.method === 'workspace.list') return { ok: true as const, value: { archivedSessionIds: [] } }
+        return { ok: true as const, value: {} }
+      }),
+    }
+    const ctx = {
+      get: (name: string) => name === 'sessionPersistence' ? { open: async () => ({ close: async () => {} }) } : undefined,
+    } as unknown as Context
+    return { api, ctx, methods }
+  }
+
+  it('archives, removes the data and then drops the session state', async () => {
+    const root = await makeSessionsRoot()
+    const target = await makeSession(root, 'ws', SESSION_A)
+    const { api, ctx, methods } = purgerHarness([])
+    const onPurged = vi.fn(async () => {})
+    await createSessionPurger(ctx, api as never, root, onPurged)(SESSION_A)
+    expect(await readdir(target)).toEqual([])
+    expect(methods).toEqual(['session.list', 'workspace.list', 'workspace.archiveSession'])
+    expect(onPurged).toHaveBeenCalledWith(SESSION_A)
+  })
+
+  it('keeps the session state when the purge is refused', async () => {
+    const root = await makeSessionsRoot()
+    const target = await makeSession(root, 'ws', SESSION_A)
+    const { api, ctx } = purgerHarness([SESSION_A])
+    const onPurged = vi.fn(async () => {})
+    await expect(createSessionPurger(ctx, api as never, root, onPurged)(SESSION_A)).rejects.toMatchObject({ code: 'running' })
+    await expect(stat(target)).resolves.toBeTruthy()
+    expect(onPurged).not.toHaveBeenCalled()
+  })
 })

@@ -11,8 +11,14 @@
  * @module @natgurlain/dsh-bridge-browser/src/session-purge
  */
 
+import { randomUUID } from 'node:crypto'
 import { lstat, readdir, rm } from 'node:fs/promises'
 import path from 'node:path'
+import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-session-persistence'
+import type {} from '@deepseek-ai/dsh-session-query'
+import type {} from '@deepseek-ai/dsh-experimental-worktree'
+import { isRecord, type BrowserHostApi } from './host-api.ts'
 
 /** Stable failure codes surfaced to the panel. Open set: callers must tolerate growth. */
 export type SessionPurgeErrorCode = 'not-found' | 'running' | 'invalid-id' | 'internal'
@@ -166,4 +172,92 @@ export async function purgeSessionFiles(deps: SessionPurgeDeps, sessionId: strin
     }
   }
   if (failure !== undefined) throw failure
+}
+
+/**
+ * The panel's purge: list running sessions (advisory), then
+ * {@link purgeSessionFiles} under the runtime's exclusive write ownership,
+ * archiving first (and restoring the archive state if removal fails).
+ * @param ctx - the plugin context (session persistence, worktrees, session query).
+ * @param api - the Host API (session.list, workspace archive methods).
+ * @param sessionsRoot - the dsh sessions root.
+ * @param onPurged - runs after a successful purge (drop per-session state).
+ * @returns the purge function the server calls.
+ */
+export function createSessionPurger(
+  ctx: Context,
+  api: Pick<BrowserHostApi, 'call'>,
+  sessionsRoot: string,
+  onPurged?: (sessionId: string) => Promise<void>,
+): (sessionId: string) => Promise<void> {
+  return async (sessionId) => {
+    const runningSessionIds = new Set<string>()
+    try {
+      const listed = await api.call({
+        rpcId: randomUUID(),
+        method: 'session.list',
+        payload: {},
+        signal: new AbortController().signal,
+      })
+      if (listed.ok && isRecord(listed.value) && Array.isArray(listed.value.items)) {
+        for (const entry of listed.value.items) {
+          if (isRecord(entry) && entry.running === true && typeof entry.sessionId === 'string') {
+            runningSessionIds.add(entry.sessionId)
+          }
+        }
+      }
+    } catch {
+      // Listing is advisory; the required exclusive persistence handle below
+      // protects both active and idle sessions, including in other processes.
+    }
+    const deps: SessionPurgeDeps = {
+      sessionsRoot,
+      runningSessionIds,
+      acquireOwnership: async (id) => {
+        const persistence = ctx.get('sessionPersistence')
+        if (persistence === undefined) {
+          throw new Error('browser bridge: session persistence is required to safely purge a session')
+        }
+        return persistence.open(id as Parameters<typeof persistence.open>[0], 'write')
+      },
+      archiveSession: async (id) => {
+        const workspace = await api.call({
+          rpcId: randomUUID(), method: 'workspace.list', payload: {}, signal: new AbortController().signal,
+        })
+        if (!workspace.ok) throw new Error(workspace.error.message)
+        if (!isRecord(workspace.value) || !Array.isArray(workspace.value.archivedSessionIds)) {
+          throw new TypeError('workspace.list returned an invalid archive set')
+        }
+        const wasArchived = workspace.value.archivedSessionIds.includes(id)
+        const archived = await api.call({
+          rpcId: randomUUID(),
+          method: 'workspace.archiveSession',
+          payload: { sessionId: id },
+          signal: new AbortController().signal,
+        })
+        if (!archived.ok) throw new Error(archived.error.message)
+        if (wasArchived) return
+        return async () => {
+          const restored = await api.call({
+            rpcId: randomUUID(), method: 'workspace.unarchiveSession', payload: { sessionId: id },
+            signal: new AbortController().signal,
+          })
+          if (!restored.ok) throw new Error(restored.error.message)
+        }
+      },
+      waitForArchiveCleanup: async (id) => {
+        const worktrees = ctx.get('worktrees')
+        if (worktrees === undefined) return
+        const query = ctx.get('sessionQuery')
+        if (query === undefined) throw new Error('session query is required to finish worktree cleanup')
+        const session = await query.inspectSession(id as Parameters<typeof query.inspectSession>[0], session => session)
+        const pending = await worktrees.cleanupOf(session, null)
+        const cleanup = pending?.status === 'scheduled'
+          ? await worktrees.cleanupOf(session, pending.revision) : pending
+        if (cleanup?.status === 'failed') throw new Error('worktree cleanup failed')
+      },
+    }
+    await purgeSessionFiles(deps, sessionId)
+    await onPurged?.(sessionId)
+  }
 }

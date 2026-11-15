@@ -53,7 +53,7 @@ import {
 import { isLoopbackBindAddress, startDiscoveryBeacon, type DiscoveryBeacon } from './discovery-beacon.ts'
 import { withSessionDeferral } from './session-deferral.ts'
 import { withSessionWorkspace } from './session-workspace.ts'
-import { purgeSessionFiles, type SessionPurgeDeps } from './session-purge.ts'
+import { createSessionPurger } from './session-purge.ts'
 import { installedTokenMismatch, resolveToken, syncInstalledExtensionToken } from './token.ts'
 import { withBridgePolicy } from './bridge-policy.ts'
 import { installSessionTaint, SessionTaintRegistry, withTaintMethods } from './session-taint.ts'
@@ -63,7 +63,7 @@ import {
   type HostConnectionLike,
   type TypertGatewayLike,
 } from './remote-host-api.ts'
-import { isRecord, type BrowserHostApi } from './host-api.ts'
+import type { BrowserHostApi } from './host-api.ts'
 import { mountMcpEndpoint, type McpConfig } from './mcp-mount.ts'
 import { createMcpToolHost, type ToolRegistryLike } from './mcp-tools.ts'
 import { registerBrowserDelegateTool, registerBrowserPreset, registerBrowserSkills } from './browser-agent.ts'
@@ -315,74 +315,21 @@ function mountBridge(
     browserContext.activate(agent)
   })
 
-  const purgeSession = async (sessionId: string): Promise<void> => {
-    const runningSessionIds = new Set<string>()
-    try {
-      const listed = await api.call({
-        rpcId: randomUUID(),
-        method: 'session.list',
-        payload: {},
-        signal: new AbortController().signal,
-      })
-      if (listed.ok && isRecord(listed.value) && Array.isArray(listed.value.items)) {
-        for (const entry of listed.value.items) {
-          if (isRecord(entry) && entry.running === true && typeof entry.sessionId === 'string') {
-            runningSessionIds.add(entry.sessionId)
-          }
-        }
-      }
-    } catch {
-      // Listing is advisory; the required exclusive persistence handle below
-      // protects both active and idle sessions, including in other processes.
-    }
-    const deps: SessionPurgeDeps = {
-      sessionsRoot: SESSIONS_ROOT,
-      runningSessionIds,
-      acquireOwnership: async (id) => {
-        const persistence = ctx.get('sessionPersistence')
-        if (persistence === undefined) {
-          throw new Error('browser bridge: session persistence is required to safely purge a session')
-        }
-        return persistence.open(id as Parameters<typeof persistence.open>[0], 'write')
-      },
-      archiveSession: async (id) => {
-        const workspace = await api.call({
-          rpcId: randomUUID(), method: 'workspace.list', payload: {}, signal: new AbortController().signal,
-        })
-        if (!workspace.ok) throw new Error(workspace.error.message)
-        if (!isRecord(workspace.value) || !Array.isArray(workspace.value.archivedSessionIds)) {
-          throw new TypeError('workspace.list returned an invalid archive set')
-        }
-        const wasArchived = workspace.value.archivedSessionIds.includes(id)
-        const archived = await api.call({
-          rpcId: randomUUID(),
-          method: 'workspace.archiveSession',
-          payload: { sessionId: id },
-          signal: new AbortController().signal,
-        })
-        if (!archived.ok) throw new Error(archived.error.message)
-        if (wasArchived) return
-        return async () => {
-          const restored = await api.call({
-            rpcId: randomUUID(), method: 'workspace.unarchiveSession', payload: { sessionId: id },
-            signal: new AbortController().signal,
-          })
-          if (!restored.ok) throw new Error(restored.error.message)
-        }
-      },
-      waitForArchiveCleanup: async (id) => {
-        const worktrees = ctx.get('worktrees')
-        if (worktrees === undefined) return
-        const query = ctx.get('sessionQuery')
-        if (query === undefined) throw new Error('session query is required to finish worktree cleanup')
-        const session = await query.inspectSession(id as Parameters<typeof query.inspectSession>[0], session => session)
-        const pending = await worktrees.cleanupOf(session, null)
-        const cleanup = pending?.status === 'scheduled'
-          ? await worktrees.cleanupOf(session, pending.revision) : pending
-        if (cleanup?.status === 'failed') throw new Error('worktree cleanup failed')
-      },
-    }
-    await purgeSessionFiles(deps, sessionId)
+  const purgeSession = createSessionPurger(ctx, api, SESSIONS_ROOT, (sessionId) => forgetSession(sessionId))
+  /**
+   * Drop the in-memory and durable per-session state a purged session leaves
+   * behind (install binding, taint, wake history, listing cache, watcher
+   * records, workflow schedules). Taint and the install binding stay while a
+   * child session is linked under it: the child inherits both through it.
+   */
+  const forgetSession = async (sessionId: string): Promise<void> => {
+    if (taint.forget(sessionId)) server.forgetSession(sessionId)
+    wakeLimiter.forget(sessionId)
+    fenced.forgetSession(sessionId)
+    await watchRecords.removeSession(sessionId).catch((error: unknown) => {
+      ctx.logger.warn(`browser bridge: could not drop the purged session's page watchers: ${error instanceof Error ? error.message : String(error)}`)
+    })
+    await learning?.forgetSession(sessionId)
   }
 
   // Least privilege: the extension reaches only what its panel uses, in scope.

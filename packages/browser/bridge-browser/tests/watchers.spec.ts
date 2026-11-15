@@ -120,6 +120,15 @@ describe('handleWatchFire', () => {
     expect(woken).toHaveLength(SESSION_WAKES_PER_HOUR)
   })
 
+  it('forgets a purged session\'s wake history', async () => {
+    const now = 1_000_000
+    const limiter = new WakeLimiter(() => now)
+    expect(limiter.admit('s1')).toEqual({ ok: true })
+    expect(limiter.admit('s1').ok).toBe(false)
+    limiter.forget('s1')
+    expect(limiter.admit('s1')).toEqual({ ok: true })
+  })
+
   it('caps the matched text and fences the URL even when no text matched', () => {
     const long = createWatchWakeMessage({ ...fire(), matched: 'x'.repeat(10_000) })
     expect((long.content[0] as { text: string }).text.length).toBeLessThan(10_000)
@@ -163,6 +172,17 @@ describe('watcher records file', () => {
       expect(second.get('old')).toBeUndefined()
       await second.remove('w1')
       expect((await fileWatchRecords(file, () => {})).get('w1')).toBeUndefined()
+      // A purged session's records go, others stay.
+      await second.add('a1', { sessionId: 'gone', expiresAt: Date.now() + 60_000 })
+      await second.add('b1', { sessionId: 'kept', expiresAt: Date.now() + 60_000 })
+      await second.removeSession('gone')
+      const third = await fileWatchRecords(file, () => {})
+      expect(third.get('a1')).toBeUndefined()
+      expect(third.get('b1')).toMatchObject({ sessionId: 'kept' })
+      const memory = memoryWatchRecords()
+      await memory.add('a1', { sessionId: 'gone', expiresAt: Date.now() + 60_000 })
+      await memory.removeSession('gone')
+      expect(memory.get('a1')).toBeUndefined()
       // A file others can write is ignored.
       writeFileSync(file, JSON.stringify({ evil: { sessionId: 'x', expiresAt: Date.now() + 60_000 } }))
       chmodSync(file, 0o666)

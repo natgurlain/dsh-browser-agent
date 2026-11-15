@@ -88,6 +88,8 @@ export interface LearningMount {
   disconnected: (connection: string) => void
   /** The user's kill switch: revoke every standing grant (workflow schedules). */
   revokeStandingGrants: () => Promise<void>
+  /** A session was purged: delete the workflow schedules that target it. */
+  forgetSession: (sessionId: string) => Promise<void>
   dispose: () => void
 }
 
@@ -416,6 +418,15 @@ export function mountLearning(
       if (states.delete(connection)) sync()
     },
     revokeStandingGrants: () => revokeSchedules('kill switch engaged'),
+    forgetSession: async (sessionId) => {
+      try {
+        const { revoked, failed } = await schedules.revokeSession(sessionId)
+        await refreshScheduleCount()
+        if (revoked > 0 || failed > 0) ctx.logger.info(`browser bridge: session ${sessionId} was purged; revoked ${String(revoked)} workflow schedule(s)${failed > 0 ? `, ${String(failed)} could not be deleted` : ''}`)
+      } catch (error: unknown) {
+        ctx.logger.warn(`browser bridge: could not revoke the purged session's workflow schedules: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    },
     dispose: () => {
       disposed = true
       liveSchedules = 0
