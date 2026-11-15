@@ -59,6 +59,10 @@ const HOST_STYLE = [
   'contain: strict !important',
 ].join(';')
 
+// The overlay sits on arbitrary pages, so it does not follow the panel theme:
+// every piece pairs a dark and a light edge (blue frame + white inset, blue
+// cursor + white stroke, navy pill/typing chip + light hairline ring) so it
+// reads on both light and dark sites.
 const SHADOW_CSS = `
 :host { all: initial; }
 * { box-sizing: border-box; }
@@ -66,7 +70,7 @@ const SHADOW_CSS = `
 .frame { position: fixed; inset: 0; border: 3px solid rgba(77, 107, 254, .85); border-radius: 2px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.6); opacity: 0; transition: opacity .2s ease; }
 .frame.on { opacity: 1; }
 .frame.takeover { border-color: rgba(208, 138, 23, .9); }
-.pill { position: fixed; top: 10px; right: 12px; display: none; align-items: center; gap: 8px; padding: 5px 6px 5px 10px; border-radius: 999px; background: #172033; color: #fff; box-shadow: 0 6px 18px rgba(23,32,51,.28); }
+.pill { position: fixed; top: 10px; right: 12px; display: none; align-items: center; gap: 8px; padding: 5px 6px 5px 10px; border-radius: 999px; background: #172033; color: #fff; box-shadow: 0 0 0 1px rgba(255,255,255,.32), 0 6px 18px rgba(23,32,51,.28); }
 .pill.on { display: inline-flex; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: #7d93ff; box-shadow: 0 0 0 3px rgba(125,147,255,.25); }
 .pill.on .dot { animation: pulse 1.6s ease-in-out infinite; }
@@ -86,7 +90,7 @@ const SHADOW_CSS = `
 .outline.on { display: block; }
 .outline .label { position: absolute; left: -2px; top: -22px; padding: 2px 6px; border-radius: 6px 6px 6px 0; background: #4d6bfe; color: #fff; font-weight: 650; font-size: 11px; white-space: nowrap; }
 .outline.below .label { top: auto; bottom: -22px; border-radius: 0 6px 6px 6px; }
-.typing { position: fixed; display: none; padding: 3px 8px; border-radius: 999px; background: #172033; color: #fff; font-size: 11px; }
+.typing { position: fixed; display: none; padding: 3px 8px; border-radius: 999px; background: #172033; color: #fff; font-size: 11px; box-shadow: 0 0 0 1px rgba(255,255,255,.32); }
 .typing.on { display: block; animation: blink 1s ease-in-out infinite; }
 @keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(125,147,255,.08); } }
 @keyframes blink { 50% { opacity: .55; } }
