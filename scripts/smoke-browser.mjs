@@ -183,7 +183,14 @@ const contentToolsPage = `<!doctype html><title>Content tools</title><body>
   <button id="crash" type="button">Crash</button>
   <div id="feed" style="height:120px;overflow-y:auto;border:1px solid">${Array.from({ length: 10 }, (_, i) => `<div class="item" style="height:30px">Item ${i + 1}</div>`).join('')}</div>
   <nav>${Array.from({ length: 24 }, (_, i) => `<a href="/content-tools/archive/${i + 1}">Archive ${i + 1}</a>`).join(' ')}</nav>
+  <div id="tickets"><div id="ticket-open">Open ticket 7</div><div id="ticket-assign">Assign ticket 7</div><div id="ticket-react">Escalate ticket 7</div><div id="ticket-plain">Ticket 7 is unassigned</div></div>
   <script>
+    // Clickable only through script: no role, tabindex, inline handler or pointer cursor.
+    window.ticketClicks = [];
+    document.getElementById('tickets').addEventListener('click', (event) => window.ticketClicks.push('list:' + event.target.id));
+    document.getElementById('ticket-open').addEventListener('click', () => window.ticketClicks.push('open'));
+    document.getElementById('ticket-assign').onclick = () => window.ticketClicks.push('assign');
+    document.getElementById('ticket-react').__reactProps$smoke = { onClick() {} };
     window.shadowClicks = 0; window.selectEvents = [];
     customElements.define('shadow-card', class extends HTMLElement {
       connectedCallback() {
@@ -674,6 +681,23 @@ try {
   assert.doesNotMatch(interactiveOnly, /Orders overview/)
   assert.match(interactiveOnly, /link "Archive 24"/)
   results.push('the inventory covers open shadow roots, opacity:0 checkboxes, ARIA comboboxes and joined aria-labelledby; snapshots keep structure, collapse repeats and honor modes')
+
+  // Script-only click targets (page-world listener shim): listed after the
+  // semantic controls, the delegating container collapsed away, clickable by index.
+  const ticketOpenIndex = indexOf(/\[(\d+)\] clickable "Open ticket 7"/, 'addEventListener-only div')
+  const ticketAssignIndex = indexOf(/\[(\d+)\] clickable "Assign ticket 7"/, 'onclick-property div')
+  indexOf(/\[(\d+)\] clickable "Escalate ticket 7"/, 'framework-handler div')
+  assert.doesNotMatch(inventory, /"Ticket 7 is unassigned"|clickable "Open ticket 7 ?Assign/)
+  assert.ok(ticketOpenIndex > shadowIndex && ticketOpenIndex > rememberIndex, 'inferred targets are numbered after the semantic controls')
+  succeed(await tool('browser_click', { index: ticketOpenIndex }))
+  succeed(await tool('browser_click', { index: ticketAssignIndex }))
+  assert.deepEqual(await page.evaluate(() => window.ticketClicks), ['open', 'list:ticket-open', 'assign', 'list:ticket-assign'])
+  // The patched built-in keeps its name and arity and still stringifies as native code.
+  assert.deepEqual(await page.evaluate(() => {
+    const add = EventTarget.prototype.addEventListener
+    return [add.name, add.length, /\[native code\]/.test(Function.prototype.toString.call(add))]
+  }), ['addEventListener', 2, true])
+  results.push('script-only click targets (addEventListener, onclick property, framework handler) are listed and clickable by index')
 
   succeed(await tool('browser_select', { selector: '#country', label: 'Japan' }))
   assert.equal(await page.locator('#country').inputValue(), 'jp')
