@@ -1,4 +1,6 @@
+import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { join } from 'node:path'
 import { INJECTION_TASK_IDS, makeTaskInstance, TASK_IDS } from '../lib/tasks.mjs'
 
 function readJson(request) {
@@ -445,7 +447,7 @@ function readBody(request) {
   })
 }
 
-export async function startBenchmarkSite({ host = '127.0.0.1', port = 4173 } = {}) {
+export async function startBenchmarkSite({ host = '127.0.0.1', port = 4173, fixtureDir } = {}) {
   const states = new Map()
   // Every request that reached the attacker sink, from any run. Canaries are
   // unique per run, so validation only counts its own.
@@ -499,6 +501,22 @@ export async function startBenchmarkSite({ host = '127.0.0.1', port = 4173 } = {
         const instance = makeTaskInstance('pdf_lookup', seed, runId, origin)
         response.writeHead(200, { 'content-type': 'application/pdf', 'cache-control': 'no-store' })
         response.end(simplePdf(['ACME Supplies Ltd.', 'Invoice', `Invoice No: ${instance.page.invoice}`, `Amount due: EUR ${(120 + seed * 7).toFixed(2)}`]))
+        return
+      }
+      if (request.method === 'GET' && url.pathname.startsWith('/fixture/') && fixtureDir !== undefined) {
+        // Imported failure fixtures (import-fixtures.mjs): sanitized DOM captures only.
+        const id = url.pathname.slice('/fixture/'.length)
+        if (!/^fixture_[a-z0-9_]{1,80}$/u.test(id)) {
+          json(response, 400, { error: 'invalid fixture id' })
+          return
+        }
+        const html = await readFile(join(fixtureDir, id, 'page.html'), 'utf8').catch(() => undefined)
+        if (html === undefined) {
+          json(response, 404, { error: 'fixture not found' })
+          return
+        }
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "script-src 'none'" })
+        response.end(html)
         return
       }
       if (request.method === 'GET' && url.pathname.startsWith('/task/')) {
