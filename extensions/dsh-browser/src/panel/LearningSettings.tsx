@@ -10,6 +10,7 @@ import type { LearningSettings as Settings } from '../background/learning.ts'
 import { connectLearning, type LearningClient, type LearningClientErrors, type LearningState } from './learning-api.ts'
 import { hasOptionalPermission, requestOptionalPermission } from './browser-helpers.ts'
 import { SettingToggle } from './SettingToggle.tsx'
+import { EntryAdd, EntryList, LearnMore, SettingsGroup } from './SettingsKit.tsx'
 import { PANEL_COPY } from './strings.ts'
 
 /** Subscribe to the learning runtime for one conversation. */
@@ -37,7 +38,12 @@ export function useLearning(sessionId: string | undefined, locale: UiLocale = 'e
   return { state, client }
 }
 
-export function LearningSettings({ locale, sessionId }: { locale: UiLocale; sessionId?: string }): React.JSX.Element {
+export function LearningSettings({ locale, sessionId, note }: {
+  locale: UiLocale
+  sessionId?: string
+  /** Shown beside the title: these switches apply at once, without Save. */
+  note?: string
+}): React.JSX.Element {
   const copy = PANEL_COPY[locale].learning
   const { state, client } = useLearning(sessionId, locale)
   const [origin, setOrigin] = useState('')
@@ -56,14 +62,15 @@ export function LearningSettings({ locale, sessionId }: { locale: UiLocale; sess
     }
   })()
   return (
-    <section className="settings-panel learning-settings" aria-label={copy.settingsTitle}>
-      <div>
-        <strong>{copy.settingsTitle}</strong>
-        <small>{copy.settingsHelp}</small>
+    <SettingsGroup title={copy.settingsTitle} className="learning-settings" {...(note === undefined ? {} : { note })}>
+      <div className="setting-row">
+        <p className="setting-help">{copy.settingsHelp}</p>
+        <LearnMore><p>{copy.settingsMore}</p></LearnMore>
       </div>
       <SettingToggle
         title={copy.workflowsTitle}
         help={copy.workflowsHelp}
+        more={<p>{copy.workflowsMore}</p>}
         checked={settings?.workflows ?? false}
         disabled={settings === undefined}
         onChange={(checked) => update({ workflows: checked })}
@@ -71,6 +78,7 @@ export function LearningSettings({ locale, sessionId }: { locale: UiLocale; sess
       <SettingToggle
         title={copy.watchMeTitle}
         help={copy.watchMeHelp}
+        more={<p>{copy.watchMeMore}</p>}
         checked={settings?.watchMe ?? false}
         disabled={settings === undefined}
         onChange={(checked) => update({ watchMe: checked })}
@@ -78,31 +86,36 @@ export function LearningSettings({ locale, sessionId }: { locale: UiLocale; sess
       <SettingToggle
         title={copy.driversTitle}
         help={state?.siteDriversSupported === false ? copy.driversUnavailable : copy.driversHelp}
+        {...(state?.siteDriversSupported === false ? {} : { more: <p>{copy.driversMore}</p> })}
         checked={settings?.siteDrivers ?? false}
         disabled={settings === undefined || state?.siteDriversSupported === false}
         onChange={(checked) => update({ siteDrivers: checked })}
-      />
-      {settings?.siteDrivers === true && (
-        <div className="learning-origins">
-          <div className="trusted-origin-add">
-            <input aria-label={copy.driverSiteLabel} value={origin} placeholder="https://shop.example.com"
-              onChange={(event) => setOrigin(event.target.value)} />
-            <button disabled={parsedOrigin === undefined}
-              onClick={() => { if (parsedOrigin !== undefined) { update({ siteDriverOrigins: [...settings.siteDriverOrigins, parsedOrigin] }); setOrigin('') } }}>
-              {copy.add}
-            </button>
-          </div>
-          {settings.siteDriverOrigins.map((entry) => (
-            <div className="trusted-origin" key={entry}>
-              <code>{entry}</code>
-              <button onClick={() => update({ siteDriverOrigins: settings.siteDriverOrigins.filter((candidate) => candidate !== entry) })}>{copy.remove}</button>
+        {...(settings?.siteDrivers === true ? {
+          after: (
+            <div className="learning-origins">
+              <EntryAdd
+                label={copy.driverSiteLabel}
+                value={origin}
+                placeholder="https://shop.example.com"
+                valid={parsedOrigin !== undefined}
+                error={copy.invalidDriverSite}
+                addLabel={copy.add}
+                onChange={setOrigin}
+                onAdd={() => { if (parsedOrigin !== undefined) { update({ siteDriverOrigins: [...settings.siteDriverOrigins, parsedOrigin] }); setOrigin('') } }}
+              />
+              <EntryList
+                entries={settings.siteDriverOrigins.map((entry) => ({ key: entry, value: entry }))}
+                removeLabel={(entry) => copy.removeItem(entry.value)}
+                onRemove={(entry) => update({ siteDriverOrigins: settings.siteDriverOrigins.filter((candidate) => candidate !== entry.key) })}
+              />
             </div>
-          ))}
-        </div>
-      )}
+          ),
+        } : {})}
+      />
       <SettingToggle
         title={copy.fixturesTitle}
         help={copy.fixturesHelp}
+        more={<p>{copy.fixturesMore}</p>}
         checked={settings?.fixtures ?? false}
         disabled={settings === undefined}
         onChange={(checked) => {
@@ -111,7 +124,7 @@ export function LearningSettings({ locale, sessionId }: { locale: UiLocale; sess
           update({ fixtures: checked })
         }}
       />
-      {error !== null && <p className="learning-error" role="alert">{error}</p>}
-    </section>
+      {error !== null && <div className="setting-row"><p className="field-error learning-error" role="alert">{error}</p></div>}
+    </SettingsGroup>
   )
 }
