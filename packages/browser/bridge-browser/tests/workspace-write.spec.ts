@@ -62,6 +62,7 @@ describe('writeWorkspaceFile', () => {
     expect(readFileSync(join(root, 'out/page.pdf'))).toEqual(Buffer.from(bytes))
     expect(statSync(join(root, 'out/page.pdf')).mode & 0o777).toBe(0o644 & ~process.umask())
     await expect(writeWorkspaceFile({ mode: 'workspace-write', root }, 'out/page.pdf', bytes, { allowedExt: ['.pdf'] })).rejects.toThrow(/already exists/)
+    await expect(writeWorkspaceFile({ mode: 'workspace-write', root }, 'out/page.pdf', bytes, { allowedExt: ['.pdf'] })).rejects.toMatchObject({ reason: 'exists' })
   })
 
   it('creates the bridge-owned fallback workspace but never a missing session cwd', async () => {

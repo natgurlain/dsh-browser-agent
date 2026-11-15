@@ -44,9 +44,16 @@ import { extname, isAbsolute, join, relative, sep } from 'node:path'
 
 /** A refused or failed workspace write the model can act on. */
 export class WorkspaceWriteError extends Error {
-  constructor(message: string) {
+  /**
+   * Machine-readable refusal kind, for callers that recover from one
+   * (`exists`: the file is already there; `symlink`: the path goes through a
+   * link or non-directory). Absent for every other refusal.
+   */
+  readonly reason: 'exists' | 'symlink' | undefined
+  constructor(message: string, reason?: 'exists' | 'symlink') {
     super(message)
     this.name = 'WorkspaceWriteError'
+    this.reason = reason
   }
 }
 
@@ -178,11 +185,11 @@ function codeOf(error: unknown): string | undefined {
 }
 
 function symlinkRefusal(relPath: string): WorkspaceWriteError {
-  return new WorkspaceWriteError(`the path goes through a symbolic link or a non-directory: "${relPath}"; nothing was written.`)
+  return new WorkspaceWriteError(`the path goes through a symbolic link or a non-directory: "${relPath}"; nothing was written.`, 'symlink')
 }
 
 function existsRefusal(relPath: string): WorkspaceWriteError {
-  return new WorkspaceWriteError(`"${relPath}" already exists; existing files are never overwritten. Choose a new file name.`)
+  return new WorkspaceWriteError(`"${relPath}" already exists; existing files are never overwritten. Choose a new file name.`, 'exists')
 }
 
 /** Whether descriptor-relative paths (`/proc/self/fd/<fd>/<name>`) work here. */

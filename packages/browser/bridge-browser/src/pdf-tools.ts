@@ -90,7 +90,7 @@ async function writeUnique(
     try {
       return await writeWorkspaceFile(target, relPath, bytes, { allowedExt: ['.pdf'], defaultExt: '.pdf' })
     } catch (error: unknown) {
-      if (!(error instanceof WorkspaceWriteError) || !/already exists/.test(error.message)) throw error
+      if (!(error instanceof WorkspaceWriteError) || error.reason !== 'exists') throw error
     }
   }
   throw new WorkspaceWriteError(`could not find a free file name for ${name} in ${PDF_FOLDER}/.`)
