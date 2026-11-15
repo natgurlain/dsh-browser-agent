@@ -68,6 +68,7 @@ await new Promise(resolve => unavailableServer.close(resolve))
 // A scripted local model (OpenAI chat-completions streaming): asked by a user
 // turn it calls `browser_press`; after the tool result it answers in text.
 // It drives a real Agent turn so a real browser tool call reaches the bridge.
+let presetProbeTools
 const scriptedModel = createHttpServer((req, res) => {
   let body = ''
   req.on('data', chunk => { body += chunk })
@@ -84,7 +85,16 @@ const scriptedModel = createHttpServer((req, res) => {
       return
     }
     const messages = parsed.messages ?? []
+    const request = parsed
     const afterTool = messages.at(-1)?.role === 'tool'
+    // The browser agent preset probe: record the tools that agent is offered.
+    if (Array.isArray(request.tools) && messages.some(message => message.role === 'user' && JSON.stringify(message.content ?? '').includes('PRESET-PROBE'))) {
+      presetProbeTools = (request.tools ?? []).map(tool => tool.function?.name)
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(`data: ${JSON.stringify({ id: 'scripted-p', object: 'chat.completion.chunk', created: 0, model: 'scripted', choices: [{ index: 0, delta: { role: 'assistant', content: 'Probed.' }, finish_reason: 'stop' }] })}\n\n`)
+      res.end('data: [DONE]\n\n')
+      return
+    }
     const chunk = (delta, finish) => `data: ${JSON.stringify({
       id: 'scripted-1', object: 'chat.completion.chunk', created: 0, model: 'scripted',
       choices: [{ index: 0, delta, finish_reason: finish }],
@@ -412,12 +422,13 @@ try {
   // probe, and recorded in the bridge's session ledger as an earlier bridge
   // run would have left them; `foreignSessionId` is not in the ledger.
   const foreignSessionId = `session-${randomUUID()}`
+  const browserAgentSessionId = `session-${randomUUID()}`
   await writeFile(join(home, 'browser-bridge-sessions.json'),
-    JSON.stringify([sessionId, ...worktreeSessions.map(entry => entry.sessionId)]), { mode: 0o600 })
+    JSON.stringify([sessionId, browserAgentSessionId, ...worktreeSessions.map(entry => entry.sessionId)]), { mode: 0o600 })
   let rpc = await start(false)
-  const place = async (id, cwd) => {
+  const place = async (id, cwd, agentPreset) => {
     const response = await fetch(`${rpc.base}/smoke/create-session`, {
-      method: 'POST', body: JSON.stringify({ sessionId: id, cwd }), signal: AbortSignal.timeout(30_000),
+      method: 'POST', body: JSON.stringify({ sessionId: id, cwd, agentPreset }), signal: AbortSignal.timeout(30_000),
     })
     assert.equal(response.status, 200, await response.clone().text())
     assert.equal((await response.json()).sessionId, id)
@@ -650,6 +661,23 @@ try {
     }
   }
 
+  // ---- Browser subagent preset and bundled skills (Phase 3.10) ----
+  {
+    await place(browserAgentSessionId, temp, 'browser')
+    const skills = JSON.stringify(await rpc('skills.list', { sessionId: browserAgentSessionId }))
+    for (const name of ['fill-form-safely', 'extract-table-to-csv', 'research-across-tabs', 'debug-localhost-page']) {
+      assert.ok(skills.includes(name), `the bundled skill ${name} is registered`)
+    }
+    await rpc('session.setPermission', { sessionId: browserAgentSessionId, preset: 'workspace-write' })
+    await rpc('session.selectModel', { sessionId: browserAgentSessionId, provider: 'scripted', model: 'scripted' })
+    await rpc('session.prompt', { sessionId: browserAgentSessionId, mode: 'queue', content: [{ type: 'text', text: 'PRESET-PROBE' }] })
+    const offered = await waitFor(() => presetProbeTools, 'browser agent model request', 60_000)
+    assert.ok(offered.includes('browser_snapshot') && offered.includes('browser_click'), `browser agent tools: ${offered.join(', ')}`)
+    assert.ok(offered.every(name => name.startsWith('browser_') || name === 'skill'),
+      `the browser agent preset offers only browser_* tools (and skill): ${offered.join(', ')}`)
+    await waitFor(async () => (await rpc('session.state', { sessionId: browserAgentSessionId })).running === false, 'browser agent turn end', 60_000)
+  }
+
   // ---- MCP clients drive the same browser path through an external session ----
   await smokeMcp({
     root,
@@ -832,7 +860,7 @@ try {
   assert.equal((await rpc('session.permissions', { sessionId: retrySession })).current, 'read-only',
     'prompt text must never act as a /permission command')
 
-  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), multi-client bridge with per-install replacement and session routing, browser approvals forwarded to dsh and answered by another owner client (allow and deny), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, MCP clients through the stdio shim on an external session (requester-labelled cards answered in the browser, audit log, Host methods refused), browser context, a page watcher waking only its owned session (untrusted boundary, rate limit), a tab fleet of real subagents restricted to read tools with structured results, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
+  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), multi-client bridge with per-install replacement and session routing, browser approvals forwarded to dsh and answered by another owner client (allow and deny), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, MCP clients through the stdio shim on an external session (requester-labelled cards answered in the browser, audit log, Host methods refused), the browser agent preset (browser_* tools only) and bundled skills, browser context, a page watcher waking only its owned session (untrusted boundary, rate limit), a tab fleet of real subagents restricted to read tools with structured results, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
   succeeded = true
 } catch (error) {
   console.error(hostLog)

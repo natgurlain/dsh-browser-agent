@@ -142,6 +142,19 @@ With `mcp.enabled: true` the plugin serves an MCP endpoint at `http://127.0.0.1:
   - Allows at most 16 sessions and expires them after 1 h idle. `DELETE` ends a session, and a dropped HTTP request cancels its call and withdraws its card.
 - **Refusals.** Tools that write into a DSH workspace (`browser_save_pdf`, `browser_extract { saveTo }`) refuse MCP callers. `browser_screenshot` returns an MCP image block.
 
+## Browser subagent and skills
+
+- **Agent preset `browser`.** When the Host has the agent-preset registry, the plugin registers a preset with one row, `lib/browser-preset.js`. That row restricts the agent's tools to the registered `browser_*` tools, and to `skill` when that tool is global. It re-applies the restriction when the developer-tools group comes or goes, and it adds a short role prompt. A main agent can delegate page work to it, so large snapshots stay in the child's context and only a summary comes back. The shipped `subagent` tool lets the model choose a preset only if the deployment lists that preset. A profile patch does this:
+
+  ```yaml
+  - id: tool-subagent
+    config:
+      allowedAgentPresets: [standard, browser]
+  ```
+
+  The model can then call `subagent { agent_preset: "browser", … }`. You can also start a session on the preset directly, by choosing the "Browser" preset in DSH.
+- **Skills.** The package ships `skills/*/SKILL.md`: `fill-form-safely`, `extract-table-to-csv`, `research-across-tabs` and `debug-localhost-page`. They are registered on `ctx.skills` as bundled skills, so the `skill` tool lists them for every session.
+
 ## Extension points
 
 - The tool set is the consumer surface; the seam is the bridge wire (`protocol.ts`). Add tools by registering on `ctx.tools` and dispatching over the bridge; the extension's content script dispatches by action name.

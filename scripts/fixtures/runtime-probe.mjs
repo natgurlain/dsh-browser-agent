@@ -24,9 +24,9 @@ export async function apply(ctx, config) {
       req.on('data', chunk => { body += chunk })
       req.on('end', async () => {
         try {
-          const { sessionId, cwd } = JSON.parse(body)
+          const { sessionId, cwd, agentPreset } = JSON.parse(body)
           const value = await ctx.typertGateway.invoke({
-            namespace: 'session', method: 'create', args: { request: { sessionId, cwd } }, peer,
+            namespace: 'session', method: 'create', args: { request: { sessionId, cwd, ...(agentPreset === undefined ? {} : { agentPreset }) } }, peer,
           })
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify(value))

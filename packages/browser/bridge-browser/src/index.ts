@@ -18,6 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
@@ -65,6 +66,7 @@ import {
 import { isRecord, type BrowserHostApi } from './host-api.ts'
 import { mountMcpEndpoint, type McpConfig } from './mcp-mount.ts'
 import { createMcpToolHost, type ToolRegistryLike } from './mcp-tools.ts'
+import { registerBrowserPreset, registerBrowserSkills } from './browser-agent.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'bridge-browser'
@@ -495,6 +497,13 @@ function mountBridge(
       for (const dispose of disposers.values()) dispose()
     }
   }, 'bridge-browser: browser tools')
+
+  // A `browser` agent preset (tools restricted to browser_*) for delegating
+  // page work, and the bundled browser skills (Phase 3.10). Both optional.
+  registerBrowserPreset(ctx, new URL('./browser-preset.js', import.meta.url).href)
+  void registerBrowserSkills(ctx, fileURLToPath(new URL('../skills/', import.meta.url))).catch((error: unknown) => {
+    ctx.logger.warn(`browser bridge: could not register the browser skills: ${error instanceof Error ? error.message : String(error)}`)
+  })
 
   // Other harnesses drive the same browser tools over a loopback MCP endpoint
   // (opt-in): one external session per MCP client, same extension gates.
