@@ -7,10 +7,10 @@
  *   the skill registry, so the model's `skill` tool can load them.
  * - **Agent preset `browser`**: a composition whose only row is
  *   `browser-preset.ts`, which restricts the agent's tools to `browser_*`
- *   (plus `skill`). A main agent delegates page work to it (the spawn
- *   subagent tool with `agent_preset: "browser"`, once the deployment lists
- *   it in `allowedAgentPresets`), so large snapshots stay in the child's
- *   context and only its summary returns.
+ *   (plus `skill` when it is global). A main agent delegates page work to it
+ *   with `delegate_browser_task` (registered here on the in-process `spawn`
+ *   subagent backend), so large snapshots stay in the child's context and
+ *   only its summary returns.
  *
  * Both are optional Host services, read through `ctx.get`.
  *
@@ -155,5 +155,86 @@ export function registerBrowserPreset(ctx: Context, presetModuleUrl: string): bo
       await dispose?.()
     }
   }, 'bridge-browser: browser agent preset')
+  return true
+}
+
+/** Name of the delegation tool (not `browser_*`: the browser agent itself never sees it). */
+export const BROWSER_DELEGATE_TOOL = 'delegate_browser_task'
+
+/** The slice of `ctx.subagents` used here. */
+interface SubagentsLike {
+  getProvider(name: string): unknown
+  startActivation(spec: {
+    provider: string
+    label: string
+    prompt: Array<{ type: 'text'; text: string }>
+    parent: unknown
+    agentPreset: string
+    signal: AbortSignal
+    delivery: 'caller'
+  }): Promise<{ result: Promise<{ output: ReadonlyArray<{ type: string; text?: string }>; stopReason: string; diagnostic?: string }>; dispose(): Promise<void> }>
+}
+
+/** Subagent backend that can run an independent preset in-process. */
+const SPAWN_PROVIDER = 'spawn'
+
+/**
+ * Register `delegate_browser_task`: run a page task in a child agent on the
+ * `browser` preset (browser_* tools only) and return only its summary, so
+ * large snapshots stay out of the caller's context. Needs the Host's
+ * subagent manager with the in-process `spawn` backend; a tainted session
+ * cannot call it (session-taint.ts denies delegation).
+ * @returns whether the tool was registered.
+ */
+export function registerBrowserDelegateTool(ctx: Context, defineTool: (options: never) => unknown): boolean {
+  const subagents = (ctx.get as (name: string) => unknown)('subagents') as SubagentsLike | undefined
+  const tools = (ctx.get as (name: string) => unknown)('tools') as { register(definition: unknown): () => void } | undefined
+  if (subagents === undefined || typeof subagents.startActivation !== 'function' || tools === undefined) return false
+  const definition = defineTool({
+    name: BROWSER_DELEGATE_TOOL,
+    description: 'Delegate a task in the user\'s browser (read pages, navigate, fill forms, extract tables, research across tabs) '
+      + 'to a browser subagent that only has the browser_* tools. It works in its own context and returns a short summary, '
+      + 'so page snapshots do not fill this conversation. Describe the goal, the starting URL or tab, and what to report back.',
+    parameters: {
+      task: { type: 'string', required: true, description: 'What the browser subagent should do and report.' },
+      label: { type: 'string', description: 'Short label for the task (a few words).' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { text: { type: 'string', required: true }, stopReason: { type: 'string', required: true } },
+      },
+      render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: (value as { text: string }).text }],
+    },
+    execute: async (args: { task: string; label?: string }, exec: { agent?: unknown; signal: AbortSignal }) => {
+      if (exec.agent === undefined) throw new Error('delegate_browser_task needs a calling agent session.')
+      if (subagents.getProvider(SPAWN_PROVIDER) === undefined) {
+        throw new Error('The Host has no in-process "spawn" subagent backend, so the browser subagent cannot start.')
+      }
+      const started = await subagents.startActivation({
+        provider: SPAWN_PROVIDER,
+        label: (args.label ?? 'browser task').slice(0, 80),
+        prompt: [{ type: 'text', text: args.task }],
+        parent: exec.agent,
+        agentPreset: BROWSER_AGENT_PRESET_ID,
+        signal: exec.signal,
+        delivery: 'caller',
+      })
+      const onAbort = (): void => { void started.dispose().catch(() => {}) }
+      exec.signal.addEventListener('abort', onAbort, { once: true })
+      try {
+        const result = await started.result
+        const text = result.output.flatMap(block => block.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('\n').trim()
+        return {
+          text: text !== '' ? text : `The browser subagent ended (${result.stopReason}) without a summary.${result.diagnostic === undefined ? '' : ` ${result.diagnostic}`}`,
+          stopReason: result.stopReason,
+        }
+      } finally {
+        exec.signal.removeEventListener('abort', onAbort)
+      }
+    },
+  } as never)
+  ctx.effect(() => tools.register(definition), `bridge-browser: ${BROWSER_DELEGATE_TOOL} tool`)
   return true
 }

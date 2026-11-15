@@ -76,6 +76,12 @@ export interface ApprovalPrompt {
    * card; absent for DSH Agent sessions.
    */
   requester?: string
+  /**
+   * A dev-loop read of a localhost tab on behalf of a linked DSH coding
+   * session (its panel label). Shown on the card; the panel never switches to
+   * that session, which the browser cannot prompt.
+   */
+  devLoopFor?: string
 }
 
 /** Correlated request delivered to every open side-panel view. */

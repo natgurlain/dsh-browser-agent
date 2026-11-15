@@ -49,6 +49,12 @@ describe('approval session presentation', () => {
     expect(offersDevToolsTrust({ ...evalCard, action: 'browser_devtools_get_request', perCallOnly: true })).toBe(false)
   })
 
+  it('never switches the panel to an MCP client\'s session or a dev-loop coding session', () => {
+    expect(approvalSessionToFocus({ ...request, sessionId: 'mcp-1', requester: 'Cursor' }, 'session-b', false, true)).toBeUndefined()
+    expect(approvalSessionToFocus({ ...request, sessionId: 'mcp-2' }, 'session-b', false, true)).toBeUndefined()
+    expect(approvalSessionToFocus({ ...request, sessionId: 'coding', devLoopFor: 'webapp — Fix login' }, 'session-b', false, true)).toBeUndefined()
+  })
+
   it('keeps compatibility with approvals from an older bridge', () => {
     const unscoped = { ...request, sessionId: undefined }
     expect(approvalSessionToFocus(unscoped, 'session-b', false, true)).toBeUndefined()

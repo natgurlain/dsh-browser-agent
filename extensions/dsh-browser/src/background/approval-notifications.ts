@@ -89,7 +89,9 @@ export function approvalNotificationOptions(
   const quick = approvalNotificationClass(request) === 'quick'
   const template = quick ? options.copy.quickMessage : options.copy.reviewMessage
   // Only a review notification may shorten (it decides nothing).
-  const base = request.requester === undefined ? request.summary : `[MCP: ${request.requester}] ${request.summary}`
+  const base = request.requester !== undefined ? `[MCP: ${request.requester}] ${request.summary}`
+    : request.devLoopFor !== undefined ? `[Dev loop] ${request.summary}`
+    : request.summary
   const summary = quick || base.length <= MAX_NOTIFICATION_SUMMARY
     ? base
     : `${base.slice(0, MAX_NOTIFICATION_SUMMARY - 3)}…`

@@ -71,6 +71,8 @@ await new Promise(resolve => unavailableServer.close(resolve))
 // turn it calls `browser_press`; after the tool result it answers in text.
 // It drives a real Agent turn so a real browser tool call reaches the bridge.
 let presetProbeTools
+let delegateOffered = false
+let delegateResult = false
 const devLoopProbe = {}
 const scriptedModel = createHttpServer((req, res) => {
   let body = ''
@@ -89,6 +91,19 @@ const scriptedModel = createHttpServer((req, res) => {
     }
     const messages = parsed.messages ?? []
     const request = parsed
+    // A standard session delegates page work to the browser subagent.
+    const toolNames = (request.tools ?? []).map(tool => tool.function?.name)
+    if (toolNames.includes('delegate_browser_task') && messages.at(-1)?.role !== 'tool'
+      && messages.some(message => message.role === 'user' && JSON.stringify(message.content ?? '').includes('DELEGATE-PROBE'))) {
+      delegateOffered = true
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      const call = { index: 0, id: `call_${randomUUID().slice(0, 8)}`, type: 'function', function: { name: 'delegate_browser_task', arguments: JSON.stringify({ task: 'PRESET-PROBE: list the open tabs and summarize.', label: 'probe' }) } }
+      res.write(`data: ${JSON.stringify({ id: 'scripted-d', object: 'chat.completion.chunk', created: 0, model: 'scripted', choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [call] }, finish_reason: null }] })}\n\n`)
+      res.write(`data: ${JSON.stringify({ id: 'scripted-d', object: 'chat.completion.chunk', created: 0, model: 'scripted', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`)
+      res.end('data: [DONE]\n\n')
+      return
+    }
+    if (messages.at(-1)?.role === 'tool' && JSON.stringify(messages.at(-1)?.content ?? '').includes('Probed.')) delegateResult = true
     const afterTool = messages.at(-1)?.role === 'tool'
     // The browser agent preset probe: record the tools that agent is offered.
     if (Array.isArray(request.tools) && messages.some(message => message.role === 'user' && JSON.stringify(message.content ?? '').includes('PRESET-PROBE'))) {
@@ -690,6 +705,17 @@ try {
     assert.ok(offered.every(name => name.startsWith('browser_') || name === 'skill'),
       `the browser agent preset offers only browser_* tools (and skill): ${offered.join(', ')}`)
     await waitFor(async () => (await rpc('session.state', { sessionId: browserAgentSessionId })).running === false, 'browser agent turn end', 60_000)
+    // A standard session delegates to it through delegate_browser_task and gets only the summary back.
+    presetProbeTools = undefined
+    const delegating = (await rpc('session.create', { cwd: temp })).sessionId
+    await rpc('session.selectModel', { sessionId: delegating, provider: 'scripted', model: 'scripted' })
+    await rpc('session.prompt', { sessionId: delegating, mode: 'queue', content: [{ type: 'text', text: 'DELEGATE-PROBE' }] })
+    const childTools = await waitFor(() => presetProbeTools, 'browser subagent model request', 60_000)
+    assert.ok(delegateOffered, 'the standard session is offered delegate_browser_task')
+    assert.ok(childTools.every(name => name.startsWith('browser_') || name === 'skill'),
+      `the delegated child runs the browser preset: ${childTools.join(', ')}`)
+    await waitFor(() => delegateResult, 'the child summary returned to the delegating session', 60_000)
+    await waitFor(async () => (await rpc('session.state', { sessionId: delegating })).running === false, 'delegating turn end', 60_000)
   }
 
   // ---- Closed dev loop: a linked localhost tab reports back to a coding session ----
@@ -897,7 +923,7 @@ try {
   assert.equal((await rpc('session.permissions', { sessionId: retrySession })).current, 'read-only',
     'prompt text must never act as a /permission command')
 
-  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), multi-client bridge with per-install replacement and session routing, browser approvals forwarded to dsh and answered by another owner client (allow and deny), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, MCP clients through the stdio shim on an external session (requester-labelled cards answered in the browser, audit log, Host methods refused), the browser agent preset (browser_* tools only) and bundled skills, the closed dev loop (localhost link, capture after an editing turn, read-only injection without prompting), browser context, a page watcher waking only its owned session (untrusted boundary, rate limit), a tab fleet of real subagents restricted to read tools with structured results, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
+  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), multi-client bridge with per-install replacement and session routing, browser approvals forwarded to dsh and answered by another owner client (allow and deny), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, MCP clients through the stdio shim on an external session (requester-labelled cards answered in the browser, audit log, Host methods refused), the browser agent preset (browser_* tools only), delegation to it via delegate_browser_task, and bundled skills, the closed dev loop (localhost link, capture after an editing turn, read-only injection without prompting), browser context, a page watcher waking only its owned session (untrusted boundary, rate limit), a tab fleet of real subagents restricted to read tools with structured results, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
   succeeded = true
 } catch (error) {
   console.error(hostLog)

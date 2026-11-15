@@ -712,6 +712,12 @@ function ApprovalDialog({
             <strong>{copy.approval.mcpClient(request.requester)}</strong>
           </div>
         )}
+        {request.devLoopFor !== undefined && (
+          <div className="approval-detail approval-requester">
+            <span>{copy.approval.requestedBy}</span>
+            <strong>{copy.approval.devLoop(request.devLoopFor)}</strong>
+          </div>
+        )}
         <div className="approval-detail">
           <span>{copy.approval.request}</span>
           <strong>{request.summary}</strong>
@@ -2090,7 +2096,7 @@ export function App(): React.JSX.Element {
   async function focusApprovalSession(request: ApprovalRequest): Promise<void> {
     const sessionId = request.sessionId
     // An MCP client's session has no conversation to open in the panel.
-    if (sessionId === undefined || request.requester !== undefined || isExternalSessionId(sessionId)
+    if (sessionId === undefined || request.requester !== undefined || request.devLoopFor !== undefined || isExternalSessionId(sessionId)
       || sessionChangingRef.current || sessionRef.current === sessionId) return
     const transition = beginSessionTransition()
     let history: HistoryPage | undefined

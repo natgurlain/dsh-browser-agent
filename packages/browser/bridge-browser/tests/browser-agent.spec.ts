@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import {
   BROWSER_AGENT_PRESET_ID,
+  BROWSER_DELEGATE_TOOL,
+  registerBrowserDelegateTool,
   browserPresetDefinition,
   loadBundledSkills,
   parseSkillFile,
@@ -10,6 +12,8 @@ import {
   registerBrowserSkills,
 } from '../src/browser-agent.ts'
 import { apply as applyPreset, browserAgentAllows } from '../src/browser-preset.ts'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import { resultTaintsSession } from '../src/session-taint.ts'
 
 const SKILLS_DIR = fileURLToPath(new URL('../skills/', import.meta.url))
 
@@ -52,6 +56,37 @@ describe('bundled browser skills', () => {
     }))
     expect(disposers).toHaveLength(4)
     expect(await registerBrowserSkills(fakeCtx({}).ctx, SKILLS_DIR)).toBe(0)
+  })
+})
+
+describe('delegate_browser_task', () => {
+  it('runs the task on the browser preset through the spawn backend and returns only the summary', async () => {
+    const registered: Array<{ name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }> = []
+    const dispose = vi.fn(async () => {})
+    const startActivation = vi.fn(async () => ({
+      result: Promise.resolve({ output: [{ type: 'text', text: 'Found 3 tabs; the login form is broken.' }], stopReason: 'completed' }),
+      dispose,
+    }))
+    const { ctx } = fakeCtx({
+      subagents: { getProvider: (name: string) => name === 'spawn' ? {} : undefined, startActivation },
+      tools: { register: (definition: never) => { registered.push(definition); return () => {} } },
+    })
+    expect(registerBrowserDelegateTool(ctx, defineTool as never)).toBe(true)
+    const tool = registered.find(entry => entry.name === BROWSER_DELEGATE_TOOL)!
+    const parent = { id: 'parent-session' }
+    const signal = new AbortController().signal
+    await expect(tool.execute({ task: 'Check the login page.' }, { agent: parent, signal })).resolves.toEqual({
+      text: 'Found 3 tabs; the login form is broken.', stopReason: 'completed',
+    })
+    expect(startActivation).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'spawn', agentPreset: BROWSER_AGENT_PRESET_ID, parent, delivery: 'caller',
+      prompt: [{ type: 'text', text: 'Check the login page.' }],
+    }))
+    await expect(tool.execute({ task: 'x' }, { signal })).rejects.toThrow(/calling agent/u)
+    expect(BROWSER_DELEGATE_TOOL.startsWith('browser_')).toBe(false)
+    // Its summary taints the caller (session-taint.ts keeps the same name).
+    expect(resultTaintsSession(BROWSER_DELEGATE_TOOL, false)).toBe(true)
+    expect(registerBrowserDelegateTool(fakeCtx({}).ctx, defineTool as never)).toBe(false)
   })
 })
 

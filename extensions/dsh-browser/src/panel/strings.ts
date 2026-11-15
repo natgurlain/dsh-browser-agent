@@ -51,6 +51,8 @@ export interface PanelCopy {
     requestedBy: string
     /** The external client, by its self-reported name. */
     mcpClient: (name: string) => string
+    /** A dev-loop read for a linked coding session. */
+    devLoop: (session: string) => string
   }
   tool: {
     running: string
@@ -423,6 +425,7 @@ const EN: PanelCopy = {
     fingerprint: 'Approval fingerprint',
     requestedBy: 'Requested by',
     mcpClient: (name) => `MCP client “${name}” (name reported by the client)`,
+    devLoop: (session) => `Dev loop for the coding session “${session}” (read-only page check after its edit)`,
   },
   tool: {
     running: 'Working on page',
@@ -844,6 +847,7 @@ const ZH: PanelCopy = {
     fingerprint: '审批指纹',
     requestedBy: '请求方',
     mcpClient: (name) => `MCP 客户端“${name}”（名称由客户端自报）`,
+    devLoop: (session) => `编码会话“${session}”的开发闭环（编辑后对页面的只读检查）`,
   },
   tool: {
     running: '正在操作页面',

@@ -43,8 +43,11 @@ import {
 /** Tools whose successful result means the turn edited files. */
 export const DEFAULT_DEVLOOP_EDIT_TOOLS: readonly string[] = ['edit', 'write', 'apply_patch', 'str_replace_editor', 'notebook_edit']
 
-/** Budget for one capture (the extension may wait on the user's read approval). */
-export const DEVLOOP_CAPTURE_TIMEOUT_MS = 30_000
+/**
+ * Budget for one capture: long enough for the extension's read-approval card
+ * (60 s with the panel open) to be answered before the call is withdrawn.
+ */
+export const DEVLOOP_CAPTURE_TIMEOUT_MS = 90_000
 
 /** One listed coding session the panel may link to. */
 export interface DevLoopCandidate {

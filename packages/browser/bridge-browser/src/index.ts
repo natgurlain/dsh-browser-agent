@@ -66,7 +66,8 @@ import {
 import { isRecord, type BrowserHostApi } from './host-api.ts'
 import { mountMcpEndpoint, type McpConfig } from './mcp-mount.ts'
 import { createMcpToolHost, type ToolRegistryLike } from './mcp-tools.ts'
-import { registerBrowserPreset, registerBrowserSkills } from './browser-agent.ts'
+import { registerBrowserDelegateTool, registerBrowserPreset, registerBrowserSkills } from './browser-agent.ts'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { DEVLOOP_CAPTURE_TIMEOUT_MS, DevLoop, withDevLoopMethods } from './dev-loop.ts'
 import { DEVLOOP_CAPTURE_TOOL } from './protocol.ts'
 
@@ -536,7 +537,9 @@ function mountBridge(
 
   // A `browser` agent preset (tools restricted to browser_*) for delegating
   // page work, and the bundled browser skills (Phase 3.10). Both optional.
-  registerBrowserPreset(ctx, new URL('./browser-preset.js', import.meta.url).href)
+  if (registerBrowserPreset(ctx, new URL('./browser-preset.js', import.meta.url).href)) {
+    registerBrowserDelegateTool(ctx, defineTool as never)
+  }
   void registerBrowserSkills(ctx, fileURLToPath(new URL('../skills/', import.meta.url))).catch((error: unknown) => {
     ctx.logger.warn(`browser bridge: could not register the browser skills: ${error instanceof Error ? error.message : String(error)}`)
   })

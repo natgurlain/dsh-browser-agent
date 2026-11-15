@@ -2354,7 +2354,11 @@ function routeToolCall(call: ToolCall): void {
           { id: call.id, name: 'browser_snapshot', args: { delta: true }, ...(call.sessionId === undefined ? {} : { sessionId: call.sessionId }) },
           sharePageContent,
           budget,
-          auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(prompt, controller.signal, target.windowId ?? 0, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt)),
+          // The card says it is a dev-loop read for the linked coding session.
+          auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(
+            { ...prompt, devLoopFor: devLoop.linkOf(call.sessionId)?.label ?? 'a linked coding session' },
+            controller.signal, target.windowId ?? 0, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt,
+          )),
           controller.signal,
           target,
           () => devLoop.allowsTarget(call.sessionId, target.id),

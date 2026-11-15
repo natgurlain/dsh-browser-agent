@@ -1,4 +1,5 @@
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
+import { isExternalSessionId } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 
 /**
  * Characters that render as nothing or reorder text: bidi embeddings,
@@ -55,6 +56,11 @@ export function approvalSessionToFocus(
   connected: boolean,
 ): string | undefined {
   if (!connected || request?.sessionId === undefined || sessionChanging || request.sessionId === sessionId) {
+    return undefined
+  }
+  // MCP clients' external sessions and dev-loop reads for a coding session
+  // have no conversation the panel may open (or prompt).
+  if (request.requester !== undefined || request.devLoopFor !== undefined || isExternalSessionId(request.sessionId)) {
     return undefined
   }
   return request.sessionId
