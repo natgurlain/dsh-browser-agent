@@ -2,7 +2,8 @@ name: DSH compatibility matrix
 
 # Probes the bridge against DSH releases other than the exact pin.
 # Only the pin row can fail the workflow; latest/next rows report via the job
-# summary and warnings. The pin itself is enforced by ci.yml / runtime.yml.
+# summary and warnings. The pin itself is enforced by ci.yml (check:runtime and
+# the runtime smoke).
 
 on:
   schedule:

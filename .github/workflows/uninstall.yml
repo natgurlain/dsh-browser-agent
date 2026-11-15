@@ -1,4 +1,8 @@
-name: Uninstall lifecycle
+name: Script tests
+
+# Every scripts/tests/*.test.mjs (uninstall lifecycle, token provisioning,
+# release packaging, installer consistency, DSH matrix helpers) on Linux,
+# macOS and Windows. ci.yml does not run them again.
 
 on:
   push:
@@ -28,4 +32,4 @@ jobs:
           run_install: false
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter dsh-browser-extension build
-      - run: pnpm test:uninstall
+      - run: pnpm test:scripts

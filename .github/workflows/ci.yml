@@ -36,8 +36,9 @@ jobs:
         run: pnpm run build
       - name: Build Firefox extension
         run: pnpm --filter dsh-browser-extension run build:firefox
-      - name: Script tests
-        run: node --test scripts/tests/*.test.mjs
+      # scripts/tests run on all three platforms in uninstall.yml (Script tests).
+      - name: Benchmark tests
+        run: pnpm run test:benchmark
       - name: Runtime smoke (real DSH host)
         run: node scripts/smoke-runtime.mjs
       - name: Install Chromium for the browser smoke
