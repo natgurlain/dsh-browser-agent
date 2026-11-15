@@ -38,7 +38,7 @@ export const AUDIT_KEY_FILE = '.chain-key'
 export const AUDIT_MAC_ALG = 'hmac-sha256'
 
 /** What one entry records. */
-export type AuditKind = 'tool-call' | 'approval' | 'result' | 'navigation' | 'kill-switch' | 'fixture'
+export type AuditKind = 'tool-call' | 'approval' | 'result' | 'navigation' | 'kill-switch' | 'fixture' | 'schedule'
 
 /** The first entry's `prevHash`. */
 export const AUDIT_GENESIS_HASH = '0'.repeat(64)

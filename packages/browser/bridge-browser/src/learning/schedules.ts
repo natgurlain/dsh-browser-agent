@@ -56,6 +56,8 @@ interface ScheduleRecordEntry {
   sessionId: string
   workflow: string
   timing: ScheduleTimingInput
+  /** The extension install (bridge client key) whose user created it; absent on older records. */
+  install?: string
 }
 
 /** Validate panel-supplied timing (every ≥ 60 s, or a daily wall-clock time). */
@@ -132,7 +134,7 @@ export class WorkflowSchedules {
   }
 
   /** Create a schedule that replays `workflow` in its owning session. */
-  create(sessionId: string, workflow: Workflow, timing: ScheduleTimingInput, params: Record<string, string> = {}): Promise<WorkflowSchedule> {
+  create(sessionId: string, workflow: Workflow, timing: ScheduleTimingInput, params: Record<string, string> = {}, install?: string): Promise<WorkflowSchedule> {
     return this.serialized(async () => {
       if (!await this.ownsSession(sessionId)) throw new Error('only sessions created by the browser bridge can be scheduled.')
       for (const param of workflow.params) {
@@ -146,7 +148,7 @@ export class WorkflowSchedules {
         target: { kind: 'session', sessionId },
       })
       const records = await this.records()
-      await this.persist([...records, { id: created.id, sessionId, workflow: workflow.name, timing }])
+      await this.persist([...records, { id: created.id, sessionId, workflow: workflow.name, timing, ...(install === undefined ? {} : { install }) }])
       return { id: created.id, sessionId, workflow: workflow.name, timing, status: String(created.status ?? 'active') }
     })
   }
@@ -175,15 +177,23 @@ export class WorkflowSchedules {
     })
   }
 
+  /** Number of schedules this bridge recorded (live or not yet swept). */
+  count(): Promise<number> {
+    return this.serialized(async () => (await this.records()).length)
+  }
+
   /**
-   * Delete every schedule this bridge created (kill switch, workflows turned
-   * off): a schedule is a standing grant to run the browser unattended.
-   * Deletion failures are reported, and the record is dropped either way so
-   * a later list never resurrects it.
+   * Delete the schedules this bridge created (all of them for the kill
+   * switch; one install's when its user turns workflows off): a schedule is
+   * a standing grant to run the browser unattended. Deletion failures are
+   * reported, and the record is dropped either way so a later list never
+   * resurrects it.
+   * @param install - only schedules created from this install (plus older records that name none).
    */
-  revokeAll(): Promise<{ revoked: number; failed: number }> {
+  revokeAll(install?: string): Promise<{ revoked: number; failed: number }> {
     return this.serialized(async () => {
-      const records = await this.records()
+      const all = await this.records()
+      const records = install === undefined ? all : all.filter((record) => record.install === undefined || record.install === install)
       if (records.length === 0) return { revoked: 0, failed: 0 }
       const service = this.schedule()
       let failed = 0
@@ -195,7 +205,7 @@ export class WorkflowSchedules {
           failed += 1
         }
       }
-      await this.persist([])
+      await this.persist(all.filter((record) => !records.includes(record)))
       return { revoked: records.length - failed, failed }
     })
   }

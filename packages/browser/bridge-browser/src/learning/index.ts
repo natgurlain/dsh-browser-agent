@@ -79,7 +79,7 @@ export interface LearningOptions {
   /** Mark a session tainted: a fixture puts page content where its file tools can read it. */
   markTainted?: (sessionId: string) => void
   /** Record a saved fixture in the session's keyed audit chain. */
-  audit?: (sessionId: string | undefined, entry: { tool: string; url: string; decision: string; resultDigest?: string }) => void
+  audit?: (sessionId: string | undefined, entry: { kind?: 'fixture' | 'schedule'; tool: string; url: string; decision: string; resultDigest?: string }) => void
 }
 
 /** The handle `index.ts` wires into the server. */
@@ -174,6 +174,19 @@ export function mountLearning(
     options.ownsSession,
   )
   let workflowDisposers: Array<() => void> | undefined
+  /** Schedules this bridge recorded: the workflow tools stay registered (refusing) so a delivery while every install has workflows off is skipped and audited. */
+  let liveSchedules = 0
+  const workflowsEnabled = (): boolean => [...states.values()].some((state) => state.workflows)
+  const refreshScheduleCount = async (): Promise<void> => {
+    liveSchedules = await schedules.count().catch(() => 0)
+    sync()
+  }
+  /** Fail closed: no connected install has saved workflows on. */
+  const requireWorkflowsOn = (exec: Pick<ToolRunContext, 'agent'>, tool: string, name?: string): void => {
+    if (workflowsEnabled()) return
+    options.audit?.(sessionOf(exec), { kind: 'schedule', tool, url: '', decision: `skipped: saved workflows are off in every connected browser${name === undefined ? '' : ` (workflow ${name})`}` })
+    throw new WorkflowError('saved browser workflows are turned off in every connected browser, so this run was skipped. Ask the user to turn them on in the extension settings.')
+  }
   let skills: { dispose: () => void; invalidate: () => void } | undefined
   const driverDisposers = new Map<string, () => void>()
 
@@ -194,6 +207,7 @@ export function mountLearning(
       timeoutMs: 10_000,
       output: { schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } }, render: (_a: unknown, v: unknown) => [{ type: 'text' as const, text: (v as { text: string }).text }] },
       execute: async (_args, exec) => {
+        requireWorkflowsOn(exec, 'browser_workflow_list')
         const workflows = await listWorkflows(rootOf(exec))
         if (workflows.length === 0) return { text: 'No saved browser workflows in this workspace.' }
         return {
@@ -213,6 +227,7 @@ export function mountLearning(
       output: { schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string', required: true } } }, render: (_a: unknown, v: unknown) => [{ type: 'text' as const, text: (v as { text: string }).text }] },
       execute: async (args, exec) => {
         const a = args as { name: string; params?: Record<string, unknown>; fromStep?: number }
+        requireWorkflowsOn(exec, 'browser_workflow_run', a.name)
         const workflow = await loadWorkflow(rootOf(exec), a.name).catch((error: unknown) => {
           throw new WorkflowError(`workflow "${a.name}" could not be loaded: ${error instanceof Error ? error.message : String(error)}`)
         })
@@ -242,7 +257,7 @@ export function mountLearning(
 
   const sync = (): void => {
     const all = [...states.values()]
-    const workflowsOn = all.some((state) => state.workflows)
+    const workflowsOn = all.some((state) => state.workflows) || liveSchedules > 0
     if (workflowsOn && workflowDisposers === undefined) {
       workflowDisposers = workflowTools().map((tool) => ctx.tools.register(tool))
       const service = (ctx.get as (name: string) => unknown)('skills') as SkillsServiceLike | undefined
@@ -286,9 +301,10 @@ export function mountLearning(
     return sessionId
   }
 
-  const revokeSchedules = async (why: string): Promise<void> => {
+  const revokeSchedules = async (why: string, install?: string): Promise<void> => {
     try {
-      const { revoked, failed } = await schedules.revokeAll()
+      const { revoked, failed } = await schedules.revokeAll(install)
+      await refreshScheduleCount()
       if (revoked > 0 || failed > 0) ctx.logger.info(`browser bridge: ${why}; revoked ${String(revoked)} workflow schedule(s)${failed > 0 ? `, ${String(failed)} could not be deleted` : ''}`)
     } catch (error: unknown) {
       ctx.logger.warn(`browser bridge: could not revoke workflow schedules: ${error instanceof Error ? error.message : String(error)}`)
@@ -301,7 +317,6 @@ export function mountLearning(
       const body = isRecord(payload) ? payload : {}
       try {
         if (method === LEARNING_METHODS.state) {
-          const before = states.get(context.connection)
           states.set(context.connection, {
             workflows: body.workflows === true,
             fixtures: body.fixtures === true,
@@ -309,12 +324,13 @@ export function mountLearning(
             drivers: body.siteDrivers === undefined ? [] : parseSiteDrivers(body.siteDrivers),
           })
           sync()
-          // The user turned saved workflows off (here, or while this browser
-          // was disconnected): their schedules end with them once no
-          // connected browser has the feature on.
-          const anyOn = [...states.values()].some((state) => state.workflows)
-          if (body.workflows !== true && !anyOn && (before?.workflows === true || before === undefined)) {
-            await revokeSchedules('saved workflows are turned off')
+          // Only an explicit settings change from this install (its user
+          // turned saved workflows off, now or while it was disconnected)
+          // revokes, and only the schedules this install created. A browser
+          // merely connecting with the feature off never deletes anything;
+          // deliveries while every install has it off are skipped instead.
+          if (body.workflowsTurnedOff === true && body.workflows !== true) {
+            await revokeSchedules('saved workflows were turned off in the browser that created them', context.connection)
           }
           return { ok: true, result: { tools: [...driverDisposers.keys(), ...(workflowDisposers === undefined ? [] : ['browser_workflow_run', 'browser_workflow_list'])] } }
         }
@@ -333,7 +349,9 @@ export function mountLearning(
           const sessionId = await ownedSession(body, context)
           if (method === LEARNING_METHODS.scheduleList) return { ok: true, result: { schedules: await schedules.list(sessionId) } }
           if (typeof body.id !== 'string') throw new Error('id must name a schedule')
-          return { ok: true, result: { cancelled: await schedules.cancel(body.id) } }
+          const cancelled = await schedules.cancel(body.id)
+          await refreshScheduleCount()
+          return { ok: true, result: { cancelled } }
         }
         if (method === LEARNING_METHODS.programRun) {
           if (!featureOn(context.connection, 'watchMe')) return { ok: false, error: { code: 'disabled', message: 'Watch me is turned off in the extension settings' } }
@@ -360,7 +378,9 @@ export function mountLearning(
             if (root === undefined || typeof body.workflow !== 'string') throw new Error('workflow must name a saved workflow')
             const workflow = await loadWorkflow(root, body.workflow)
             const params = isRecord(body.params) ? Object.fromEntries(Object.entries(body.params).filter(([, value]) => typeof value === 'string')) as Record<string, string> : {}
-            return { ok: true, result: await schedules.create(sessionId, workflow, parseScheduleTiming(body.timing), params) }
+            const created = await schedules.create(sessionId, workflow, parseScheduleTiming(body.timing), params, context.connection)
+            await refreshScheduleCount()
+            return { ok: true, result: created }
           }
           case LEARNING_METHODS.programRun: {
             const program = parseProgram(body.steps)
@@ -383,6 +403,8 @@ export function mountLearning(
       }
     })()
   }
+
+  void refreshScheduleCount()
 
   return {
     rpc,

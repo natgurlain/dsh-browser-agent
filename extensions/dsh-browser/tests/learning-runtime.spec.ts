@@ -66,6 +66,21 @@ describe('learning runtime', () => {
     expect(learning.stepsFor('s1')).toEqual([])
   })
 
+  it('reports turning workflows off as an explicit event, resent after a disconnect, never on a plain connect', async () => {
+    let connected = false
+    const { learning, request, storage } = runtime({ bridgeConnected: () => connected }, { dshLearningSettings: { workflows: true } })
+    await learning.ready
+    await learning.updateSettings({ workflows: false })
+    expect(request).not.toHaveBeenCalled()
+    expect(storage.data.dshWorkflowsOffPending).toBe(true)
+    connected = true
+    await learning.pushBridgeState()
+    expect(request).toHaveBeenLastCalledWith('bridge.learning.state', expect.objectContaining({ workflows: false, workflowsTurnedOff: true }))
+    await learning.pushBridgeState()
+    expect(request.mock.calls.at(-1)![1]).not.toHaveProperty('workflowsTurnedOff')
+    expect(storage.data.dshWorkflowsOffPending).toBe(false)
+  })
+
   it('never records keys pressed into a sensitive field (review finding 8)', async () => {
     const { learning } = runtime({}, { dshLearningSettings: { workflows: true } })
     await learning.ready

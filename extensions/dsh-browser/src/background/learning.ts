@@ -41,6 +41,9 @@ import type { CallPolicyHook, ToolAnswer, ToolCall } from './tools.ts'
 export const LEARNING_SETTINGS_KEY = 'dshLearningSettings'
 /** Storage key of saved site drivers. */
 export const SITE_DRIVERS_KEY = 'dshSiteDrivers'
+/** Storage flag: a workflows turn-off the bridge has not acknowledged yet. */
+export const WORKFLOWS_OFF_PENDING_KEY = 'dshWorkflowsOffPending'
+
 /** Panel port name. */
 export const LEARNING_PORT_NAME = 'dsh-learning'
 
@@ -211,6 +214,8 @@ export class LearningRuntime {
   private readonly recentFailures = new Map<string, number>()
   private readonly ports = new Set<chrome.runtime.Port>()
   private watch: { tabId: number; origin: string; events: WatchEvent[] } | undefined
+  /** The user turned saved workflows off and the bridge has not acknowledged it yet. */
+  private workflowsTurnedOff = false
   private suggestion: WatchSuggestion | undefined
   private lastAgentActivity = new Map<number, number>()
   readonly ready: Promise<void>
@@ -224,8 +229,9 @@ export class LearningRuntime {
   }
 
   private async load(): Promise<void> {
-    const stored = await this.storage.get([LEARNING_SETTINGS_KEY, SITE_DRIVERS_KEY])
+    const stored = await this.storage.get([LEARNING_SETTINGS_KEY, SITE_DRIVERS_KEY, WORKFLOWS_OFF_PENDING_KEY])
     this.settings = normalizeLearningSettings(stored[LEARNING_SETTINGS_KEY])
+    this.workflowsTurnedOff = stored[WORKFLOWS_OFF_PENDING_KEY] === true
     const drivers = Array.isArray(stored[SITE_DRIVERS_KEY]) ? stored[SITE_DRIVERS_KEY] as unknown[] : []
     this.drivers = drivers.flatMap((raw) => {
       try {
@@ -241,6 +247,15 @@ export class LearningRuntime {
   async updateSettings(next: Partial<LearningSettings>): Promise<LearningSettings> {
     await this.ready
     const updated = normalizeLearningSettings({ ...this.settings, ...next })
+    // The user turning saved workflows off is the event that ends this
+    // install's schedules on the Host; kept until the bridge has heard it.
+    if (this.settings.workflows && !updated.workflows) {
+      this.workflowsTurnedOff = true
+      await this.storage.set({ [WORKFLOWS_OFF_PENDING_KEY]: true })
+    } else if (updated.workflows && this.workflowsTurnedOff) {
+      this.workflowsTurnedOff = false
+      await this.storage.set({ [WORKFLOWS_OFF_PENDING_KEY]: false })
+    }
     if (!updated.workflows) this.recorded.clear()
     if (!updated.siteDrivers) this.proposals.splice(0)
     if (!updated.watchMe) await this.stopWatching()
@@ -256,7 +271,19 @@ export class LearningRuntime {
     const rpc = this.deps.rpc()
     if (rpc === null || !this.deps.bridgeConnected()) return
     const drivers = this.settings.siteDrivers && this.deps.siteDriversSupported ? this.drivers : []
-    await rpc.request(METHODS.state, { workflows: this.settings.workflows, fixtures: this.settings.fixtures, watchMe: this.settings.watchMe, siteDrivers: drivers }).catch(() => {})
+    const turnedOff = this.workflowsTurnedOff && !this.settings.workflows
+    try {
+      await rpc.request(METHODS.state, {
+        workflows: this.settings.workflows, fixtures: this.settings.fixtures, watchMe: this.settings.watchMe, siteDrivers: drivers,
+        ...(turnedOff ? { workflowsTurnedOff: true } : {}),
+      })
+      if (turnedOff) {
+        this.workflowsTurnedOff = false
+        await this.storage.set({ [WORKFLOWS_OFF_PENDING_KEY]: false })
+      }
+    } catch {
+      // Not delivered: a pending turn-off is sent again on the next push.
+    }
   }
 
   /** The bridge connection changed state. */
