@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -108,6 +108,52 @@ describe('keyed audit chain (P2 hardening)', () => {
     expect((await new AuditLog(dir).read('s1')).verification.ok).toBe(false)
   })
 
+  it('rejects a full downgrade: alg stripped, re-hashed publicly, head deleted, key still present (poc5)', async () => {
+    const dir = temp()
+    const log = new AuditLog(dir)
+    await log.append('s1', { kind: 'tool-call', tool: 'browser_type', url: 'https://evil.example/' })
+    await log.append('s1', { kind: 'result', tool: 'browser_type', outcome: 'ok' })
+    const lines = readFileSync(log.file('s1'), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
+    let prev = AUDIT_GENESIS_HASH
+    const forged = lines.map((entry, index) => {
+      const { hash: _hash, alg: _alg, ...rest } = entry
+      const body = { ...rest, ...(index === 0 ? { tool: 'browser_scroll', url: undefined } : {}), prevHash: prev }
+      const hash = auditEntryHash(body)
+      prev = hash
+      return JSON.stringify({ ...body, hash })
+    })
+    writeFileSync(log.file('s1'), `${forged.join('\n')}\n`)
+    rmSync(`${log.file('s1')}.head`)
+    expect(statSync(join(dir, AUDIT_KEY_FILE)).isFile()).toBe(true)
+    const verification = (await new AuditLog(dir).read('s1')).verification
+    expect(verification).toMatchObject({ ok: false, reason: expect.stringMatching(/unkeyed/u) })
+    expect(verification).not.toHaveProperty('unkeyed')
+  })
+
+  it('reports a deleted head anchor and an unknown alg', async () => {
+    const dir = temp()
+    const log = new AuditLog(dir)
+    await log.append('s1', { kind: 'tool-call' })
+    await log.append('s1', { kind: 'result' })
+    rmSync(`${log.file('s1')}.head`)
+    expect((await new AuditLog(dir).read('s1')).verification).toMatchObject({ ok: false, reason: expect.stringMatching(/head anchor is missing/u) })
+    const entries = parseAuditLines(readFileSync(log.file('s1'), 'utf8'))
+    const key = await log.chainKey()
+    const relabelled = entries.map((entry, index) => index === 1 ? { ...(entry as object), alg: 'sha1' } : entry)
+    expect(verifyAuditChain(relabelled, key)).toMatchObject({ ok: false, brokenAt: 1, reason: expect.stringMatching(/unknown alg/u) })
+  })
+
+  it('rejects an unkeyed entry after keyed ones', async () => {
+    const log = new AuditLog(temp())
+    await log.append('s1', { kind: 'tool-call' })
+    await log.append('s1', { kind: 'result' })
+    const key = await log.chainKey()
+    const entries = parseAuditLines(readFileSync(log.file('s1'), 'utf8')) as Array<Record<string, unknown>>
+    const body = { seq: 3, ts: 't', kind: 'tool-call', prevHash: entries[1]!.hash }
+    const unkeyed = { ...body, hash: auditEntryHash(body) }
+    expect(verifyAuditChain([...entries, unkeyed], key)).toMatchObject({ ok: false, brokenAt: 2, reason: expect.stringMatching(/unkeyed entry after keyed/u) })
+  })
+
   it('detects a rewrite re-hashed with the public hash function (poc5)', async () => {
     const dir = temp()
     const log = new AuditLog(dir)
@@ -126,7 +172,7 @@ describe('keyed audit chain (P2 hardening)', () => {
     expect((await new AuditLog(dir).read('s1')).verification.ok).toBe(false)
   })
 
-  it('keeps legacy unkeyed logs readable and flags them', async () => {
+  it('keeps legacy unkeyed logs readable: verified while no chain key exists, refused once one does', async () => {
     const dir = temp()
     let prev = AUDIT_GENESIS_HASH
     const legacy = [1, 2].map((seq) => {
@@ -136,9 +182,15 @@ describe('keyed audit chain (P2 hardening)', () => {
       return JSON.stringify({ ...body, hash })
     })
     const log = new AuditLog(dir)
-    await log.append('other', { kind: 'tool-call' })
+    mkdirSync(dir, { recursive: true })
     writeFileSync(log.file('legacy'), `${legacy.join('\n')}\n`)
     expect((await log.read('legacy')).verification).toEqual({ ok: true, count: 2, unkeyed: true })
+    // Once the bridge holds a chain key, an all-unkeyed chain is indistinguishable
+    // from a downgraded keyed one: still exported, but not verified.
+    await log.append('other', { kind: 'tool-call' })
+    const refused = await log.read('legacy')
+    expect(refused.entries).toHaveLength(2)
+    expect(refused.verification).toMatchObject({ ok: false, reason: expect.stringMatching(/unkeyed/u) })
     // Continuing a legacy file switches to keyed entries and stays verifiable.
     await log.append('legacy', { kind: 'result' })
     expect((await new AuditLog(dir).read('legacy')).verification).toEqual({ ok: true, count: 3 })
