@@ -4,7 +4,8 @@
  * page, the watchdog around page calls, and the approval-gated answer tool.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { dispatchToolCall, type ToolAnswer, type ToolCall } from '../src/background/tools.ts'
+import type { ToolAnswer, ToolCall } from '../src/background/tools.ts'
+import { dispatchOnTab } from './support/dispatch.ts'
 import { DialogController, type DialogDebugger } from '../src/background/dialogs.ts'
 import type { ApprovalPrompt } from '../src/security/approval.ts'
 
@@ -53,10 +54,7 @@ async function run(
   authorize: (prompt: ApprovalPrompt) => Promise<'approved' | 'denied'> = async () => 'approved',
   unrestrictedAccess = true,
 ): Promise<ToolAnswer> {
-  return dispatchToolCall(
-    call, 'auto', { maxItems: 60, maxChars: 12_000 }, authorize, undefined, TAB, () => true,
-    { unrestrictedAccess, followTab: async () => undefined, dialogs },
-  )
+  return dispatchOnTab(call, { tab: TAB, authorize, context: { unrestrictedAccess, dialogs } })
 }
 
 afterEach(() => {

@@ -4,7 +4,8 @@
  * CDP re-hit-test before every press, the no-effect hint, hover, and drag.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { dispatchToolCall, type InputRuntime, type ToolAnswer, type ToolCall } from '../src/background/tools.ts'
+import type { InputRuntime, ToolAnswer, ToolCall } from '../src/background/tools.ts'
+import { dispatchOnTab } from './support/dispatch.ts'
 import { mouseDrag, resolvePointerTarget, quadCenter } from '../src/background/pointer-actions.ts'
 import type { MeasuredTarget, WatchReport } from '../src/shared/input-setup.ts'
 
@@ -97,10 +98,7 @@ function runtime(harness: Harness, supported = true, hit: () => HitOutcome = () 
 }
 
 async function run(call: ToolCall, input?: InputRuntime): Promise<ToolAnswer> {
-  return dispatchToolCall(
-    call, 'auto', { maxItems: 60, maxChars: 12_000 }, async () => 'approved', undefined, TAB, () => true,
-    { unrestrictedAccess: true, followTab: async () => undefined, ...(input === undefined ? {} : { input }) },
-  )
+  return dispatchOnTab(call, { tab: TAB, context: { unrestrictedAccess: true, ...(input === undefined ? {} : { input }) } })
 }
 
 function mouseEvents(harness: Harness): Array<[string, number, number]> {

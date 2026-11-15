@@ -5,7 +5,8 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { dispatchToolCall, type InputRuntime, type ToolAnswer, type ToolCall } from '../src/background/tools.ts'
+import type { InputRuntime, ToolAnswer, ToolCall } from '../src/background/tools.ts'
+import { dispatchOnTab } from './support/dispatch.ts'
 import { resolveApprovalGate } from '../src/background/authorization.ts'
 import { runDownloadsTool, waitForDownload, type DownloadsApi } from '../src/background/downloads.ts'
 import { readTabPdfText } from '../src/background/page-documents.ts'
@@ -59,10 +60,12 @@ async function run(call: ToolCall, options: {
   input?: InputRuntime
   share?: 'ask' | 'auto' | 'off'
 } = {}): Promise<ToolAnswer> {
-  return dispatchToolCall(
-    call, options.share ?? 'auto', { maxItems: 60, maxChars: 12_000 }, options.authorize ?? (async () => 'approved'), undefined, TAB, () => true,
-    { unrestrictedAccess: options.unrestricted ?? false, followTab: async () => undefined, ...(options.input === undefined ? {} : { input: options.input }) },
-  )
+  return dispatchOnTab(call, {
+    tab: TAB,
+    ...(options.share === undefined ? {} : { share: options.share }),
+    ...(options.authorize === undefined ? {} : { authorize: options.authorize }),
+    context: { unrestrictedAccess: options.unrestricted ?? false, ...(options.input === undefined ? {} : { input: options.input }) },
+  })
 }
 
 afterEach(() => {

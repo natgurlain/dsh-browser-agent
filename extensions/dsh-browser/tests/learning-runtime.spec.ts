@@ -3,17 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { classifyFailure, fixtureAllowedFor, LearningRuntime, normalizeLearningSettings, rpcValue, type LearningDeps } from '../src/background/learning.ts'
 import type { ApprovalPrompt } from '../src/security/approval.ts'
 import type { ToolCall } from '../src/background/tools.ts'
+import { memoryStorage } from './support/chrome.ts'
 
-function fakeStorage(initial: Record<string, unknown> = {}) {
-  const data: Record<string, unknown> = { ...initial }
-  return {
-    data,
-    area: {
-      get: vi.fn(async (keys: string[]) => Object.fromEntries(keys.filter((key) => key in data).map((key) => [key, data[key]]))),
-      set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(data, items) }),
-    } as unknown as chrome.storage.StorageArea,
-  }
-}
+const fakeStorage = memoryStorage
 
 let tabUrl = 'https://crm.example/new'
 const sendMessage = vi.fn()
