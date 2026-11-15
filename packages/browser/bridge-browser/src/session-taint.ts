@@ -43,6 +43,12 @@ import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD } from './protocol.ts'
 
+/** Cross-session and job-output readers a tainted session may not run (see {@link TAINT_ALLOWED_TOOLS}). */
+export const TAINT_DENIED_READERS: readonly string[] = [
+  'session_event_read', 'session_event_search', 'session_event_trace', 'session_search', 'session_trace',
+  'job_output', 'job_list', 'team_task_get', 'team_task_list',
+]
+
 /** Tools a tainted session may still run (read-only or user-facing). */
 export const TAINT_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'todo_write',
@@ -50,17 +56,13 @@ export const TAINT_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'get_goal',
   'list_agents',
   'list_subagent_models',
-  'job_list',
-  'job_output',
   'schedule_list',
   'schedule_view',
-  'team_task_get',
-  'team_task_list',
-  'session_event_read',
-  'session_event_search',
-  'session_event_trace',
-  'session_search',
-  'session_trace',
+  // Not here on purpose: cross-session and job-output readers
+  // (session_event_read/search/trace, session_search, session_trace,
+  // job_output, job_list, team_task_get/list). A page could steer a tainted
+  // session into reading another conversation's or a background command's
+  // output and smuggling it out through a browser action.
   // A structured subagent (a tab-fleet worker) reports its answer through this
   // child-scoped tool; it only hands a value to the parent, which treats it as
   // untrusted page-derived data.

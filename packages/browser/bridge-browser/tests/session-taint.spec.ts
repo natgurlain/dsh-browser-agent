@@ -6,6 +6,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import {
   installSessionTaint,
   resultTaintsSession,
+  TAINT_DENIED_READERS,
   SessionTaintRegistry,
   toolAllowedWhileTainted,
   withTaintMethods,
@@ -56,6 +57,9 @@ describe('session taint (Host side)', () => {
     for (const name of ['bash', 'pwsh', 'write', 'edit', 'apply_patch', 'str_replace_editor', 'web_fetch', 'web_search', 'agent', 'schedule_create', 'terminal_send', 'mcp__x__y']) {
       expect(toolAllowedWhileTainted(name)).toBe(false)
     }
+    // Cross-session and job-output readers could carry other conversations' data out.
+    for (const name of TAINT_DENIED_READERS) expect(toolAllowedWhileTainted(name)).toBe(false)
+    expect(TAINT_DENIED_READERS).toEqual(expect.arrayContaining(['session_event_read', 'session_search', 'job_output']))
   })
 
   it('makes a tainted session read-only for harness tools until cleared, per session', async () => {

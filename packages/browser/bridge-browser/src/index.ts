@@ -187,14 +187,18 @@ export interface Config {
    * `allowedOrigins` adds exact non-loopback origins (e.g.
    * `http://myapp.test:3000`) to the default localhost / 127.0.0.1 / [::1].
    * Injections from such origins taint the session like other web content.
+   * `trustLoopback` (default true) keeps loopback injections from tainting
+   * the coding session (so its edit tools stay usable); set it to false when
+   * the local dev server renders untrusted data (user content, scraped or
+   * proxied pages), which could otherwise inject text into the session.
    */
-  devLoop?: { allowedOrigins?: string[] }
+  devLoop?: { allowedOrigins?: string[]; trustLoopback?: boolean }
 }
 
 /** The shape after schemastery applies its defaults to every field. */
 type ResolvedConfig = Required<Omit<Config, 'token' | 'mcp' | 'devLoop'>> & Pick<Config, 'token'> & {
   mcp: Required<McpConfig>
-  devLoop: { allowedOrigins: string[] }
+  devLoop: { allowedOrigins: string[]; trustLoopback: boolean }
 }
 
 export const Config: z<Config, ResolvedConfig> = z.object({
@@ -219,7 +223,8 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   }).default({ enabled: false, port: 0 }),
   devLoop: z.object({
     allowedOrigins: z.array(z.string().pattern(/^https?:\/\/[^/\s]+$/)).default([]),
-  }).default({ allowedOrigins: [] }),
+    trustLoopback: z.boolean().default(true),
+  }).default({ allowedOrigins: [], trustLoopback: true }),
 }) as unknown as z<Config, ResolvedConfig>
 
 /**
@@ -413,6 +418,7 @@ function mountBridge(
     inject: (sessionId, text) => browserContext.inject(sessionId, text, 'devloop'),
     taint: (sessionId) => { taint.mark(sessionId, 'devloop-injection') },
     extraOrigins: resolved.devLoop.allowedOrigins,
+    trustLoopback: resolved.devLoop.trustLoopback,
     log: (message) => { ctx.logger.warn(message) },
   })
   ctx.on('tools/result', (exec, result) => {
@@ -548,7 +554,10 @@ function mountBridge(
   // (opt-in): one external session per MCP client, same extension gates.
   mountMcpEndpoint(ctx, resolved.mcp, {
     ledger,
-    tools: createMcpToolHost(() => ctx.get('tools') as unknown as ToolRegistryLike | undefined, server, resolved.toolTimeoutMs),
+    tools: createMcpToolHost(() => ctx.get('tools') as unknown as ToolRegistryLike | undefined, server, resolved.toolTimeoutMs,
+      // MCP calls bypass the DSH executor, so record their taint here: later
+      // frames of that external session then carry `tainted: true`.
+      (sessionId, tool) => { taint.mark(sessionId, tool) }),
     version: BRIDGE_PACKAGE_VERSION,
   })
 

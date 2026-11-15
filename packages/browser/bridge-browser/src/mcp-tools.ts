@@ -17,6 +17,7 @@ import type { McpCallResult, McpCaller, McpContent, McpTool, McpToolHost } from 
 import { bridgeCallArgs, withExternalCaller } from './external-caller.ts'
 import { DEVTOOLS_TOOL_NAMES } from './protocol.ts'
 import { BROWSER_TOOL_NAMES } from './tools.ts'
+import { resultTaintsSession } from './session-taint.ts'
 
 /** Every tool name the endpoint may serve (when currently registered). */
 export const MCP_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
@@ -47,7 +48,13 @@ export interface BridgeLike {
  * @param bridge - the bridge server (screenshot wire call).
  * @param toolTimeoutMs - per-call budget for the screenshot wire call.
  */
-export function createMcpToolHost(tools: () => ToolRegistryLike | undefined, bridge: BridgeLike, toolTimeoutMs: number): McpToolHost {
+export function createMcpToolHost(
+  tools: () => ToolRegistryLike | undefined,
+  bridge: BridgeLike,
+  toolTimeoutMs: number,
+  /** Record Host-side taint for the external session (session-taint.ts lineage). */
+  taint: (sessionId: string, tool: string) => void = () => {},
+): McpToolHost {
   const served = (name: string): boolean => MCP_TOOL_NAMES.has(name) && tools()?.get(name) !== undefined
   return {
     has: served,
@@ -78,6 +85,9 @@ export function createMcpToolHost(tools: () => ToolRegistryLike | undefined, bri
         return { content: toMcpContent(definition.output.render(args, value as never)) }
       } catch (error: unknown) {
         return failure(errorText(error))
+      } finally {
+        // Same rule as DSH sessions: page-quoting results (errors included) taint.
+        if (resultTaintsSession(name)) taint(caller.sessionId, name)
       }
     },
   }

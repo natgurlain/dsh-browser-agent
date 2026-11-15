@@ -89,7 +89,7 @@ describe('config', () => {
       forwardedPorts: [],
       allowForwardedPorts: false,
       mcp: { enabled: false, port: 0 },
-      devLoop: { allowedOrigins: [] },
+      devLoop: { allowedOrigins: [], trustLoopback: true },
     })
   })
 
@@ -126,7 +126,7 @@ describe('config', () => {
       forwardedPorts: [],
       allowForwardedPorts: false,
       mcp: { enabled: false, port: 0 },
-      devLoop: { allowedOrigins: [] },
+      devLoop: { allowedOrigins: [], trustLoopback: true },
     })
   })
 
@@ -143,7 +143,8 @@ describe('config', () => {
   })
 
   it('accepts only bare http(s) origins as extra dev-loop origins', () => {
-    expect(new Config({ devLoop: { allowedOrigins: ['http://myapp.test:3000'] } }).devLoop).toEqual({ allowedOrigins: ['http://myapp.test:3000'] })
+    expect(new Config({ devLoop: { allowedOrigins: ['http://myapp.test:3000'] } }).devLoop).toEqual({ allowedOrigins: ['http://myapp.test:3000'], trustLoopback: true })
+    expect(new Config({ devLoop: { trustLoopback: false } }).devLoop).toEqual({ allowedOrigins: [], trustLoopback: false })
     expect(() => new Config({ devLoop: { allowedOrigins: ['http://myapp.test:3000/path'] } })).toThrow()
     expect(() => new Config({ devLoop: { allowedOrigins: ['*'] } })).toThrow()
   })

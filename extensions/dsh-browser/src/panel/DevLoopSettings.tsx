@@ -95,6 +95,9 @@ export function DevLoopSettings({ api, locale, activeTab }: {
         <small>{t(locale,
           'Link a localhost tab to a DSH coding session. After each turn in which that session edits files, it receives this tab\'s new console errors, failed requests and page changes as read-only context. It can never be prompted from here.',
           '将本地页面标签关联到 DSH 编码会话。该会话每次编辑文件后，会以只读上下文收到此标签新的控制台错误、失败请求和页面变化；此处永远不会向它发送提示。')}</small>
+        <small className="dev-loop-warning">{t(locale,
+          'Caution: if your local app renders untrusted data (user content, scraped or proxied pages), that text can reach the coding session this way. Set devLoop.trustLoopback: false in the bridge config to treat such injections as untrusted web content (the session then becomes read-only until you clear it).',
+          '注意：如果本地应用会渲染不可信数据（用户内容、抓取或代理的页面），这些文本可能借此进入编码会话。可在桥接配置中设置 devLoop.trustLoopback: false，将此类注入视为不可信网页内容（会话随后变为只读，直到你清除）。')}</small>
       </div>
       {links.map((entry) => (
         <div className="trusted-origin" key={entry.sessionId}>

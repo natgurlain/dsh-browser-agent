@@ -457,6 +457,11 @@ export class BridgeServer {
     if (signal.aborted) {
       throw new BridgeToolError('bridge-closed', 'tool call cancelled before dispatch')
     }
+    // An MCP client's external session binds to the first install it reaches,
+    // at dispatch: it never falls back to another browser profile afterwards.
+    if (sessionId !== undefined && isExternalSessionId(sessionId) && this.affinityOf(sessionId) === undefined) {
+      this.sessionAffinity.set(sessionId, conn.key)
+    }
     const id = randomUUID()
     const startedAt = this.now()
     const expiresAt = startedAt + timeoutMs

@@ -13,7 +13,7 @@ import {
 } from '../src/browser-agent.ts'
 import { apply as applyPreset, browserAgentAllows } from '../src/browser-preset.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { resultTaintsSession } from '../src/session-taint.ts'
+import { SessionTaintRegistry } from '../src/session-taint.ts'
 
 const SKILLS_DIR = fileURLToPath(new URL('../skills/', import.meta.url))
 
@@ -84,8 +84,12 @@ describe('delegate_browser_task', () => {
     }))
     await expect(tool.execute({ task: 'x' }, { signal })).rejects.toThrow(/calling agent/u)
     expect(BROWSER_DELEGATE_TOOL.startsWith('browser_')).toBe(false)
-    // Its summary taints the caller (session-taint.ts keeps the same name).
-    expect(resultTaintsSession(BROWSER_DELEGATE_TOOL, false)).toBe(true)
+    // No separate taint rule: the spawned child's header names its parent, so
+    // the taint lineage (session-taint.ts) carries the child's page reads up.
+    const lineage = new SessionTaintRegistry()
+    lineage.link('child-session', 'parent-session')
+    lineage.mark('child-session', 'browser_get_text')
+    expect(lineage.isTainted('parent-session')).toBe(true)
     expect(registerBrowserDelegateTool(fakeCtx({}).ctx, defineTool as never)).toBe(false)
   })
 })

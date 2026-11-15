@@ -43,8 +43,9 @@ describe('MCP tool host', () => {
     registerPdfTool(ctx, bridge, { toolTimeoutMs: 1_000, workspacePath: '/tmp/ws' })
     // A foreign harness tool must never be served.
     ctx.tools.register({ name: 'bash', description: 'Run a shell command.', parameters: {} } as never)
-    const host = createMcpToolHost(() => tools, { requestTool }, 1_000)
-    return { host, requestTool, definitions }
+    const taint = vi.fn()
+    const host = createMcpToolHost(() => tools, { requestTool }, 1_000, taint)
+    return { host, requestTool, definitions, taint }
   }
 
   it('lists exactly the bridge\'s browser tools with their DSH schemas and descriptions', () => {
@@ -67,6 +68,15 @@ describe('MCP tool host', () => {
     expect(program).toBeUndefined()
     expect([name, args, passedSignal, timeout, sessionId, requester]).toEqual(['browser_click', { index: 3 }, signal, 1_000, 'mcp-1234', 'claude-code'])
     expect(callId).toMatch(/^mcp-call-/u)
+  })
+
+  it('records Host-side taint for the external session after a page-quoting call', async () => {
+    const { host, taint } = harness({ text: 'Page text' })
+    await host.call('browser_get_text', {}, caller, new AbortController().signal)
+    expect(taint).toHaveBeenCalledWith('mcp-1234', 'browser_get_text')
+    taint.mockClear()
+    await host.call('browser_follow_tab', { tabId: 3 }, caller, new AbortController().signal)
+    expect(taint).not.toHaveBeenCalled()
   })
 
   it('validates arguments with the tool\'s own schema', async () => {

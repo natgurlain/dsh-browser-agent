@@ -20,7 +20,10 @@
  * defeat the loop); the user's own dev server is the source, the payload is
  * limited to errors/requests/DOM changes, and it is fenced as untrusted text.
  * An injection from a non-loopback origin the operator allowed DOES taint the
- * session like any other web content.
+ * session like any other web content. Caveat: a local dev server that renders
+ * untrusted data (user content, scraped or proxied pages) can put that text
+ * into the coding session; `devLoop.trustLoopback: false` taints loopback
+ * injections too.
  *
  * Links live in memory: a Host restart forgets them (the extension re-asserts
  * its links when the panel opens).
@@ -79,6 +82,8 @@ export interface DevLoopDeps {
   taint(sessionId: string): void
   /** Exact non-loopback origins the operator allowed. */
   extraOrigins?: readonly string[]
+  /** Loopback injections do not taint the coding session (default true; `devLoop.trustLoopback`). */
+  trustLoopback?: boolean
   /** Tools that count as file edits. */
   editTools?: readonly string[]
   log?: (message: string) => void
@@ -168,8 +173,9 @@ export class DevLoop {
       const text = isRecord(result) && typeof result.text === 'string' ? result.text : undefined
       if (text === undefined || text.trim() === '' || this.links.get(link.sessionId) !== link) return
       this.deps.inject(link.sessionId, text)
-      // Loopback: the user's own dev server; see the module note on taint.
-      if (!isLoopbackDevOrigin(link.origin)) this.deps.taint(link.sessionId)
+      // Loopback: the user's own dev server, trusted unless `trustLoopback` is
+      // off; see the module note on taint.
+      if (!isLoopbackDevOrigin(link.origin) || this.deps.trustLoopback === false) this.deps.taint(link.sessionId)
     } catch (error: unknown) {
       this.deps.log?.(`browser bridge: dev loop capture for ${link.sessionId} failed: ${error instanceof Error ? error.message : String(error)}`)
     } finally {

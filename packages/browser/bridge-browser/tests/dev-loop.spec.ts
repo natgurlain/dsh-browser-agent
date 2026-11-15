@@ -106,6 +106,15 @@ describe('DevLoop', () => {
     expect(taint).toHaveBeenCalledWith('coding')
   })
 
+  it('taints loopback injections too when trustLoopback is off', async () => {
+    const { devLoop, taint, inject } = harness({ trustLoopback: false })
+    await devLoop.link('coding', 'http://localhost:3000/', signal)
+    devLoop.noteToolResult('coding', 'edit', false)
+    await devLoop.noteStatus('coding', 'idle')
+    expect(inject).toHaveBeenCalledOnce()
+    expect(taint).toHaveBeenCalledWith('coding')
+  })
+
   it('injects nothing when the extension refuses or returns nothing', async () => {
     const log = vi.fn()
     const { devLoop, inject } = harness({ capture: async () => { throw new Error('not linked in this browser') }, log })

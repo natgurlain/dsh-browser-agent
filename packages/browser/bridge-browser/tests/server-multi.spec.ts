@@ -283,6 +283,23 @@ describe('tool routing', () => {
     await expect(followUp).resolves.toEqual({ text: 'b2' })
   })
 
+  it('binds an MCP external session to its first install at dispatch, with no fallback', async () => {
+    const h = await startBridge()
+    const a = await connectClient(h.url, identity('client-aaaa'))
+    const b = await connectClient(h.url, identity('client-bbbb'))
+    await a.rpc('session.list', {})
+    // Unanswered (still pending) when A goes away: the binding happened at dispatch.
+    const first = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1_000, 'mcp-9', undefined, undefined, 'Cursor')
+    void first.catch(() => {})
+    await nextToolCall(a)
+    a.ws.close()
+    await waitFor(() => h.bridge.connectionCount() === 1)
+    await b.rpc('session.list', {})
+    expect(() => h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1_000, 'mcp-9', undefined, undefined, 'Cursor'))
+      .toThrow(expect.objectContaining({ code: 'bridge-closed' }))
+    expect(toolCalls(b)).toHaveLength(0)
+  })
+
   it('fails instead of falling back to another profile when the affine client is gone', async () => {
     const h = await startBridge()
     const a = await connectClient(h.url, identity('client-aaaa'))

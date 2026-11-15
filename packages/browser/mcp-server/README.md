@@ -82,6 +82,7 @@ The shim refuses a token file that is a symlink, belongs to another user, or is 
 ## Behaviour notes
 
 - An action can wait for your decision in the browser: about 1 minute once the side panel shows the card, and up to 10 minutes as a system notification while the panel is closed. MCP approvals are never forwarded to DSH's own approval UI.
+- Taint applies to MCP sessions as well. Once a call has read a page, that external session's later calls carry the taint, so the extension's taint rules, such as fresh approvals for writes to other sites, apply. The session also binds to the first browser install it reaches. If that browser disconnects, calls fail instead of moving to another profile.
 - A denial, the kill switch, or a pause is your decision. The tool result says so, and the client should not retry.
 - `browser_save_pdf` and `browser_extract { saveTo }` write into a DSH workspace, so they are refused for MCP clients. Read the data and save it with the client's own tools instead.
 - `browser_screenshot` returns an MCP image block.

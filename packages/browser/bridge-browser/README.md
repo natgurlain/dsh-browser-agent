@@ -21,6 +21,7 @@ Page snapshots contain structured text with numbered controls and masked form fi
 | `beaconPorts` | `number[]` | `43189…43198` | Candidate beacon ports, tried in order until one binds; the first free port wins, which keeps several local instances discoverable. Ignored when `beacon` is false. |
 | `mcp.enabled` | `boolean` | `false` | Serve a loopback MCP endpoint (Streamable HTTP) so Claude Code, Cursor, Codex and other MCP clients can drive the browser. See [MCP clients](#mcp-clients). |
 | `mcp.port` | `number` | `0` | Loopback port of the MCP endpoint (`0`: any free port; the URL is written to `~/.dsh/browser-mcp.json`). |
+| `devLoop.trustLoopback` | `boolean` | `true` | Loopback dev-loop injections do not taint the coding session. Set `false` if your dev server renders untrusted data. |
 | `devLoop.allowedOrigins` | `string[]` | `[]` | Extra exact origins (beyond localhost / 127.0.0.1 / [::1]) a tab may have to be linked to a coding session. See [Dev loop](#dev-loop-coding-sessions). |
 
 Workspace grouping is best-effort. If the composition has no workspace domain, directory creation fails, or `workspace.create` rejects the path, the plugin logs one warning and sends every session creation without an injected workspace so browser chat remains usable.
@@ -160,13 +161,14 @@ Rules that still hold:
 
 - **Linking is not prompting.** The session still cannot be prompted, steered, re-permissioned or snapshot-injected from the browser (`bridge-policy.ts`).
 - **Origins.** Only loopback origins by default. `devLoop.allowedOrigins` (exact `http(s)://host[:port]`) adds others.
-- **Taint.** A loopback injection does **not** taint the coding session on the Host. That taint would make its edit tools read-only and break the loop. The source is the user's own dev server, and the payload is fenced as untrusted text. An injection from an allowed non-loopback origin **does** taint it. On the browser side, the capture taints that session's browser actions like any other page read.
+- **Taint.** By default (`devLoop.trustLoopback: true`) a loopback injection does **not** taint the coding session on the Host. That taint would make its edit tools read-only and break the loop. The source is the user's own dev server, and the payload is fenced as untrusted text. An injection from an allowed non-loopback origin **does** taint it. On the browser side, the capture taints that session's browser actions like any other page read.
+- **Caveat.** A local dev server that renders untrusted data (user-generated content, scraped or proxied pages) can put that text into the coding session through the dev loop. For such apps, set `devLoop.trustLoopback: false`: loopback injections then taint the session like any web content.
 - **Lifetime.** Links live in the bridge's memory and in the extension's session storage. After DSH restarts, opening the panel's settings re-asserts them. A link ends when its tab closes.
 
 ## Browser subagent and skills
 
 - **Agent preset `browser`.** When the Host has the agent-preset registry, the plugin registers a preset with one row, `lib/browser-preset.js`. That row restricts the agent's tools to the registered `browser_*` tools, and to `skill` when that tool is global. It re-applies the restriction when the developer-tools group comes or goes, and it adds a short role prompt. You can also start a session on the "Browser" preset directly in DSH.
-- **Delegation: `delegate_browser_task { task, label? }`.** The plugin registers this tool for every agent when the Host has the subagent manager with the in-process `spawn` backend (the shipped web profile has it). The tool runs the task in a child agent on the `browser` preset and returns only the child's summary, so large page snapshots never enter the caller's context. A tainted session cannot delegate: the taint guard denies it. The returned summary taints the caller like any other browser result, so delegation cannot launder page content. No profile change is needed.
+- **Delegation: `delegate_browser_task { task, label? }`.** The plugin registers this tool for every agent when the Host has the subagent manager with the in-process `spawn` backend (the shipped web profile has it). The tool runs the task in a child agent on the `browser` preset and returns only the child's summary, so large page snapshots never enter the caller's context. A tainted session cannot delegate: the taint guard denies it. The child is linked into the bridge's taint lineage (its session header names the caller), so its page reads taint the caller and delegation cannot launder page content. No profile change is needed.
 - **Skills.** The package ships `skills/*/SKILL.md`: `fill-form-safely`, `extract-table-to-csv`, `research-across-tabs` and `debug-localhost-page`. They are registered on `ctx.skills` as bundled skills, so the `skill` tool lists them for every session.
 
 ## Extension points
