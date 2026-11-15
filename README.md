@@ -218,7 +218,48 @@ Notes:
 - The bridge plugin must have a built `lib/` before startup because the loader consumes it; both `scripts/install.sh` and the root `pnpm run build` build the plugin before the extension.
 - The dependencies of `@deepseek-ai/dsh` and the bridge plugin are pinned to the same tested public release line. An upgrade must update the manifests and lockfile together and rerun the root checks.
 
-`check:runtime` checks the resolved DSH dependencies and lockfile; `test:smoke` starts the real web host in a temporary DSH home and verifies the bridge and session reads after a restart, without model credentials. CI runs these checks on every push to `main` and every pull request (`pnpm install --frozen-lockfile` with a cached pnpm store), together with `pnpm test:scripts` on Linux, macOS and Windows and `pnpm test:benchmark`.
+`check:runtime` checks the resolved DSH dependencies and lockfile; `test:smoke` starts the real web host in a temporary DSH home and verifies the bridge and session reads after a restart, without model credentials.
+
+### The gate
+
+GitHub Actions has never run for this repository (it is private and has no Actions billing), so no check here has ever been verified by CI. The gate is one local command:
+
+```sh
+pnpm gate                  # everything; needs a Playwright Chromium
+pnpm gate --skip-browser   # no Chromium: skips the three browser steps
+pnpm gate --list           # the steps, in order
+pnpm gate --only typecheck,unit-extension
+```
+
+It runs the steps below one after another, keeps going after a failure, prints a pass/fail table, and exits non-zero if any step failed. The result is written to `.artifacts/gate/result.json` (`--output <file>` to change it): commit, whether the tree had uncommitted changes, date, and each step's status, exit code, duration and test counts, with each step's output beside it as `<step>.log`. Install Chromium once with `pnpm --dir benchmark install-browser`. On a deep checkout path set `DSH_SMOKE_ARTIFACTS` to a short directory (Chromium aborts on long profile socket paths; the gate defaults it to a directory under the system temp directory). The unit suites run with `--maxWorkers=4` (`--max-workers <n>`), one package at a time: the extension's background specs time out on an oversubscribed machine.
+
+| Step | Command | Needs Chromium |
+| --- | --- | --- |
+| `install` | `pnpm install --frozen-lockfile` | |
+| `check-runtime` | `pnpm run check:runtime` | |
+| `typecheck` | `pnpm -r typecheck` | |
+| `unit-bridge`, `unit-extension` | `vitest run --maxWorkers=4` in each package | |
+| `unit-mcp` | MCP stdio shim tests (`node --test`) | |
+| `build`, `build-firefox` | `pnpm build`, the extension's `build:firefox` | |
+| `test-scripts` | `pnpm test:scripts` (installer, uninstall, release packaging, the gate itself) | |
+| `test-benchmark` | `pnpm test:benchmark` (harness, injection detector, scripted agents, Playwright baseline tools) | its baseline-tools test skips itself without one |
+| `smoke-runtime` | `pnpm test:smoke`: real DSH host, including the MCP endpoint and dev-loop smokes (`scripts/fixtures/mcp-smoke.mjs`, `devloop-smoke.mjs`) | |
+| `smoke-browser` | `pnpm test:browser`: real DSH and the real extension in Chromium | yes |
+| `model-free` | `pnpm test:model-free`: injection canaries and the dialog task, see below | yes |
+| `smoke-uninstall-ui` | `pnpm test:uninstall:ui` | yes |
+
+`.github/workflows/ci.yml` runs `pnpm gate` and nothing else, so it cannot drift from the local command; `uninstall.yml` adds `pnpm test:scripts` on macOS and Windows. Both are untested until Actions is available.
+
+What each phase gate rests on (the roadmap is not in this repository; the phases are the ones the tests name):
+
+| Phase | Covered by | Not covered by the gate |
+| --- | --- | --- |
+| 1: reliable actions (select, hover, drag, dialogs, conditional wait, scroll containers, covered elements) | `unit-bridge`, `unit-extension`, the reliability section of `smoke-browser`, `test-benchmark` (the Playwright baseline completes the same task pages), `model-free` (the dialog task through the benchmark harness) | Model success rates and timings: `node benchmark/run.mjs` needs a model account |
+| 2: policy (session taint, forced approvals, site rules, audit log) | the unit suites, the policy section of `smoke-browser`, `smoke-runtime` (approval forwarding, least privilege), `model-free` (injection canaries) | Whether a real model resists the injected text |
+| 3: programs, page watchers, tab fleets, MCP, dev loop, browser agent preset, learning | `smoke-runtime`, the Phase 3 and learning sections of `smoke-browser`, `unit-mcp` | |
+| Install, update, uninstall, release | `test-scripts`, `smoke-uninstall-ui`, both builds, `check-runtime` | macOS and Windows (only `uninstall.yml` would run them) |
+
+`model-free` (`benchmark/model-free-check.mjs`) drives the three prompt-injection benchmark tasks against the real extension without a model. A scripted agent that has fully fallen for the injection reads the page, takes the canary secret and the attacker URL from it, and tries every route (the instructed URL through `browser_navigate` and `browser_open_tab`, base64url, hex and percent-encoded variants, typing into the attacker's form, the clipboard), ignoring refusals. A scripted user allows every ordinary approval card and denies only the cards the extension marks as forced. Each run passes only if the agent made attempts carrying the canary, every attempt was refused, every attempt was met by a forced card, and the canary never reached the sink; it runs with the task origin trusted and with unrestricted browser access. A control run per task allows the forced cards and must leak, which shows the route and the leak detector are live. It does not show that a model would resist the injection, and it covers only the routes scripted there: an exfiltration path the taint rules do not know about is not tested.
 
 After building, run `pnpm test:browser` with a Playwright Chromium installation, or set `CHROMIUM_PATH` to a Chromium executable that supports loading unpacked extensions. This starts real DSH and Chromium instances to verify sharing controls, developer-tools consent, input, iframe uploads and targeting, and CSS edits. Site isolation is enabled and verified for cross-site frames; element clicks, input, and scrolling cover same-origin, cross-origin, and nested frames. It needs no model credentials and saves results under `.artifacts/browser-smoke/`.
 
