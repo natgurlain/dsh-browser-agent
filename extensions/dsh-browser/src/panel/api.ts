@@ -263,10 +263,10 @@ export interface PanelApi {
   releaseKillSwitch(): Promise<void>
   onKillSwitch(callback: (engaged: boolean) => void): () => void
   /** Hold the next browser action ("after-step") or hand the page to the user ("take-over"). */
-  pauseAgent?(mode: 'after-step' | 'take-over'): Promise<void>
+  pauseAgent(mode: 'after-step' | 'take-over'): Promise<void>
   /** Tell the agent what changed while paused, then release held actions. */
-  resumeAgent?(): Promise<void>
-  onPauseState?(callback: (state: AgentPauseState) => void): () => void
+  resumeAgent(): Promise<void>
+  onPauseState(callback: (state: AgentPauseState) => void): () => void
 }
 
 /** Connect to the background service worker and return the panel API. */

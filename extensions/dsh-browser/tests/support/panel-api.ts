@@ -36,6 +36,9 @@ export function fakePanelApi(overrides: Partial<PanelApi> = {}): PanelApi {
     engageKillSwitch: vi.fn(async () => undefined),
     releaseKillSwitch: vi.fn(async () => undefined),
     onKillSwitch: vi.fn(() => unsubscribe),
+    pauseAgent: vi.fn(async () => {}),
+    resumeAgent: vi.fn(async () => {}),
+    onPauseState: vi.fn(() => unsubscribe),
     ...overrides,
   }
 }

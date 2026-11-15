@@ -7,7 +7,7 @@
  * @module
  */
 
-import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { BRIDGE_AUDIT_EXPORT_METHOD, BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeCaps } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
@@ -1121,11 +1121,16 @@ export function App(): React.JSX.Element {
   useEffect(() => api.onDevToolsStatus(setDevToolsStatus), [api])
   // Kill switch: the toolbar button and Ctrl+Shift+K stop the agent at once.
   const [killSwitchEngaged, setKillSwitchEngaged] = useState(false)
-  useEffect(() => api.onKillSwitch?.(setKillSwitchEngaged), [api])
+  useEffect(() => api.onKillSwitch(setKillSwitchEngaged), [api])
 
   // Pause / take over / resume: the background holds the next tool call.
   const [pauseState, setPauseState] = useState<AgentPauseState>({ mode: 'running', held: [] })
-  useEffect(() => api.onPauseState?.(setPauseState), [api])
+  useEffect(() => api.onPauseState(setPauseState), [api])
+  // Stable handlers, so the memoized AgentControls skips unrelated renders.
+  const pauseAfterStep = useCallback(() => { void api.pauseAgent('after-step').catch(() => {}) }, [api])
+  const takeOver = useCallback(() => { void api.pauseAgent('take-over').catch(() => {}) }, [api])
+  const resumeAgent = useCallback(() => { void api.resumeAgent().catch(() => {}) }, [api])
+  const engageKillSwitch = useCallback(() => { setKillSwitchEngaged(true); void api.engageKillSwitch().catch(() => {}) }, [api])
 
   // Step decisions and durations come from the bridge's audit log.
   const auditRefreshRef = useRef<{ timer?: ReturnType<typeof setTimeout>; sessionId?: string }>({})
@@ -2725,7 +2730,7 @@ export function App(): React.JSX.Element {
   const approvalDialog = !approvalReadyForSession(queuedApproval, sessionRef.current, sessionChanging)
     ? null
     : <ApprovalDialog key={queuedApproval!.id} request={queuedApproval!} onDecision={decideApproval} copy={copy}
-        onKillSwitch={() => { setKillSwitchEngaged(true); void api.engageKillSwitch().catch(() => {}) }} />
+        onKillSwitch={engageKillSwitch} />
   const permissionDialog = permissionConfirm === null
     ? null
     : (
@@ -3112,7 +3117,7 @@ export function App(): React.JSX.Element {
         </button>
         <div className="topbar-actions">
           <button className="icon-button kill-switch-trigger" disabled={killSwitchEngaged}
-            onClick={() => { setKillSwitchEngaged(true); void api.engageKillSwitch().catch(() => {}) }}
+            onClick={engageKillSwitch}
             aria-label={copy.killSwitch.engage} title={copy.killSwitch.engageHint}>
             <StopIcon />
           </button>
@@ -3152,9 +3157,9 @@ export function App(): React.JSX.Element {
         state={pauseState}
         working={working && state === 'connected'}
         copy={copy}
-        onPause={() => { void api.pauseAgent?.('after-step').catch(() => {}) }}
-        onTakeOver={() => { void api.pauseAgent?.('take-over').catch(() => {}) }}
-        onResume={() => { void api.resumeAgent?.().catch(() => {}) }}
+        onPause={pauseAfterStep}
+        onTakeOver={takeOver}
+        onResume={resumeAgent}
       />
       <LearningPanel locale={locale} connected={state === 'connected'} {...(sessionRef.current === null ? {} : { sessionId: sessionRef.current })} />
       <TabAffinityBanner
