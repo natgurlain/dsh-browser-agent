@@ -159,4 +159,54 @@ describe('CommitGate', () => {
     expect(gate.isArmed(1)).toBe(false)
     expect(release).toHaveBeenCalled()
   })
+
+  it('arms once for overlapping arm calls, so one disarm releases the only lease (M2)', async () => {
+    const { broker, release } = fakeBroker()
+    const gate = new CommitGate({ broker, ask: async () => 'approved' })
+    await Promise.all([gate.arm(4), gate.arm(4)])
+    expect(broker.acquire).toHaveBeenCalledTimes(1)
+    expect(gate.isArmed(4)).toBe(true)
+    await gate.disarm(4)
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(gate.isArmed(4)).toBe(false)
+    // Arming again afterwards takes a fresh lease.
+    await gate.arm(4)
+    expect(broker.acquire).toHaveBeenCalledTimes(2)
+  })
+
+  it('a failed arm is shared by the overlapping caller and leaves nothing held', async () => {
+    const { broker, session, release } = fakeBroker()
+    session.send.mockRejectedValueOnce(new Error('Another debugger is attached'))
+    const gate = new CommitGate({ broker, ask: async () => 'approved' })
+    const results = await Promise.allSettled([gate.arm(2), gate.arm(2)])
+    expect(results.map((result) => result.status)).toEqual(['rejected', 'rejected'])
+    expect(broker.acquire).toHaveBeenCalledTimes(1)
+    expect(release).toHaveBeenCalledTimes(1)
+    await gate.arm(2)
+    expect(gate.isArmed(2)).toBe(true)
+  })
+
+  it('forget releases the lease of a closed tab', async () => {
+    const { broker, release } = fakeBroker()
+    const gate = new CommitGate({ broker, ask: async () => 'approved' })
+    await gate.arm(6)
+    await gate.forget(6)
+    expect(release).toHaveBeenCalledTimes(1)
+    expect(gate.isArmed(6)).toBe(false)
+  })
+})
+
+describe('request body summaries: raw and broken bodies (G24)', () => {
+  it('masks a sensitive raw-text body', () => {
+    const summary = summarizeRequestBody({ url: 'https://x/', method: 'POST', headers: { 'content-type': 'text/plain' }, postData: 'user=ada password=hunter2' })
+    expect(summary.sensitive).toBe(true)
+    expect(summary.text).not.toContain('hunter2')
+    expect(summary.sensitiveText).toContain('hunter2')
+  })
+
+  it('marks an invalid-JSON body with a secret name as sensitive', () => {
+    const summary = summarizeRequestBody({ url: 'https://x/', method: 'POST', headers: { 'content-type': 'application/json' }, postData: '{"password": "hunter2"' })
+    expect(summary.sensitive).toBe(true)
+    expect(summary.text).not.toContain('hunter2')
+  })
 })

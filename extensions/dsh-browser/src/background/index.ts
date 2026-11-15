@@ -3600,6 +3600,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   dialogs.clear(tabId)
   resetInputState(tabId)
   devTools.releaseTab(tabId)
+  commitGateCallers.delete(tabId)
+  void commitGate.forget(tabId)
 })
 
 // Ports are cleaned up by their own disconnect; only the window's quote is

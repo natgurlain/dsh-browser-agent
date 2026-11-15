@@ -218,6 +218,8 @@ export interface CommitGateOptions {
 
 interface GateTab {
   lease?: DebuggerLease
+  /** The arm in progress: overlapping callers share it instead of taking a second lease. */
+  arming?: Promise<void>
   armed: boolean
   inFlight: number
   lastCallEnd: number
@@ -250,8 +252,8 @@ export class CommitGate {
     return this.tabs.get(tabId)?.armed === true
   }
 
-  /** An agent call on the tab starts / ends (agent-turn detection). */
   /**
+   * An agent call on the tab starts / ends (agent-turn detection).
    * `turn`: the call belongs to an agent session whose turn end the
    * extension can observe; calls without one (probes) keep only the grace.
    */
@@ -304,9 +306,14 @@ export class CommitGate {
    * Arm (or keep armed) interception for a tab under strict mode. Throws when
    * it cannot: the caller must then refuse the agent call.
    */
-  async arm(tabId: number): Promise<void> {
+  arm(tabId: number): Promise<void> {
     const entry = this.tab(tabId)
-    if (entry.armed && entry.lease?.session.isAttached === true) return
+    if (entry.armed && entry.lease?.session.isAttached === true) return Promise.resolve()
+    entry.arming ??= this.doArm(tabId, entry).finally(() => { entry.arming = undefined })
+    return entry.arming
+  }
+
+  private async doArm(tabId: number, entry: GateTab): Promise<void> {
     entry.armed = false
     if (entry.lease !== undefined) {
       await entry.lease.release({ immediate: false }).catch(() => undefined)
@@ -318,8 +325,11 @@ export class CommitGate {
           if (method === 'Fetch.requestPaused') void this.onPaused(tabId, params as PausedRequest)
         },
         onDetached: () => {
-          // Another feature (kill switch, devtools revoke) dropped the
-          // attachment: the next agent call re-arms or is refused.
+          // Chrome dropped the attachment (the user closed the "being
+          // debugged" bar, devtools opened, the tab crashed). Broker-initiated
+          // detaches (kill switch) clear owner listeners first and never land
+          // here; arm() checks isAttached for those. The next agent call
+          // re-arms or is refused.
           const current = this.tabs.get(tabId)
           if (current !== undefined) {
             current.armed = false
@@ -342,6 +352,8 @@ export class CommitGate {
   async disarm(tabId: number): Promise<void> {
     const entry = this.tabs.get(tabId)
     if (entry === undefined) return
+    // An arm in progress finishes first, so its lease is the one released.
+    await entry.arming?.catch(() => undefined)
     const lease = entry.lease
     entry.armed = false
     entry.lease = undefined
@@ -350,7 +362,9 @@ export class CommitGate {
     await lease.release({ immediate: true }).catch(() => undefined)
   }
 
-  forget(tabId: number): void {
+  /** The tab closed: release its lease and drop its turn state. */
+  async forget(tabId: number): Promise<void> {
+    await this.disarm(tabId)
     this.tabs.delete(tabId)
   }
 
