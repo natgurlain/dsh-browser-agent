@@ -14,6 +14,7 @@ import {
   watchApprovalPrompt,
   WATCHERS_STORAGE_KEY,
   type PageWatcher,
+  selectorSyntaxError,
   type WatchStorage,
 } from '../src/background/watchers.ts'
 import { evaluateCondition, PageWatchObserver } from '../src/content/watch.ts'
@@ -159,6 +160,22 @@ describe('browser_watch / browser_watches', () => {
     expect(JSON.stringify(answer)).not.toContain(PAGE)
     expect(deps.authorize).not.toHaveBeenCalled()
     expect(registry.list()).toEqual([])
+  })
+
+  it('refuses a selector that can never parse before showing a card, accepting the shadow >>> form', async () => {
+    expect(selectorSyntaxError('#cart > .badge')).toBeUndefined()
+    expect(selectorSyntaxError('my-app >>> #cart .badge')).toBeUndefined()
+    expect(selectorSyntaxError('div[')).toMatch(/not a valid CSS selector/)
+    expect(selectorSyntaxError('my-app >>> ')).toMatch(/empty part/)
+    expect(selectorSyntaxError('my-app >>> a[')).toMatch(/not a valid CSS selector \(a\[\)/)
+    const registry = new WatcherRegistry(memoryStorage())
+    const validateSelector = vi.fn(async (_tabId: number, selector: string) => selectorSyntaxError(selector))
+    const deps = toolDeps(registry, { validateSelector })
+    const answer = await createWatcher({ id: 'c', name: 'browser_watch', args: { condition: { selector: 'div[' }, prompt: 'p' }, sessionId: 's1' }, deps)
+    expect(answer).toMatchObject({ ok: false, error: { code: 'bad-args', message: expect.stringMatching(/condition.selector is not a valid CSS selector/) } })
+    expect(deps.authorize).not.toHaveBeenCalled()
+    expect(await createWatcher({ id: 'c', name: 'browser_watch', args: { condition: { selector: 'my-app >>> .badge' }, prompt: 'p' }, sessionId: 's1' }, deps)).toMatchObject({ ok: true })
+    expect(validateSelector).toHaveBeenCalledWith(7, 'my-app >>> .badge')
   })
 
   it('lists a watcher whose page became hidden without printing its URL (G10)', async () => {

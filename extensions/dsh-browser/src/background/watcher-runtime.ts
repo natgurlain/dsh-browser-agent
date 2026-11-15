@@ -14,6 +14,7 @@ import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval
 import type { ToolCall } from './tools.ts'
 import {
   armedFor,
+  selectorSyntaxError,
   createWatcher,
   handleWatchHit,
   manageWatchers,
@@ -121,6 +122,12 @@ export class PageWatcherRuntime {
       resolveTab: deps.resolveTab,
       allowsTab: deps.allowsTab,
       getTab: (tabId) => chrome.tabs.get(tabId).then((tab) => tab, () => undefined),
+      validateSelector: async (tabId, selector) => {
+        // Best effort: where the page cannot be scripted the content script still drops an unparseable selector.
+        const results = await chrome.scripting?.executeScript({ target: { tabId, frameIds: [0] }, func: selectorSyntaxError, args: [selector] }).catch(() => undefined)
+        const error = results?.[0]?.result
+        return typeof error === 'string' ? error : undefined
+      },
       authorize: deps.authorize,
       signal: deps.signal,
     })
@@ -180,6 +187,18 @@ export class PageWatcherRuntime {
       if (sender.id !== chrome.runtime.id || sender.tab?.id === undefined) return undefined
       const type = (message as { type?: unknown }).type
       const tabId = sender.tab.id
+      if (type === 'DSH_WATCH_INVALID') {
+        // The page cannot evaluate this watcher (its selector never parses there): drop it
+        // instead of listing a watcher that can never fire. Only that tab's own watcher.
+        const watchId = (message as { watchId?: unknown }).watchId
+        void this.registry.ready.then(async () => {
+          const watcher = typeof watchId === 'string' ? this.registry.get(watchId) : undefined
+          if (watcher === undefined || watcher.tabId !== tabId || (sender.frameId ?? 0) !== 0) return
+          await this.registry.remove(watcher.id)
+          this.broadcast()
+        })
+        return undefined
+      }
       if (type === 'DSH_WATCH_HIT') {
         const hit = message as { watchId?: unknown; matched?: unknown }
         void handleWatchHit(

@@ -147,4 +147,14 @@ describe('page watcher runtime', () => {
     expect(runtime.connect(panel.port)).toBe(true)
     expect(panel.onMessage.addListener).toHaveBeenCalled()
   })
+
+  it('drops a watcher its own tab reports it cannot evaluate, and nothing else', async () => {
+    const harness = stubChrome({ session: { [WATCHERS_STORAGE_KEY]: [watcher(), watcher({ id: 'w-2', tabId: 9 })] }, openTabs: [5, 9] })
+    const runtime = new PageWatcherRuntime(runtimeOptions())
+    await runtime.registry.ready
+    harness.onMessage.emit({ type: 'DSH_WATCH_INVALID', watchId: 'w-2' }, hitSender(), () => {})
+    harness.onMessage.emit({ type: 'DSH_WATCH_INVALID', watchId: 'w-1' }, hitSender({ id: 'other-extension' }), () => {})
+    harness.onMessage.emit({ type: 'DSH_WATCH_INVALID', watchId: 'w-1' }, hitSender(), () => {})
+    await vi.waitFor(() => { expect(runtime.registry.list().map((entry) => entry.id)).toEqual(['w-2']) })
+  })
 })

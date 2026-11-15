@@ -373,9 +373,33 @@ export interface WatchToolDeps {
   changed: () => void
   /** Site policy hides the page from the agent (blocked / managed-disallowed). */
   pageHidden?: (url: string) => boolean
+  /**
+   * Check a selector's syntax in the tab's page (the worker has no DOM):
+   * resolves an error message for one that can never match, else undefined.
+   */
+  validateSelector?: (tabId: number, selector: string) => Promise<string | undefined>
   newId?: () => string
   now?: () => number
   signal: AbortSignal
+}
+
+/**
+ * Page-side syntax check of a watcher selector (run through
+ * chrome.scripting in the watched tab). Accepts the shadow-piercing
+ * `host >>> inner` form the locator hands out: every part must parse.
+ * Must stay self-contained (serialized into the page).
+ */
+export function selectorSyntaxError(selector: string): string | undefined {
+  const parts = selector.split('>>>').map((part) => part.trim())
+  if (parts.some((part) => part === '')) return 'has an empty part around >>>'
+  for (const part of parts) {
+    try {
+      document.createDocumentFragment().querySelector(part)
+    } catch {
+      return `is not a valid CSS selector (${part})`
+    }
+  }
+  return undefined
 }
 
 const failed = fail
@@ -406,6 +430,11 @@ export async function createWatcher(call: ToolCall, deps: WatchToolDeps): Promis
   if (tab.id === undefined || tab.url === undefined || origin === undefined) return failed('Only http and https pages can be watched.')
   // A page site policy hides cannot be watched; its address is not echoed back.
   if (deps.pageHidden?.(tab.url) === true) return failed('This page is blocked by site policy, so it cannot be watched.')
+  // A selector that can never parse would show a dead watcher until it expires: refuse it before the card.
+  if (request.condition.kind === 'selector' && deps.validateSelector !== undefined) {
+    const invalid = await deps.validateSelector(tab.id, request.condition.selector)
+    if (invalid !== undefined) return failed(`condition.selector ${invalid}.`, 'bad-args')
+  }
   const page = { url: tab.url, origin, ...(tab.title === undefined ? {} : { title: tab.title }) }
   const prompt = watchApprovalPrompt(request, page)
   const authorization = await deps.authorize(prompt, tab.windowId ?? 0)
