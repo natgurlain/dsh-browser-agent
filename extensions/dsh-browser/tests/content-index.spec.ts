@@ -116,3 +116,57 @@ describe('agent overlay commands', () => {
     Reflect.deleteProperty(window, 'matchMedia')
   })
 })
+
+describe('Watch me across documents', () => {
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>).__dshBrowserLearningWatch__
+    delete (globalThis as Record<string, unknown>).__dshBrowserAgentOverlay__
+  })
+
+  function stubReady(readyResponse: unknown) {
+    const sendMessage = vi.fn(async (message: { type: string }) => message.type === 'DSH_CONTENT_READY' ? readyResponse : undefined)
+    vi.stubGlobal('chrome', { runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage } })
+    return sendMessage
+  }
+
+  function captureClickListeners(spy: { mock: { calls: unknown[][] } }): Array<(event: Event) => void> {
+    return spy.mock.calls.filter((call) => call[0] === 'click' && call[2] === true).map((call) => call[1] as (event: Event) => void)
+  }
+
+  it('re-arms recording on a new document when the ready reply says Watch me is on', async () => {
+    const add = vi.spyOn(document, 'addEventListener')
+    const sendMessage = stubReady({ selectionWatch: false, watchMe: true })
+    document.body.innerHTML = '<button id="go">Go</button>'
+    await import('../src/content/index.ts')
+    await vi.waitFor(() => { expect(captureClickListeners(add)).toHaveLength(1) })
+    const target = document.querySelector('#go')!
+    captureClickListeners(add)[0]!({ isTrusted: true, target } as unknown as Event)
+    expect(sendMessage).toHaveBeenCalledWith({ type: 'DSH_WATCH_EVENT', event: expect.objectContaining({ kind: 'click', css: '#go' }) })
+    add.mockRestore()
+  })
+
+  it('does not arm recording when the ready reply leaves Watch me off', async () => {
+    const add = vi.spyOn(document, 'addEventListener')
+    const sendMessage = stubReady({ selectionWatch: false })
+    await import('../src/content/index.ts')
+    await vi.waitFor(() => { expect(sendMessage).toHaveBeenCalledTimes(1) })
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    expect(captureClickListeners(add)).toHaveLength(0)
+    add.mockRestore()
+  })
+
+  it('releases the previous instance recording listeners when content.js is injected again', async () => {
+    const add = vi.spyOn(document, 'addEventListener')
+    const remove = vi.spyOn(document, 'removeEventListener')
+    stubReady({ selectionWatch: false, watchMe: true })
+    await import('../src/content/index.ts')
+    await vi.waitFor(() => { expect(captureClickListeners(add)).toHaveLength(1) })
+    const first = captureClickListeners(add)[0]
+    vi.resetModules()
+    stubReady({ selectionWatch: false })
+    await import('../src/content/index.ts')
+    expect(remove).toHaveBeenCalledWith('click', first, true)
+    add.mockRestore()
+    remove.mockRestore()
+  })
+})

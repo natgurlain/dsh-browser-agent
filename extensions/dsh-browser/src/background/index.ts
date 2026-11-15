@@ -3013,6 +3013,7 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
       selectionWatchEpoch: selectionWatchEpoch,
       selectionWatchRevision: selectionWatchRevision,
       ...(overlay === undefined ? {} : { overlay }),
+      ...(learning.watchMeReady(sender.tab.id, sender.frameId, sender.url) ? { watchMe: true } : {}),
     })
     return
   }
