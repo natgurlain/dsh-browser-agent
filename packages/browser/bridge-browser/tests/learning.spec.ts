@@ -31,6 +31,7 @@ import {
 } from '../src/learning/site-drivers.ts'
 import { mountLearning, parseProgram, LEARNING_METHODS } from '../src/learning/index.ts'
 import { UNTRUSTED_NOTICE } from '../src/protocol.ts'
+import { BridgeToolError } from '../src/server.ts'
 import { fakeContext } from './support/fake-ctx.ts'
 import { tempDirs } from './support/tmp.ts'
 
@@ -596,6 +597,52 @@ describe('learning mount', () => {
     expect(() => parseProgram([{ tool: 'browser_click', args: { index: 3 } }])).toThrow(/selector/)
     expect(() => parseProgram([{ tool: 'browser_console_eval', args: {} }])).toThrow(/supported/)
     expect(() => parseProgram([])).toThrow()
+  })
+
+  it('runs "Do the remaining 38" (3 steps per row) as batches under one card, and reports rows done when a row breaks', async () => {
+    const root = tempDir()
+    const { ctx } = fakeCtx(root)
+    const rows = (count: number) => Array.from({ length: count }, (_unused, row) => [
+      { tool: 'browser_type', args: { selector: `#people > tr:nth-child(${String(row + 3)}) input`, text: `p${String(row)}`, replace: true } },
+      { tool: 'browser_click', args: { selector: `#people > tr:nth-child(${String(row + 3)}) .invite` } },
+      { tool: 'browser_click', args: { selector: `#people > tr:nth-child(${String(row + 3)}) .confirm` } },
+    ]).flat()
+    let batch = 0
+    let failAt: string | undefined
+    const requestTool = vi.fn(async (name: string, args: Record<string, unknown>) => {
+      if (name === 'browser_run') return { programId: `program-${String(batch++)}` }
+      if (failAt !== undefined && args.selector === failAt) throw new BridgeToolError('action-failed', 'No element matches that selector')
+      return { text: `${name} ok` }
+    })
+    const mount = mountLearning(ctx, { requestTool } as never, { toolTimeoutMs: 1000, workspacePath: root, scheduleFile: join(root, 's.json'), ownsSession: async () => true })
+    const rpc = (payload: unknown) => mount.rpc(LEARNING_METHODS.programRun, payload, { connection: 'c1', allowsSession: async () => true })!
+    await mount.rpc(LEARNING_METHODS.state, { watchMe: true }, { connection: 'c1', allowsSession: async () => true })
+    const steps = rows(38)
+    // Longer than one browser_run: refused without the row size, and beyond the overall bound.
+    expect(await rpc({ steps })).toMatchObject({ ok: false })
+    expect(await rpc({ steps: rows(84), rowSteps: 3 })).toMatchObject({ ok: false, error: { message: expect.stringMatching(/at most 250 steps/) } })
+    expect(requestTool).not.toHaveBeenCalled()
+
+    const done = await rpc({ sessionId: 's1', steps, rowSteps: 3 }) as { ok: true; result: { report: { status: string; rows: unknown; steps: unknown[] }; text: string } }
+    expect(done).toMatchObject({ ok: true, result: { report: { status: 'completed', rows: { done: 38, total: 38, steps: 114 } } } })
+    expect(done.result.text).toMatch(/all 38 rows done \(114 steps\)/)
+    const runs = requestTool.mock.calls.filter(([name]) => name === 'browser_run')
+    expect(runs).toHaveLength(5)
+    // One card for all 114 steps; the other four calls continue it.
+    const first = runs[0]![1] as { steps: unknown[]; series: { rowSteps: number; later: unknown[] } }
+    expect(first.steps.length + first.series.later.length).toBe(114)
+    expect(runs.slice(1).every(([, args]) => (args as { continues?: string }).continues === 'program-0')).toBe(true)
+    expect(requestTool.mock.calls.filter(([name]) => name === 'browser_type' || name === 'browser_click')).toHaveLength(114)
+
+    requestTool.mockClear()
+    batch = 0
+    failAt = '#people > tr:nth-child(15) .invite'
+    const broken = await rpc({ sessionId: 's1', steps, rowSteps: 3 }) as { ok: true; result: { report: { status: string; stoppedAt: number }; text: string } }
+    // Row 13 (nth-child 15) breaks at its second step: 12 rows done, nothing after it.
+    expect(broken).toMatchObject({ ok: true, result: { report: { status: 'failed', stoppedAt: 37, rows: { done: 12, total: 38, steps: 114 } } } })
+    expect(broken.result.text).toMatch(/12 of 38 rows done \(37 of 114 steps ran\)/)
+    expect(requestTool.mock.calls.filter(([name]) => name === 'browser_run')).toHaveLength(2)
+    mount.dispose()
   })
 
   it('writes fixtures only while the flywheel is on', async () => {

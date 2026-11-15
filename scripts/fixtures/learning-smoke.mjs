@@ -14,6 +14,9 @@ export const learningSubmissions = []
 const csrf = `csrf-${randomUUID()}`
 const PEOPLE = ['Ada', 'Grace', 'Linus']
 const invited = []
+/** The long table: two rows the user does, then more than one program (25 steps) of remaining rows. */
+const MANY_ROWS = 16
+const manyPeople = count => Array.from({ length: count }, (_unused, index) => `Person ${String(index + 1).padStart(2, '0')}`)
 
 /**
  * Fixture routes for the learning smoke (`/learn`, `/api/learn`, `/api/invite`).
@@ -38,6 +41,9 @@ export function handleLearningRequest(request, response) {
   // v=1 records, v=2 renames every id (self-healing), v=3 makes "Save" ambiguous.
   const v = url.searchParams.get('v') ?? '1'
   const suffix = v === '1' ? '' : v
+  // rows=N: a longer table, for a "do the remaining N" that exceeds one program.
+  const rows = Number(url.searchParams.get('rows') ?? 0)
+  const people = rows > 0 ? manyPeople(rows) : PEOPLE
   response.setHeader('set-cookie', `csrftoken=${csrf}; Path=/`)
   response.end(`<!doctype html><title>Learn ${v}</title><meta name="csrf-token" content="${csrf}">
 <body><h1>Contacts</h1>
@@ -49,7 +55,7 @@ export function handleLearningRequest(request, response) {
 </form>
 <p id="status"></p>
 <table id="people"><tbody>
-${PEOPLE.map((person, index) => `<tr><td>${person}</td><td><input aria-label="Email ${String(index + 1)}"></td><td><button type="button" class="invite">Invite</button></td></tr>`).join('\n')}
+${people.map((person, index) => `<tr><td>${person}</td><td><input aria-label="Email ${String(index + 1)}"></td><td><button type="button" class="invite">Invite</button></td></tr>`).join('\n')}
 </tbody></table>
 <script>
   const cookie = () => document.cookie.split('; ').find(part => part.startsWith('csrftoken='))?.slice(10) ?? ''
@@ -86,13 +92,13 @@ export async function runLearningSmoke(ctx) {
     globalThis.learnPort = chrome.runtime.connect({ name: 'dsh-learning' })
     learnPort.onMessage.addListener(message => learnMessages.push(message))
   })
-  const learn = async (type, body = {}) => {
+  const learn = async (type, body = {}, timeout = 60_000) => {
     const id = await panel.evaluate(({ type, body }) => {
       const id = crypto.randomUUID()
       learnPort.postMessage({ type, id, ...body })
       return id
     }, { type, body })
-    const answer = await waitFor(() => panel.evaluate(id => learnMessages.find(message => message.type === 'learning.result' && message.id === id), id), type)
+    const answer = await waitFor(() => panel.evaluate(id => learnMessages.find(message => message.type === 'learning.result' && message.id === id), id), type, timeout)
     assert.equal(answer.ok, true, `${type}: ${JSON.stringify(answer.error)}`)
     return answer.result
   }
@@ -238,6 +244,49 @@ export async function runLearningSmoke(ctx) {
   await waitFor(() => invited.includes('Linus'), 'remaining row done by the program')
   assert.equal(await panel.evaluate(() => messages.some(message => message.type === 'approval.request')), false, 'one card covered the program')
   results.push('Watch me learns two real repetitions over table rows and does the remaining row after a single program card')
+
+  // ---- 3.7 beyond one program: 14 remaining rows × 2 steps = 28 steps (> 25) ----
+  const many = manyPeople(MANY_ROWS)
+  await page.goto(`${origin}/learn?v=1&rows=${String(MANY_ROWS)}`)
+  await page.bringToFront()
+  await delay(1_700)
+  await learn('learning.watch.start')
+  for (const [index, person] of many.slice(0, 2).entries()) {
+    await page.locator('#people input').nth(index).fill(person)
+    await page.locator('.invite').nth(index).click()
+  }
+  const remainder = await waitFor(async () => {
+    const offered = (await state()).suggestion
+    return offered?.remaining === MANY_ROWS - 2 ? offered : undefined
+  }, 'watch-me suggestion for every remaining row')
+  assert.equal(remainder.program.length, 28, 'the offer holds the whole remainder, beyond one 25-step program')
+  assert.equal(remainder.more, false)
+  await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request' && message.type !== 'agent.pause-state') })
+  const longRun = learn('learning.watch.run', {}, 180_000)
+  const seriesCard = await waitFor(() => panel.evaluate(() => messages.find(message => message.type === 'approval.request')?.request), 'series card')
+  assert.equal(seriesCard.action, 'browser_run')
+  // The one card states the true total and lists every step of every batch.
+  assert.match(seriesCard.summary, /Repeat a 2-step action on 14 rows: 28 steps in total/u)
+  assert.equal(seriesCard.details.length, 28)
+  assert.ok(seriesCard.details.at(-1).value.includes(`tr:nth-child(${String(MANY_ROWS)})`), 'the last row is on the card')
+  await panel.evaluate(id => { messages = messages.filter(message => message.type !== 'approval.request'); panelPort.postMessage({ type: 'approval.response', id, decision: 'allow-once' }) }, seriesCard.id)
+  // Pause as the first batch (12 rows) ends: the run must stop there until the user resumes.
+  await waitFor(() => invited.includes(many[13]), 'first batch done', 120_000)
+  await panel.evaluate(() => panelPort.postMessage({ type: 'agent.pause', mode: 'after-step' }))
+  const held = await waitFor(() => panel.evaluate(() => messages.filter(message => message.type === 'agent.pause-state').at(-1)?.state.held[0]), 'the run held by the pause', 20_000)
+  const doneWhilePaused = invited.filter(email => many.includes(email)).length
+  assert.ok(doneWhilePaused < MANY_ROWS, 'the pause landed before the run finished')
+  await delay(1_500)
+  assert.equal(invited.filter(email => many.includes(email)).length, doneWhilePaused, 'nothing runs while paused')
+  await panel.evaluate(() => panelPort.postMessage({ type: 'agent.resume' }))
+  const longOutcome = await longRun
+  assert.equal(longOutcome.report.status, 'completed', JSON.stringify(longOutcome).slice(0, 2_000))
+  assert.deepEqual(longOutcome.report.rows, { done: 14, total: 14, steps: 28 })
+  assert.match(longOutcome.text, /all 14 rows done \(28 steps\)/u)
+  await waitFor(() => many.every(person => invited.includes(person)), 'every remaining row done')
+  assert.deepEqual(invited.filter(email => many.includes(email)), many, 'each row exactly once, in order')
+  assert.equal(await panel.evaluate(() => messages.some(message => message.type === 'approval.request')), false, 'one card covered every batch')
+  results.push(`Watch me does a remainder longer than one program (14 rows, 28 steps) in batches under a single card that states the total; a pause held it at ${held.name === 'browser_run' ? 'the batch boundary' : `a step (${held.name})`} until resume`)
 
   // ---- Off again: tools withdrawn ----
   await learn('learning.settings', { settings: { workflows: false, fixtures: false, watchMe: false, siteDrivers: false } })

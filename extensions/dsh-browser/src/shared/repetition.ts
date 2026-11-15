@@ -12,8 +12,24 @@
  * Pure: the content script probes how many further rows exist and reports
  * their cells; this module only does the arithmetic.
  *
+ * How much one "do the remaining N" does: a single `browser_run` holds
+ * {@link RUN_BATCH_STEPS} steps. A longer remainder runs as batches of that
+ * size under one approval card that lists every step, up to
+ * {@link MAX_FINISH_STEPS} steps in total; rows beyond that are left for a
+ * further run, and the offer says so.
+ *
  * @module
  */
+
+/** Steps one `browser_run` holds (mirrors run-program.ts MAX_PROGRAM_STEPS). */
+export const RUN_BATCH_STEPS = 25
+/** Most steps one "do the remaining N" does in total (mirrors run-program.ts MAX_SERIES_STEPS). */
+export const MAX_FINISH_STEPS = 250
+
+/** Most further rows one run may cover for a pattern of `period` steps per row (a row must fit one batch). */
+export function maxFinishRows(period: number): number {
+  return period < 1 || period > RUN_BATCH_STEPS ? 0 : Math.floor(MAX_FINISH_STEPS / period)
+}
 
 /** One recorded user input event. */
 export interface WatchEvent {

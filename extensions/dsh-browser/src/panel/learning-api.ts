@@ -17,7 +17,7 @@ export interface LearningState {
   siteDriversSupported: boolean
   steps: RecordedStep[]
   watching: { tabId: number; origin: string; events: number } | null
-  suggestion: { tabId: number; origin: string; remaining: number; done: number; period: number; program: ProgramStep[]; labels: string[] } | null
+  suggestion: { tabId: number; origin: string; remaining: number; more?: boolean; done: number; period: number; program: ProgramStep[]; labels: string[] } | null
   proposals: Array<{ driver: SiteDriver; droppedHeaders: string[] }>
   drivers: SiteDriver[]
 }

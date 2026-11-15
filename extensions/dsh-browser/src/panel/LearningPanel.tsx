@@ -177,7 +177,7 @@ export function LearningPanel({ locale, sessionId, connected }: { locale: UiLoca
               <small>{copy.repeated(state.suggestion.done)} {state.suggestion.labels.join(' → ')}</small>
               <button className="primary" disabled={busy || !connected}
                 onClick={() => report(client!.request('learning.watch.run'), (value) => String((value as { text?: string }).text ?? copy.done))}>
-                {copy.doRemaining(state.suggestion.remaining)}
+                {copy.doRemaining(state.suggestion.remaining, state.suggestion.program.length, state.suggestion.more === true)}
               </button>
             </div>
           )}

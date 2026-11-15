@@ -2750,6 +2750,9 @@ function routeToolCall(call: ToolCall): void {
         listFrames: listTabFrames,
         authorize: authorizeFor(call.sessionId),
         signal: controller.signal,
+        // Only "Do the remaining N" runs longer than one program, and only as the extension built it.
+        allowSeries: (sessionId, steps) => learning.claimSeries(sessionId, steps),
+        onContinued: () => { activeCall.decision = 'program-approved' },
       })
     : call.name === 'browser_open_tab'
     ? resolveOpenTabWindow(call.sessionId).then((target) => 'ok' in target
