@@ -182,6 +182,18 @@ function isUnavailableMethod(cause: unknown): boolean {
   return errorCodeOf(cause) === 'not-found' || /is unavailable/iu.test(describeCatalogFailure(cause))
 }
 
+/**
+ * True when DSH answered that it has no such conversation for this browser
+ * (a restarted DSH that lost it, or one whose bridge no longer lists it), as
+ * opposed to a read that merely failed.
+ */
+function isSessionGone(cause: unknown): boolean {
+  const code = errorCodeOf(cause)
+  if (code === 'not-found' || code === 'forbidden' || code === 'session-not-found') return true
+  const message = cause instanceof Error ? cause.message : String(cause)
+  return /is not available to the browser extension|session\b.*\bnot found|unknown session|no such session/iu.test(message)
+}
+
 /** True when the Host refused a command because the Session is still deferred. */
 function isProvisionalFailure(cause: unknown): boolean {
   return errorCodeOf(cause) === 'provisional-session'
@@ -1348,7 +1360,7 @@ export function App(): React.JSX.Element {
       }
       if (previous !== null && next !== previous && next === 'connected' && sessionRef.current !== null) {
         // After a reconnect, re-establish the subscription and the history baseline of the current session.
-        void refreshHistory(sessionRef.current)
+        void resumeAfterReconnect(sessionRef.current)
         void refreshComposerDirectories(sessionRef.current)
       }
     })
@@ -1724,6 +1736,43 @@ export function App(): React.JSX.Element {
     } catch (cause) {
       if (sessionRef.current === id) setError(cause instanceof Error ? cause.message : String(cause))
     }
+  }
+
+  /**
+   * After a reconnect (possibly to a DSH that was restarted meanwhile): the
+   * same conversation when DSH still has it. When it answers that it does
+   * not, say so and start a new one, instead of leaving the old transcript
+   * over a conversation that no longer exists.
+   */
+  async function resumeAfterReconnect(id: string): Promise<void> {
+    let history: HistoryPage
+    try {
+      history = await readHistory(id)
+    } catch (cause) {
+      if (sessionRef.current !== id) return
+      if (!isSessionGone(cause) || sessionChangingRef.current) {
+        setError(cause instanceof Error ? cause.message : String(cause))
+        return
+      }
+      const transition = beginSessionTransition()
+      try {
+        sessionRef.current = null
+        setSessionTitle(null)
+        setSessionModels(null)
+        setShowModelPicker(false)
+        prepareSessionSwitch(false)
+        await createSession(transition)
+        if (sessionTransitionRef.current === transition) setNotice(copy.app.conversationGone)
+      } catch (failure) {
+        if (sessionTransitionRef.current === transition) {
+          setError(failure instanceof Error ? failure.message : String(failure))
+        }
+      } finally {
+        finishSessionTransition(transition)
+      }
+      return
+    }
+    applyHistory(id, history)
   }
 
   async function createSession(transition: number): Promise<void> {

@@ -22,7 +22,10 @@
  * a web-accessible resource, so pages and other extensions cannot read it.
  *
  * The reconnect policy mirrors the dsh GUI's own ConnectionController: base
- * 500ms, ×2 per attempt, capped at 10s, jittered 0.5–1×.
+ * 500ms, ×2 per attempt, capped at 10s, jittered 0.5–1×. The client only ever
+ * retries the address it was given; looking for a bridge that came back on
+ * another port is the owner's job (index.ts, outage recovery), which then
+ * points the client there with {@link BridgeClient.redirect}.
  *
  * @module
  */
@@ -103,9 +106,12 @@ export type BridgeState = 'connecting' | 'connected' | 'reconnecting' | 'stopped
  * - `no-token`: a bridge answers, but this install has no token yet (a store
  *   build before pairing): nothing was dialed;
  * - `token-unreadable`: the installer's token file is there but could not be
- *   read this time: nothing was dialed, and the next attempt reads it again.
+ *   read this time: nothing was dialed, and the next attempt reads it again;
+ * - `gave-up`: a bridge that was connected went away and did not come back
+ *   within the outage retry period (outage-recovery.ts); reported by the
+ *   background once it stopped looking, never by the client itself.
  */
-export type BridgeFailure = 'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy' | 'no-token' | 'token-unreadable'
+export type BridgeFailure = 'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy' | 'no-token' | 'token-unreadable' | 'gave-up'
 
 /** Map a bridge close code to a {@link BridgeFailure}. */
 export function failureOfCloseCode(code: number): BridgeFailure | undefined {
@@ -217,6 +223,41 @@ export class BridgeClient {
     this.attempt = 0
     this.generation += 1
     void this.loop(this.generation)
+  }
+
+  /**
+   * Point a client that is not connected at another address, without ending
+   * the connection for listeners: it stays (or becomes) `reconnecting` and
+   * dials the new address at once. Used while an outage is being recovered,
+   * where the bridge may come back on another port.
+   * @returns false when the client is stopped or connected (nothing changed).
+   */
+  redirect(url: string, token: string): boolean {
+    if (!this.hold()) return false
+    this.url = url
+    this.token = token
+    void this.loop(this.generation)
+    return true
+  }
+
+  /**
+   * Stop dialing without ending the connection for listeners: the client
+   * stays `reconnecting` and idle until {@link redirect} or {@link start}
+   * gives it an address to try. The last verdict is dropped with the attempt.
+   * @returns false when the client is stopped or connected (nothing changed).
+   */
+  hold(): boolean {
+    if (!this.running || this.state === 'connected') return false
+    const socket = this.ws
+    this.ws = null
+    this.channel = undefined
+    this.clearAckTimer()
+    this.failure = undefined
+    this.attempt = 0
+    this.generation += 1
+    socket?.close()
+    if (this.state !== 'reconnecting') this.emitState('reconnecting')
+    return true
   }
 
   /** Stop the loop and close the current socket. */
@@ -355,7 +396,7 @@ export class BridgeClient {
       const session = this.authenticate(socket, token, endpoint)
       const accepted = await session.accepted
       if (!accepted || !this.running || generation !== this.generation || socket.readyState !== WebSocket.OPEN) {
-        await this.fail(socket)
+        await this.fail(socket, generation)
         continue
       }
 
@@ -508,7 +549,7 @@ export class BridgeClient {
     }
   }
 
-  private async fail(socket: WebSocket): Promise<void> {
+  private async fail(socket: WebSocket, generation = this.generation): Promise<void> {
     if (this.ws === socket) {
       this.ws = null
       this.channel = undefined
@@ -516,6 +557,8 @@ export class BridgeClient {
     if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
       socket.close()
     }
+    // A superseded loop (a newer start, redirect or hold) reports nothing and does not wait.
+    if (generation !== this.generation) return
     if (!this.running) return
     if (!this.retryAllowed()) return
     this.emitState('reconnecting')

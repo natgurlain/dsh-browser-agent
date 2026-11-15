@@ -167,6 +167,12 @@ export const BRIDGE_CLOSE_CODES = {
    */
   replaced: 4000,
   /**
+   * The bridge itself is going away (DSH is quitting or reloading the plugin):
+   * the standard "going away" code. It is an outage, not a verdict on this
+   * client, so the extension keeps reconnecting and finds the next bridge.
+   */
+  closing: 1001,
+  /**
    * No valid `hello` within {@link HELLO_TIMEOUT_MS}. The bridge now
    * terminates such sockets (the client sees 1006); the extension still uses
    * this code for its own handshake timeout.

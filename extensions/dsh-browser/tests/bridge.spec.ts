@@ -470,3 +470,95 @@ describe('loadInstalledToken', () => {
     client.stop()
   })
 })
+
+describe('BridgeClient redirect and hold', () => {
+  const FIRST = 'ws://127.0.0.1:3080/ext/bridge'
+  const SECOND = 'ws://127.0.0.1:3081/ext/bridge'
+
+  async function droppedClient() {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const states: BridgeState[] = []
+    const client = new BridgeClient({
+      onStateChange: (state) => { states.push(state) },
+      onFrame: () => {},
+      onHelloOk: () => {},
+    })
+    client.start(FIRST, TEST_BRIDGE_TOKEN)
+    await vi.advanceTimersByTimeAsync(0)
+    const first = FakeWebSocket.instances[0]!
+    first.open()
+    await completeHandshake(first, { until: () => { expect(states.at(-1)).toBe('connected') } })
+    return { client, states, first }
+  }
+
+  it('redirects a waiting client to another address without reporting a stop', async () => {
+    const { client, states, first } = await droppedClient()
+    first.close(1006, '')
+    await vi.advanceTimersByTimeAsync(0)
+    states.length = 0
+
+    expect(client.redirect(SECOND, TEST_BRIDGE_TOKEN)).toBe(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(FakeWebSocket.instances.map(socket => socket.url)).toEqual([FIRST, SECOND])
+    const second = FakeWebSocket.instances[1]!
+    second.open()
+    await completeHandshake(second, { until: () => { expect(states.at(-1)).toBe('connected') } })
+    expect(states).not.toContain('stopped')
+    // The wait that was superseded dials nothing afterwards.
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    client.stop()
+  })
+
+  it('abandons a dial in flight when redirected, and reports nothing for it', async () => {
+    const { client, states, first } = await droppedClient()
+    first.close(1006, '')
+    await vi.advanceTimersByTimeAsync(1_000)
+    const dialing = FakeWebSocket.instances[1]!
+    expect(states.at(-1)).toBe('connecting')
+    states.length = 0
+
+    expect(client.redirect(SECOND, TEST_BRIDGE_TOKEN)).toBe(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(dialing.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(states).not.toContain('stopped')
+    expect(FakeWebSocket.instances.at(-1)!.url).toBe(SECOND)
+    client.stop()
+  })
+
+  it('holds a waiting client idle, dropping the last verdict, until it is given an address', async () => {
+    const { client, states, first } = await droppedClient()
+    first.close(BRIDGE_CLOSE_CODES.authFailed, 'auth failed')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(client.failure).toBe('token-mismatch')
+    states.length = 0
+
+    expect(client.hold()).toBe(true)
+    expect(client.failure).toBeUndefined()
+    expect(client.active).toBe(true)
+    await vi.advanceTimersByTimeAsync(120_000)
+    // Idle: no dial, no state change, still the same connection for listeners.
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    expect(states).toEqual([])
+    expect(client.state).toBe('reconnecting')
+
+    expect(client.redirect(SECOND, TEST_BRIDGE_TOKEN)).toBe(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(FakeWebSocket.instances.at(-1)!.url).toBe(SECOND)
+    expect(states).not.toContain('stopped')
+    client.stop()
+  })
+
+  it('leaves a connected or stopped client alone', async () => {
+    const { client, states } = await droppedClient()
+    expect(client.redirect(SECOND, TEST_BRIDGE_TOKEN)).toBe(false)
+    expect(client.hold()).toBe(false)
+    expect(states.at(-1)).toBe('connected')
+    client.stop()
+    expect(client.redirect(SECOND, TEST_BRIDGE_TOKEN)).toBe(false)
+    expect(client.hold()).toBe(false)
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+  })
+})

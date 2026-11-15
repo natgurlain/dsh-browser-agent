@@ -140,6 +140,20 @@ describe('multi-connection registry', () => {
     await expect(again).resolves.toEqual({ text: 'a2' })
   })
 
+  it('tells its clients it is going away when it closes, not that they were replaced', async () => {
+    const h = await startBridge()
+    const a = await connectClient(h.url, identity('client-aaaa'))
+    const b = await connectClient(h.url, identity('client-bbbb'))
+
+    await h.bridge.close()
+
+    // `replaced` makes the extension stop for good and drop the panel's
+    // conversation; a bridge that is quitting is an outage the client rides out.
+    expect((await a.closed).code).toBe(BRIDGE_CLOSE_CODES.closing)
+    expect((await b.closed).code).toBe(BRIDGE_CLOSE_CODES.closing)
+    expect(BRIDGE_CLOSE_CODES.closing).toBe(1001)
+  })
+
   it('keeps the legacy behavior for clients without an identity', async () => {
     const h = await startBridge()
     const first = await connectClient(h.url, { ...BASE_CAPS })
