@@ -23,6 +23,7 @@ import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval
 import { approvalBinding } from '../security/payload-binding.ts'
 import type { ToolCall } from './tools.ts'
 import { httpOrigin, isRecord } from '../security/web-url.ts'
+import { cancelledAnswer, fail, notApprovedAnswer, type SettledAnswer } from './answers.ts'
 
 /** Storage key of the persisted watchers. */
 export const WATCHERS_STORAGE_KEY = 'dshPageWatchers'
@@ -353,10 +354,8 @@ function parseWatchConditionShape(value: unknown): WatchCondition | undefined {
   }
 }
 
-/** A tool answer (structurally a ToolAnswer). */
-export type WatchAnswer =
-  | { ok: true; result: unknown }
-  | { ok: false; error: { code: 'bad-args' | 'action-failed' | 'timeout' | 'no-active-tab'; message: string } }
+/** A tool answer (watchers.ts lanes always settle one way or the other). */
+export type WatchAnswer = SettledAnswer
 
 /** What the tool handlers need from the background worker. */
 export interface WatchToolDeps {
@@ -379,9 +378,7 @@ export interface WatchToolDeps {
   signal: AbortSignal
 }
 
-function failed(message: string, code: 'bad-args' | 'action-failed' | 'no-active-tab' = 'action-failed'): WatchAnswer {
-  return { ok: false, error: { code, message } }
-}
+const failed = fail
 
 /** `browser_watch`: approve and record one watcher. */
 export async function createWatcher(call: ToolCall, deps: WatchToolDeps): Promise<WatchAnswer> {
@@ -412,10 +409,8 @@ export async function createWatcher(call: ToolCall, deps: WatchToolDeps): Promis
   const page = { url: tab.url, origin, ...(tab.title === undefined ? {} : { title: tab.title }) }
   const prompt = watchApprovalPrompt(request, page)
   const authorization = await deps.authorize(prompt, tab.windowId ?? 0)
-  if (deps.signal.aborted) return failed('Tool call was cancelled')
-  if (authorization !== 'approved') {
-    return { ok: false, error: { code: authorization === 'timed-out' ? 'timeout' : 'action-failed', message: authorization === 'denied' ? 'The user declined the page watcher.' : `The page watcher was not approved (${authorization}).` } }
-  }
+  if (deps.signal.aborted) return cancelledAnswer()
+  if (authorization !== 'approved') return notApprovedAnswer('The user declined the page watcher.', 'The page watcher', authorization)
   if (!deps.registry.hasRoom()) return failed(`At most ${String(MAX_ACTIVE_WATCHERS)} page watchers can be active.`)
   const now = (deps.now ?? Date.now)()
   const watcher: PageWatcher = {

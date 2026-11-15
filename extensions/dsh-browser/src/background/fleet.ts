@@ -25,6 +25,7 @@ import type { CallPolicyDecision } from '../security/call-policy.ts'
 import { approvalBinding } from '../security/payload-binding.ts'
 import { analyzeUrl } from '../security/url-risk.ts'
 import type { CallPolicyHook, ToolCall } from './tools.ts'
+import { cancelledAnswer, fail, notApprovedAnswer, type SettledAnswer } from './answers.ts'
 
 export const MAX_FLEET_TASKS = 8
 export const FLEET_GROUP_TITLE = 'DSH fleet'
@@ -109,14 +110,10 @@ export interface FleetDeps {
   policy?: CallPolicyHook
 }
 
-/** Wire answer (structurally a ToolAnswer). */
-export type FleetAnswer =
-  | { ok: true; result: unknown }
-  | { ok: false; error: { code: 'bad-args' | 'action-failed' | 'timeout'; message: string } }
+/** Wire answer. */
+export type FleetAnswer = SettledAnswer
 
-function failed(message: string, code: 'bad-args' | 'action-failed' = 'action-failed'): FleetAnswer {
-  return { ok: false, error: { code, message } }
-}
+const failed = fail
 
 /** Parsed `browser_fanout` wire arguments. */
 export interface FleetRequest {
@@ -270,10 +267,8 @@ export class FleetRegistry {
     const windowId = await deps.parentWindow(call.sessionId)
     const prompt = fleetApprovalPrompt(request, policy.forced)
     const authorization = await deps.authorize(prompt, windowId ?? 0)
-    if (deps.signal.aborted) return failed('Tool call was cancelled')
-    if (authorization !== 'approved') {
-      return { ok: false, error: { code: authorization === 'timed-out' ? 'timeout' : 'action-failed', message: authorization === 'denied' ? 'The user declined the tab fleet.' : `The tab fleet was not approved (${authorization}).` } }
-    }
+    if (deps.signal.aborted) return cancelledAnswer()
+    if (authorization !== 'approved') return notApprovedAnswer('The user declined the tab fleet.', 'The tab fleet', authorization)
     const fleetId = `fleet-${(deps.newId ?? (() => crypto.randomUUID()))().slice(0, 8)}`
     const fleet: Fleet = { parentSessionId: call.sessionId, children: [], tabIds: [], allowActions: request.allowActions }
     this.fleets.set(fleetId, fleet)

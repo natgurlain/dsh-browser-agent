@@ -174,6 +174,7 @@ import {
   PAGE_SESSION_CONTEXT_STORAGE_KEY,
   PageSessionContextTracker,
 } from './session-continuity.ts'
+import { approvalFailureMessage } from './answers.ts'
 
 /** User settings persisted in chrome.storage.local. */
 export interface Settings {
@@ -2794,19 +2795,6 @@ async function prewarmDevTools(): Promise<void> {
     // Attach is lazy by design: a tab that cannot be debugged right now only
     // surfaces an error when a devtools call actually needs it.
   })
-}
-
-function approvalFailureMessage(prompt: ApprovalPrompt, authorization: Exclude<ApprovalAuthorization, 'approved'>): string {
-  switch (authorization) {
-    case 'denied':
-      return `The user denied the browser approval request for "${prompt.action}".`
-    case 'unavailable':
-      return `No browser side panel was available to receive or complete the approval request for "${prompt.action}".`
-    case 'timed-out':
-      return `The browser approval request for "${prompt.action}" timed out before the user responded.`
-    case 'cancelled':
-      return `The browser approval request for "${prompt.action}" was cancelled.`
-  }
 }
 
 async function revokeUnrestrictedAccess(): Promise<void> {

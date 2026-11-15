@@ -8,20 +8,13 @@
  */
 
 import type { ToolError } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import type { CdpClient } from './debugger-session.ts'
 import { extractPdfText, looksLikePdf, PdfTextError } from './pdf-text.ts'
 import { wrapUntrustedContent } from '../security/untrusted.ts'
+import type { ToolAnswer } from './answers.ts'
+import type { InputRuntime } from './input-actions.ts'
 
-interface DocumentAnswer {
-  ok: boolean
-  result?: unknown
-  error?: ToolError
-}
-
-interface DocumentInput {
-  supported: boolean
-  run<T>(tabId: number, operation: (client: CdpClient) => Promise<T>): Promise<T>
-}
+type DocumentAnswer = ToolAnswer
+type DocumentInput = InputRuntime
 
 /** Largest PDF handed to the bridge (base64 grows it by a third). */
 const MAX_PDF_BYTES = 40_000_000

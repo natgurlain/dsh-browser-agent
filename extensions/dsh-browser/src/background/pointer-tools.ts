@@ -10,11 +10,10 @@
  * @module
  */
 
-import type { ToolErrorCode } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import type { CdpClient } from './debugger-session.ts'
 import type { TabFrame } from './frames.ts'
-import { InputError } from './input-actions.ts'
-import { isModifierName, type ModifierName } from './keys.ts'
+import { InputError, requestedModifiers, usableInput, type InputRuntime } from './input-actions.ts'
+import type { ToolAnswer } from './answers.ts'
+import type { ModifierName } from './keys.ts'
 import { mouseClick, mouseDrag, mouseMove, PointerRedirectedError, resolvePointerTarget, type MouseButton } from './pointer-actions.ts'
 import type {
   ElementPoint,
@@ -32,17 +31,10 @@ interface PointerCall {
 }
 
 /** Answer shape shared with tool dispatch. */
-interface PointerAnswer {
-  ok: boolean
-  result?: unknown
-  error?: { code: ToolErrorCode; message: string }
-}
+type PointerAnswer = ToolAnswer
 
 /** Trusted-input runtime (debugger broker), as tool dispatch passes it. */
-interface PointerInput {
-  supported: boolean
-  run<T>(tabId: number, operation: (client: CdpClient) => Promise<T>): Promise<T>
-}
+type PointerInput = InputRuntime
 
 /** What the pointer helpers need from tool dispatch. */
 export interface PointerContext {
@@ -78,10 +70,6 @@ function endOf(args: Record<string, unknown>): PointerEnd {
   }
 }
 
-function usable(input: PointerInput | undefined): input is PointerInput {
-  return input !== undefined && input.supported
-}
-
 /** The refusal for a click (or hover/drag) whose target is under another element. */
 export function coveredAnswer(end: PointerEnd, covered: string, gesture: string): PointerAnswer {
   return {
@@ -111,15 +99,7 @@ function clickOptions(args: Record<string, unknown>): { button: MouseButton; cli
   if (args.action !== undefined && args.action !== 'click' && args.action !== 'dblclick') throw new InputError('bad-args', 'action must be click or dblclick.')
   const clicks = args.action === 'dblclick' ? 2 : args.clicks === undefined ? 1 : args.clicks
   if (typeof clicks !== 'number' || !Number.isInteger(clicks) || clicks < 1 || clicks > 3) throw new InputError('bad-args', 'clicks must be 1, 2, or 3.')
-  const modifiers: ModifierName[] = []
-  if (args.modifiers !== undefined) {
-    if (!Array.isArray(args.modifiers)) throw new InputError('bad-args', 'modifiers must be a list of Alt, Control, Meta, or Shift.')
-    for (const value of args.modifiers) {
-      if (typeof value !== 'string' || !isModifierName(value)) throw new InputError('bad-args', 'modifiers must be a list of Alt, Control, Meta, or Shift.')
-      modifiers.push(value)
-    }
-  }
-  return { button, clicks, modifiers }
+  return { button, clicks, modifiers: requestedModifiers(args) }
 }
 
 // ---- Clicks ----
@@ -157,7 +137,7 @@ export async function precheckClick(ctx: PointerContext, mayRetry: boolean): Pro
  * click with no explicit `trusted` choice and a debugger available.
  */
 export function clickMayRetry(args: Record<string, unknown>, input: PointerInput | undefined): boolean {
-  if (!usable(input) || args.trusted !== undefined) return false
+  if (!usableInput(input) || args.trusted !== undefined) return false
   if (args.action !== undefined && args.action !== 'click') return false
   if (args.clicks !== undefined && args.clicks !== 1) return false
   if (args.button !== undefined && args.button !== 'left') return false
@@ -209,7 +189,7 @@ function redirectedAnswer(end: PointerEnd, error: PointerRedirectedError, gestur
 /** A real mouse click at the element's center. */
 export async function trustedClick(ctx: PointerContext, suffix = ' (trusted)'): Promise<PointerAnswer> {
   const input = ctx.input
-  if (!usable(input)) {
+  if (!usableInput(input)) {
     throw new InputError('input-unavailable', 'This browser has no trusted input channel (it needs the Chrome debugger). Omit trusted to use the synthetic click.')
   }
   const end = endOf(ctx.call.args)
@@ -249,7 +229,7 @@ export async function hover(ctx: PointerContext): Promise<PointerAnswer> {
   const end = endOf(ctx.call.args)
   if (end.index === undefined && end.selector === undefined) throw new InputError('bad-args', 'Provide index or selector.')
   const input = ctx.input
-  if (!usable(input)) {
+  if (!usableInput(input)) {
     const measured = await measure(ctx, end, { hitTest: true })
     if (measured.covered !== undefined) return coveredAnswer(end, measured.covered, 'hover')
     await ctx.setup({ op: 'synthetic-hover', ...end })
@@ -342,7 +322,7 @@ export async function drag(ctx: PointerContext): Promise<PointerAnswer> {
   const source = await measure(ctx, parsed.from, { hitTest: true })
   if (source.covered !== undefined) return coveredAnswer(parsed.from, source.covered, 'drag')
   const status = `Dragged ${describePointerEnd(parsed.from)} to ${describeDestination(parsed)}`
-  if (source.draggable || !usable(ctx.input)) {
+  if (source.draggable || !usableInput(ctx.input)) {
     const result = await ctx.setup({
       op: 'synthetic-drag',
       from: parsed.from,

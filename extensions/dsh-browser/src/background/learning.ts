@@ -37,6 +37,7 @@ import { listTabFrames } from './frames.ts'
 import { isExtensionPageSender } from './policy-runtime.ts'
 import type { CallPolicyHook, ToolAnswer, ToolCall } from './tools.ts'
 import { httpOrigin, isRecord } from '../security/web-url.ts'
+import { cancelledAnswer } from './answers.ts'
 
 /** Storage key of the learning switches. */
 export const LEARNING_SETTINGS_KEY = 'dshLearningSettings'
@@ -179,7 +180,7 @@ export function classifyFailure(answer: ToolAnswer, decision: string | undefined
   if (decision !== undefined && NO_CAPTURE_DECISIONS.has(decision)) return undefined
   const message = answer.error?.message ?? ''
   if (/cancelled|kill switch|stopped/iu.test(message)) return undefined
-  if (answer.error?.code === 'timeout' || /denied|declined|not approved|timed out/iu.test(message)) return undefined
+  if (answer.error?.code === 'timeout' || /denied|declined|not approved|timed out|approval request/iu.test(message)) return undefined
   if (retried) return 'retried'
   if (/does not exist|no element matched|not found|no .*matching/iu.test(message)) return 'not-found'
   if (/covered by|changed|guard|strict mode|refused/iu.test(message)) return 'guard'
@@ -645,7 +646,7 @@ export class LearningRuntime {
       binding: approvalBinding({ action: 'browser_site_driver', args: { request: described }, origins: [driver.origin] }),
     }
     const authorization = await authorize(prompt)
-    if (signal.aborted) return fail('Tool call was cancelled')
+    if (signal.aborted) return cancelledAnswer()
     if (authorization !== 'approved') return fail(`The user did not approve the site driver request (${authorization}). Use the page UI only if the user asks.`)
     // The tab may have moved while the card waited.
     const now = await chrome.tabs.get(tab.id).catch(() => undefined)

@@ -32,6 +32,7 @@ import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval
 import { frameDocumentKey, frameOrigin, type TabFrame } from './frames.ts'
 import type { ToolCall } from './tools.ts'
 import { httpOrigin, isRecord } from '../security/web-url.ts'
+import { cancelledAnswer, notApprovedAnswer, type SettledAnswer } from './answers.ts'
 
 /** Mirrors the bridge's PROGRAM_STEP_TOOLS (a spec keeps the two equal). */
 export const PROGRAM_STEP_TOOLS: ReadonlySet<string> = new Set([
@@ -271,11 +272,7 @@ export interface ProgramApprovalDeps {
 }
 
 /** The wire answer shape (structurally a ToolAnswer). */
-export type ProgramAnswer =
-  | { ok: true; result: unknown }
-  | { ok: false; error: { code: 'bad-args' | 'action-failed' | 'timeout' | 'no-active-tab'; message: string } }
-
-const CANCELLED: ProgramAnswer = { ok: false, error: { code: 'action-failed', message: 'Tool call was cancelled' } }
+export type ProgramAnswer = SettledAnswer
 
 /**
  * Show the program card and, once approved for this exact page, record the
@@ -287,19 +284,11 @@ export async function approveProgram(call: ToolCall, deps: ProgramApprovalDeps):
   const tab = await deps.resolveTab()
   if ('ok' in tab) return { ok: false, error: { code: 'no-active-tab', message: tab.error?.message ?? 'No controlled tab for the program.' } }
   if (tab.id === undefined) return { ok: false, error: { code: 'no-active-tab', message: 'No controlled tab for the program.' } }
-  if (deps.signal.aborted) return CANCELLED
+  if (deps.signal.aborted) return cancelledAnswer()
   const prompt = programApprovalPrompt(steps, await deps.listFrames(tab.id, tab.url))
   const authorization = await deps.authorize(prompt, tab.windowId ?? 0)
-  if (deps.signal.aborted) return CANCELLED
-  if (authorization !== 'approved') {
-    return {
-      ok: false,
-      error: {
-        code: authorization === 'timed-out' ? 'timeout' : 'action-failed',
-        message: authorization === 'denied' ? 'The user denied the browser program.' : `The browser program was not approved (${authorization}).`,
-      },
-    }
-  }
+  if (deps.signal.aborted) return cancelledAnswer()
+  if (authorization !== 'approved') return notApprovedAnswer('The user denied the browser program.', 'The browser program', authorization)
   // The card is bound to the page it was approved on.
   const current = await deps.resolveTab()
   if ('ok' in current || current.id !== tab.id) {
