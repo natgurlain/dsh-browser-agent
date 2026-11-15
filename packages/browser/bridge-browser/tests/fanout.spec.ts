@@ -105,6 +105,14 @@ describe('runFanout', () => {
     expect(seen.flat()).not.toContain('browser_close_tab')
   })
 
+  it('routes each worker to the browser that opened its tab', async () => {
+    const h = harness()
+    const shareSessionAffinity = vi.fn()
+    const bridge = { requestTool: (h.deps.bridge as { requestTool: unknown }).requestTool, shareSessionAffinity }
+    await runFanout(parent, { tasks, allowActions: false, closeTabs: true }, { signal }, { ...h.deps, bridge: bridge as never }, { toolTimeoutMs: 1000, provider: 'spawn' })
+    expect(shareSessionAffinity.mock.calls).toEqual([['child-1', 'parent'], ['child-2', 'parent']])
+  })
+
   it('does not record children of a session the bridge does not own', async () => {
     const h = harness({ parentOwned: false })
     await runFanout(parent, { tasks, allowActions: false, closeTabs: true }, { signal }, h.deps, { toolTimeoutMs: 1000, provider: 'spawn' })

@@ -176,7 +176,7 @@ export function renderFleetResults(results: FleetResult[]): string {
 
 /** What the fanout runner needs. */
 export interface FanoutDeps {
-  bridge: Pick<BridgeServer, 'requestTool'>
+  bridge: Pick<BridgeServer, 'requestTool'> & Partial<Pick<BridgeServer, 'shareSessionAffinity'>>
   subagents: () => FleetSubagents | undefined
   children: FleetChildren
   ledger: SessionLedger
@@ -223,6 +223,8 @@ export async function runFanout(
   try {
     for (const childId of childIds) {
       deps.children.expect(childId, tools)
+      // Workers act in the browser that opened their tabs.
+      deps.bridge.shareSessionAffinity?.(childId, parentId)
       await deps.ledger.addChild?.(childId, parentId)
     }
     const results = await Promise.all(args.tasks.map(async (task, index): Promise<FleetResult> => {

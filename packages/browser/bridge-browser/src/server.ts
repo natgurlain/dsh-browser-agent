@@ -421,6 +421,15 @@ export class BridgeServer {
   }
 
   /**
+   * Route `sessionId`'s tool calls to the browser serving `likeSessionId`
+   * (tab-fleet workers act in the browser that opened their tabs).
+   */
+  shareSessionAffinity(sessionId: string, likeSessionId: string): void {
+    const key = this.sessionAffinity.get(likeSessionId)
+    if (key !== undefined) this.sessionAffinity.set(sessionId, key)
+  }
+
+  /**
    * Request one browser action from the connected extension.
    * @param name - tool name (also the wire action name).
    * @param args - validated tool arguments.
