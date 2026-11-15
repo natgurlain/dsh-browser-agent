@@ -4,7 +4,7 @@
  * says what each one records and where it goes.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { UiLocale } from '../i18n.ts'
 import type { LearningSettings as Settings } from '../background/learning.ts'
 import { connectLearning, type LearningClient, type LearningState } from './learning-api.ts'
@@ -16,19 +16,19 @@ function t(locale: UiLocale, en: string, zh: string): string {
 /** Subscribe to the learning runtime for one conversation. */
 export function useLearning(sessionId: string | undefined): { state: LearningState | null; client: LearningClient | null } {
   const [state, setState] = useState<LearningState | null>(null)
-  const clientRef = useRef<LearningClient | null>(null)
-  const [, force] = useState(0)
+  const [client, setClient] = useState<LearningClient | null>(null)
   useEffect(() => {
+    // The previous conversation's steps must not show until the next push.
+    setState(null)
     if (typeof chrome === 'undefined' || chrome.runtime?.connect === undefined) return undefined
-    const client = connectLearning(sessionId, setState)
-    clientRef.current = client
-    force((value) => value + 1)
+    const next = connectLearning(sessionId, setState)
+    setClient(next)
     return () => {
-      client.dispose()
-      if (clientRef.current === client) clientRef.current = null
+      next.dispose()
+      setClient((current) => current === next ? null : current)
     }
   }, [sessionId])
-  return { state, client: clientRef.current }
+  return { state, client }
 }
 
 function Toggle({ title, help, checked, disabled, onChange }: {

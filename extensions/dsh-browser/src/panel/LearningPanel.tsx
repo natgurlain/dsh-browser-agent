@@ -7,7 +7,7 @@
 import { useEffect, useState } from 'react'
 import type { UiLocale } from '../i18n.ts'
 import { useLearning } from './LearningSettings.tsx'
-import type { RecordedStep } from '../shared/workflow-build.ts'
+import { suggestParamName, type RecordedStep } from '../shared/workflow-build.ts'
 
 function t(locale: UiLocale, en: string, zh: string): string {
   return locale === 'zh' ? zh : en
@@ -93,7 +93,7 @@ export function LearningPanel({ locale, sessionId, connected }: { locale: UiLoca
                         <label className="learning-variable">
                           <input type="checkbox" checked={variables[step.id] !== undefined} onChange={(event) => setVariables((current) => {
                             const next = { ...current }
-                            if (event.target.checked) next[step.id] = (step.locator?.name ?? 'value').toLowerCase().replace(/[^a-z0-9]+/gu, '_').replace(/^_+|_+$/gu, '') || 'value'
+                            if (event.target.checked) next[step.id] = suggestParamName(step, new Set(Object.values(current)))
                             else delete next[step.id]
                             return next
                           })} />
@@ -112,6 +112,11 @@ export function LearningPanel({ locale, sessionId, connected }: { locale: UiLoca
                   onClick={() => report(client!.request('learning.workflow.save', { choices: { name, description, skip: [...skip], variables } }), (value) => {
                     refresh()
                     setOpen(false)
+                    // The saved recording's step ids mean nothing for the next one.
+                    setName('')
+                    setDescription('')
+                    setSkip(new Set())
+                    setVariables({})
                     return t(locale, `Saved to ${String((value as { relativePath?: string }).relativePath)}`, `已保存到 ${String((value as { relativePath?: string }).relativePath)}`)
                   })}>
                   {t(locale, 'Save', '保存')}
@@ -223,7 +228,10 @@ export function LearningPanel({ locale, sessionId, connected }: { locale: UiLoca
             <label className="secondary learning-import">
               {t(locale, 'Import…', '导入…')}
               <input type="file" accept="application/json,.json" onChange={(event) => {
-                const file = event.target.files?.[0]
+                const input = event.target
+                const file = input.files?.[0]
+                // Without a reset, picking the same file again fires no change event.
+                input.value = ''
                 if (file === undefined) return
                 report(file.text().then((text) => client!.request('learning.driver.import', { text })), (count) => t(locale, `Imported ${String(count)} driver(s).`, `已导入 ${String(count)} 个驱动。`))
               }} />

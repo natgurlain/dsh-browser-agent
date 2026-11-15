@@ -97,6 +97,71 @@ describe('learning panel UI', () => {
     expect(posted.find((message) => message.type === 'learning.workflow.save')).toMatchObject({ sessionId: 's1', choices: { name: 'login', variables: { a: 'name' } } })
   })
 
+  it('gives two same-named fields distinct default variable names, so Save does not fail (finding 5)', async () => {
+    const host = await mount(createElement(LearningPanel, { locale: 'en', connected: true, sessionId: 's1' }))
+    await act(async () => {
+      push({
+        settings: { workflows: true, siteDrivers: false, siteDriverOrigins: [], watchMe: false, fixtures: false },
+        steps: [
+          { id: 'a', tool: 'browser_type', args: { text: 'a@x' }, locator: { role: 'textbox', name: 'Email' }, at: 1 },
+          { id: 'b', tool: 'browser_type', args: { text: 'b@x' }, locator: { role: 'textbox', name: 'Email' }, at: 2 },
+        ],
+      })
+    })
+    await act(async () => { (host.querySelector('button.secondary') as HTMLButtonElement).click() })
+    const boxes = [...host.querySelectorAll('.learning-variable input[type=checkbox]')] as HTMLInputElement[]
+    await act(async () => { boxes[0]!.click() })
+    await act(async () => { boxes[1]!.click() })
+    const names = ([...host.querySelectorAll('input[aria-label="Variable name"]')] as HTMLInputElement[]).map((input) => input.value)
+    expect(names).toEqual(['email', 'email_2'])
+  })
+
+  it('clears the save form after a successful save (finding 21)', async () => {
+    const host = await mount(createElement(LearningPanel, { locale: 'en', connected: true, sessionId: 's1' }))
+    const settings = { workflows: true, siteDrivers: false, siteDriverOrigins: [], watchMe: false, fixtures: false }
+    await act(async () => {
+      push({ settings, steps: [{ id: 'a', tool: 'browser_type', args: { text: 'Ada' }, locator: { role: 'textbox', name: 'Name' }, at: 1 }] })
+    })
+    await act(async () => { (host.querySelector('button.secondary') as HTMLButtonElement).click() })
+    const nameInput = host.querySelector('input[aria-label="Workflow name"]') as HTMLInputElement
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(nameInput, 'login')
+      nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { (host.querySelector('.learning-variable input[type=checkbox]') as HTMLInputElement).click() })
+    await act(async () => { ([...host.querySelectorAll('button.primary')].find((button) => button.textContent === 'Save') as HTMLButtonElement).click() })
+    await act(async () => { push({ settings, steps: [{ id: 'c', tool: 'browser_type', args: { text: 'Bo' }, locator: { role: 'textbox', name: 'Name' }, at: 3 }] }) })
+    await act(async () => { (host.querySelector('button.secondary') as HTMLButtonElement).click() })
+    expect((host.querySelector('input[aria-label="Workflow name"]') as HTMLInputElement).value).toBe('')
+    expect(host.querySelector('input[aria-label="Variable name"]')).toBeNull()
+  })
+
+  it('drops the previous conversation state when the session changes (finding 21)', async () => {
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    await act(async () => { root.render(createElement(LearningPanel, { locale: 'en', connected: true, sessionId: 's1' })) })
+    await act(async () => {
+      push({ settings: { workflows: true, siteDrivers: false, siteDriverOrigins: [], watchMe: false, fixtures: false }, steps: [{ id: 'a', tool: 'browser_click', args: {}, at: 1 }] })
+    })
+    expect(host.textContent).toContain('1 step(s) recorded')
+    await act(async () => { root.render(createElement(LearningPanel, { locale: 'en', connected: true, sessionId: 's2' })) })
+    expect(host.textContent).not.toContain('1 step(s) recorded')
+    expect(posted.filter((message) => message.type === 'learning.subscribe').map((message) => message.sessionId)).toEqual(['s1', 's2'])
+  })
+
+  it('resets the import file input so the same file can be chosen again (finding 21)', async () => {
+    const host = await mount(createElement(LearningPanel, { locale: 'en', connected: true }))
+    await act(async () => { push({ settings: { workflows: false, siteDrivers: true, siteDriverOrigins: [], watchMe: false, fixtures: false } }) })
+    const input = host.querySelector('input[type=file]') as HTMLInputElement
+    const file = new File(['[]'], 'drivers.json', { type: 'application/json' })
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] })
+    let value = 'C:\\fakepath\\drivers.json'
+    Object.defineProperty(input, 'value', { configurable: true, get: () => value, set: (next: string) => { value = next } })
+    await act(async () => { input.dispatchEvent(new Event('change', { bubbles: true })) })
+    expect(value).toBe('')
+  })
+
   it('offers "Do the remaining N like this" in both languages', async () => {
     const suggestion = { tabId: 1, origin: 'https://a.example', remaining: 3, done: 2, period: 1, program: [], labels: ['click "Invite"'] }
     const host = await mount(createElement(LearningPanel, { locale: 'zh', connected: true }))
