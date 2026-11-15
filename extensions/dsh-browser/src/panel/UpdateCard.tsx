@@ -108,7 +108,7 @@ export function UpdateCard({ copy }: { copy: PanelCopy['update'] }): React.JSX.E
         </div>
         <div className="update-meta">
           <span className={`install-pill install-${installMode}`}>{installLabel}</span>
-          <span className="version-pill">v{currentVersion}</span>
+          <span className="version-pill">v{chrome.runtime.getManifest().version_name ?? currentVersion}</span>
         </div>
       </div>
       <div className="update-status" role="status" aria-live="polite" aria-busy={checkState.status === 'checking'}>

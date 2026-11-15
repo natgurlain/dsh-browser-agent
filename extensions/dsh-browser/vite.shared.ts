@@ -1,6 +1,7 @@
 import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { defineConfig } from 'vite'
+import { checkoutBuild, stampBuild } from './src/shared/build-stamp.ts'
 import { storeManifest } from './src/shared/manifest-key.ts'
 
 /**
@@ -25,8 +26,9 @@ export const copyManifest = {
   name: 'copy-manifest',
   closeBundle(): void {
     mkdirSync(outDir, { recursive: true })
-    const manifest = JSON.parse(readFileSync(resolve(import.meta.dirname, targetManifest), 'utf8')) as Record<string, unknown>
-    writeFileSync(resolve(outDir, 'manifest.json'), `${JSON.stringify(storeBuild ? storeManifest(manifest) : manifest, null, 2)}\n`)
+    const source = JSON.parse(readFileSync(resolve(import.meta.dirname, targetManifest), 'utf8')) as Record<string, unknown>
+    const manifest = stampBuild(storeBuild ? storeManifest(source) : source, storeBuild ? undefined : checkoutBuild(), browserTarget)
+    writeFileSync(resolve(outDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
     cpSync(resolve(import.meta.dirname, '_locales'), resolve(outDir, '_locales'), { recursive: true })
     cpSync(resolve(import.meta.dirname, 'assets'), resolve(outDir, 'assets'), { recursive: true })
     // Enterprise policy schema (chrome.storage.managed); Firefox reads policies.json instead.
