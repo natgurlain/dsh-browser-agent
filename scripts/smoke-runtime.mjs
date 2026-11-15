@@ -1,26 +1,25 @@
 import assert from 'node:assert/strict'
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { once } from 'node:events'
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
-import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
-import { createServer } from 'node:net'
 import { createServer as createHttpServer } from 'node:http'
 import { zstdCompressSync } from 'node:zlib'
-import { smokeMcp } from './smoke-mcp.mjs'
-import { smokeDevLoop } from './smoke-devloop.mjs'
+import {
+  addBridgePlugin, assertBridgeBuilt, BASE_CAPS, closedPort, providerYaml, resolveDsh, runCli, smokeEnv, startHost, streamReply, waitFor as pollFor,
+} from './lib/dsh-harness.mjs'
+import { smokeMcp } from './fixtures/mcp-smoke.mjs'
+import { smokeDevLoop } from './fixtures/devloop-smoke.mjs'
 
-const root = fileURLToPath(new URL('../', import.meta.url))
-const bridge = join(root, 'packages/browser/bridge-browser')
-const require = createRequire(join(root, 'package.json'))
+const dsh = resolveDsh()
+assertBridgeBuilt(dsh)
+const { root, cli, bridge, bridgeRequire } = dsh
 const expectedVersion = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).dependencies['@deepseek-ai/dsh']
-const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
-const bridgeRequire = createRequire(join(bridge, 'package.json'))
 const { default: WebSocket } = await import(pathToFileURL(bridgeRequire.resolve('ws')).href)
 const {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BEACON_PORTS, BRIDGE_CONFIG_PATH,
@@ -28,7 +27,7 @@ const {
   BridgeFrameChannel, bridgeEndpointOfUrl, BRIDGE_APPROVAL_ASK_METHOD, BRIDGE_TOOL_HOLD_METHOD, BRIDGE_WATCH_FIRE_METHOD,
   BRIDGE_DEVLOOP_CANDIDATES_METHOD, BRIDGE_DEVLOOP_LINK_METHOD, BRIDGE_DEVLOOP_UNLINK_METHOD,
 } = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
-const { phase3Reply, streamReply } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-model.mjs')).href)
+const { phase3Reply } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-model.mjs')).href)
 /** What the Phase 3 conversations (watcher wake, fleet workers) showed the model. */
 const phase3State = {}
 const temp = await mkdtemp(join(tmpdir(), 'dsh-runtime-smoke-'))
@@ -60,13 +59,10 @@ const legacyLog = [
 // The JSONL container requires its header in a separate Zstandard frame.
 const legacyBytes = Buffer.concat(legacyLog.trimEnd().split('\n').map(line => zstdCompressSync(Buffer.from(line + '\n'))))
 const token = randomUUID()
-const env = { ...process.env, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1', DSH_PERMISSION_MODE: 'danger-full-access' }
+// Do not inherit bridge settings or credentials from the developer's shell (smokeEnv).
+const env = smokeEnv(home, { DSH_PERMISSION_MODE: 'danger-full-access' })
 // 使用已关闭的本机端口验证真实连接失败及继续请求，不返回模拟模型响应。
-const unavailableServer = createServer()
-unavailableServer.listen(0, '127.0.0.1')
-await once(unavailableServer, 'listening')
-const unavailablePort = unavailableServer.address().port
-await new Promise(resolve => unavailableServer.close(resolve))
+const unavailablePort = await closedPort()
 // A scripted local model (OpenAI chat-completions streaming): asked by a user
 // turn it calls `browser_press`; after the tool result it answers in text.
 // It drives a real Agent turn so a real browser tool call reaches the bridge.
@@ -96,11 +92,7 @@ const scriptedModel = createHttpServer((req, res) => {
     if (toolNames.includes('delegate_browser_task') && messages.at(-1)?.role !== 'tool'
       && messages.some(message => message.role === 'user' && JSON.stringify(message.content ?? '').includes('DELEGATE-PROBE'))) {
       delegateOffered = true
-      res.writeHead(200, { 'content-type': 'text/event-stream' })
-      const call = { index: 0, id: `call_${randomUUID().slice(0, 8)}`, type: 'function', function: { name: 'delegate_browser_task', arguments: JSON.stringify({ task: 'PRESET-PROBE: list the open tabs and summarize.', label: 'probe' }) } }
-      res.write(`data: ${JSON.stringify({ id: 'scripted-d', object: 'chat.completion.chunk', created: 0, model: 'scripted', choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [call] }, finish_reason: null }] })}\n\n`)
-      res.write(`data: ${JSON.stringify({ id: 'scripted-d', object: 'chat.completion.chunk', created: 0, model: 'scripted', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`)
-      res.end('data: [DONE]\n\n')
+      streamReply(res, { tool: { name: 'delegate_browser_task', args: { task: 'PRESET-PROBE: list the open tabs and summarize.', label: 'probe' } } })
       return
     }
     if (messages.at(-1)?.role === 'tool' && JSON.stringify(messages.at(-1)?.content ?? '').includes('Probed.')) delegateResult = true
@@ -108,9 +100,7 @@ const scriptedModel = createHttpServer((req, res) => {
     // The browser agent preset probe: record the tools that agent is offered.
     if (Array.isArray(request.tools) && messages.some(message => message.role === 'user' && JSON.stringify(message.content ?? '').includes('PRESET-PROBE'))) {
       presetProbeTools = (request.tools ?? []).map(tool => tool.function?.name)
-      res.writeHead(200, { 'content-type': 'text/event-stream' })
-      res.write(`data: ${JSON.stringify({ id: 'scripted-p', object: 'chat.completion.chunk', created: 0, model: 'scripted', choices: [{ index: 0, delta: { role: 'assistant', content: 'Probed.' }, finish_reason: 'stop' }] })}\n\n`)
-      res.end('data: [DONE]\n\n')
+      streamReply(res, { text: 'Probed.' })
       return
     }
     // Dev loop: an editing turn writes a file; the check turn records what it was given.
@@ -120,58 +110,24 @@ const scriptedModel = createHttpServer((req, res) => {
     }
     const devLoopEdit = Array.isArray(request.tools) && userText.includes('DEVLOOP-EDIT') && !userText.includes('DEVLOOP-CHECK')
     const devLoopCheck = Array.isArray(request.tools) && userText.includes('DEVLOOP-CHECK')
-    const chunk = (delta, finish) => `data: ${JSON.stringify({
-      id: 'scripted-1', object: 'chat.completion.chunk', created: 0, model: 'scripted',
-      choices: [{ index: 0, delta, finish_reason: finish }],
-    })}\n\n`
-    res.writeHead(200, { 'content-type': 'text/event-stream' })
     const textOnly = afterTool || devLoopCheck
     const toolCall = devLoopEdit
-      ? { name: 'write', arguments: JSON.stringify({ file_path: join(temp, 'devloop-edit.txt'), content: 'edited by the coding agent\n' }) }
-      : { name: 'browser_press', arguments: '{"key":"Enter"}' }
-    res.write(textOnly
-      ? chunk({ role: 'assistant', content: 'Done.' }, null)
-      : chunk({ role: 'assistant', tool_calls: [{ index: 0, id: `call_${randomUUID().slice(0, 8)}`, type: 'function', function: toolCall }] }, null))
-    res.write(chunk({}, textOnly ? 'stop' : 'tool_calls'))
-    res.end('data: [DONE]\n\n')
+      ? { name: 'write', args: { file_path: join(temp, 'devloop-edit.txt'), content: 'edited by the coding agent\n' } }
+      : { name: 'browser_press', args: { key: 'Enter' } }
+    streamReply(res, textOnly ? { text: 'Done.' } : { tool: toolCall })
   })
 })
 scriptedModel.listen(0, '127.0.0.1')
 await once(scriptedModel, 'listening')
 const scriptedPort = scriptedModel.address().port
 const approvalLog = join(temp, 'approvals.jsonl')
-// Do not inherit bridge settings or credentials from the developer's shell.
-delete env.DSH_EXT_TOKEN
-delete env.DSH_BROWSER_SESSION_WORKSPACE
+/** The running `dsh web` (from startHost). */
 let host
 let socket
-let hostLog = ''
 let succeeded = false
 
-async function waitFor(check, label, timeout = 60_000) {
-  const end = Date.now() + timeout
-  while (Date.now() < end) {
-    if (host && (host.exitCode !== null || host.signalCode !== null)) {
-      throw new Error(`DSH exited (${host.exitCode ?? host.signalCode}) while waiting for ${label}`)
-    }
-    const value = await check()
-    if (value) return value
-    await delay(100)
-  }
-  throw new Error(`Timed out waiting for ${label}`)
-}
-
-async function command(args) {
-  const child = spawn(process.execPath, [cli, ...args], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })
-  let output = ''
-  child.stdout.on('data', data => { output += data })
-  child.stderr.on('data', data => { output += data })
-  const timeout = setTimeout(() => child.kill('SIGKILL'), 120_000)
-  try {
-    const [code] = await once(child, 'exit')
-    assert.equal(code, 0, output)
-  } finally { clearTimeout(timeout) }
-}
+/** Poll until truthy; fails early (with the DSH log) once DSH has exited. */
+const waitFor = (check, label, timeout = 60_000) => pollFor(check, label, { timeout, host })
 
 async function start(reopen) {
   await rm(marker, { force: true })
@@ -190,26 +146,8 @@ async function start(reopen) {
     '- id: llm-pi-ai',
     '  config:',
     '    providers:',
-    '      connection-check:',
-    '        api: openai-completions',
-    `        baseURL: http://127.0.0.1:${unavailablePort}/v1`,
-    '        headers:',
-    '          Authorization: Bearer local-connection-check',
-    '        models:',
-    '          - id: connection-check',
-    '        retryPolicy:',
-    '          mode: normal',
-    '          maxRetries: 0',
-    '      scripted:',
-    '        api: openai-completions',
-    `        baseURL: http://127.0.0.1:${scriptedPort}/v1`,
-    '        headers:',
-    '          Authorization: Bearer scripted',
-    '        models:',
-    '          - id: scripted',
-    '        retryPolicy:',
-    '          mode: normal',
-    '          maxRetries: 0',
+    ...providerYaml('connection-check', unavailablePort, ['connection-check']),
+    ...providerYaml('scripted', scriptedPort, ['scripted']),
     '- insert:',
     '    - id: runtime-smoke-probe',
     `      name: ${JSON.stringify(pathToFileURL(join(root, 'scripts/fixtures/runtime-probe.mjs')).href)}`,
@@ -224,18 +162,8 @@ async function start(reopen) {
     `        approvalLog: ${JSON.stringify(approvalLog)}`,
     '',
   ].join('\n'))
-  hostLog = ''
-  host = spawn(process.execPath, [cli, 'web', '--patch', patch, '--no-open', '--port', '0'], {
-    cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  host.stdout.on('data', data => { hostLog += data })
-  host.stderr.on('data', data => { hostLog += data })
-  let spawnError
-  host.on('error', error => { spawnError = error })
-  const base = await waitFor(() => {
-    if (spawnError) throw spawnError
-    return hostLog.match(/dsh web: (http:\/\/127\.0\.0\.1:\d+)/)?.[1]
-  }, 'host readiness')
+  host = await startHost({ cli, patch, env })
+  const { base } = host
   const response = await fetch(`${base}/ext/bridge-config`, { signal: AbortSignal.timeout(10_000) })
   assert.equal(response.status, 200)
   const config = await response.json()
@@ -282,7 +210,7 @@ async function start(reopen) {
     assert.equal(seen.some(value => value.t === 'hello.ok'), false)
     return code
   }
-  const caps = { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }
+  const caps = { ...BASE_CAPS }
   const endpoint = bridgeEndpointOfUrl(config.wsUrl)
   assert.equal(await rejected(`chrome-extension://${PINNED_CHROME_EXTENSION_ID}`, {
     t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: createBridgeNonce(), mac: createBridgeNonce(), endpoint, caps,
@@ -310,49 +238,10 @@ async function start(reopen) {
   assert.equal(await rejected('chrome-extension://abcdefghijklmnopabcdefghijklmnop'),
     BRIDGE_CLOSE_CODES.originRejected, 'a foreign extension must be refused')
   // Firefox-style origin with the real token completes the mutual handshake.
-  socket = new WebSocket(config.wsUrl, { origin: 'moz-extension://runtime-smoke', handshakeTimeout: 10_000 })
-  const frames = []
-  let socketError
-  let channel
-  socket.on('error', error => { socketError = error })
-  socket.on('message', data => {
-    const text = data.toString()
-    const parsed = JSON.parse(text)
-    if (channel === undefined || parsed.t === 'hello.ok') {
-      frames.push(parsed)
-      return
-    }
-    const opened = channel.open(text)
-    if (opened === undefined) socketError = new Error(`bridge frame failed authentication: ${text.slice(0, 200)}`)
-    else frames.push(opened)
-  })
-  await once(socket, 'open')
-  async function frame(predicate) {
-    return waitFor(() => {
-      if (socketError) throw socketError
-      const found = frames.find(predicate)
-      if (found) return found
-      if (socket.readyState === WebSocket.CLOSED) throw new Error(`Bridge closed: ${JSON.stringify(frames)}`)
-    }, 'bridge response', 15_000)
-  }
-  const challenge = await frame(value => value.t === 'challenge')
-  assert.equal(challenge.v, BRIDGE_PROTOCOL_VERSION)
-  const clientNonce = createBridgeNonce()
-  const sealed = BridgeFrameChannel.derive(token, 'client', challenge.nonce, clientNonce, endpoint)
-  socket.send(JSON.stringify({
-    t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: clientNonce, endpoint, caps,
-    mac: await computeBridgeProof(token, 'client', challenge.nonce, clientNonce, endpoint, { client: caps }),
-  }))
-  // hello.ok is the last unsealed frame; everything after it is sealed.
-  channel = sealed
-  const accepted = await frame(value => value.t === 'hello.ok')
-  assert.equal(accepted.mac, await computeBridgeProof(token, 'server', clientNonce, challenge.nonce, endpoint, { client: caps, server: accepted.caps }),
-    'the bridge must prove knowledge of the token back')
-  async function request(method, payload) {
-    const id = randomUUID()
-    socket.send(channel.seal({ t: 'rpc', id, method, payload }))
-    return frame(value => value.t === 'rpc.result' && value.id === id)
-  }
+  const main = await connectClient(config.wsUrl, caps, { origin: 'moz-extension://runtime-smoke' })
+  socket = main.ws
+  const frame = predicate => main.frame(predicate, 'bridge response', 15_000)
+  const request = (method, payload) => main.request(method, payload, 15_000)
   async function send(method, payload) {
     const result = await request(method, payload)
     assert.equal(result.ok, true, JSON.stringify(result))
@@ -381,40 +270,54 @@ async function start(reopen) {
 }
 
 /**
- * Authenticate one more bridge client with its own caps (a second browser
- * install). Returns its frames and a sealed rpc helper.
+ * Authenticate a bridge client (a stand-in browser install) with its own caps:
+ * challenge, hello with the token proof, and the bridge's proof back. Every
+ * frame after `hello.ok` is sealed. Returns its frames and sealed helpers.
+ * @param options - `{ origin? }`: the WebSocket Origin to present.
  */
-async function connectClient(wsUrl, clientCaps) {
-  const ws = new WebSocket(wsUrl, { handshakeTimeout: 10_000 })
+async function connectClient(wsUrl, clientCaps, { origin } = {}) {
+  const ws = new WebSocket(wsUrl, { handshakeTimeout: 10_000, ...origin === undefined ? {} : { origin } })
   const frames = []
   let channel
-  let ready = false
+  let failure
   const closed = once(ws, 'close')
+  ws.on('error', error => { failure ??= error })
   ws.on('message', data => {
     const text = data.toString()
-    if (!ready) { frames.push(JSON.parse(text)); return }
+    const parsed = JSON.parse(text)
+    // hello.ok is the last unsealed frame; everything after it is sealed.
+    if (channel === undefined || parsed.t === 'hello.ok') { frames.push(parsed); return }
     const opened = channel.open(text)
-    if (opened === undefined) throw new Error('bridge frame failed authentication')
-    frames.push(opened)
+    if (opened === undefined) failure ??= new Error(`bridge frame failed authentication: ${text.slice(0, 200)}`)
+    else frames.push(opened)
   })
   await once(ws, 'open')
-  const challenge = await waitFor(() => frames.find(value => value.t === 'challenge'), 'challenge', 10_000)
+  const frame = (predicate, label = 'bridge frame', timeout = 10_000) => waitFor(() => {
+    if (failure) throw failure
+    const found = frames.find(predicate)
+    if (found) return found
+    if (ws.readyState === WebSocket.CLOSED) throw new Error(`Bridge closed while waiting for ${label}: ${JSON.stringify(frames).slice(0, 2_000)}`)
+  }, label, timeout)
+  const challenge = await frame(value => value.t === 'challenge', 'challenge')
+  assert.equal(challenge.v, BRIDGE_PROTOCOL_VERSION)
   const endpoint = bridgeEndpointOfUrl(wsUrl)
   const nonce = createBridgeNonce()
-  channel = BridgeFrameChannel.derive(token, 'client', challenge.nonce, nonce, endpoint)
+  const sealed = BridgeFrameChannel.derive(token, 'client', challenge.nonce, nonce, endpoint)
   ws.send(JSON.stringify({
     t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, endpoint, caps: clientCaps,
     mac: await computeBridgeProof(token, 'client', challenge.nonce, nonce, endpoint, { client: clientCaps }),
   }))
-  const ok = await waitFor(() => frames.find(value => value.t === 'hello.ok'), 'hello.ok', 10_000)
-  ready = true
-  const send = frame => ws.send(channel.seal(frame))
+  channel = sealed
+  const ok = await frame(value => value.t === 'hello.ok', 'hello.ok')
+  assert.equal(ok.mac, await computeBridgeProof(token, 'server', nonce, challenge.nonce, endpoint, { client: clientCaps, server: ok.caps }),
+    'the bridge must prove knowledge of the token back')
+  const send = value => ws.send(channel.seal(value))
   const request = async (method, payload, timeout = 30_000) => {
     const id = randomUUID()
     send({ t: 'rpc', id, method, payload })
-    return waitFor(() => frames.find(value => value.t === 'rpc.result' && value.id === id), `${method} result`, timeout)
+    return frame(value => value.t === 'rpc.result' && value.id === id, `${method} result`, timeout)
   }
-  return { ws, frames, ok, send, request, closed }
+  return { ws, frames, ok, send, request, frame, closed }
 }
 
 async function observation(file = marker) {
@@ -429,11 +332,7 @@ async function observation(file = marker) {
 async function stop() {
   socket?.terminate()
   socket = undefined
-  if (!host || host.exitCode !== null || host.signalCode !== null) return
-  const exited = once(host, 'exit')
-  host.kill('SIGTERM')
-  const timeout = setTimeout(() => host.kill('SIGKILL'), 10_000)
-  try { await exited } finally { clearTimeout(timeout) }
+  await host?.stop()
   host = undefined
 }
 
@@ -446,8 +345,8 @@ try {
   { cwd: worktreeRepository, env })
   await mkdir(legacyDirectory, { recursive: true })
   await writeFile(legacyFile, legacyBytes)
-  await command(['plugin', '--profile', 'web', 'add', '-w', `@natgurlain/dsh-bridge-browser@link:${bridge}`])
-  await command(['plugin', '--profile', 'web', 'add', `@deepseek-ai/dsh-experimental-tool-worktree@${expectedVersion}`])
+  await addBridgePlugin(dsh, env)
+  await runCli(cli, ['plugin', '--profile', 'web', 'add', `@deepseek-ai/dsh-experimental-tool-worktree@${expectedVersion}`], { env })
   // The fixture sessions need a fixed id and directory, which the bridge no
   // longer lets its client choose. They are placed as the owner through the
   // probe, and recorded in the bridge's session ledger as an earlier bridge
@@ -529,7 +428,7 @@ try {
   // ---- Multi-connection bridge and approvals answered by another owner client ----
   {
     const wsUrl = rpc.base.replace('http:', 'ws:') + '/ext/bridge'
-    const baseCaps = { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }
+    const baseCaps = BASE_CAPS
     const chrome = await connectClient(wsUrl, { ...baseCaps, client: { id: 'smoke-chrome-0001', browser: 'chrome' } })
     const firefox = await connectClient(wsUrl, { ...baseCaps, client: { id: 'smoke-firefox-001', browser: 'firefox' } })
     assert.equal(chrome.ok.caps.hostApprovals, 1, 'the real bridge forwards approvals to dsh')
@@ -594,7 +493,7 @@ try {
   // ---- Phase 3 on real Agents: a page watcher wakes its session; a tab fleet of real subagents ----
   {
     const wsUrl = rpc.base.replace('http:', 'ws:') + '/ext/bridge'
-    const ext = await connectClient(wsUrl, { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60, client: { id: 'smoke-phase3-001', browser: 'chrome' } })
+    const ext = await connectClient(wsUrl, { ...BASE_CAPS, client: { id: 'smoke-phase3-001', browser: 'chrome' } })
     const value = answer => {
       assert.equal(answer.ok, true, JSON.stringify(answer))
       const envelope = answer.result?.result ?? answer.result
@@ -928,7 +827,7 @@ try {
   console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), multi-client bridge with per-install replacement and session routing, browser approvals forwarded to dsh and answered by another owner client (allow and deny), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, MCP clients through the stdio shim on an external session (requester-labelled cards answered in the browser, audit log, Host methods refused), the browser agent preset (browser_* tools only), delegation to it via delegate_browser_task, and bundled skills, the closed dev loop (localhost link, capture after an editing turn, read-only injection without prompting), browser context, a page watcher waking only its owned session (untrusted boundary, rate limit), a tab fleet of real subagents restricted to read tools with structured results, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
   succeeded = true
 } catch (error) {
-  console.error(hostLog)
+  console.error(host?.log ?? '(DSH was not running)')
   console.error(`Smoke artifacts retained at ${temp}`)
   throw error
 } finally {
