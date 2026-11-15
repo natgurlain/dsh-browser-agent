@@ -232,7 +232,7 @@ describe('BridgeServer', () => {
     const { ws, done } = await connect(h.url, FIREFOX_EXT_ORIGIN)
     await sendHello(ws, '', CAPS)
     await done
-    expect(ws.readyState).toBe(WebSocket.CLOSED)
+    expect(socketClose.get(ws)?.code).toBe(BRIDGE_CLOSE_CODES.authFailed)
   })
 
   it('accepts an authenticated Firefox extension origin', async () => {
@@ -249,7 +249,7 @@ describe('BridgeServer', () => {
     const { ws, done } = await connect(h.url, 'https://evil.example')
     await sendHello(ws, '', CAPS)
     await done
-    expect(ws.readyState).toBe(WebSocket.CLOSED)
+    expect(socketClose.get(ws)?.code).toBe(BRIDGE_CLOSE_CODES.originRejected)
   })
 
   it('rejects loopback connections without a token and without any Origin', async () => {
@@ -257,7 +257,7 @@ describe('BridgeServer', () => {
     const { ws, done } = await connect(h.url)
     await sendHello(ws, '', CAPS)
     await done
-    expect(ws.readyState).toBe(WebSocket.CLOSED)
+    expect(socketClose.get(ws)?.code).toBe(BRIDGE_CLOSE_CODES.authFailed)
   })
 
   it('still requires the token from non-loopback remotes', async () => {
@@ -265,7 +265,7 @@ describe('BridgeServer', () => {
     const { ws, done } = await connect(h.url)
     await sendHello(ws, '', CAPS)
     await done
-    expect(ws.readyState).toBe(WebSocket.CLOSED)
+    expect(socketClose.get(ws)?.code).toBe(BRIDGE_CLOSE_CODES.authFailed)
   })
 
   it('terminates unauthenticated TCP connections that never answer the close handshake (relay3 pre-auth)', async () => {
@@ -702,7 +702,8 @@ describe('BridgeServer', () => {
   it('closes cleanly twice (second close is a no-op on the acceptor)', async () => {
     const h = await startBridge()
     await h.bridge.close()
-    await h.bridge.close()
+    await expect(h.bridge.close()).resolves.toBeUndefined()
+    expect(h.bridge.connectionCount()).toBe(0)
   })
 
   it('sends protocol pings on the configured cadence and the client answers pong', async () => {
@@ -711,6 +712,10 @@ describe('BridgeServer', () => {
     await sendHello(ws, TOKEN, CAPS)
     await waitFor(() => frames.some((f) => f.t === 'ping'))
     send(ws, { t: 'pong' })
+    // Answered pings keep the connection: a later ping still arrives on the open socket.
+    await waitFor(() => frames.filter((f) => f.t === 'ping').length >= 3)
+    expect(ws.readyState).toBe(WebSocket.OPEN)
+    expect(h.bridge.connectionCount()).toBe(1)
     ws.close()
   })
 
@@ -945,6 +950,46 @@ describe('BridgeServer audit hooks', () => {
     await waitFor(() => ['kill', 'bad'].every((id) => frames.some((frame) => frame.t === 'rpc.result' && frame.id === id)))
     expect(audit.killSwitch).toHaveBeenCalledOnce()
     expect(frames.find((frame) => frame.t === 'rpc.result' && frame.id === 'bad')).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    ws.close()
+  })
+
+  it('runs the Host kill switch hook for a kill-switch record, with the reporting connection', async () => {
+    const onKillSwitch = vi.fn()
+    const audit = observer()
+    const h = await startBridge({ audit, onKillSwitch })
+    const { ws, frames } = await ready(h)
+    send(ws, { t: 'rpc', id: 'note', method: BRIDGE_AUDIT_RECORD_METHOD, payload: { callId: 'unknown', decision: 'allowed' } })
+    await waitFor(() => frames.some((frame) => frame.t === 'rpc.result' && frame.id === 'note'))
+    expect(onKillSwitch).not.toHaveBeenCalled()
+    send(ws, { t: 'rpc', id: 'kill', method: BRIDGE_AUDIT_RECORD_METHOD, payload: { event: 'kill-switch' } })
+    await waitFor(() => frames.some((frame) => frame.t === 'rpc.result' && frame.id === 'kill'))
+    expect(onKillSwitch).toHaveBeenCalledOnce()
+    expect(onKillSwitch).toHaveBeenCalledWith(expect.any(String))
+    expect(h.callMock).not.toHaveBeenCalled()
+    ws.close()
+  })
+
+  it('routes plugin RPCs through extraRpc: answered, thrown, and not handled', async () => {
+    const extraRpc = vi.fn((method: string, payload: unknown, context: { connection: string; signal: AbortSignal }) => {
+      void context
+      if (method === 'bridge.test.answer') return Promise.resolve({ ok: true as const, result: { echoed: payload } })
+      if (method === 'bridge.test.throw') return Promise.reject(new Error('handler exploded'))
+      return undefined
+    })
+    const h = await startBridge({ extraRpc })
+    const { ws, frames } = await ready(h)
+    send(ws, { t: 'rpc', id: 'a', method: 'bridge.test.answer', payload: { n: 1 } })
+    send(ws, { t: 'rpc', id: 't', method: 'bridge.test.throw', payload: {} })
+    send(ws, { t: 'rpc', id: 'p', method: 'session.list', payload: {} })
+    const result = (id: string) => frames.find((frame) => frame.t === 'rpc.result' && frame.id === id)
+    await waitFor(() => ['a', 't', 'p'].every((id) => result(id) !== undefined))
+    expect(result('a')).toMatchObject({ ok: true, result: { type: 'server-response', result: { ok: true, value: { echoed: { n: 1 } } } } })
+    expect(result('t')).toMatchObject({ ok: false, error: { code: 'internal', message: 'handler exploded' } })
+    // Not handled: falls through to the Host.
+    expect(result('p')).toMatchObject({ ok: true, result: { type: 'server-response' } })
+    expect(h.callMock).toHaveBeenCalledOnce()
+    expect(h.callMock).toHaveBeenCalledWith(expect.objectContaining({ method: 'session.list' }))
+    expect(extraRpc).toHaveBeenCalledWith('bridge.test.answer', { n: 1 }, expect.objectContaining({ connection: expect.any(String) }))
     ws.close()
   })
 
