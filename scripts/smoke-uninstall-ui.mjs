@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const require = createRequire(join(root, 'packages', 'browser', 'bridge-browser', 'package.json'))
 const { chromium } = require('playwright-core')
-const artifacts = join(root, '.artifacts', 'uninstall-ui')
+// Chromium aborts when its profile socket path is too long; DSH_SMOKE_ARTIFACTS gives a short root.
+const artifacts = process.env.DSH_SMOKE_ARTIFACTS === undefined ? join(root, '.artifacts', 'uninstall-ui') : join(process.env.DSH_SMOKE_ARTIFACTS, 'uninstall-ui')
 await mkdir(artifacts, { recursive: true })
 const directory = await mkdtemp(join(artifacts, 'run-'))
 const runtimeTmp = join(directory, 'runtime')

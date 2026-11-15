@@ -2,11 +2,12 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { chromium, findChromiumExecutable } from './chromium.mjs'
 
-export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl, trustedOrigin, connectTimeoutMs = 30_000, actionTimeoutMs = 8_000 }) {
+export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl, trustedOrigin, connectTimeoutMs = 30_000, actionTimeoutMs = 8_000, profileRoot }) {
   const extensionDir = resolve(repoRoot, 'extensions/dsh-browser/dist')
   const executablePath = await findChromiumExecutable(undefined, { requireExtensions: true })
   if (executablePath === undefined) throw new Error('no Chromium executable found; set PLAYWRIGHT_CHROMIUM_PATH')
-  const tempParent = resolve(benchmarkRoot, '.tmp')
+  // Chromium aborts when the profile's socket path is too long; callers under a deep checkout pass a short profileRoot.
+  const tempParent = profileRoot ?? resolve(benchmarkRoot, '.tmp')
   await mkdir(tempParent, { recursive: true })
   const profileDir = await mkdtemp(join(tempParent, 'extension-profile-'))
   let context
@@ -47,6 +48,19 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       await new Promise((resolveConnection, rejectConnection) => {
         const port = chrome.runtime.connect({ name: 'dsh-panel' })
         window.__dshBenchmarkPort = port
+        // Request acknowledgements (settings, tab binding), and the approval cards this port answered
+        // as the benchmark's stand-in user (see setApprovalPolicy).
+        window.__dshBenchmarkResults = []
+        window.__dshBenchmarkApprovals = []
+        window.__dshBenchmarkApprovalPolicy = undefined
+        port.onMessage.addListener((message) => {
+          if (typeof message?.type === 'string' && message.type.endsWith('.result')) window.__dshBenchmarkResults.push(message)
+          if (message?.type !== 'approval.request' || window.__dshBenchmarkApprovalPolicy === undefined) return
+          const request = message.request
+          const decision = request.forced === true ? window.__dshBenchmarkApprovalPolicy.forced : window.__dshBenchmarkApprovalPolicy.other
+          window.__dshBenchmarkApprovals.push({ ...request, decision, at: Date.now() })
+          port.postMessage({ type: 'approval.response', id: request.id, decision })
+        })
         const timer = setTimeout(() => {
           port.disconnect()
           rejectConnection(new Error(`extension bridge did not connect within ${timeoutMs}ms`))
@@ -91,12 +105,62 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       throw new Error(`extension did not connect to benchmark DSH; UI=${JSON.stringify(status)} discovery=${JSON.stringify(discovery)}: ${error instanceof Error ? error.message : String(error)}`)
     }
     await target.bringToFront()
+    /** Post one panel message with a fresh id and wait for its `<type>.result`. */
+    const request = (message, resultType) => panel.evaluate(async ({ value, type, timeoutMs }) => {
+      const id = crypto.randomUUID()
+      window.__dshBenchmarkPort.postMessage({ ...value, id })
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        const answer = window.__dshBenchmarkResults.find((candidate) => candidate.type === type && candidate.id === id)
+        if (answer !== undefined) return answer
+        await new Promise((resolveWait) => setTimeout(resolveWait, 25))
+      }
+      return { ok: false, error: `no ${type} within ${timeoutMs}ms` }
+    }, { value: message, type: resultType, timeoutMs: actionTimeoutMs })
     return {
       context,
       worker,
       panel,
       target,
       executablePath,
+      /** Merge settings into the extension's and wait until the worker applied them. */
+      async configure(settings) {
+        const result = await request({ type: 'settings', settings }, 'settings.result')
+        if (result.ok !== true) throw new Error(`extension rejected benchmark settings ${JSON.stringify(settings)}: ${JSON.stringify(result)}`)
+      },
+      /**
+       * Bind an agent session to the benchmark tab, as a user does by choosing
+       * the current page in the side panel. A session created through the DSH
+       * API (not from the panel) has no tab of its own, and every browser tool
+       * call of an unbound session fails with "The controlled tab was closed".
+       */
+      async bindSession(sessionId) {
+        await target.bringToFront()
+        const result = await request({ type: 'tab-affinity.rebind', sessionId }, 'tab-affinity.rebind.result')
+        if (result.ok !== true) throw new Error(`extension did not bind session ${sessionId} to the benchmark tab: ${JSON.stringify(result)}`)
+      },
+      /**
+       * Answer approval cards as a scripted user: `forced` decides the cards
+       * no setting can waive (session taint), `other` every ordinary card.
+       * `undefined` leaves cards unanswered (the default: a benchmark run
+       * expects none).
+       */
+      async setApprovalPolicy(policy) {
+        await panel.evaluate((value) => {
+          window.__dshBenchmarkApprovalPolicy = value
+          window.__dshBenchmarkApprovals = []
+        }, policy)
+      },
+      /** The approval cards answered since the last setApprovalPolicy call. */
+      approvals() {
+        return panel.evaluate(() => window.__dshBenchmarkApprovals)
+      },
+      /** Close tabs a run opened (browser_open_tab), leaving the benchmark tab and the panel. */
+      async closeOtherTabs() {
+        for (const page of context.pages()) {
+          if (page !== target && page !== panel) await page.close().catch(() => undefined)
+        }
+      },
       async prepare(url) {
         await target.goto(url, { waitUntil: 'domcontentloaded' })
         await target.bringToFront()

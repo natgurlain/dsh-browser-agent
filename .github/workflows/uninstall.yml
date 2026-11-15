@@ -2,7 +2,8 @@ name: Script tests
 
 # Every scripts/tests/*.test.mjs (uninstall lifecycle, token provisioning,
 # release packaging, installer consistency, DSH matrix helpers) on Linux,
-# macOS and Windows. ci.yml does not run them again.
+# macOS and Windows. The gate that ci.yml runs (`pnpm gate`) also runs them on
+# Linux; this workflow adds the other two platforms.
 
 on:
   push:

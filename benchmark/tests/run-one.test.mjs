@@ -66,3 +66,51 @@ test('V3 benchmark measures first live token before settlement and counts durabl
   assert.deepEqual(result.tokens, { inputTokens: 100, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 })
   assert.equal(result.timings.llmMs, 27)
 })
+
+test('an extension run applies the task settings, binds the session to the tab, and records refused tool calls', async (t) => {
+  const site = await startBenchmarkSite({ port: 0 })
+  t.after(() => site.close())
+  const steps = []
+  let listener
+  const client = {
+    async rpc(method) {
+      if (method === 'session.create') {
+        steps.push('session.create')
+        return { sessionId: 'session-bind' }
+      }
+      if (method === 'session.modelCatalog') return { default: { provider: 'fixture', model: 'fixture-model' }, routableProviders: ['fixture'] }
+      if (method === 'session.history') return {}
+      assert.equal(method, 'session.prompt')
+      steps.push('session.prompt')
+      const at = performance.now()
+      const event = (type, data, offset) => listener({ type: 'session/event', sessionId: 'session-bind', event: { type, data } }, at + offset)
+      event('turn/start', { turn: 1 }, 0)
+      event('tool/call', { callId: 'tool-1', name: 'browser_click', arguments: { index: 1 } }, 5)
+      event('tool/result', { message: { role: 'tool', source: { callId: 'tool-1' }, isError: true, content: [{ type: 'text', text: 'Error: denied' }] } }, 10)
+      event('tool/call', { callId: 'tool-2', name: 'browser_dialog', arguments: { accept: true } }, 15)
+      event('tool/result', { message: { role: 'tool', toolCallId: 'tool-2', source: {}, isError: false, content: [{ type: 'text', text: 'ok' }] } }, 20)
+      event('turn/end', { reason: { kind: 'completed' } }, 25)
+      return { accepted: true }
+    },
+    async followSession() {},
+    onFrame(callback) { listener = callback; return () => { listener = undefined } },
+  }
+  const extensionBrowser = {
+    configure: async (settings) => { steps.push(['configure', settings]) },
+    prepare: async () => { steps.push('prepare') },
+    bindSession: async (sessionId) => { steps.push(['bindSession', sessionId]) },
+  }
+  const run = (taskId) => runOne({
+    backend: { backend: 'extension', client },
+    extensionBrowser,
+    instance: makeTaskInstance(taskId, 1, `bind-${taskId}`, site.origin),
+    siteOrigin: site.origin, workspace: '/tmp/benchmark', timeoutMs: 500,
+  })
+  const result = await run('confirm_delete')
+  // Dialogs are caught only for the task that raises one; the session is bound before the prompt.
+  assert.deepEqual(steps, [['configure', { catchPageDialogs: true }], 'prepare', 'session.create', ['bindSession', 'session-bind'], 'session.prompt'])
+  assert.deepEqual(result.tools.calls.map((call) => [call.name, call.ok]), [['browser_click', false], ['browser_dialog', true]])
+  steps.length = 0
+  await run('contact_form')
+  assert.deepEqual(steps[0], ['configure', { catchPageDialogs: false }])
+})
