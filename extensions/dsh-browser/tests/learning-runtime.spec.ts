@@ -40,7 +40,6 @@ function runtime(overrides: Partial<LearningDeps> = {}, stored: Record<string, u
     agentActiveOnTab: () => false,
     halted: () => false,
     fixtureAllowed: () => true,
-    authorize: vi.fn(async () => 'approved' as const),
     capturedRequests: () => undefined,
     siteDriversSupported: true,
     activeTab: async () => ({ id: 7 } as chrome.tabs.Tab),
@@ -101,20 +100,16 @@ describe('learning runtime', () => {
     expect(learning.stepsFor('s1')).toEqual([])
   })
 
-  it('pre-approves program steps once, for exact args, never forced cards', async () => {
-    const { learning } = runtime({}, { dshLearningSettings: { watchMe: true } })
+  it('hands "Do the remaining N" to the bridge as one browser_run program, with no card of its own', async () => {
+    const { learning, request } = runtime({}, { dshLearningSettings: { watchMe: true } })
     await learning.ready
-    const grants = (learning as unknown as { grants: Array<unknown> }).grants
-    grants.push({ sessionKey: 's1', origin: 'https://crm.example', remaining: new Map([[JSON.stringify({ args: { selector: '#a' }, tool: 'browser_click' }), 1]]), expiresAt: Date.now() + 60_000 })
-    const prompt: ApprovalPrompt = { kind: 'action', action: 'browser_click', summary: '', origins: ['https://crm.example'], canTrust: true }
-    const fallback = vi.fn(async () => 'denied' as const)
-    const click = call('browser_click', { selector: '#a' })
-    expect(await learning.authorize(click, prompt, fallback)).toBe('approved')
-    expect(await learning.authorize(click, prompt, fallback)).toBe('denied')
-    expect(await learning.authorize(call('browser_click', { selector: '#b' }), prompt, fallback)).toBe('denied')
-    grants.push({ sessionKey: 's1', origin: 'https://crm.example', remaining: new Map([[JSON.stringify({ args: { selector: '#a' }, tool: 'browser_click' }), 1]]), expiresAt: Date.now() + 60_000 })
-    expect(await learning.authorize(click, { ...prompt, forced: true }, fallback)).toBe('denied')
-    expect(await learning.authorize(click, { ...prompt, origins: ['https://evil.example'] }, fallback)).toBe('denied')
+    const program = [{ tool: 'browser_click' as const, args: { selector: '#people > tr:nth-child(3) button' } }]
+    ;(learning as unknown as { suggestion: unknown }).suggestion = { tabId: 7, origin: 'https://crm.example', period: 1, done: 2, remaining: 1, program, labels: [] }
+    await learning.runSuggestion('s1')
+    expect(request).toHaveBeenCalledWith('bridge.learning.program.run', { sessionId: 's1', steps: program }, expect.any(Number))
+    tabUrl = 'https://other.example/'
+    ;(learning as unknown as { suggestion: unknown }).suggestion = { tabId: 7, origin: 'https://crm.example', period: 1, done: 2, remaining: 1, program, labels: [] }
+    await expect(learning.runSuggestion('s1')).rejects.toThrow(/left the page/)
   })
 
   it('runs a site driver only on its origin, behind a forced card with the exact request', async () => {

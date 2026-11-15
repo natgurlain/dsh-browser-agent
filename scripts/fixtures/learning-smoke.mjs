@@ -196,7 +196,7 @@ export async function runLearningSmoke(ctx) {
   assert.deepEqual(proposed.driver.tokens, [{ header: 'x-csrf-token', source: { kind: 'cookie', name: 'csrftoken' } }])
   assert.equal(JSON.stringify(proposed).includes(csrf), false, 'the token value is never stored')
   await learn('learning.driver.save', { index: 0 })
-  const driverTool = (await waitFor(async () => (await toolNames()).find(name => name.startsWith('site_') && name.endsWith('_post_learn')), 'driver tool'))
+  const driverTool = (await waitFor(async () => (await toolNames()).find(name => name.startsWith('browser_site_') && name.endsWith('_post_learn')), 'driver tool'))
   await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request') })
   const driverCall = tool(driverTool, { name: 'Via Driver' })
   const card = await waitFor(() => panel.evaluate(() => messages.find(message => message.type === 'approval.request')?.request), 'site driver card')
@@ -231,7 +231,7 @@ export async function runLearningSmoke(ctx) {
   await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request') })
   const run = learn('learning.watch.run')
   const programCard = await waitFor(() => panel.evaluate(() => messages.find(message => message.type === 'approval.request')?.request), 'program card')
-  assert.equal(programCard.action, 'browser_program')
+  assert.equal(programCard.action, 'browser_run')
   await panel.evaluate(id => { messages = messages.filter(message => message.type !== 'approval.request'); panelPort.postMessage({ type: 'approval.response', id, decision: 'allow-once' }) }, programCard.id)
   const outcome = await run
   assert.equal(outcome.report.status, 'completed', JSON.stringify(outcome))
@@ -241,7 +241,7 @@ export async function runLearningSmoke(ctx) {
 
   // ---- Off again: tools withdrawn ----
   await learn('learning.settings', { settings: { workflows: false, fixtures: false, watchMe: false, siteDrivers: false } })
-  await waitFor(async () => !(await toolNames()).some(name => name === 'browser_workflow_run' || name.startsWith('site_')), 'learning tools withdrawn')
+  await waitFor(async () => !(await toolNames()).some(name => name === 'browser_workflow_run' || name.startsWith('browser_site_')), 'learning tools withdrawn')
   await settings({ trustedActionOrigins: [origin] })
   await panel.evaluate(() => learnPort.disconnect())
 }

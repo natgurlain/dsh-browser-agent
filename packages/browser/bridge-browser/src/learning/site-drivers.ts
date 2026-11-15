@@ -135,10 +135,14 @@ export function driverIdent(raw: string, fallback = 'action'): string {
   return IDENT.test(ident) ? ident : fallback
 }
 
-/** The model-facing tool name of a driver (`site_<host>_<name>`, ≤ 64 chars). */
+/**
+ * The model-facing tool name of a driver (`browser_site_<host>_<name>`, ≤ 64
+ * chars). The `browser_` prefix makes its result taint the session like any
+ * other page read.
+ */
 export function siteDriverToolName(driver: Pick<SiteDriver, 'origin' | 'name'>): string {
   const host = new URL(driver.origin).host.replace(/[^a-z0-9]+/giu, '_').toLowerCase().replace(/^_+|_+$/gu, '').slice(0, 24)
-  return `site_${host}_${driver.name}`.slice(0, 64)
+  return `browser_site_${host}_${driver.name}`.slice(0, 64)
 }
 
 /** Resolve the path template against the driver origin; refuse anything off-origin. */

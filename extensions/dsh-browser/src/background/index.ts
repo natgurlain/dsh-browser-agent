@@ -2265,7 +2265,6 @@ const learning = new LearningRuntime({
     if (origin === undefined || (!unrestrictedAccessEnabled() && settings.sharePageContent === 'off')) return false
     return policyRuntime.evaluate({ name: 'browser_snapshot', args: {}, ...(sessionId === undefined ? {} : { sessionId }) }, { reads: [origin], acts: [], pageOrigin: origin }).kind !== 'deny'
   },
-  authorize: (prompt, sessionId, windowId, signal) => authorizeToolCall(prompt, signal, windowId, sessionId),
   capturedRequests: (tabId) => devTools.capturedRequests?.(tabId),
   siteDriversSupported: devToolsCapability,
   activeTab: async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0],

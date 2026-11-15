@@ -74,11 +74,11 @@ const METHODS = {
 const MAX_RECORDED_STEPS = 100
 const MAX_WATCH_EVENTS = 60
 const MAX_PROPOSALS = 10
-const PROGRAM_GRANT_TTL_MS = 10 * 60_000
 const AGENT_QUIET_MS = 1_500
 const NO_SESSION = '(no-session)'
 const PROGRAM_RUN_TIMEOUT_MS = 30 * 60_000
-const MAX_REMAINING_ROWS = 50
+/** One `browser_run` holds at most this many steps. */
+const MAX_PROGRAM_STEPS = 25
 
 /** What the background index provides. */
 export interface LearningDeps {
@@ -93,8 +93,6 @@ export interface LearningDeps {
    * and site policy does not block reads of it.
    */
   fixtureAllowed: (sessionId: string | undefined, url: string) => boolean
-  /** The full approval path (gate, panel card, notification / Host fallback). */
-  authorize: (prompt: ApprovalPrompt, sessionId: string | undefined, windowId: number, signal: AbortSignal) => Promise<ApprovalAuthorization>
   /** Developer-tools network capture for a tab, when attached. */
   capturedRequests: (tabId: number) => readonly NetworkEntry[] | undefined
   /** Whether this browser can run site drivers (Chrome debugger + page-origin fetch). */
@@ -119,12 +117,6 @@ interface LocatorProbe extends RecordedLocator {
   password?: boolean
 }
 
-interface ProgramGrant {
-  sessionKey: string
-  origin: string
-  remaining: Map<string, number>
-  expiresAt: number
-}
 
 /** A "do the remaining N" offer shown in the panel. */
 export interface WatchSuggestion {
@@ -198,7 +190,6 @@ export class LearningRuntime {
   private readonly recorded = new Map<string, RecordedStep[]>()
   private readonly probes = new Map<string, PendingProbe>()
   private readonly proposals: SiteDriverProposal[] = []
-  private readonly grants: ProgramGrant[] = []
   private readonly recentFailures = new Map<string, number>()
   private readonly ports = new Set<chrome.runtime.Port>()
   private watch: { tabId: number; origin: string; events: WatchEvent[] } | undefined
@@ -313,27 +304,6 @@ export class LearningRuntime {
     } catch {
       return undefined
     }
-  }
-
-  /**
-   * Program pre-approval: a step the user approved as part of a "Watch me"
-   * program passes its ordinary card once, for its exact tool + arguments.
-   * Forced, per-call, developer-tools and permission cards are never covered.
-   */
-  async authorize(call: ToolCall, prompt: ApprovalPrompt, fallback: () => Promise<ApprovalAuthorization>): Promise<ApprovalAuthorization> {
-    if (prompt.forced === true || prompt.perCallOnly === true || prompt.devTools === true || prompt.permission !== undefined || prompt.kind !== 'action') return fallback()
-    const now = this.now()
-    const key = canonicalJson({ tool: call.name, args: call.args })
-    const sessionKey = call.sessionId ?? NO_SESSION
-    for (const grant of this.grants) {
-      if (grant.expiresAt < now || grant.sessionKey !== sessionKey) continue
-      if (prompt.origins.length !== 1 || prompt.origins[0] !== grant.origin) continue
-      const left = grant.remaining.get(key) ?? 0
-      if (left <= 0) continue
-      grant.remaining.set(key, left - 1)
-      return 'approved'
-    }
-    return fallback()
   }
 
   /** Record one settled call (success → workflow step; failure → fixture). */
@@ -670,7 +640,7 @@ export class LearningRuntime {
       return
     }
     try {
-      const response = await chrome.tabs.sendMessage(watch.tabId, { type: 'DSH_WATCH_PROBE', selectors: nextSelectors(pattern, MAX_REMAINING_ROWS) }, { frameId: 0 }) as { ok?: boolean; result?: { rows?: string[][] } } | undefined
+      const response = await chrome.tabs.sendMessage(watch.tabId, { type: 'DSH_WATCH_PROBE', selectors: nextSelectors(pattern, Math.floor(MAX_PROGRAM_STEPS / pattern.period)) }, { frameId: 0 }) as { ok?: boolean; result?: { rows?: string[][] } } | undefined
       const rows = response?.result?.rows ?? []
       // A cell-sourced value needs a non-empty cell in every remaining row.
       const usable = rows.filter((cells) => pattern.steps.every((step) => step.value.kind !== 'cell' || (cells[step.value.cell] ?? '').trim() !== ''))
@@ -694,48 +664,20 @@ export class LearningRuntime {
   }
 
   /**
-   * "Do the remaining N like this": one card shows the whole program; once
-   * approved, each step is pre-approved for its exact tool + args, once, and
-   * the program runs step by step through the bridge (so policy, taint,
-   * strict mode, pause and kill switch still apply to every step).
+   * "Do the remaining N like this": the program goes to the bridge as one
+   * `browser_run`, so the extension shows its single program card (every
+   * step's payload, bound to this page) and each step then claims that
+   * approval through run-program.ts; forced, per-call and off-origin cards
+   * still ask, and every step keeps the full dispatch path.
    */
-  async runSuggestion(sessionId: string | undefined, signal: AbortSignal): Promise<unknown> {
+  async runSuggestion(sessionId: string | undefined): Promise<unknown> {
     const suggestion = this.suggestion
     if (suggestion === undefined || !this.settings.watchMe) throw new Error('There is no suggestion to run.')
     const tab = await chrome.tabs.get(suggestion.tabId)
     if (originOf(tab.url) !== suggestion.origin) throw new Error('The watched tab left the page.')
-    const payload = JSON.stringify(suggestion.program, null, 2)
-    const prompt: ApprovalPrompt = {
-      kind: 'action',
-      action: 'browser_program',
-      summary: zh()
-        ? `按同样方式完成剩余 ${String(suggestion.remaining)} 项（${String(suggestion.program.length)} 步，${suggestion.origin}）`
-        : `Do the remaining ${String(suggestion.remaining)} like this (${String(suggestion.program.length)} steps on ${suggestion.origin})`,
-      origins: [suggestion.origin],
-      canTrust: false,
-      forced: true,
-      perCallOnly: true,
-      details: [
-        { kind: 'text', value: zh() ? '批准后，下面的每一步按原样各执行一次；站点规则、严格模式、暂停和紧急停止仍然生效。' : 'Approving runs each step below once, exactly as shown; site rules, strict mode, pause, and the kill switch still apply.', masked: false, label: zh() ? '为何需要您的批准' : 'Why this needs your approval' },
-        { kind: 'payload', value: payload },
-      ],
-      binding: approvalBinding({ action: 'browser_program', args: { program: suggestion.program }, origins: [suggestion.origin] }),
-    }
-    const authorization = await this.deps.authorize(prompt, sessionId, tab.windowId, signal)
-    if (authorization !== 'approved') throw new Error(zh() ? '未批准该程序。' : `The program was not approved (${authorization}).`)
-    const grant: ProgramGrant = { sessionKey: sessionId ?? NO_SESSION, origin: suggestion.origin, remaining: new Map(), expiresAt: this.now() + PROGRAM_GRANT_TTL_MS }
-    for (const step of suggestion.program) {
-      const key = canonicalJson({ tool: step.tool, args: step.args })
-      grant.remaining.set(key, (grant.remaining.get(key) ?? 0) + 1)
-    }
-    this.grants.push(grant)
     // The user's own input from here on is the program, not new teaching.
     await this.stopWatching()
-    try {
-      return await this.bridgeCall(METHODS.programRun, { ...(sessionId === undefined ? {} : { sessionId }), steps: suggestion.program }, PROGRAM_RUN_TIMEOUT_MS)
-    } finally {
-      this.grants.splice(this.grants.indexOf(grant), 1)
-    }
+    return this.bridgeCall(METHODS.programRun, { ...(sessionId === undefined ? {} : { sessionId }), steps: suggestion.program }, PROGRAM_RUN_TIMEOUT_MS)
   }
 
   // ---- panel port ----
@@ -813,7 +755,7 @@ export class LearningRuntime {
           await this.stopWatching()
           return reply(true)
         case 'learning.watch.run':
-          return reply(await this.runSuggestion(sessionId, new AbortController().signal))
+          return reply(await this.runSuggestion(sessionId))
         case 'learning.driver.save':
           return reply(await this.saveDriver(Number(message.index), isRecord(message.edits) ? message.edits as { name?: string; description?: string } : {}))
         case 'learning.driver.discard':

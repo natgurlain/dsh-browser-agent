@@ -480,6 +480,13 @@ function mountBridge(
       scheduleFile: dshHomePath(LEARNING_SCHEDULE_FILE_NAME),
       ownsSession: (sessionId) => fenced.allowsSession(sessionId, new AbortController().signal, 'own'),
       markTainted: (sessionId) => { taint.mark(sessionId, 'browser_failure_fixture') },
+      ...(auditLog === undefined ? {} : {
+        audit: (sessionId, entry) => {
+          void auditLog.append(sessionId, { kind: 'fixture', ...entry }).catch((error: unknown) => {
+            ctx.logger.warn(`browser bridge: audit log write failed: ${error instanceof Error ? error.message : String(error)}`)
+          })
+        },
+      }),
     })
     return () => {
       learning?.dispose()

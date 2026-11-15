@@ -305,7 +305,7 @@ describe('site drivers', () => {
     expect(driver.tokens).toEqual([{ header: 'x-csrftoken', source: { kind: 'cookie', name: 'csrftoken' } }])
     expect(JSON.stringify(driver)).not.toMatch(/tok-123456789|sess-abcdefgh|zzz/)
     expect(proposal.droppedHeaders).toEqual(['x-api-key'])
-    expect(siteDriverToolName(driver)).toBe('site_shop_example_post_items')
+    expect(siteDriverToolName(driver)).toBe('browser_site_shop_example_post_items')
     const request = buildDriverRequest(driver, { sku: 'B"1', qty: 3 })
     expect(request.body).toBe('{"sku":"B\\"1","qty":"3","csrf":"{{@cookie:csrftoken}}"}')
     expect(describeDriverRequest(request)).toMatch(/x-csrftoken: <from page cookie "csrftoken">/)
@@ -360,26 +360,29 @@ describe('learning mount', () => {
   it('registers tools only while the extension reports the feature on, and drops them on disconnect', async () => {
     const root = tempDir()
     const { ctx, registered } = fakeCtx(root)
-    const requestTool = vi.fn(async (name: string) => ({ text: `${name} ok` }))
+    const requestTool = vi.fn(async (name: string) => name === 'browser_run' ? { programId: 'program-1' } : { text: `${name} ok` })
     const mount = mountLearning(ctx, { requestTool } as never, { toolTimeoutMs: 1000, workspacePath: root, scheduleFile: join(root, 's.json'), ownsSession: async () => true })
     const rpc = (method: string, payload: unknown, connection = 'c1') => mount.rpc(method, payload, { connection, allowsSession: async (id) => id !== 'foreign' })!
     expect(registered.size).toBe(0)
     expect(await rpc(LEARNING_METHODS.saveWorkflow, { workflow: baseWorkflow() })).toMatchObject({ ok: false, error: { code: 'disabled' } })
     const driver = { format: 'dsh-site-driver/v1', origin: 'https://shop.example', name: 'search', description: 'Search', method: 'GET', path: '/s?q={{q}}', headers: {}, tokens: [], params: [{ name: 'q' }] }
     expect(await rpc(LEARNING_METHODS.state, { workflows: true, siteDrivers: [driver] })).toMatchObject({ ok: true })
-    expect([...registered.keys()].sort()).toEqual(['browser_workflow_list', 'browser_workflow_run', 'site_shop_example_search'])
+    expect([...registered.keys()].sort()).toEqual(['browser_site_shop_example_search', 'browser_workflow_list', 'browser_workflow_run'])
     const saved = await rpc(LEARNING_METHODS.saveWorkflow, { workflow: baseWorkflow() })
     expect(saved).toMatchObject({ ok: true, result: { relativePath: 'browser-workflows/add-contact.workflow.json' } })
     expect(await rpc(LEARNING_METHODS.saveWorkflow, { sessionId: 'foreign', workflow: baseWorkflow() })).toMatchObject({ ok: false })
     const listed = await registered.get('browser_workflow_list')!.execute({}, { signal: new AbortController().signal })
     expect((listed as { text: string }).text).toMatch(/add-contact \(4 steps/)
-    await registered.get('site_shop_example_search')!.execute({ q: 'x' }, { signal: new AbortController().signal })
+    await registered.get('browser_site_shop_example_search')!.execute({ q: 'x' }, { signal: new AbortController().signal })
     expect(requestTool).toHaveBeenCalledWith('browser_site_driver', { origin: 'https://shop.example', driver: 'search', params: { q: 'x' } }, expect.anything(), 1000)
     const steps = [{ tool: 'browser_click', args: { selector: '#a' } }]
     expect(await rpc(LEARNING_METHODS.programRun, { steps })).toMatchObject({ ok: false, error: { code: 'disabled' } })
     await rpc(LEARNING_METHODS.state, { watchMe: true }, 'c2')
     const program = await rpc(LEARNING_METHODS.programRun, { steps }, 'c2')
     expect(program).toMatchObject({ ok: true, result: { report: { status: 'completed' } } })
+    // "Do the remaining N" runs as one browser_run: one program card, then each step tagged with the program.
+    expect(requestTool).toHaveBeenCalledWith('browser_run', { steps }, expect.anything(), 1000, undefined, undefined, undefined)
+    expect(requestTool).toHaveBeenCalledWith('browser_click', { selector: '#a' }, expect.anything(), 1000, undefined, undefined, { id: 'program-1', step: 0 })
     // Watch me alone does not open the workflow methods.
     expect(await rpc(LEARNING_METHODS.listWorkflows, {}, 'c2')).toMatchObject({ ok: false, error: { code: 'disabled' } })
     mount.disconnected('c2')

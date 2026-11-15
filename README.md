@@ -80,6 +80,17 @@ Before every click the target's center is hit-tested; a target covered by anothe
 
 Set `mcp: { enabled: true }` in the `bridge-browser` plugin config. Then register the stdio shim `packages/browser/mcp-server/bin/dsh-browser-mcp.mjs` with your MCP client, for example `claude mcp add dsh-browser -- node /abs/path/to/dsh-browser-mcp.mjs`. Every MCP call goes through the same approval cards, site policy, taint rules, kill switch and audit log as DSH's own sessions. Each card names the MCP client that is asking. Setup snippets for Cursor and Codex are in [packages/browser/mcp-server/README.md](packages/browser/mcp-server/README.md).
 
+### Learning features (experimental, all off by default)
+
+Turn them on in the side panel under **Settings → Learning (experimental)**. Every replayed or learned action still passes the pause gate, site policy, taint rules, kill switch, approval cards and audit log.
+
+- **Save as workflow.** With "Record runs" on, the agent's successful steps are kept in memory together with how to find each element again: role, accessible name, text, and a CSS fallback. **Save as workflow** writes them to `browser-workflows/<name>.workflow.json` in the session workspace. You choose which typed values become parameters. Values typed into sensitive fields are never stored; they become required parameters instead. Each saved workflow is also offered as a DSH skill.
+  - `browser_workflow_run` replays a workflow and looks up every element fresh. When the element is gone or ambiguous it stops and hands the step to the model.
+  - The panel can schedule a workflow to run in its own conversation, at most once per minute. Its approval cards still ask and fail closed when nobody answers. Workflows with sensitive inputs cannot be scheduled.
+- **Watch me.** While watching, your own clicks and typing on the tab are recorded. Passwords are never recorded and sensitive fields are masked. After two repetitions over table or list rows, the panel offers **Do the remaining N like this**, which runs as a single `browser_run` program behind one card.
+- **Site drivers** (Chrome only; developer tools must be allowed). For sites you list, the same-origin request behind an agent action is proposed as a typed tool (`browser_site_<host>_<name>`). Nothing is saved until you approve it, and cookies, tokens and sensitive fields are never stored: tokens are read from the page each time. Every use shows the exact request on its own card. If a driver fails, the agent goes back to the page UI. Drivers can be exported and imported as JSON.
+- **Failure fixtures.** A failed step saves a sanitized copy of the page, with sensitive values masked and scripts removed, plus the intended action under `browser-fixtures/` in the session workspace. Pages that are blocked or not shared are skipped, and each save is recorded in the audit log. `node benchmark/import-fixtures.mjs <dir>` turns these files into benchmark tasks. `benchmark/online-mind2web/` loads an Online-Mind2Web subset at runtime and renders a static leaderboard.
+
 ## Detailed installation and usage
 
 Requirements: Node.js `>=24.9.0`, Corepack/pnpm, and Chrome 125+ or Firefox 140+. Windows additionally needs Windows PowerShell 5.1, which ships with Windows, or PowerShell 7+.

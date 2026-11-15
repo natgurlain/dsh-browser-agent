@@ -21,9 +21,11 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { BridgeServer } from '../server.ts'
 import { BridgeToolError, toolCallIdArg } from '../server.ts'
+import { auditResultDigest, redactAuditUrl } from '../audit-log.ts'
 import { workspaceWriteTarget } from '../workspace-write.ts'
 import { parseFixtureInput, saveFixture } from './fixtures.ts'
-import { createSequentialExecutor, renderReplayReport, type ProgramStep, type StepCall, type WorkflowExecutor } from './replay.ts'
+import { createSequentialExecutor, renderReplayReport, type BrowserProgramRunner, type ProgramStep, type ReplayReport, type StepCall, type WorkflowExecutor } from './replay.ts'
+import { MAX_PROGRAM_STEPS as BROWSER_RUN_MAX_STEPS, parseProgram as parseBrowserRunProgram, renderProgramOutcome, runProgram as runBrowserRun } from '../run-program.ts'
 import { parseScheduleTiming, WorkflowSchedules, type ScheduleServiceLike } from './schedules.ts'
 import { parseSiteDrivers, siteDriverToolName, type SiteDriverSummary } from './site-drivers.ts'
 import { listWorkflows, loadWorkflow, registerWorkflowSkills, saveWorkflow, workspaceRootOf, type SkillsServiceLike } from './store.ts'
@@ -41,8 +43,8 @@ export const LEARNING_METHODS = {
   saveFixture: 'bridge.learning.fixture.save',
 } as const
 
-/** Most steps a "Watch me" program may hold. */
-const MAX_PROGRAM_STEPS = 100
+/** Most steps a "Watch me" program may hold (one `browser_run`). */
+const MAX_PROGRAM_STEPS = BROWSER_RUN_MAX_STEPS
 
 /** Tools a program step may call. */
 const PROGRAM_TOOLS = new Set(['browser_click', 'browser_type', 'browser_select', 'browser_press', 'browser_scroll', 'browser_wait'])
@@ -76,6 +78,8 @@ export interface LearningOptions {
   ownsSession: (sessionId: string) => Promise<boolean>
   /** Mark a session tainted: a fixture puts page content where its file tools can read it. */
   markTainted?: (sessionId: string) => void
+  /** Record a saved fixture in the session's keyed audit chain. */
+  audit?: (sessionId: string | undefined, entry: { tool: string; url: string; decision: string; resultDigest?: string }) => void
 }
 
 /** The handle `index.ts` wires into the server. */
@@ -114,6 +118,26 @@ export function bridgeStepCall(bridge: Pick<BridgeServer, 'requestTool'>, toolTi
   }
 }
 
+/**
+ * A `browser_run`-backed program runner: one program card in the extension,
+ * then each step claims it (run-program.ts), every step through the full path.
+ */
+export function browserRunRunner(bridge: Pick<BridgeServer, 'requestTool'>, toolTimeoutMs: number, sessionId: string | undefined, toolCallId?: string): BrowserProgramRunner {
+  return async (steps, signal) => {
+    const parsed = parseBrowserRunProgram(steps.map((step) => ({ tool: step.tool, args: step.args })))
+    const outcome = await runBrowserRun(bridge, parsed, {
+      signal, ...(sessionId === undefined ? {} : { sessionId }), ...(toolCallId === undefined ? {} : { toolCallId }),
+    }, { toolTimeoutMs })
+    const status: ReplayReport['status'] = outcome.stop === 'completed' ? 'completed' : outcome.stop === 'cancelled' ? 'cancelled' : 'failed'
+    return {
+      status,
+      steps: outcome.steps.map((step) => ({ step: step.step - 1, tool: step.tool, status: step.ok && step.guard?.ok !== false ? 'done' as const : 'failed' as const, message: step.text })),
+      ...(status === 'completed' ? {} : { stoppedAt: Math.max(0, outcome.steps.length - 1) }),
+      text: renderProgramOutcome(outcome, parsed.length),
+    } as ReplayReport
+  }
+}
+
 /** Validate a "Watch me" program sent by the panel. */
 export function parseProgram(value: unknown): ProgramStep[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_PROGRAM_STEPS) {
@@ -139,7 +163,7 @@ export function mountLearning(
   ctx: Context,
   bridge: Pick<BridgeServer, 'requestTool'>,
   options: LearningOptions,
-  executorFor: (call: StepCall) => WorkflowExecutor = createSequentialExecutor,
+  executorFor: (call: StepCall, runBrowserProgram?: BrowserProgramRunner) => WorkflowExecutor = createSequentialExecutor,
 ): LearningMount {
   const states = new Map<string, ConnectionState>()
   const schedules = new WorkflowSchedules(
@@ -278,8 +302,10 @@ export function mountLearning(
         if (method === LEARNING_METHODS.saveFixture) {
           if (!featureOn(context.connection, 'fixtures')) return { ok: false, error: { code: 'disabled', message: 'failure fixtures are turned off' } }
           const sessionId = await ownedSession(body, context)
-          const saved = await saveFixture(sessionWriteTarget(sessionId), parseFixtureInput(body.fixture))
+          const fixture = parseFixtureInput(body.fixture)
+          const saved = await saveFixture(sessionWriteTarget(sessionId), fixture)
           if (sessionId !== undefined) options.markTainted?.(sessionId)
+          options.audit?.(sessionId, { tool: 'browser_failure_fixture', url: redactAuditUrl(fixture.url), decision: fixture.failure, resultDigest: auditResultDigest(fixture.page.content) })
           return { ok: true, result: saved }
         }
         if (method === LEARNING_METHODS.programRun) {
@@ -319,8 +345,11 @@ export function mountLearning(
             const controller = new AbortController()
             const timer = setTimeout(() => { controller.abort() }, REPLAY_TIMEOUT_MS)
             try {
-              const report = await executorFor(bridgeStepCall(bridge, options.toolTimeoutMs, sessionId)).runProgram(program, { signal: controller.signal })
-              return { ok: true, result: { report, text: renderReplayReport('watch-me program', report, program.length) } }
+              const report = await executorFor(
+                bridgeStepCall(bridge, options.toolTimeoutMs, sessionId),
+                browserRunRunner(bridge, options.toolTimeoutMs, sessionId),
+              ).runProgram(program, { signal: controller.signal })
+              return { ok: true, result: { report, text: report.text ?? renderReplayReport('watch-me program', report, program.length) } }
             } finally {
               clearTimeout(timer)
             }

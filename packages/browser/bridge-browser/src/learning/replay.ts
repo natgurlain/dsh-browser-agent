@@ -56,6 +56,8 @@ export interface ReplayReport {
   stoppedAt?: number
   /** Candidates the model can choose from when a lookup was ambiguous. */
   candidates?: FoundCandidate[]
+  /** Rendered outcome when a `browser_run` ran the program. */
+  text?: string
 }
 
 /** A concrete program step (no locator: already resolved). */
@@ -185,7 +187,14 @@ export async function locateElement(locator: WorkflowLocator, call: StepCall, si
  * The default executor: one browser tool call at a time through `call`.
  * @param call - tool caller bound to the session.
  */
-export function createSequentialExecutor(call: StepCall): WorkflowExecutor {
+/**
+ * Runs a concrete program as one `browser_run` (one program card, then each
+ * step as an ordinary tool call claiming that approval). Supplied by the
+ * bridge; absent in unit tests, where programs run step by step.
+ */
+export type BrowserProgramRunner = (steps: readonly ProgramStep[], signal: AbortSignal) => Promise<ReplayReport>
+
+export function createSequentialExecutor(call: StepCall, runBrowserProgram?: BrowserProgramRunner): WorkflowExecutor {
   const runOne = async (tool: string, args: Record<string, unknown>, signal: AbortSignal, report: StepReport): Promise<StepReport> => {
     const result = await call(tool, args, signal)
     if (result.ok) return { ...report, status: 'done' }
@@ -226,6 +235,7 @@ export function createSequentialExecutor(call: StepCall): WorkflowExecutor {
       return { status: 'completed', steps }
     },
     async runProgram(program, options) {
+      if (runBrowserProgram !== undefined && (options.fromStep ?? 0) === 0) return runBrowserProgram(program, options.signal)
       const steps: StepReport[] = []
       const from = Math.max(0, options.fromStep ?? 0)
       for (const [index, step] of program.entries()) {
