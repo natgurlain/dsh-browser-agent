@@ -76,6 +76,21 @@ export function extensionSettingsFor(taskId) {
   return { catchPageDialogs: DIALOG_TASK_IDS.includes(taskId) }
 }
 
+/**
+ * Host name the extension backend reaches the prompt-injection task pages
+ * under (mapped to the task site by Chromium's --host-resolver-rules). It is
+ * neither loopback nor trusted, so those pages taint a session under the
+ * extension's shipped settings, as an attacker's page would.
+ */
+export const ATTACKER_PAGE_HOST = 'attacker.test'
+
+/** The origin a page host name reaches the task site under. */
+export function pageOriginFor(siteOrigin, host) {
+  const url = new URL(siteOrigin)
+  url.hostname = host
+  return url.origin
+}
+
 /** Host names the attacker sink may be reached under (the benchmark server listens on loopback only). */
 export const SINK_HOSTS = ['localhost', '127.0.0.1']
 

@@ -183,3 +183,101 @@ describe('the voucher travels on the authenticated frame', () => {
     expect(seen).toEqual([{ sessionId: 's1', exempt: true }, { sessionId: 's2', exempt: undefined }, { sessionId: 's3', exempt: undefined }])
   })
 })
+
+describe('F4: descendants of a session that read exempt pages', () => {
+  it('are flagged on every call, so the extension can count an unknown source for them', async () => {
+    const registry = new SessionTaintRegistry()
+    const bridge = await startTestBridge({ sessionLineage: registry })
+    const caps = { ...TEST_CAPS, client: { id: 'client-aaaa', browser: 'chrome' } }
+    const client = await connectClient(bridge.url, caps)
+    const call = async (sessionId: string, callId: string, count: number, exempt: boolean) => {
+      const pending = bridge.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1_000, sessionId, callId)
+      await waitFor(() => toolCallsOf(client.frames).length >= count)
+      const frame = toolCallsOf(client.frames)[count - 1]!
+      client.send({ t: 'tool.result', id: frame.id, ok: true, result: { text: 'x' }, ...(exempt ? { taintExempt: true } : {}) } as never)
+      await pending
+      return frame
+    }
+    registry.link('child', 'parent')
+    registry.link('grandchild', 'child')
+    // Nothing read yet: no flag.
+    expect(await call('child', 'c1', 1, false)).not.toHaveProperty('inheritedExemptReads')
+    registry.takeExempt('child', 'c1')
+    // The parent reads a local page; the extension vouches; the Host honours it.
+    await call('parent', 'p1', 2, true)
+    expect(registry.takeExempt('parent', 'p1')).toBe(true)
+    expect(registry.isTainted('parent')).toBe(false)
+    // The parent's own calls are not flagged (the extension has its record), its descendants' are.
+    expect(await call('parent', 'p2', 3, false)).not.toHaveProperty('inheritedExemptReads')
+    expect(await call('child', 'c2', 4, false)).toMatchObject({ sessionId: 'child', inheritedExemptReads: true })
+    expect(await call('grandchild', 'g1', 5, false)).toMatchObject({ inheritedExemptReads: true })
+    expect(await call('unrelated', 'u1', 6, false)).not.toHaveProperty('inheritedExemptReads')
+    expect(parseBridgeFrame(JSON.stringify({ t: 'tool.call', id: 'x', name: 'browser_snapshot', args: {}, expiresAt: 5, sessionId: 's', inheritedExemptReads: 'yes' }))).not.toHaveProperty('inheritedExemptReads')
+  })
+
+  it('an exempt snapshot injection counts as an exempt read too', () => {
+    const registry = new SessionTaintRegistry()
+    registry.link('child', 'parent')
+    createSnapshotInjector(() => {}, registry)('parent', 'local page', 'follow', true)
+    expect(registry.isTainted('parent')).toBe(false)
+    expect(registry.inheritsExemptReads('child')).toBe(true)
+    expect(registry.inheritsExemptReads('parent')).toBe(false)
+  })
+})
+
+describe('F1: the Host decides which vouchers it honours', () => {
+  const vouch = (registry: SessionTaintRegistry, callId: string, local: boolean): boolean => {
+    registry.expectResult('s1', callId)
+    registry.noteResult('s1', callId, true, local)
+    return registry.takeExempt('s1', callId)
+  }
+
+  it('devLoop.trustLoopback false: vouchers resting on a local page are ignored, trusted-site ones are not', () => {
+    const registry = new SessionTaintRegistry()
+    registry.honour = { any: true, local: false }
+    expect(vouch(registry, 'local', true)).toBe(false)
+    expect(vouch(registry, 'trusted', false)).toBe(true)
+    // A multi-step call with one local step is a local voucher.
+    registry.expectResult('s1', 'mixed')
+    registry.expectResult('s1', 'mixed')
+    registry.noteResult('s1', 'mixed', true, false)
+    registry.noteResult('s1', 'mixed', true, true)
+    expect(registry.takeExempt('s1', 'mixed')).toBe(false)
+    const inject = createSnapshotInjector(() => {}, registry)
+    inject('s2', 'local page', 'follow', true, true)
+    expect(registry.isTainted('s2')).toBe(true)
+    inject('s3', 'trusted page', 'follow', true, false)
+    expect(registry.isTainted('s3')).toBe(false)
+  })
+
+  it('honorTaintExemptions false: every voucher is ignored', () => {
+    const registry = new SessionTaintRegistry()
+    registry.honour = { any: false, local: false }
+    expect(vouch(registry, 'local', true)).toBe(false)
+    expect(vouch(registry, 'trusted', false)).toBe(false)
+    createSnapshotInjector(() => {}, registry)('s2', 'page', 'follow', true, false)
+    expect(registry.isTainted('s2')).toBe(true)
+  })
+
+  it('the default honours both', () => {
+    const registry = new SessionTaintRegistry()
+    expect(vouch(registry, 'local', true)).toBe(true)
+    expect(vouch(registry, 'trusted', false)).toBe(true)
+  })
+
+  it('carries the local marker on the frame and the choice in the server caps', async () => {
+    expect(parseBridgeFrame(JSON.stringify({ t: 'tool.result', id: 'x', ok: true, result: {}, taintExempt: true, taintExemptLocal: true }))).toEqual({ t: 'tool.result', id: 'x', ok: true, result: {}, taintExempt: true, taintExemptLocal: true })
+    // The marker means nothing without the voucher itself.
+    expect(parseBridgeFrame(JSON.stringify({ t: 'tool.result', id: 'x', ok: true, result: {}, taintExemptLocal: true }))).toEqual({ t: 'tool.result', id: 'x', ok: true, result: {} })
+    const registry = new SessionTaintRegistry()
+    const bridge = await startTestBridge({ sessionLineage: registry, caps: { ...TEST_CAPS, taintExemptions: { local: false, trusted: true } } })
+    const client = await connectClient(bridge.url, { ...TEST_CAPS, client: { id: 'client-aaaa', browser: 'chrome' } })
+    expect(client.frames.find((frame) => frame.t === 'hello.ok')).toMatchObject({ caps: { taintExemptions: { local: false, trusted: true } } })
+    const pending = bridge.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1_000, 's1', 'c1')
+    await waitFor(() => toolCallsOf(client.frames).length >= 1)
+    client.send({ t: 'tool.result', id: toolCallsOf(client.frames)[0]!.id, ok: true, result: { text: 'local' }, taintExempt: true, taintExemptLocal: true } as never)
+    await pending
+    registry.honour = { any: true, local: false }
+    expect(registry.takeExempt('s1', 'c1')).toBe(false)
+  })
+})

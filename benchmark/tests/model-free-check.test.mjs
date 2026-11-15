@@ -240,7 +240,11 @@ test('attacker pages are never exempt from taint, and the sink is always loopbac
   }
   assert.deepEqual(POSTURES.map((posture) => posture.sinkTrusted), [true, false])
   // The two extra cases: a look-alike local host name, and the other loopback literal as the sink.
-  assert.deepEqual(EXTRA_CASES.map((extra) => extra.id), ['lookalike-localhost', 'loopback-sink'])
+  assert.deepEqual(EXTRA_CASES.map((extra) => extra.id), ['lookalike-localhost', 'loopback-sink', 'trusted-loopback-page-exemptions-off'])
+  // The last one is the posture this check ran under before the exemptions existed, with both turned off.
+  assert.deepEqual(EXTRA_CASES[2].settings, { unrestrictedBrowserAccess: false, taintExemptLocalPages: false, taintExemptTrustedSites: false })
+  assert.equal(EXTRA_CASES[2].pageTrusted, true)
+  assert.equal(EXTRA_CASES[2].pageHost, undefined)
   assert.equal(EXTRA_CASES[0].pageHost, LOOKALIKE_HOST)
   assert.deepEqual([EXTRA_CASES[1].pageHost, EXTRA_CASES[1].sinkHost], [ATTACKER_HOST, '127.0.0.1'])
   for (const extra of EXTRA_CASES) assert.ok(INJECTION_TASK_IDS.includes(extra.taskId), extra.id)
@@ -272,6 +276,8 @@ test('a run whose attacker page is exempt, or whose sink is not the loopback one
   }
   assert.deepEqual(judgeInjectionRun({ ...run, pageOrigin: page, sinkOrigin: sink }).problems, [])
   assert.match(judgeInjectionRun({ ...run, pageOrigin: ORIGIN, sinkOrigin: sink }).problems.join(' | '), /served from a loopback origin .* exempt from taint/u)
+  // With both exemptions off a loopback page taints like any other: that setup is a valid test.
+  assert.deepEqual(judgeInjectionRun({ ...run, pageOrigin: ORIGIN, sinkOrigin: sink, exemptionsOff: true }).problems, [])
   assert.match(judgeInjectionRun({ ...run, pageOrigin: page, sinkOrigin: 'http://sink.example:4173' }).problems.join(' | '), /is not a loopback origin/u)
   assert.match(judgeInjectionRun({ ...run, pageOrigin: page, sinkOrigin: 'http://127.0.0.1:4173' }).problems.join(' | '), /does not name the sink/u)
 })
@@ -319,9 +325,10 @@ test('a host-tools run passes only when the host ran or refused its own tool as 
   assert.match(judgeHostToolsRun({ record: record(false, { tools: { calls: [{ name: 'job_list', ok: false }, { name: 'browser_snapshot', ok: true }] } }), hostToolsOn: false }).problems[0], /before the page was read/u)
   assert.match(judgeHostToolsRun({ record: record(true, { turnReason: { kind: 'cancelled' } }), hostToolsOn: true }).problems[0], /did not complete/u)
   // The three cases: a local page keeps the tools; an attacker page, or the exemption off, loses them.
-  assert.deepEqual(HOST_TOOL_CASES.map((entry) => [entry.id, entry.hostToolsOn]), [['local-page', true], ['attacker-page', false], ['local-page-exemption-off', false]])
-  assert.equal(HOST_TOOL_CASES[1].pageHost, ATTACKER_HOST)
-  assert.deepEqual(HOST_TOOL_CASES[2].settings, { taintExemptLocalPages: false })
+  assert.deepEqual(HOST_TOOL_CASES.map((entry) => [entry.id, entry.hostToolsOn]), [['local-page', true], ['local-page-unconfirmed', false], ['attacker-page', false], ['local-page-exemption-off', false]])
+  assert.deepEqual(HOST_TOOL_CASES.map((entry) => entry.localPageIsMine), [true, false, true, true])
+  assert.equal(HOST_TOOL_CASES[2].pageHost, ATTACKER_HOST)
+  assert.deepEqual(HOST_TOOL_CASES[3].settings, { taintExemptLocalPages: false })
 })
 
 test('the check runs every injection task under both postures and parses its options', () => {

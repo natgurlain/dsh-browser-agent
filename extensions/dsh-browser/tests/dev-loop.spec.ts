@@ -189,5 +189,17 @@ describe('dev-loop panel RPCs', () => {
     expect(gateway).toHaveBeenLastCalledWith(BRIDGE_DEVLOOP_UNLINK_METHOD, { sessionId: 's1' })
     expect(await controller.list()).toEqual([])
   })
+
+  it('tells the worker which origin was linked (the user said this app is theirs), only for an accepted link', async () => {
+    const { browser } = fakeBrowser({ 1: { id: 1, url: 'http://localhost:3000/app' }, 2: { id: 2, url: 'http://localhost:4000/' } })
+    const gateway = vi.fn(async (method: string, payload: unknown) => method === BRIDGE_DEVLOOP_LINK_METHOD && (payload as { url: string }).url.startsWith('http://localhost:3000')
+      ? { type: 'server-response', result: { ok: true, value: { link: { origin: 'http://localhost:3000' } } } }
+      : { type: 'server-response', result: { ok: false } })
+    const linked: string[] = []
+    const rpc = createDevLoopPanelRpc(new DevLoopController(browser), gateway, browser.getTab, (origin) => { linked.push(origin) })
+    await rpc(BRIDGE_DEVLOOP_LINK_METHOD, { sessionId: 's1', tabId: 1 })
+    await rpc(BRIDGE_DEVLOOP_LINK_METHOD, { sessionId: 's2', tabId: 2 })
+    expect(linked).toEqual(['http://localhost:3000'])
+  })
 })
 

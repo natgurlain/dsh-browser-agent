@@ -147,10 +147,10 @@ export class TaintTracker {
     const key = taintKey(sessionId)
     if (this.records.has(key)) return
     const known = this.exemptReads.get(key) ?? []
-    if (known.includes(UNKNOWN_SOURCE)) return
     const merged = new Set(known)
     for (const origin of origins) merged.add(origin)
     if (merged.size === known.length) return
+    // Past the bound only "unknown" is kept: it already means no origin is ever the only source.
     this.exemptReads.set(key, merged.size > MAX_EXEMPT_READS ? [UNKNOWN_SOURCE] : [...merged].sort())
     this.persistExempt()
   }
@@ -210,6 +210,21 @@ export class TaintTracker {
     const key = taintKey(sessionId)
     if (this.exemptReads.delete(key)) this.persistExempt()
     if (!this.records.delete(key)) return false
+    this.changed(key)
+    return true
+  }
+
+  /**
+   * Lift a session's taint because every source became exempt (the user
+   * trusted them): the record goes, but its sources stay remembered as exempt
+   * reads, so they are sources again the moment the session is tainted anew.
+   */
+  lift(sessionId: string | undefined): boolean {
+    const key = taintKey(sessionId)
+    const record = this.records.get(key)
+    if (record === undefined) return false
+    this.records.delete(key)
+    this.noteExemptRead(sessionId, record.sources)
     this.changed(key)
     return true
   }

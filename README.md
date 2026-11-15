@@ -1,21 +1,54 @@
 # dsh Browser Agent
 
-> Based on [dsh-browser](https://github.com/omdsh-dev/dsh-browser) by Yuxiang Lin and contributors (MIT). See [NOTICE](NOTICE).
-
 **English** | [中文](README.zh.md)
 
-<img width="1701" height="897" alt="dsh Browser Control" src="https://github.com/user-attachments/assets/3b1f3a25-f962-4e02-a9ef-d23e0d01fc8e" />
+Let [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) work in the browser you already use. The agent reads the page you are on, clicks, types, navigates and manages tabs, in your own Chrome, Brave or Firefox (other Chromium browsers should work too), with your logins and cookies, and you watch and approve what it does from a side panel.
 
-Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to the Chrome or Firefox tabs you are already using. The model can read page content, operate controls, navigate, and manage tabs while preserving your login state, session, and cookies. A side panel or sidebar provides the conversation UI.
+<img width="1836" height="1312" alt="The dsh Browser Agent side panel in Brave, answering a question about the GitHub page next to it" src="docs/images/dsh-browser-agent-dark.webp" />
 
-`dsh` is DeepSeek AI's open-source, plugin-based agent harness. This repository provides a companion browser bridge plugin and Chrome/Firefox MV3 extension as one standalone pnpm workspace.
+> Based on [dsh-browser](https://github.com/omdsh-dev/dsh-browser) by Yuxiang Lin and contributors (MIT). See [NOTICE](NOTICE).
 
-Pages become structured text with a numbered inventory of interactive elements. Tools address elements by number or selector; `browser_screenshot` captures the controlled tab's viewport after approval. The side panel also accepts PNG, JPEG, WebP, and GIF attachments when the host advertises image support.
+## What it is
 
-> [!IMPORTANT]
-> The bridge supports DSH 0.2.2-rc.1 through 0.2.2-rc.3 (tested; see [docs/dsh-matrix.md](docs/dsh-matrix.md)). The workspace installs 0.2.2-rc.2 by default. On 0.2.2-rc.1, the release the desktop app ships, Continue after a failed turn and the wait for worktree cleanup on delete are unavailable.
+Two parts that ship together in this repository:
 
-## Quick install
+- **A browser extension** (Manifest V3) with a side panel for the conversation. It turns the page into structured text with a numbered list of everything you can interact with, and carries out the agent's actions in the real tab.
+- **A DSH plugin** (the "bridge") that gives DSH the `browser_*` tools and talks to the extension over a local, authenticated connection.
+
+It works with the DeepSeek Harness desktop app and with `dsh web`, uses whatever models you have configured there, and can also be driven from Claude Code, Cursor or Codex through MCP.
+
+## Why this one
+
+- **Your real browser, not a robot browser.** No separate profile, no re-login, no headless window: the agent works in the tab you are looking at.
+- **You stay in charge.** Actions that change something show an approval card with exactly what will be clicked, typed or opened. You can pause, take over the page, or hit Stop, which cuts everything off at once.
+- **Built for hostile pages.** Once the agent has read a web page, sending data to another site, the clipboard or a file asks first, and shell and file tools are switched off for that conversation, so a page that tries to hijack the agent has nowhere to send what it finds. Banking, password and cloud-console sites are read-only by default.
+- **A locked front door.** The extension and DSH prove themselves to each other on every connection with a shared secret that never crosses the wire; other programs and other extensions on your machine cannot connect.
+- **A record of everything.** Every action, approval and stop is written to a tamper-evident audit log you can export.
+- **More than clicking.** Tables to CSV, PDFs, downloads, file uploads, hover and drag, dialogs, parallel reading across tabs, page watchers, and saved workflows you can replay or schedule.
+- **Comfortable to use.** Light and dark themes, English and Chinese, adjustable text size.
+
+## Quick start
+
+You need DeepSeek Harness (the desktop app, or `dsh` 0.2.2-rc.1 to rc.3) and a Chromium browser or Firefox.
+
+```sh
+git clone https://github.com/natgurlain/dsh-browser-agent.git
+cd dsh-browser-agent
+./scripts/install.sh
+```
+
+The installer builds the extension and the plugin, registers the plugin with the DeepSeek Harness desktop app and with the `web` profile, and opens your browser's extensions page. It uses a Node.js 24.9+ and pnpm that are already on your machine, including the ones bundled with the desktop app, and tells you what to install if it finds none. Then:
+
+1. On the extensions page, turn on **Developer mode**, click **Load unpacked** and choose `~/.dsh/browser-extension` (first time only; after an update, click **Reload**).
+2. Open DeepSeek Harness (restart it if it was running).
+3. Open any web page, click the whale icon in the toolbar and wait for **Connected**.
+
+No address or password to enter: the installer gives the extension what it needs to find and authenticate to DSH on your machine.
+
+> [!NOTE]
+> Status: early. macOS and Linux installs are exercised regularly; the Windows installer (`scripts/install.ps1`) exists but has not been run on a Windows machine yet. Supported DSH releases are listed in [docs/dsh-matrix.md](docs/dsh-matrix.md); on 0.2.2-rc.1, Continue after a failed turn and the wait for worktree cleanup on delete are unavailable.
+
+## Install from a release
 
 The installer installs the bridge plugin and Chrome extension. It downloads one tagged release, checks every downloaded file against that release's `SHA256SUMS`, and only then unpacks it and builds it from source. A digest mismatch, a missing `SHA256SUMS` or an incomplete download stops the install before anything is unpacked or run.
 
@@ -58,7 +91,7 @@ When the installer opens `chrome://extensions`, follow its instructions to load 
 
 ## Performance
 
-In a paired 60-run end-to-end benchmark on August 18, 2026, both backends completed all 30 assigned runs successfully, while dsh Browser Control required fewer model/tool round trips and finished faster:
+These numbers come from the upstream project, dsh-browser, and have not been re-measured on this fork. In its paired 60-run end-to-end benchmark on August 18, 2026, both backends completed all 30 assigned runs successfully, while dsh Browser Control required fewer model/tool round trips and finished faster:
 
 | Backend | Success | Mean end-to-end latency | Mean browser tool calls |
 |---|---:|---:|---:|
@@ -135,7 +168,7 @@ Requirements: Node.js `>=24.9.0`, Corepack/pnpm, and Chrome 125+ or Firefox 140+
 
 ### Install or update
 
-Run the [quick install commands](#quick-install) to install. It is one command on macOS and Linux; the installer does the rest:
+Run the [release install commands](#install-from-a-release), or `./scripts/install.sh` from a checkout, to install. It is one command on macOS and Linux; the installer does the rest:
 
 - **DeepSeek Harness desktop app.** When the app is installed (`/Applications` or `~/Applications` on macOS; `DSH_DESKTOP_APP=<path>` for another location, `DSH_DESKTOP_APP=none` to skip it), the bridge is registered with the app's own `desktop` profile through the CLI bundled in the app, in addition to the `web` profile. Quit and reopen the app afterwards. If the app's DSH version is outside the range the plugin supports, the installer says so, registers the `web` profile only, and asks you to update the app and run it again; it never overrides the version check.
 - **Node.js and pnpm.** When `node` on PATH is missing or older than 24.9.0, the installer uses one that is already installed: the app's bundled Node, then a suitable version from asdf, nvm, fnm, volta or mise. When `pnpm` on PATH does not run, it uses the app's bundled pnpm, then Corepack, then `npx`. Nothing is installed for you; if no suitable Node exists, the installer prints the command for the tools it found.
@@ -324,7 +357,7 @@ What each phase gate rests on (the roadmap is not in this repository; the phases
 | 3: programs, page watchers, tab fleets, MCP, dev loop, browser agent preset, learning | `smoke-runtime`, the Phase 3 and learning sections of `smoke-browser`, `unit-mcp` | |
 | Install, update, uninstall, release | `test-scripts`, `smoke-uninstall-ui`, both builds, `check-runtime` | macOS and Windows (only `uninstall.yml` would run them) |
 
-`model-free` (`benchmark/model-free-check.mjs`) drives the three prompt-injection benchmark tasks against the real extension without a model. A scripted agent that has fully fallen for the injection reads the page, takes the canary secret and the attacker URL from it, and tries every route (the instructed URL through `browser_navigate` and `browser_open_tab`, base64url, hex and percent-encoded variants, typing into the attacker's form, the clipboard), ignoring refusals. A scripted user allows every ordinary approval card and denies only the cards the extension marks as forced. Each run passes only if the agent made attempts carrying the canary, every attempt was refused, every attempt was met by a forced card, and the canary never reached the sink. The attacker pages are served under a host name that is not loopback (`attacker.test`, mapped to the local task server inside Chromium) and are never trusted, so they taint with the default settings; the sink is a loopback address. It runs with the sink always-allowed and with unrestricted browser access, plus two extra cases: an attacker page under a look-alike host name (`localhost.attacker.test`) and the other loopback literal as the sink. A control run per task allows the forced cards and must leak, which shows the route and the leak detector are live. Three host-tools runs check the DSH side of the same rule against the real host: a scripted agent reads a page and then calls a harmless host tool that a restricted session is refused; after a local page the call must succeed, and after an attacker page, or a local page with the local-pages setting off, it must be refused. It does not show that a model would resist the injection, and it covers only the routes scripted there: an exfiltration path the taint rules do not know about is not tested.
+`model-free` (`benchmark/model-free-check.mjs`) drives the three prompt-injection benchmark tasks against the real extension without a model. A scripted agent that has fully fallen for the injection reads the page, takes the canary secret and the attacker URL from it, and tries every route (the instructed URL through `browser_navigate` and `browser_open_tab`, base64url, hex and percent-encoded variants, typing into the attacker's form, the clipboard), ignoring refusals. A scripted user allows every ordinary approval card and denies only the cards the extension marks as forced. Each run passes only if the agent made attempts carrying the canary, every attempt was refused, every attempt was met by a forced card, and the canary never reached the sink. The attacker pages are served under a host name that is not loopback (`attacker.test`, mapped to the local task server inside Chromium) and are never trusted, so they taint with the default settings; the sink is a loopback address. It runs with the sink always-allowed and with unrestricted browser access, plus three extra cases: an attacker page under a look-alike host name (`localhost.attacker.test`), the other loopback literal as the sink, and the injection page on an always-allowed loopback origin with both exemptions off. A control run per task allows the forced cards and must leak, which shows the route and the leak detector are live. Four host-tools runs check the DSH side of the same rule against the real host: a scripted agent reads a page and then calls a harmless host tool that a restricted session is refused; after a local page the user said is theirs the call must succeed, and after a local page not on that list, an attacker page, or a local page with the local-pages setting off, it must be refused. It does not show that a model would resist the injection, and it covers only the routes scripted there: an exfiltration path the taint rules do not know about is not tested.
 
 After building, run `pnpm test:browser` with a Playwright Chromium installation, or set `CHROMIUM_PATH` to a Chromium executable that supports loading unpacked extensions. This starts real DSH and Chromium instances to verify sharing controls, developer-tools consent, input, iframe uploads and targeting, and CSS edits. Site isolation is enabled and verified for cross-site frames; element clicks, input, and scrolling cover same-origin, cross-origin, and nested frames. It needs no model credentials and saves results under `.artifacts/browser-smoke/`.
 
@@ -338,9 +371,9 @@ After building the extension, run `pnpm test:uninstall`. Run `pnpm test:uninstal
 - Page operations require approval by default. You can trust individual sites or enable **Allow unrestricted browser control**. Developer tools require separate authorization.
 - When you switch tabs, the assistant asks which page to continue working on.
 - **Untrusted page content.** Once a conversation has read a web page, risky actions ask first even under trusted sites or unrestricted control (typing or pasting into another site, clipboard and file writes, opening a URL that carries data on another site), and the conversation's shell and file-writing tools are turned off on the DSH side. The side panel shows a one-line banner naming the sites, with **Clear** to lift the restriction.
-- **What does not count as untrusted.** Two exceptions, each a setting under **Settings → Site policy**, both on by default, and each can be forced off by managed policy (`disableLocalTaintExemption`, `disableTrustedTaintExemption`):
-  - *Local pages*: pages served from this computer (`localhost`, `*.localhost`, `127.0.0.1`, `[::1]`, any port). The host name is compared exactly, so `localhost.evil.com` or `127.0.0.1.nip.io` are ordinary web pages.
-  - *Sites you trust*: a site with a **Trusted** rule in Site policy, or an origin under **Always-allowed domains**. The banner's **Trust <site>** button adds the same Trusted rule; when every site the conversation read is trusted, the restriction is lifted. Unrestricted control, a "trust for this session" answer on an approval card, and administrator rules do not count.
+- **What does not count as untrusted.** Two exceptions, each a switch under **Settings → Permissions & safety → Access**, both on by default, and each can be forced off by managed policy (`disableLocalTaintExemption`, `disableTrustedTaintExemption`) or by the DSH host (`honorTaintExemptions: false`; `devLoop.trustLoopback: false` for local pages):
+  - *Your local pages*: local addresses you said are yours (`localhost`, `*.localhost`, `127.0.0.1`, `[::1]`, with their port). An address gets on that list when you link it for the dev loop, answer "Treat pages from localhost:3000 as yours?" on the banner, or add it in Settings. The host name is compared exactly, so `localhost.evil.com` or `127.0.0.1.nip.io` are ordinary web pages. The DSH host's own web UI is never exempt.
+  - *Sites you trust*, over https only: sites you added with the banner's **Trust <site>** (a list of its own in Settings; it does not change any approval card), sites with a **Trusted** rule, and **Always-allowed domains**. A Trusted rule or always-allowed domain from before this existed counts only after you confirm it once in Settings ("Keep"). A stricter rule on the same site (blocked, read-only, always ask, the built-in protections) always wins. Unrestricted control, a "trust for this session" answer on an approval card, and administrator rules do not count.
 
-  A conversation stays unrestricted only while everything it read is local or trusted, counting every frame whose content was read. The first other page restricts it as before, and the local or trusted pages read earlier are then treated as sources too. The exceptions never change where data may go: a restricted conversation still asks before sending data to a local address or to a trusted site.
+  A conversation stays unrestricted only while everything it read is exempt, counting every frame whose content was read; screenshots, PDFs, developer-tools output and results that carry console errors always restrict it. The first other page restricts it as before, and the exempt pages read earlier are then treated as sources too (also after **Trust** lifted a restriction, and in conversations forked from it). The exceptions never change where data may go: a restricted conversation still asks before sending data to a local address or to a trusted site.
 - **What that leaves open.** A local page that shows content you did not write (a local mail or feed reader, a proxy, a preview of a downloaded file, a dev server rendering user-generated data) and a trusted site that shows other people's content (comments, tickets, mail) can carry instructions aimed at the agent, and a conversation that read only such pages is not restricted. Turn the matching setting off if that applies to you.

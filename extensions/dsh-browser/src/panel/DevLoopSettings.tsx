@@ -16,6 +16,7 @@ import {
   BRIDGE_DEVLOOP_UNLINK_METHOD,
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { UiLocale } from '../i18n.ts'
+import { Callout, EntryList, LearnMore, SettingsGroup } from './SettingsKit.tsx'
 import { PANEL_COPY } from './strings.ts'
 
 /** The RPC slice of the panel API this section uses. */
@@ -32,9 +33,11 @@ export function candidateLabel(candidate: Candidate): string {
   return candidate.project === undefined ? name : `${candidate.project} — ${name}`
 }
 
-export function DevLoopSettings({ api, locale, activeTab }: {
+export function DevLoopSettings({ api, locale, activeTab, note }: {
   api: DevLoopApi
   locale: UiLocale
+  /** Shown beside the title: links apply at once, without Save. */
+  note?: string
   /** The tab the panel's window shows (resolved by the caller). */
   activeTab: () => Promise<{ id?: number; url?: string } | undefined>
 }): React.JSX.Element {
@@ -85,32 +88,37 @@ export function DevLoopSettings({ api, locale, activeTab }: {
   }
 
   return (
-    <section className="settings-panel dev-loop" aria-label={copy.title}>
-      <div>
-        <strong>{copy.title}</strong>
-        <small>{copy.help}</small>
-        <small className="dev-loop-warning">{copy.caution}</small>
-      </div>
-      {links.map((entry) => (
-        <div className="trusted-origin" key={entry.sessionId}>
-          <code>{entry.origin}</code>
-          <span>{entry.label ?? entry.sessionId.slice(0, 12)}</span>
-          <button onClick={() => unlink(entry.sessionId)}>{copy.unlink}</button>
+    <SettingsGroup title={copy.title} className="dev-loop" {...(note === undefined ? {} : { note })}>
+      <div className="setting-row">
+        <p className="setting-help">{copy.help}</p>
+        <LearnMore><p>{copy.more}</p><p>{copy.cautionMore}</p></LearnMore>
+        <div className="setting-row-body">
+          <Callout tone="caution"><p>{copy.caution}</p></Callout>
+          <EntryList
+            entries={links.map((entry) => ({
+              key: entry.sessionId,
+              value: entry.origin,
+              detail: entry.label ?? entry.sessionId.slice(0, 12),
+            }))}
+            empty={copy.noLinks}
+            actionText={copy.unlink}
+            onRemove={(entry) => unlink(entry.key)}
+          />
+          {candidates === null
+            ? <button type="button" className="secondary" onClick={pick}>{copy.linkTab}</button>
+            : candidates.length === 0
+              ? <p className="entry-empty">{copy.noSessions}</p>
+              : (
+                <div className="entry-add">
+                  <select aria-label={copy.sessionLabel} value={choice} onChange={(event) => setChoice(event.target.value)}>
+                    {candidates.map((candidate) => <option key={candidate.sessionId} value={candidate.sessionId}>{candidateLabel(candidate)}</option>)}
+                  </select>
+                  <button type="button" className="primary" disabled={choice === ''} onClick={link}>{copy.link}</button>
+                </div>
+              )}
+          {error !== null && <p className="field-error" role="alert">{error}</p>}
         </div>
-      ))}
-      {candidates === null
-        ? <button className="secondary" onClick={pick}>{copy.linkTab}</button>
-        : candidates.length === 0
-          ? <p className="hint">{copy.noSessions}</p>
-          : (
-            <div className="trusted-origin-add">
-              <select aria-label={copy.sessionLabel} value={choice} onChange={(event) => setChoice(event.target.value)}>
-                {candidates.map((candidate) => <option key={candidate.sessionId} value={candidate.sessionId}>{candidateLabel(candidate)}</option>)}
-              </select>
-              <button disabled={choice === ''} onClick={link}>{copy.link}</button>
-            </div>
-          )}
-      {error !== null && <p className="origin-error">{error}</p>}
-    </section>
+      </div>
+    </SettingsGroup>
   )
 }

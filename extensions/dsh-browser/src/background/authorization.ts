@@ -436,9 +436,9 @@ function effectiveFrameOrigin(frame: TabFrame, frames: TabFrame[], visited = new
  * page's effective origin and the effective origins of every frame. `opaque`
  * when the top page has no web origin.
  */
-export function tabProvenanceOf(frames: TabFrame[]): { top?: string; frames: string[]; opaque: boolean } {
+export function tabProvenanceOf(frames: TabFrame[]): { top?: string; frames: string[]; opaque: boolean; urls: string[] } {
   const top = uniqueOrigins(frames.filter((frame) => frame.frameId === 0), frames)[0]
-  return { ...top === undefined ? {} : { top }, frames: uniqueOrigins(frames, frames), opaque: top === undefined }
+  return { ...top === undefined ? {} : { top }, frames: uniqueOrigins(frames, frames), opaque: top === undefined, urls: frameUrls(frames, frames) }
 }
 
 export function originFromUrl(value: string): string | undefined {

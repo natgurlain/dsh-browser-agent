@@ -205,12 +205,22 @@ export interface Config {
    * proxied pages), which could otherwise inject text into the session.
    */
   devLoop?: { enabled?: boolean; allowedOrigins?: string[]; trustLoopback?: boolean }
+  /**
+   * Honour the extension's taint-exemption vouchers (session-taint.ts): a
+   * browser result read only from the user's own local pages or from sites
+   * the user trusts does not taint its session. Default true. `false`: every
+   * browser result taints, whatever the extension's settings say. Vouchers
+   * resting on a local page are also refused while `devLoop.trustLoopback`
+   * is false (a dev server that renders untrusted data).
+   */
+  honorTaintExemptions?: boolean
 }
 
 /** The shape after schemastery applies its defaults to every field. */
 type ResolvedConfig = Required<Omit<Config, 'token' | 'mcp' | 'devLoop'>> & Pick<Config, 'token'> & {
   mcp: Required<McpConfig>
   devLoop: { enabled: boolean; allowedOrigins: string[]; trustLoopback: boolean }
+  honorTaintExemptions: boolean
 }
 
 export const Config: z<Config, ResolvedConfig> = z.object({
@@ -238,6 +248,7 @@ export const Config: z<Config, ResolvedConfig> = z.object({
     allowedOrigins: z.array(z.string().pattern(/^https?:\/\/[^/\s]+$/)).default([]),
     trustLoopback: z.boolean().default(true),
   }).default({ enabled: false, allowedOrigins: [], trustLoopback: true }),
+  honorTaintExemptions: z.boolean().default(true),
 }) as unknown as z<Config, ResolvedConfig>
 
 /**
@@ -316,6 +327,7 @@ function mountBridge(
   // Untrusted web content in a session makes its harness tools read-only
   // until the user clears it in the panel (session-taint.ts).
   const taint = new SessionTaintRegistry()
+  taint.honour = { any: resolved.honorTaintExemptions, local: resolved.honorTaintExemptions && resolved.devLoop.trustLoopback }
   ctx.effect(() => installSessionTaint(ctx, taint), 'bridge-browser: session taint guard')
   // DSH 0.1.7+ replaced `agent/session-start` with `agent/created` as the
   // startup-driving extension point (agent registered with live session and
@@ -405,6 +417,8 @@ function mountBridge(
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
       devTools: { version: DEVTOOLS_CAPS_VERSION },
+      // Told to the extension so its own taint record agrees with what this bridge honours.
+      taintExemptions: { local: taint.honour.local, trusted: taint.honour.any },
     },
     injectBrowserSnapshot: createSnapshotInjector((sessionId, snapshot, reason) => browserContext.inject(sessionId, snapshot, reason), taint),
     purgeSession,

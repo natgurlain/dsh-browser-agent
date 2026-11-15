@@ -1,33 +1,32 @@
 /**
- * Settings section for per-site policy (security/site-policy.ts): user rules,
- * the built-in defaults switch, and the rules an administrator forces.
- * Edits go through the settings form and take effect on Save.
+ * Settings group for per-site policy (security/site-policy.ts): the built-in
+ * defaults switch, user rules, strict-mode sites, and what an administrator
+ * forces. Edits go through the settings form and take effect on Save.
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import type { UiLocale } from '../i18n.ts'
 import { DEFAULT_SITE_RULES, normalizeSitePattern, SITE_RULES, withSiteRule, type SiteRule, type SiteRuleEntry } from '../security/site-policy.ts'
 import { parseManagedPolicy, type ManagedPolicy } from '../security/managed-policy.ts'
 import { SettingToggle } from './SettingToggle.tsx'
+import { Callout, EntryAdd, EntryList, SettingRow, SettingsGroup } from './SettingsKit.tsx'
 import { PANEL_COPY } from './strings.ts'
 
 export interface SitePolicyValue {
   siteRules: SiteRuleEntry[]
   siteDefaultsEnabled: boolean
   strictSites: string[]
-  /** Pages served from this machine do not taint a session (security/taint-exempt.ts). */
-  taintExemptLocalPages: boolean
-  /** Pages from sites the user trusts do not taint a session. */
-  taintExemptTrustedSites: boolean
 }
 
 /** Firefox has no debugger API, so the commit gate cannot run there. */
 const STRICT_AVAILABLE = typeof (globalThis as { chrome?: { debugger?: unknown } }).chrome?.debugger === 'object'
 
-export function SitePolicySettings({ value, onChange, locale }: {
+export function SitePolicySettings({ value, onChange, locale, children }: {
   value: SitePolicyValue
   onChange: (next: SitePolicyValue) => void
   locale: UiLocale
+  /** Further site rows that belong in this group (always-allowed domains). */
+  children?: ReactNode
 }): React.JSX.Element {
   const copy = PANEL_COPY[locale].sitePolicy
   const [pattern, setPattern] = useState('')
@@ -52,11 +51,7 @@ export function SitePolicySettings({ value, onChange, locale }: {
     setPattern('')
   }
   return (
-    <section className="settings-panel site-policy" aria-label={copy.title}>
-      <div>
-        <strong>{copy.title}</strong>
-        <small>{copy.help}</small>
-      </div>
+    <SettingsGroup title={copy.title} className="site-policy">
       <SettingToggle
         title={copy.builtIn}
         help={copy.builtInHelp(DEFAULT_SITE_RULES.length)}
@@ -64,83 +59,75 @@ export function SitePolicySettings({ value, onChange, locale }: {
         disabled={managed?.enforceSiteDefaults === true}
         onChange={(checked) => onChange({ ...value, siteDefaultsEnabled: checked })}
       />
-      <div className="trusted-origin-add">
-        <input
-          aria-label={copy.patternLabel}
-          value={pattern}
-          onChange={(event) => setPattern(event.target.value)}
-          onKeyDown={(event) => { if (event.key === 'Enter') add() }}
-          placeholder="example.com / *bank* / github.com/settings"
-        />
-        <select aria-label={copy.ruleLabel} value={rule} onChange={(event) => setRule(event.target.value as SiteRule)}>
-          {SITE_RULES.map((entry) => <option key={entry} value={entry}>{copy.rules[entry]}</option>)}
-        </select>
-        <button disabled={normalized === undefined} onClick={add}>{copy.add}</button>
-      </div>
-      <small className="trusted-note">{copy.trustedNote}</small>
-      {value.siteRules.map((entry) => (
-        <div className="trusted-origin" key={entry.pattern}>
-          <code>{entry.pattern}</code>
-          <span>{copy.rules[entry.rule]}</span>
-          <button onClick={() => onChange({ ...value, siteRules: value.siteRules.filter((candidate) => candidate.pattern !== entry.pattern) })}>
-            {copy.remove}
-          </button>
-        </div>
-      ))}
-      <SettingToggle
-        title={copy.exemptLocal}
-        help={copy.exemptLocalHelp}
-        checked={value.taintExemptLocalPages && managed?.disableLocalTaintExemption !== true}
-        disabled={managed?.disableLocalTaintExemption === true}
-        onChange={(checked) => onChange({ ...value, taintExemptLocalPages: checked })}
-      />
-      <SettingToggle
-        title={copy.exemptTrusted}
-        help={copy.exemptTrustedHelp}
-        checked={value.taintExemptTrustedSites && managed?.disableTrustedTaintExemption !== true}
-        disabled={managed?.disableTrustedTaintExemption === true}
-        onChange={(checked) => onChange({ ...value, taintExemptTrustedSites: checked })}
-      />
-      <div className="strict-mode">
-        <strong>{copy.strictTitle}</strong>
-        <small>{STRICT_AVAILABLE ? copy.strictHelp : copy.strictUnavailable}</small>
-        <div className="trusted-origin-add">
-          <input
-            aria-label={copy.strictSiteLabel}
-            value={strictPattern}
-            disabled={!STRICT_AVAILABLE}
-            onChange={(event) => setStrictPattern(event.target.value)}
-            onKeyDown={(event) => { if (event.key === 'Enter') addStrict() }}
-            placeholder="shop.example.com"
-          />
-          <button disabled={!STRICT_AVAILABLE || strictNormalized === undefined} onClick={addStrict}>{copy.add}</button>
-        </div>
-        {value.strictSites.map((pattern) => (
-          <div className="trusted-origin" key={`strict-${pattern}`}>
-            <code>{pattern}</code>
-            <button onClick={() => onChange({ ...value, strictSites: value.strictSites.filter((candidate) => candidate !== pattern) })}>
-              {copy.remove}
-            </button>
-          </div>
-        ))}
-      </div>
+      <SettingRow label={copy.rulesTitle} help={copy.help} more={<><p>{copy.more}</p><p className="trusted-note">{copy.trustedNote}</p></>}>
+        {(id) => (
+          <>
+            <EntryAdd
+              id={id}
+              label={copy.patternLabel}
+              value={pattern}
+              placeholder={copy.patternPlaceholder}
+              valid={normalized !== undefined}
+              error={copy.invalidPattern}
+              addLabel={copy.add}
+              onChange={setPattern}
+              onAdd={add}
+              select={(
+                <select aria-label={copy.ruleLabel} value={rule} onChange={(event) => setRule(event.target.value as SiteRule)}>
+                  {SITE_RULES.map((entry) => <option key={entry} value={entry}>{copy.rules[entry]}</option>)}
+                </select>
+              )}
+            />
+            <EntryList
+              entries={value.siteRules.map((entry) => ({ key: entry.pattern, value: entry.pattern, tag: copy.rules[entry.rule] }))}
+              empty={copy.noRules}
+              removeLabel={(entry) => copy.removeItem(entry.value)}
+              onRemove={(entry) => onChange({ ...value, siteRules: value.siteRules.filter((candidate) => candidate.pattern !== entry.key) })}
+            />
+          </>
+        )}
+      </SettingRow>
+      {children}
+      <SettingRow className="strict-mode" label={copy.strictTitle}
+        help={STRICT_AVAILABLE ? copy.strictHelp : copy.strictUnavailable}
+        {...(STRICT_AVAILABLE ? { more: <p>{copy.strictMore}</p> } : {})}>
+        {(id) => (
+          <>
+            <EntryAdd
+              id={id}
+              label={copy.strictSiteLabel}
+              value={strictPattern}
+              placeholder="shop.example.com"
+              disabled={!STRICT_AVAILABLE}
+              valid={strictNormalized !== undefined}
+              error={copy.invalidPattern}
+              addLabel={copy.add}
+              onChange={setStrictPattern}
+              onAdd={addStrict}
+            />
+            <EntryList
+              entries={value.strictSites.map((site) => ({ key: site, value: site }))}
+              {...(STRICT_AVAILABLE ? { empty: copy.noStrictSites } : {})}
+              removeLabel={(entry) => copy.removeItem(entry.value)}
+              onRemove={(entry) => onChange({ ...value, strictSites: value.strictSites.filter((candidate) => candidate !== entry.key) })}
+            />
+          </>
+        )}
+      </SettingRow>
       {managed?.active === true && (
-        <div className="managed-policy">
-          <small>{copy.managedIntro}</small>
-          {managed.siteRules.map((entry) => (
-            <div className="trusted-origin" key={`managed-${entry.pattern}`}>
-              <code>{entry.pattern}</code>
-              <span>{copy.rules[entry.rule]}</span>
-            </div>
-          ))}
-          {managed.disableUnrestricted && <small>{copy.managedNoUnrestricted}</small>}
-          {managed.disableDevTools && <small>{copy.managedNoDevTools}</small>}
-          {managed.disableScreenshots && <small>{copy.managedNoScreenshots}</small>}
-          {managed.disableLocalTaintExemption && <small>{copy.managedNoLocalExemption}</small>}
-          {managed.disableTrustedTaintExemption && <small>{copy.managedNoTrustedExemption}</small>}
-          {managed.allowedOrigins !== undefined && <small>{copy.managedAllowedOnly(managed.allowedOrigins)}</small>}
+        <div className="setting-row managed-policy">
+          <Callout tone="info">
+            <p>{copy.managedIntro}</p>
+            {managed.disableUnrestricted && <p>{copy.managedNoUnrestricted}</p>}
+            {managed.disableDevTools && <p>{copy.managedNoDevTools}</p>}
+            {managed.disableScreenshots && <p>{copy.managedNoScreenshots}</p>}
+            {managed.disableLocalTaintExemption && <p>{copy.managedNoLocalExemption}</p>}
+            {managed.disableTrustedTaintExemption && <p>{copy.managedNoTrustedExemption}</p>}
+            {managed.allowedOrigins !== undefined && <p>{copy.managedAllowedOnly(managed.allowedOrigins)}</p>}
+          </Callout>
+          <EntryList entries={managed.siteRules.map((entry) => ({ key: `managed-${entry.pattern}`, value: entry.pattern, tag: copy.rules[entry.rule] }))} />
         </div>
       )}
-    </section>
+    </SettingsGroup>
   )
 }

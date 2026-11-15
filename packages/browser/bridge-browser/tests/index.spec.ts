@@ -97,6 +97,7 @@ describe('config', () => {
       allowForwardedPorts: false,
       mcp: { enabled: false, port: 0 },
       devLoop: { enabled: false, allowedOrigins: [], trustLoopback: true },
+      honorTaintExemptions: true,
     })
   })
 
@@ -134,6 +135,7 @@ describe('config', () => {
       allowForwardedPorts: false,
       mcp: { enabled: false, port: 0 },
       devLoop: { enabled: false, allowedOrigins: [], trustLoopback: true },
+      honorTaintExemptions: true,
     })
   })
 

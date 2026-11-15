@@ -6,12 +6,28 @@
  * where a tainted session's data may go.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PolicyRuntime, POLICY_PORT_NAME, type PolicySettings, type TabProvenance } from '../src/background/policy-runtime.ts'
+import { PolicyRuntime, POLICY_PORT_NAME, type PolicySettings, type TabProvenance, type TaintTrustChange } from '../src/background/policy-runtime.ts'
 import { callPolicyTargets, tabProvenanceOf } from '../src/background/authorization.ts'
 import { parseManagedPolicy, type ManagedPolicy } from '../src/security/managed-policy.ts'
-import type { SiteRuleEntry } from '../src/security/site-policy.ts'
 import { MAX_EXEMPT_READS, taintForcedReasons, UNKNOWN_SOURCE } from '../src/security/taint.ts'
-import { allTaintExempt, isLoopbackPageOrigin, NO_TAINT_EXEMPTION, originTaintExempt, trustPatternFor, userTrustsOrigin, type TaintExemptionConfig } from '../src/security/taint-exempt.ts'
+import {
+  allTaintExempt,
+  isLoopbackPageOrigin,
+  NO_TAINT_EXEMPTION,
+  normalizeTaintLocalOrigins,
+  normalizeTaintTrustedSites,
+  originTaintExempt,
+  reconcileTrustConfirmed,
+  servesBridge,
+  stricterRuleCovers,
+  TAINT_EXEMPTION_SWITCHES,
+  trustOfferFor,
+  unconfirmedTrust,
+  userTrustsOrigin,
+  type LoopbackScope,
+  type TaintExemptionConfig,
+  type TrustedMigration,
+} from '../src/security/taint-exempt.ts'
 import { memoryStorage } from './support/chrome.ts'
 
 beforeEach(() => {
@@ -25,52 +41,70 @@ afterEach(() => { vi.unstubAllGlobals() })
 const LOCAL = 'http://localhost:3000'
 const LOCAL_IP = 'http://127.0.0.1:5173'
 const EVIL = 'https://evil.example'
-const TRUSTED = 'https://seraph.quest'
-const ALWAYS = 'https://tickets.corp.example'
+const TRUSTED = 'https://seraph.quest' // a user `trusted` site rule
+const ALWAYS = 'https://tickets.corp.example' // an always-allowed origin
+const TAINT_ONLY = 'https://wiki.example' // a "not treated as untrusted" entry
 
 interface Harness {
   policy: PolicyRuntime
   settings: PolicySettings
   clearBridgeTaint: ReturnType<typeof vi.fn>
-  saved: SiteRuleEntry[][]
+  saved: TaintTrustChange[]
   /** Blanket "unrestricted browser access". */
   unrestricted: { on: boolean }
+  bridge: { caps: { local: boolean; trusted: boolean } | undefined }
 }
 
-function harness(overrides: Partial<PolicySettings> = {}, managed?: ManagedPolicy): Harness {
+interface HarnessOptions {
+  managed?: ManagedPolicy
+  loopbackScope?: LoopbackScope
+  trustedMigration?: TrustedMigration
+  neverExemptOrigin?: (origin: string) => boolean
+}
+
+/** Everything confirmed, as after the user answered the one-time questions. */
+function harness(overrides: Partial<PolicySettings> = {}, options: HarnessOptions = {}): Harness {
   const settings: PolicySettings = {
     siteRules: [{ pattern: 'seraph.quest', rule: 'trusted' }],
     siteDefaultsEnabled: true,
     trustedActionOrigins: [ALWAYS],
     taintExemptLocalPages: true,
     taintExemptTrustedSites: true,
+    taintLocalOrigins: [LOCAL, LOCAL_IP],
+    taintTrustedSites: ['wiki.example'],
+    taintTrustConfirmed: ['rule:seraph.quest', `origin:${ALWAYS}`],
     ...overrides,
   }
   const clearBridgeTaint = vi.fn(async () => {})
-  const saved: SiteRuleEntry[][] = []
+  const saved: TaintTrustChange[] = []
   const unrestricted = { on: false }
+  const bridge: Harness['bridge'] = { caps: undefined }
   const policy = new PolicyRuntime({
     settings: () => settings,
     unrestricted: () => unrestricted.on,
     clearBridgeTaint,
-    saveSiteRules: async (rules) => {
-      saved.push(rules)
-      settings.siteRules = rules
+    saveTaintTrust: async (change) => {
+      saved.push(change)
+      settings.taintTrustedSites = [...settings.taintTrustedSites ?? [], ...change.sites]
+      settings.taintLocalOrigins = [...settings.taintLocalOrigins ?? [], ...change.localOrigins]
     },
+    bridgeExemptions: () => bridge.caps,
+    switches: { loopbackScope: options.loopbackScope ?? 'confirmed', trustedMigration: options.trustedMigration ?? 'confirm' },
+    ...options.neverExemptOrigin === undefined ? {} : { neverExemptOrigin: options.neverExemptOrigin },
   })
-  if (managed !== undefined) policy.setManaged(managed)
-  return { policy, settings, clearBridgeTaint, saved, unrestricted }
+  if (options.managed !== undefined) policy.setManaged(options.managed)
+  return { policy, settings, clearBridgeTaint, saved, unrestricted, bridge }
 }
 
 let callSeq = 0
 
 /** One page read: the policy hook sees `targets`, then the result is recorded. */
-function read(h: Harness, sessionId: string, origins: string[], extra: { name?: string; pageOrigin?: string; after?: TabProvenance } = {}) {
+function read(h: Harness, sessionId: string, origins: string[], extra: { name?: string; pageOrigin?: string; after?: TabProvenance; urls?: string[]; quotesConsole?: boolean } = {}) {
   const id = `call-${callSeq += 1}`
   const name = extra.name ?? 'browser_snapshot'
   const call = { id, name, args: {}, sessionId }
-  h.policy.hook(id, sessionId, h.unrestricted.on)(call, { reads: origins, acts: [], pageOrigin: extra.pageOrigin ?? origins[0]! })
-  return h.policy.recordResult(call, true, undefined, extra.after)
+  h.policy.hook(id, sessionId, h.unrestricted.on)(call, { reads: origins, acts: [], pageOrigin: extra.pageOrigin ?? origins[0]!, ...extra.urls === undefined ? {} : { urls: extra.urls } })
+  return h.policy.recordResult(call, true, undefined, extra.after, extra.quotesConsole === true ? { quotesConsole: true } : {})
 }
 
 function navigate(h: Harness, sessionId: string, url: string) {
@@ -79,6 +113,28 @@ function navigate(h: Harness, sessionId: string, url: string) {
   const decision = h.policy.hook(id, sessionId, h.unrestricted.on)(call, { reads: [], acts: [], destination: url })
   return { decision, call }
 }
+
+const typeInto = (h: Harness, sessionId: string, origin: string) =>
+  taintForcedReasons({ name: 'browser_type', args: { text: 'SECRET-0123456789abcdef' }, targetOrigin: origin }, h.policy.get(sessionId))
+
+const config = (overrides: Partial<TaintExemptionConfig> = {}): TaintExemptionConfig => ({
+  localPages: true,
+  trustedSites: true,
+  site: { managed: [], user: [{ pattern: 'seraph.quest', rule: 'trusted' }], defaultsEnabled: true, defaultTrusted: false },
+  trustedActionOrigins: [ALWAYS, 'https://*.docs.example'],
+  localOrigins: [LOCAL],
+  taintTrustedSites: ['wiki.example'],
+  trustConfirmed: ['rule:seraph.quest', `origin:${ALWAYS}`, 'origin:https://*.docs.example'],
+  loopbackScope: 'confirmed',
+  trustedMigration: 'confirm',
+  ...overrides,
+})
+
+describe('the two open decisions ship as the safer variants', () => {
+  it('names one switch each', () => {
+    expect(TAINT_EXEMPTION_SWITCHES).toEqual({ loopbackScope: 'confirmed', trustedMigration: 'confirm' })
+  })
+})
 
 describe('what counts as a local page', () => {
   it('is the real connection target: localhost, *.localhost, 127.0.0.1, [::1], on any port', () => {
@@ -94,49 +150,145 @@ describe('what counts as a local page', () => {
   ])('%s is not loopback', (origin) => {
     expect(isLoopbackPageOrigin(origin)).toBe(false)
   })
+
+  it('scope "confirmed" (default): only loopback origins the user said are theirs', () => {
+    expect(originTaintExempt(LOCAL, config())).toBe(true)
+    expect(originTaintExempt('http://localhost:8080', config())).toBe(false)
+    expect(originTaintExempt(LOCAL_IP, config())).toBe(false)
+    // A stored entry that is not loopback never counts, whatever the list says.
+    expect(originTaintExempt('http://localhost.evil.com:3000', config({ localOrigins: ['http://localhost.evil.com:3000'] }))).toBe(false)
+    expect(normalizeTaintLocalOrigins(['http://localhost:3000/app', 'http://evil.example', 'http://localhost.evil.com', 'http://[::1]:9', 7])).toEqual(['http://[::1]:9', LOCAL])
+  })
+
+  it('scope "any": every loopback origin', () => {
+    const any = config({ loopbackScope: 'any', localOrigins: [] })
+    expect(originTaintExempt(LOCAL, any)).toBe(true)
+    expect(originTaintExempt('http://localhost:8080', any)).toBe(true)
+    expect(originTaintExempt('http://localhost.evil.com', any)).toBe(false)
+  })
+
+  it('F7: a stricter site rule on a local address wins over the exemption', () => {
+    for (const rule of ['blocked', 'read-only', 'ask'] as const) {
+      const strict = config({ site: { managed: [], user: [{ pattern: 'localhost', rule }], defaultsEnabled: true, defaultTrusted: false } })
+      expect(originTaintExempt(LOCAL, strict), rule).toBe(false)
+    }
+    const managed = config({ loopbackScope: 'any', site: { managed: [{ pattern: '127.0.0.1', rule: 'ask' }], user: [], defaultsEnabled: true, defaultTrusted: false } })
+    expect(originTaintExempt(LOCAL_IP, managed)).toBe(false)
+    expect(originTaintExempt(LOCAL, managed)).toBe(true)
+  })
+
+  it('F1: whatever serves the DSH host is never exempt', () => {
+    expect(servesBridge('http://localhost:3080', ['ws://127.0.0.1:3080/ext/bridge'])).toBe(true)
+    expect(servesBridge('http://127.0.0.1:3080', ['ws://127.0.0.1:3080/ext/bridge'])).toBe(true)
+    expect(servesBridge('http://[::1]:3080', [undefined, '', 'ws://localhost:3080/ext/bridge'])).toBe(true)
+    expect(servesBridge('http://localhost:3000', ['ws://127.0.0.1:3080/ext/bridge'])).toBe(false)
+    expect(servesBridge('https://dsh.corp.example', ['wss://dsh.corp.example/ext/bridge'])).toBe(true)
+    expect(servesBridge('https://dsh.corp.example:8443', ['wss://dsh.corp.example/ext/bridge'])).toBe(false)
+    expect(servesBridge('https://other.example', ['wss://dsh.corp.example/ext/bridge', 'not a url'])).toBe(false)
+    const h = harness({ taintLocalOrigins: [LOCAL, 'http://localhost:3080'] }, { neverExemptOrigin: (origin) => servesBridge(origin, ['ws://127.0.0.1:3080/ext/bridge']) })
+    expect(read(h, 's1', ['http://localhost:3080'])).toEqual({ exempt: false })
+    expect(read(h, 's2', [LOCAL])).toMatchObject({ exempt: true })
+    expect(h.policy.trustable()).toEqual({})
+  })
 })
 
 describe('what counts as a site the user trusts', () => {
-  const config = (overrides: Partial<TaintExemptionConfig> = {}): TaintExemptionConfig => ({
-    localPages: true,
-    trustedSites: true,
-    site: { managed: [], user: [{ pattern: 'seraph.quest', rule: 'trusted' }], defaultsEnabled: true, defaultTrusted: false },
-    trustedActionOrigins: [ALWAYS, 'https://*.wiki.example'],
-    ...overrides,
-  })
-
-  it('a user `trusted` site rule and an always-allowed origin both count', () => {
-    expect(userTrustsOrigin(TRUSTED, config())).toBe(true)
-    expect(userTrustsOrigin('https://app.seraph.quest', config())).toBe(true)
-    expect(userTrustsOrigin(ALWAYS, config())).toBe(true)
-    expect(userTrustsOrigin('https://docs.wiki.example', config())).toBe(true)
-    // Always-allowed origins stay scoped to their scheme and port.
-    expect(userTrustsOrigin('http://tickets.corp.example', config())).toBe(false)
+  it('a taint-only entry, a user `trusted` site rule and an always-allowed origin all count, over https', () => {
+    for (const origin of [TRUSTED, 'https://app.seraph.quest', ALWAYS, 'https://a.docs.example', TAINT_ONLY, 'https://en.wiki.example']) {
+      expect(userTrustsOrigin(origin, config()), origin).toBe(true)
+    }
     expect(userTrustsOrigin(EVIL, config())).toBe(false)
     expect(userTrustsOrigin('https://seraph.quest.evil.example', config())).toBe(false)
+    expect(userTrustsOrigin('https://notwiki.example', config())).toBe(false)
+  })
+
+  it('F2: never over plain http, and a host entry covers the default port only', () => {
+    // A network attacker can serve http://<trusted host>.
+    for (const origin of ['http://seraph.quest', 'http://wiki.example', 'http://tickets.corp.example']) {
+      expect(userTrustsOrigin(origin, config()), origin).toBe(false)
+    }
+    expect(userTrustsOrigin('https://seraph.quest:8443', config())).toBe(false)
+    expect(userTrustsOrigin('https://wiki.example:8443', config())).toBe(false)
+    // An always-allowed origin covers exactly what it names, port included, but only https.
+    expect(userTrustsOrigin('https://corp.example:8443', config({ trustedActionOrigins: ['https://corp.example:8443'], trustConfirmed: ['origin:https://corp.example:8443'] }))).toBe(true)
+    expect(userTrustsOrigin('http://corp.example', config({ trustedActionOrigins: ['http://corp.example'], trustConfirmed: ['origin:http://corp.example'] }))).toBe(false)
   })
 
   it('the blanket unrestricted switch is not a choice about any site', () => {
-    const blanket = config({ site: { managed: [], user: [], defaultsEnabled: true, defaultTrusted: true }, trustedActionOrigins: [] })
-    expect(userTrustsOrigin(EVIL, blanket)).toBe(false)
+    const blanket = config({ site: { managed: [], user: [], defaultsEnabled: true, defaultTrusted: true }, trustedActionOrigins: [], taintTrustedSites: [] })
     expect(originTaintExempt(EVIL, blanket)).toBe(false)
   })
 
   it('a stricter rule from any layer wins, and an administrator rule is not the user\'s choice', () => {
-    expect(userTrustsOrigin(TRUSTED, config({ site: { managed: [{ pattern: 'seraph.quest', rule: 'ask' }], user: [{ pattern: 'seraph.quest', rule: 'trusted' }], defaultsEnabled: true, defaultTrusted: false } }))).toBe(false)
-    expect(userTrustsOrigin(ALWAYS, config({ site: { managed: [], user: [{ pattern: 'tickets.corp.example', rule: 'read-only' }], defaultsEnabled: true, defaultTrusted: false } }))).toBe(false)
-    expect(userTrustsOrigin('https://intranet.example', config({ site: { managed: [{ pattern: 'intranet.example', rule: 'trusted' }], user: [], defaultsEnabled: true, defaultTrusted: false } }))).toBe(false)
-    // A built-in read-only default (a bank) is not lifted by an always-allowed entry.
-    expect(userTrustsOrigin('https://paypal.com', config({ trustedActionOrigins: ['https://paypal.com'] }))).toBe(false)
+    const withSite = (site: TaintExemptionConfig['site']) => config({ site })
+    expect(originTaintExempt(TRUSTED, withSite({ managed: [{ pattern: 'seraph.quest', rule: 'ask' }], user: [{ pattern: 'seraph.quest', rule: 'trusted' }], defaultsEnabled: true, defaultTrusted: false }))).toBe(false)
+    expect(originTaintExempt(ALWAYS, withSite({ managed: [], user: [{ pattern: 'tickets.corp.example', rule: 'read-only' }], defaultsEnabled: true, defaultTrusted: false }))).toBe(false)
+    expect(originTaintExempt(TAINT_ONLY, withSite({ managed: [], user: [{ pattern: 'wiki.example', rule: 'ask' }], defaultsEnabled: true, defaultTrusted: false }))).toBe(false)
+    expect(originTaintExempt('https://intranet.example', withSite({ managed: [{ pattern: 'intranet.example', rule: 'trusted' }], user: [], defaultsEnabled: true, defaultTrusted: false }))).toBe(false)
+    // A built-in read-only default (a bank) is not lifted by any trust entry, a user `trusted` rule included.
+    expect(originTaintExempt('https://paypal.com', config({ trustedActionOrigins: ['https://paypal.com'], trustConfirmed: ['origin:https://paypal.com'] }))).toBe(false)
+    expect(originTaintExempt('https://paypal.com', config({ site: { managed: [], user: [{ pattern: 'paypal.com', rule: 'trusted' }], defaultsEnabled: true, defaultTrusted: false }, trustConfirmed: ['rule:paypal.com'] }))).toBe(false)
   })
 
-  it('a path-scoped trusted rule does not make the whole origin trusted', () => {
-    expect(userTrustsOrigin('https://github.com', config({ site: { managed: [], user: [{ pattern: 'github.com/myorg', rule: 'trusted' }], defaultsEnabled: false, defaultTrusted: false } }))).toBe(false)
+  it('F2: a path-scoped stricter rule blocks pages under that path, and the whole host when the page is unknown', () => {
+    const github = config({ taintTrustedSites: ['github.com'] })
+    const site = github.site
+    // The built-in `github.com/settings` read-only rule.
+    expect(stricterRuleCovers('https://github.com', ['https://github.com/settings/tokens'], site)).toBe(true)
+    expect(stricterRuleCovers('https://github.com', ['https://github.com/me/repo'], site)).toBe(false)
+    expect(stricterRuleCovers('https://github.com', [], site)).toBe(true)
+    expect(originTaintExempt('https://github.com', github, ['https://github.com/me/repo/issues/1'])).toBe(true)
+    expect(originTaintExempt('https://github.com', github, ['https://github.com/me/repo', 'https://github.com/settings/profile'])).toBe(false)
+    expect(originTaintExempt('https://github.com', github)).toBe(false)
+    // A path-scoped trusted rule does not make the whole origin trusted.
+    expect(userTrustsOrigin('https://example.org', config({ site: { managed: [], user: [{ pattern: 'example.org/app', rule: 'trusted' }], defaultsEnabled: false, defaultTrusted: false }, trustConfirmed: ['rule:example.org/app'] }))).toBe(false)
+    // End to end through the policy layer: the frame URLs the call named decide.
+    const h = harness({ taintTrustedSites: ['github.com'] })
+    expect(read(h, 's1', ['https://github.com'], { urls: ['https://github.com/me/repo'] })).toMatchObject({ exempt: true })
+    expect(read(h, 's2', ['https://github.com'], { urls: ['https://github.com/settings/keys'] })).toEqual({ exempt: false })
+    expect(read(h, 's3', ['https://github.com'])).toEqual({ exempt: false })
+  })
+
+  it('migration "confirm" (default): rules and always-allowed origins that predate the exemption wait for the user', () => {
+    const before = config({ trustConfirmed: [] })
+    expect(userTrustsOrigin(TRUSTED, before)).toBe(false)
+    expect(userTrustsOrigin(ALWAYS, before)).toBe(false)
+    // A taint-only entry was added knowing what it means: it always counts.
+    expect(userTrustsOrigin(TAINT_ONLY, before)).toBe(true)
+    expect(unconfirmedTrust(before)).toEqual(['rule:seraph.quest', `origin:${ALWAYS}`, 'origin:https://*.docs.example'])
+    expect(userTrustsOrigin(TRUSTED, config({ trustConfirmed: ['rule:seraph.quest'] }))).toBe(true)
+    expect(userTrustsOrigin(ALWAYS, config({ trustConfirmed: ['rule:seraph.quest'] }))).toBe(false)
+    expect(unconfirmedTrust(config())).toEqual([])
+  })
+
+  it('migration "immediate": every existing entry counts at once', () => {
+    const immediate = config({ trustConfirmed: [], trustedMigration: 'immediate' })
+    expect(userTrustsOrigin(TRUSTED, immediate)).toBe(true)
+    expect(userTrustsOrigin(ALWAYS, immediate)).toBe(true)
+    expect(unconfirmedTrust(immediate)).toEqual([])
+  })
+
+  it('an entry added now is confirmed by adding it; existing ones are not; removed ones are forgotten', () => {
+    const previous = { siteRules: [{ pattern: 'old.example', rule: 'trusted' as const }], trustedActionOrigins: ['https://old-allowed.example'] }
+    const next = {
+      siteRules: [{ pattern: 'old.example', rule: 'trusted' as const }, { pattern: 'new.example', rule: 'trusted' as const }, { pattern: 'ask.example', rule: 'ask' as const }],
+      trustedActionOrigins: ['https://old-allowed.example', 'https://new-allowed.example'],
+    }
+    expect(reconcileTrustConfirmed(previous, next, [])).toEqual(['origin:https://new-allowed.example', 'rule:new.example'])
+    // "Keep all" in Settings confirms the old ones.
+    expect(reconcileTrustConfirmed(previous, next, ['rule:old.example', 'origin:https://old-allowed.example'])).toEqual([
+      'origin:https://new-allowed.example', 'origin:https://old-allowed.example', 'rule:new.example', 'rule:old.example',
+    ])
+    expect(reconcileTrustConfirmed(next, previous, ['rule:new.example', 'rule:old.example'])).toEqual(['rule:old.example'])
+  })
+
+  it('stored taint-only entries are narrow host names', () => {
+    expect(normalizeTaintTrustedSites(['Wiki.Example', 'https://x.com/', '*.com', '*bank*', 'x.com/path', '192.168.1.1', 'localhost', 7])).toEqual(['wiki.example', 'x.com'])
   })
 
   it('needs at least one origin, and an unknown source is never exempt', () => {
     expect(allTaintExempt([], config())).toBe(false)
-    expect(allTaintExempt([LOCAL, TRUSTED, ALWAYS], config())).toBe(true)
+    expect(allTaintExempt([LOCAL, TRUSTED, ALWAYS, TAINT_ONLY], config())).toBe(true)
     expect(allTaintExempt([LOCAL, UNKNOWN_SOURCE], config())).toBe(false)
     expect(allTaintExempt([LOCAL, EVIL], config())).toBe(false)
     expect(allTaintExempt([LOCAL], NO_TAINT_EXEMPTION)).toBe(false)
@@ -144,14 +296,22 @@ describe('what counts as a site the user trusts', () => {
 })
 
 describe('local pages do not taint', () => {
-  it('a session that only read loopback pages stays untainted and gets no forced card', () => {
+  it('a session that only read the user\'s local pages stays untainted and gets no forced card', () => {
     const h = harness()
-    expect(read(h, 's1', [LOCAL])).toEqual({ exempt: true })
-    expect(read(h, 's1', [LOCAL_IP])).toEqual({ exempt: true })
+    expect(read(h, 's1', [LOCAL])).toEqual({ exempt: true, local: true })
+    expect(read(h, 's1', [LOCAL_IP])).toEqual({ exempt: true, local: true })
     expect(h.policy.get('s1')).toBeUndefined()
     const clipboard = { id: 'c', name: 'browser_clipboard', args: { action: 'write', text: 'x' }, sessionId: 's1' }
     expect(h.policy.evaluate(clipboard, { reads: [], acts: [] }).kind).not.toBe('force')
     expect(navigate(h, 's1', 'https://other.example/c?k=sk-canary-800b3920a5708f56').decision.kind).not.toBe('force')
+  })
+
+  it('a loopback origin the user never confirmed taints (default scope), and is exempt under scope "any"', () => {
+    const h = harness()
+    expect(read(h, 's1', ['http://localhost:9999'])).toEqual({ exempt: false })
+    expect(h.policy.get('s1')?.sources).toEqual(['http://localhost:9999'])
+    const any = harness({ taintLocalOrigins: [] }, { loopbackScope: 'any' })
+    expect(read(any, 's1', ['http://localhost:9999'])).toEqual({ exempt: true, local: true })
   })
 
   it('loopback then external: tainted, and the earlier local pages are sources too', () => {
@@ -160,8 +320,7 @@ describe('local pages do not taint', () => {
     expect(read(h, 's1', [EVIL])).toEqual({ exempt: false })
     expect(h.policy.get('s1')?.sources).toEqual([LOCAL, EVIL].sort())
     // The attacker page is not the "only source": typing what the local page showed into it still asks.
-    const typing = { id: 't', name: 'browser_type', args: { text: 'x' }, sessionId: 's1' }
-    expect(h.policy.evaluate(typing, { reads: [], acts: [EVIL], typeTargetOrigin: EVIL }).kind).toBe('force')
+    expect(typeInto(h, 's1', EVIL)).not.toEqual([])
   })
 
   it('external then loopback: still tainted, and the bridge is not told otherwise', () => {
@@ -172,7 +331,7 @@ describe('local pages do not taint', () => {
   })
 
   it.each(['http://localhost.evil.com:3000', 'http://127.0.0.1.nip.io', 'http://localhost.attacker.test:8080'])('a look-alike host taints: %s', (origin) => {
-    const h = harness()
+    const h = harness({ taintLocalOrigins: [LOCAL, origin] }, { loopbackScope: 'any' })
     expect(read(h, 's1', [origin])).toEqual({ exempt: false })
     expect(h.policy.get('s1')?.sources).toEqual([origin])
   })
@@ -191,11 +350,34 @@ describe('local pages do not taint', () => {
     // Reading only the top frame of the same page stays exempt...
     const text = { id: 'text', name: 'browser_get_text', args: {}, sessionId: 's2' }
     h.policy.hook('text', 's2', false)(text, callPolicyTargets(text, frames))
-    expect(h.policy.recordResult(text, true, LOCAL, tabProvenanceOf(frames))).toEqual({ exempt: true })
+    expect(h.policy.recordResult(text, true, LOCAL, tabProvenanceOf(frames))).toMatchObject({ exempt: true })
     // ...and reading the embedded frame itself does not.
     const inner = { id: 'inner', name: 'browser_get_text', args: { frame: 4 }, sessionId: 's3' }
     h.policy.hook('inner', 's3', false)(inner, callPolicyTargets(inner, frames))
     expect(h.policy.recordResult(inner, true, LOCAL, tabProvenanceOf(frames))).toEqual({ exempt: false })
+  })
+
+  it('F5: a result that carries the tab\'s console text, a screenshot and a PDF always taint', () => {
+    const h = harness()
+    const frames = [
+      { frameId: 0, parentFrameId: -1, url: `${LOCAL}/` },
+      { frameId: 4, parentFrameId: 0, url: `${EVIL}/widget` },
+    ]
+    // A click on the top frame of a local page: exempt on its own...
+    const click = { id: 'click', name: 'browser_click', args: { index: 1 }, sessionId: 's1' }
+    h.policy.hook('click', 's1', false)(click, callPolicyTargets(click, frames))
+    expect(h.policy.recordResult(click, true, LOCAL, tabProvenanceOf(frames))).toMatchObject({ exempt: true })
+    // ...but not when its result quotes console errors, which come from any frame of the tab.
+    const noisy = { id: 'noisy', name: 'browser_click', args: { index: 1 }, sessionId: 's2' }
+    h.policy.hook('noisy', 's2', false)(noisy, callPolicyTargets(noisy, frames))
+    expect(h.policy.recordResult(noisy, true, LOCAL, tabProvenanceOf(frames), { quotesConsole: true })).toEqual({ exempt: false })
+    // Even on a page with no other frame: the text quotes whatever the page talked to.
+    expect(read(h, 's3', [LOCAL], { name: 'browser_type', quotesConsole: true, after: { top: LOCAL, frames: [LOCAL], opaque: false } })).toEqual({ exempt: false })
+    // Pixels of every subresource and frame, whatever served them.
+    for (const name of ['browser_screenshot', 'browser_save_pdf']) {
+      expect(read(h, `s-${name}`, [LOCAL], { name, after: { top: LOCAL, frames: [LOCAL], opaque: false } }), name).toEqual({ exempt: false })
+      expect(h.policy.get(`s-${name}`)).toBeDefined()
+    }
   })
 
   it('a loopback frame inside an external page taints (the top page counts)', () => {
@@ -210,7 +392,7 @@ describe('local pages do not taint', () => {
     expect(failed('f1', 's1')).toEqual({ exempt: false })
     // An error can quote any frame (an open dialog's text): a cross-origin frame taints.
     expect(failed('f2', 's2', { top: LOCAL, frames: [LOCAL, EVIL], opaque: false })).toEqual({ exempt: false })
-    expect(failed('f3', 's3', { top: LOCAL, frames: [LOCAL], opaque: false })).toEqual({ exempt: true })
+    expect(failed('f3', 's3', { top: LOCAL, frames: [LOCAL], opaque: false })).toMatchObject({ exempt: true })
     expect(h.policy.get('s3')).toBeUndefined()
     // browser_dialog answers a dialog any frame may have opened.
     const dialog = { id: 'd', name: 'browser_dialog', args: { accept: true }, sessionId: 's4' }
@@ -258,13 +440,15 @@ describe('local pages do not taint', () => {
 
   it('selections and injected snapshots follow the same rule', () => {
     const h = harness()
-    expect(h.policy.recordSelection('s1', LOCAL)).toEqual({ exempt: true })
+    expect(h.policy.recordSelection('s1', LOCAL, `${LOCAL}/page`)).toEqual({ exempt: true })
     expect(h.policy.get('s1')).toBeUndefined()
     expect(h.policy.recordSelection('s1', EVIL)).toEqual({ exempt: false })
     expect(h.policy.get('s1')?.sources).toEqual([EVIL, LOCAL].sort())
     // An injection without frame provenance always taints.
     expect(h.policy.recordInjection('s2', LOCAL)).toEqual({ exempt: false })
     expect(h.policy.injectionExempt('s3', LOCAL, [LOCAL])).toBe(true)
+    expect(h.policy.restsOnLocalPage([LOCAL])).toBe(true)
+    expect(h.policy.restsOnLocalPage([TRUSTED])).toBe(false)
     expect(h.policy.recordInjection('s3', LOCAL, [LOCAL])).toEqual({ exempt: true })
     expect(h.policy.injectionExempt('s3', LOCAL, [LOCAL, EVIL])).toBe(false)
     expect(h.policy.injectionExempt('s3', undefined, [LOCAL])).toBe(false)
@@ -274,8 +458,9 @@ describe('local pages do not taint', () => {
     // The evaluator that collects a snapshot's frames.
     const provenance = h.policy.provenanceEvaluator('s4', false)
     expect(provenance.origins()).toBeUndefined()
-    provenance.policy({ id: 'p', name: 'browser_snapshot', args: {} }, { reads: [LOCAL, EVIL], acts: [], pageOrigin: LOCAL })
+    provenance.policy({ id: 'p', name: 'browser_snapshot', args: {} }, { reads: [LOCAL, EVIL], acts: [], pageOrigin: LOCAL, urls: [`${LOCAL}/a`, `${EVIL}/w`] })
     expect(provenance.origins()?.sort()).toEqual([EVIL, LOCAL].sort())
+    expect(provenance.urls().sort()).toEqual([`${EVIL}/w`, `${LOCAL}/a`].sort())
   })
 
   it('the setting off restores today\'s behaviour', () => {
@@ -293,20 +478,32 @@ describe('local pages do not taint', () => {
   it('managed policy can force it off, whatever the user set', () => {
     const managed = parseManagedPolicy({ disableLocalTaintExemption: true })
     expect(managed).toMatchObject({ disableLocalTaintExemption: true, disableTrustedTaintExemption: false, active: true })
-    const h = harness({}, managed)
+    const h = harness({}, { managed })
     expect(read(h, 's1', [LOCAL])).toEqual({ exempt: false })
     expect(h.policy.get('s1')).toBeDefined()
     // The other exemption is untouched.
-    expect(read(h, 's2', [TRUSTED])).toEqual({ exempt: true })
-    const both = harness({}, parseManagedPolicy({ disableTrustedTaintExemption: true }))
+    expect(read(h, 's2', [TRUSTED])).toEqual({ exempt: true, local: false })
+    const both = harness({}, { managed: parseManagedPolicy({ disableTrustedTaintExemption: true }) })
     expect(read(both, 's1', [TRUSTED])).toEqual({ exempt: false })
-    expect(read(both, 's2', [LOCAL])).toEqual({ exempt: true })
+    expect(read(both, 's2', [LOCAL])).toMatchObject({ exempt: true })
+  })
+
+  it('F1: a class the connected bridge does not honour is off here too', () => {
+    const h = harness()
+    // The Host's `devLoop.trustLoopback: false`.
+    h.bridge.caps = { local: false, trusted: true }
+    expect(read(h, 's1', [LOCAL])).toEqual({ exempt: false })
+    expect(read(h, 's2', [TRUSTED])).toMatchObject({ exempt: true })
+    // Vouchers off altogether.
+    h.bridge.caps = { local: false, trusted: false }
+    expect(read(h, 's3', [TRUSTED])).toEqual({ exempt: false })
+    expect(h.policy.mayExempt('s4')).toBe(false)
   })
 
   it('remembers exempt reads across a worker restart, bounded', async () => {
     const storage = memoryStorage()
     const options = {
-      settings: (): PolicySettings => ({ siteRules: [], siteDefaultsEnabled: true, taintExemptLocalPages: true }),
+      settings: (): PolicySettings => ({ siteRules: [], siteDefaultsEnabled: true, taintExemptLocalPages: true, taintLocalOrigins: [LOCAL] }),
       unrestricted: () => false,
       clearBridgeTaint: vi.fn(async () => {}),
       storage: storage.area,
@@ -315,7 +512,7 @@ describe('local pages do not taint', () => {
     await before.ready
     const first = { id: 'r1', name: 'browser_snapshot', args: {}, sessionId: 's1' }
     before.hook('r1', 's1', false)(first, { reads: [LOCAL], acts: [], pageOrigin: LOCAL })
-    expect(before.recordResult(first, true)).toEqual({ exempt: true })
+    expect(before.recordResult(first, true)).toMatchObject({ exempt: true })
     await vi.waitFor(() => { expect(storage.area.set).toHaveBeenCalled() })
     const after = new PolicyRuntime(options)
     await after.ready
@@ -337,14 +534,27 @@ describe('local pages do not taint', () => {
 describe('sites the user trusts do not taint', () => {
   it('a session that only read trusted sites stays untainted', () => {
     const h = harness()
-    expect(read(h, 's1', [TRUSTED])).toEqual({ exempt: true })
-    expect(read(h, 's1', [ALWAYS])).toEqual({ exempt: true })
-    expect(read(h, 's1', [LOCAL, TRUSTED])).toEqual({ exempt: true })
+    expect(read(h, 's1', [TRUSTED])).toEqual({ exempt: true, local: false })
+    expect(read(h, 's1', [ALWAYS])).toMatchObject({ exempt: true })
+    expect(read(h, 's1', [TAINT_ONLY])).toMatchObject({ exempt: true })
+    expect(read(h, 's1', [LOCAL, TRUSTED])).toEqual({ exempt: true, local: true })
     expect(h.policy.get('s1')).toBeUndefined()
   })
 
+  it('a trusted rule from before the exemption taints until the user confirms it (default migration)', () => {
+    const h = harness({ taintTrustConfirmed: [] })
+    expect(read(h, 's1', [TRUSTED])).toEqual({ exempt: false })
+    expect(read(h, 's2', [ALWAYS])).toEqual({ exempt: false })
+    expect(h.policy.unconfirmedTrust()).toEqual(['rule:seraph.quest', `origin:${ALWAYS}`])
+    h.settings.taintTrustConfirmed = ['rule:seraph.quest', `origin:${ALWAYS}`]
+    expect(read(h, 's3', [TRUSTED])).toMatchObject({ exempt: true })
+    expect(h.policy.unconfirmedTrust()).toEqual([])
+    const immediate = harness({ taintTrustConfirmed: [] }, { trustedMigration: 'immediate' })
+    expect(read(immediate, 's1', [TRUSTED])).toMatchObject({ exempt: true })
+  })
+
   it('the blanket unrestricted switch still taints', () => {
-    const h = harness({ siteRules: [], trustedActionOrigins: [] })
+    const h = harness({ siteRules: [], trustedActionOrigins: [], taintTrustedSites: [] })
     h.unrestricted.on = true
     const call = { id: 'u', name: 'browser_snapshot', args: {}, sessionId: 's1' }
     // Under unrestricted access the read itself needs no prompt...
@@ -354,10 +564,10 @@ describe('sites the user trusts do not taint', () => {
     expect(h.policy.get('s1')?.sources).toEqual([EVIL])
   })
 
-  it('a session-only allowance still taints (only the persistent Settings list is consulted)', () => {
+  it('a session-only allowance still taints (only the persistent Settings lists are consulted)', () => {
     // The approval card's "trust for this session" set lives in the background
     // worker and is never handed to the policy layer.
-    const h = harness({ siteRules: [], trustedActionOrigins: [] })
+    const h = harness({ siteRules: [], trustedActionOrigins: [], taintTrustedSites: [] })
     expect(read(h, 's1', ['https://session-allowed.example'])).toEqual({ exempt: false })
     expect(h.policy.get('s1')).toBeDefined()
   })
@@ -371,7 +581,8 @@ describe('sites the user trusts do not taint', () => {
     const h = harness({ taintExemptTrustedSites: false })
     expect(read(h, 's1', [TRUSTED])).toEqual({ exempt: false })
     expect(read(h, 's2', [ALWAYS])).toEqual({ exempt: false })
-    expect(read(h, 's3', [LOCAL])).toEqual({ exempt: true })
+    expect(read(h, 's3', [TAINT_ONLY])).toEqual({ exempt: false })
+    expect(read(h, 's4', [LOCAL])).toMatchObject({ exempt: true })
     expect(h.policy.get('s1')?.sources).toEqual([TRUSTED])
   })
 })
@@ -382,7 +593,7 @@ describe('the exemption never changes where tainted data may go', () => {
   it('a tainted session exfiltrating to loopback or to a trusted origin still forces a card', () => {
     const h = harness()
     read(h, 's1', [EVIL])
-    for (const sink of [LOCAL, LOCAL_IP, 'http://[::1]:9000', TRUSTED, ALWAYS]) {
+    for (const sink of [LOCAL, LOCAL_IP, 'http://[::1]:9000', TRUSTED, ALWAYS, TAINT_ONLY]) {
       expect(navigate(h, 's1', risky(sink)).decision.kind, sink).toBe('force')
       const open = { id: `o-${sink}`, name: 'browser_open_tab', args: { url: risky(sink) }, sessionId: 's1' }
       expect(h.policy.evaluate(open, { reads: [], acts: [], destination: risky(sink) }).kind, sink).toBe('force')
@@ -407,9 +618,31 @@ describe('the exemption never changes where tainted data may go', () => {
     expect(taintForcedReasons({ name: 'browser_navigate', args: { url: risky(TRUSTED) } }, tainted)).not.toEqual([])
     expect(taintForcedReasons({ name: 'browser_navigate', args: { url: risky(EVIL) } }, tainted)).toEqual([])
   })
+
+  it('F4: a fork or subagent of a session that read exempt pages can never have a single source', () => {
+    const h = harness()
+    expect(read(h, 'parent', [LOCAL])).toMatchObject({ exempt: true })
+    // The Host tells the extension on the child's calls: an ancestor read exempt pages.
+    h.policy.noteInheritedExemptReads('child')
+    expect(h.policy.get('child')).toBeUndefined() // not tainted by that alone
+    read(h, 'child', [EVIL])
+    expect(h.policy.get('child')?.sources).toEqual([UNKNOWN_SOURCE, EVIL])
+    expect(typeInto(h, 'child', EVIL)).not.toEqual([])
+    expect(navigate(h, 'child', risky(EVIL)).decision.kind).toBe('force')
+    // Without the Host's word the child's only source would be the attacker page (the reviewed gap).
+    read(h, 'unrelated', [EVIL])
+    expect(typeInto(h, 'unrelated', EVIL)).toEqual([])
+    // A child that is already tainted gains the unknown source too.
+    read(h, 'late-child', [EVIL])
+    h.policy.noteInheritedExemptReads('late-child')
+    expect(h.policy.get('late-child')?.sources).toContain(UNKNOWN_SOURCE)
+    // Its own exempt reads stay vouched for (the unknown source is only remembered).
+    h.policy.noteInheritedExemptReads('quiet-child')
+    expect(read(h, 'quiet-child', [LOCAL])).toMatchObject({ exempt: true })
+  })
 })
 
-describe('the banner\'s "Trust <site>"', () => {
+describe('the banner\'s one-click choices', () => {
   function panel(policy: PolicyRuntime, sender: chrome.runtime.MessageSender = { id: 'ext', url: 'chrome-extension://ext/panel/index.html' }) {
     const listeners: Array<(message: unknown) => void> = []
     const posted: Array<Record<string, unknown>> = []
@@ -426,25 +659,56 @@ describe('the banner\'s "Trust <site>"', () => {
   }
   const result = (posted: Array<Record<string, unknown>>, id: string) => posted.find((message) => message.type === 'taint.trust.result' && message.id === id)
 
-  it('offers only sources a one-click user rule can cover', () => {
+  it('offers a site only over https on its default port, and only where a choice would change something', () => {
     const h = harness()
     read(h, 's1', [EVIL])
     read(h, 's1', ['https://x.com'])
-    read(h, 's1', [LOCAL]) // already exempt: nothing to trust
-    read(h, 's1', ['http://192.168.1.20']) // a user rule cannot name an address
+    read(h, 's1', [LOCAL]) // already exempt: nothing to offer
+    read(h, 's1', ['http://plain.example']) // http: never trusted
+    read(h, 's1', ['https://x.com:8443']) // not the default port
+    read(h, 's1', ['https://192.168.1.20']) // an entry cannot name an address
     read(h, 's1', ['https://www.paypal.com']) // a built-in read-only site: Settings only
-    expect(h.policy.trustable()).toEqual({ s1: { [EVIL]: 'evil.example', 'https://x.com': 'x.com' } })
-    const config = h.policy.exemption()
-    expect(trustPatternFor(TRUSTED, config)).toBeUndefined()
-    expect(trustPatternFor(UNKNOWN_SOURCE, config)).toBeUndefined()
-    expect(trustPatternFor('http://intranet', config)).toBeUndefined()
-    expect(trustPatternFor('https://github.com', config)).toBeUndefined() // github.com/settings is a built-in rule
-    expect(trustPatternFor(EVIL, { ...config, site: { ...config.site, managed: [{ pattern: 'evil.example', rule: 'ask' }] } })).toBeUndefined()
-    // With the trusted-sites exemption off, trusting would change nothing: not offered.
-    expect(trustPatternFor(EVIL, { ...config, trustedSites: false })).toBeUndefined()
+    read(h, 's1', ['http://localhost:8080']) // a local address the user has not confirmed
+    expect(h.policy.trustable()).toEqual({
+      s1: {
+        [EVIL]: { kind: 'site', entry: 'evil.example' },
+        'https://x.com': { kind: 'site', entry: 'x.com' },
+        'http://localhost:8080': { kind: 'local', entry: 'http://localhost:8080' },
+      },
+    })
+    const now = h.policy.exemption()
+    expect(trustOfferFor(TRUSTED, now)).toBeUndefined()
+    expect(trustOfferFor(UNKNOWN_SOURCE, now)).toBeUndefined()
+    expect(trustOfferFor('https://intranet', now)).toBeUndefined()
+    expect(trustOfferFor('https://github.com', now)).toBeUndefined() // github.com/settings is a built-in rule
+    expect(trustOfferFor(EVIL, { ...now, site: { ...now.site, managed: [{ pattern: 'evil.example', rule: 'ask' }] } })).toBeUndefined()
+    // With an exemption off, the matching choice would change nothing: not offered.
+    expect(trustOfferFor(EVIL, { ...now, trustedSites: false })).toBeUndefined()
+    expect(trustOfferFor('http://localhost:8080', { ...now, localPages: false })).toBeUndefined()
+    // Under scope "any" there is nothing to confirm for a local address.
+    expect(trustOfferFor('http://localhost:8080', { ...now, loopbackScope: 'any' })).toBeUndefined()
+    // A trusted rule waiting for confirmation: the banner can settle it.
+    expect(trustOfferFor(TRUSTED, { ...now, trustConfirmed: [] })).toEqual({ kind: 'site', entry: 'seraph.quest' })
   })
 
-  it('trusting every source clears the taint here and on the Host, like Clear', async () => {
+  it('F6: "Trust" adds a taint-only entry, never a site rule: approval cards on that site do not change', async () => {
+    const h = harness({ siteRules: [], trustedActionOrigins: [], taintTrustedSites: [], taintTrustConfirmed: [] })
+    read(h, 's1', [EVIL])
+    const click = { id: 'click', name: 'browser_click', args: { index: 1 }, sessionId: 's2' }
+    const before = h.policy.evaluate(click, { reads: [], acts: [EVIL], pageOrigin: EVIL })
+    expect(before.kind).toBe('default')
+    expect(await h.policy.trustSources('s1', [EVIL])).toEqual({ trusted: [EVIL], cleared: true })
+    expect(h.saved).toEqual([{ sites: ['evil.example'], localOrigins: [] }])
+    expect(h.settings.siteRules).toEqual([])
+    expect(h.settings.trustedActionOrigins).toEqual([])
+    // Actions on the site still take the ordinary approval flow.
+    expect(h.policy.evaluate(click, { reads: [], acts: [EVIL], pageOrigin: EVIL })).toEqual(before)
+    // Only the taint side changed: its pages no longer restrict a conversation.
+    expect(read(h, 's3', [EVIL])).toMatchObject({ exempt: true })
+    expect(read(h, 's4', ['http://evil.example'])).toEqual({ exempt: false })
+  })
+
+  it('trusting every source lifts the taint here and on the Host', async () => {
     const h = harness()
     read(h, 's1', [EVIL])
     read(h, 's1', [LOCAL])
@@ -452,12 +716,28 @@ describe('the banner\'s "Trust <site>"', () => {
     side.emit({ type: 'taint.trust', id: 't1', sessionId: 's1', origins: [EVIL] })
     await vi.waitFor(() => { expect(result(side.posted, 't1')).toBeDefined() })
     expect(result(side.posted, 't1')).toMatchObject({ ok: true, cleared: true, trusted: [EVIL], key: 's1' })
-    // The persistent choice is a `trusted` site rule, added to the user's rules.
-    expect(h.saved).toEqual([[{ pattern: 'evil.example', rule: 'trusted' }, { pattern: 'seraph.quest', rule: 'trusted' }]])
     expect(h.policy.get('s1')).toBeUndefined()
     expect(h.clearBridgeTaint).toHaveBeenCalledWith('s1')
     // From now on that site does not taint.
-    expect(read(h, 's2', [EVIL])).toEqual({ exempt: true })
+    expect(read(h, 's2', [EVIL])).toMatchObject({ exempt: true })
+  })
+
+  it('F3: lifting the taint by Trust keeps its sources: a page read later is never the only source', async () => {
+    const h = harness()
+    const A = 'https://a-site.example'
+    expect(read(h, 's1', [LOCAL])).toMatchObject({ exempt: true }) // a secret on localhost
+    expect(read(h, 's1', [A])).toEqual({ exempt: false })
+    expect(await h.policy.trustSources('s1', [A])).toEqual({ trusted: [A], cleared: true })
+    expect(h.policy.get('s1')).toBeUndefined()
+    expect(h.policy.taint.exemptReadsOf('s1')).toEqual([A, LOCAL].sort())
+    read(h, 's1', [EVIL])
+    expect(h.policy.get('s1')?.sources).toEqual([A, EVIL, LOCAL].sort())
+    // The attacker page is not the only source: both exfiltration shapes force a card.
+    expect(typeInto(h, 's1', EVIL)).not.toEqual([])
+    expect(taintForcedReasons({ name: 'browser_navigate', args: { url: `${EVIL}/c?d=SECRET0123456789abcdef` } }, h.policy.get('s1'))).not.toEqual([])
+    // Clear, by contrast, is the user saying "forget what this conversation read".
+    await h.policy.clear('s1')
+    expect(h.policy.taint.exemptReadsOf('s1')).toEqual([])
   })
 
   it('trusting only some sources leaves the session tainted', async () => {
@@ -467,9 +747,21 @@ describe('the banner\'s "Trust <site>"', () => {
     expect(await h.policy.trustSources('s1', [EVIL])).toEqual({ trusted: [EVIL], cleared: false })
     expect(h.policy.get('s1')?.sources).toEqual([EVIL, 'https://x.com'])
     expect(h.clearBridgeTaint).not.toHaveBeenCalled()
-    expect(h.policy.trustable()).toEqual({ s1: { 'https://x.com': 'x.com' } })
+    expect(h.policy.trustable()).toEqual({ s1: { 'https://x.com': { kind: 'site', entry: 'x.com' } } })
     expect(await h.policy.trustSources('s1', ['https://x.com'])).toEqual({ trusted: ['https://x.com'], cleared: true })
     expect(h.policy.get('s1')).toBeUndefined()
+  })
+
+  it('"these are my pages" remembers a local address and lifts a taint that had no other source', async () => {
+    const h = harness({ taintLocalOrigins: [] })
+    expect(read(h, 's1', [LOCAL])).toEqual({ exempt: false })
+    expect(h.policy.trustable()).toEqual({ s1: { [LOCAL]: { kind: 'local', entry: LOCAL } } })
+    expect(await h.policy.trustSources('s1', [LOCAL])).toEqual({ trusted: [LOCAL], cleared: true })
+    expect(h.saved).toEqual([{ sites: [], localOrigins: [LOCAL] }])
+    expect(h.policy.get('s1')).toBeUndefined()
+    expect(read(h, 's2', [LOCAL])).toMatchObject({ exempt: true })
+    // Another local address stays unconfirmed.
+    expect(read(h, 's3', ['http://localhost:9999'])).toEqual({ exempt: false })
   })
 
   it('an unknown source can never be trusted: nothing is offered and nothing is saved', async () => {
@@ -501,15 +793,16 @@ describe('the banner\'s "Trust <site>"', () => {
     expect(h.policy.get('s1')).toBeDefined()
   })
 
-  it('reports what the panel may offer with every state push', async () => {
-    const h = harness()
+  it('reports what the panel may offer, and what waits for confirmation, with every state push', async () => {
+    const h = harness({ taintTrustConfirmed: [] })
     read(h, 's1', [EVIL])
     const side = panel(h.policy)
     side.emit({ type: 'taint.subscribe' })
     await vi.waitFor(() => { expect(side.posted.some((message) => message.type === 'taint.state')).toBe(true) })
     expect(side.posted.find((message) => message.type === 'taint.state')).toMatchObject({
       records: { s1: { sources: [EVIL] } },
-      trustable: { s1: { [EVIL]: 'evil.example' } },
+      trustable: { s1: { [EVIL]: { kind: 'site', entry: 'evil.example' } } },
+      unconfirmedTrust: ['rule:seraph.quest', `origin:${ALWAYS}`],
     })
   })
 })

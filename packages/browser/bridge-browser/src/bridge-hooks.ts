@@ -48,11 +48,13 @@ export function createKillSwitchHandler(deps: KillSwitchDeps): () => Promise<voi
  */
 export function createSnapshotInjector(
   inject: (sessionId: string, snapshot: string, reason?: BrowserContextReason) => unknown,
-  taint: Pick<SessionTaintRegistry, 'mark'>,
-): (sessionId: string, snapshot: string, reason?: BrowserContextReason, exempt?: boolean) => void {
-  return (sessionId, snapshot, reason, exempt) => {
+  taint: Pick<SessionTaintRegistry, 'mark'> & Partial<Pick<SessionTaintRegistry, 'honours' | 'noteExemptRead'>>,
+): (sessionId: string, snapshot: string, reason?: BrowserContextReason, exempt?: boolean, local?: boolean) => void {
+  return (sessionId, snapshot, reason, exempt, local) => {
     inject(sessionId, snapshot, reason)
-    if (exempt !== true) taint.mark(sessionId, 'snapshot-injection')
+    // `local`: the exemption rests on a local page, which this bridge may not honour.
+    if (exempt === true && taint.honours?.(local === true) !== false) taint.noteExemptRead?.(sessionId)
+    else taint.mark(sessionId, 'snapshot-injection')
   }
 }
 

@@ -1,18 +1,21 @@
 /**
  * Session taint indicator (security/taint.ts): one short sentence naming the
- * sites the conversation read, a Clear control, and one-click "Trust <site>"
- * choices for sources the user may mark trusted (security/taint-exempt.ts).
+ * sites the conversation read, a Clear control, and one-click choices for
+ * sources the user may exempt (security/taint-exempt.ts): "Trust <site>" for
+ * a web site, "these are my pages" for a local address.
  *
  * Talks to the background over its own port (`dsh-policy`, side-port.ts) so it
  * does not depend on the main panel message protocol. The background decides
- * which sources can be trusted and re-checks every request; this component
+ * which sources can be offered and re-checks every request; this component
  * only renders what it is offered.
  */
 
 import { useRef, useState } from 'react'
+import { getDomain } from 'tldts'
 import type { UiLocale } from '../i18n.ts'
 import type { TaintRecord } from '../security/taint.ts'
 import { NO_SESSION_KEY, taintKey, UNKNOWN_SOURCE } from '../security/taint.ts'
+import type { TrustOffer } from '../security/taint-exempt.ts'
 import { useSidePort } from './side-port.ts'
 import { PANEL_COPY } from './strings.ts'
 
@@ -20,18 +23,20 @@ const PORT_NAME = 'dsh-policy'
 
 /** Hosts named in the sentence before the rest collapse into "+N more". */
 export const TAINT_BANNER_MAX_HOSTS = 3
-/** Sources up to which each gets its own "Trust <site>" button. */
+/** Sites up to which each gets its own "Trust <site>" button. */
 export const TAINT_BANNER_MAX_TRUST_BUTTONS = 2
+/** Longest subdomain prefix shown in full in the confirmation. */
+const MAX_PREFIX_CHARS = 20
 
-/** Per record key: taint source origin → the site pattern "Trust" would add. */
-export type TrustableSources = Record<string, Record<string, string>>
+/** Per record key: taint source origin → the choice the background offers for it. */
+export type TrustableSources = Record<string, Record<string, TrustOffer>>
 
 interface TrustOutcome {
   ok: boolean
   cleared: boolean
 }
 
-/** Subscribe to taint records; returns the records, what may be trusted, and the two actions. */
+/** Subscribe to taint records; returns the records, what may be offered, and the two actions. */
 export function useSessionTaint(onTrusted?: (outcome: TrustOutcome) => void): {
   records: Record<string, TaintRecord>
   trustable: TrustableSources
@@ -63,7 +68,7 @@ export function useSessionTaint(onTrusted?: (outcome: TrustOutcome) => void): {
   }
 }
 
-/** One "Trust <site>" choice: the site as shown, and the source origins it covers. */
+/** One choice: the site (or local address) as shown, and the source origins it covers. */
 export interface TaintTrustChoice {
   site: string
   origins: string[]
@@ -79,8 +84,10 @@ export interface TaintBannerView {
   more: number
   /** A source that is no origin is among them: only Clear is offered. */
   unknown: boolean
-  /** One-click trust choices, one per site; empty when none may be offered. */
+  /** "Trust <site>" choices, one per site; empty when none may be offered. */
   trust: TaintTrustChoice[]
+  /** "These are my pages" choices, one per local address. */
+  local: TaintTrustChoice[]
 }
 
 /** The host of an origin as the banner names it (`seraph.quest`, `localhost:3000`). */
@@ -94,11 +101,25 @@ function displayHost(source: string): string | undefined {
 }
 
 /**
+ * A host name split for display: the registrable domain (what the user is
+ * really trusting, shown in bold) and the subdomain prefix before it, cut in
+ * the middle when it is long so the domain is never pushed out of sight.
+ */
+export function siteNameParts(host: string): { prefix: string; domain: string } {
+  const domain = getDomain(host, { allowPrivateDomains: true })
+  if (domain === null || domain === '' || !host.endsWith(domain)) return { prefix: '', domain: host }
+  const prefix = host.slice(0, host.length - domain.length)
+  if (prefix.length <= MAX_PREFIX_CHARS) return { prefix, domain }
+  const half = Math.floor((MAX_PREFIX_CHARS - 1) / 2)
+  return { prefix: `${prefix.slice(0, half)}…${prefix.slice(prefix.length - half)}`, domain }
+}
+
+/**
  * Lay out one taint record for the banner. Pure, so the wording and the
  * button rules are tested without a browser.
- * @param offered - source origin → site pattern, as the background offers it.
+ * @param offered - source origin → the choice the background offers for it.
  */
-export function taintBannerView(record: TaintRecord, offered: Record<string, string> | undefined, unknownLabel: string): TaintBannerView {
+export function taintBannerView(record: TaintRecord, offered: Record<string, TrustOffer> | undefined, unknownLabel: string): TaintBannerView {
   const hosts: string[] = []
   let unknown = record.sources.length === 0
   for (const source of record.sources) {
@@ -108,13 +129,19 @@ export function taintBannerView(record: TaintRecord, offered: Record<string, str
   }
   if (unknown) hosts.push(unknownLabel)
   const trust: TaintTrustChoice[] = []
+  const local: TaintTrustChoice[] = []
   // An unknown source can never be trusted, so trusting the rest could not lift the taint.
   if (!unknown) {
     for (const source of record.sources) {
-      const site = offered?.[source]
-      if (typeof site !== 'string' || site === '') continue
-      const existing = trust.find((choice) => choice.site === site)
-      if (existing === undefined) trust.push({ site, origins: [source] })
+      const offer = offered?.[source]
+      if (offer === undefined || typeof offer.entry !== 'string' || offer.entry === '') continue
+      if (offer.kind === 'local') {
+        local.push({ site: displayHost(source) ?? offer.entry, origins: [source] })
+        continue
+      }
+      if (offer.kind !== 'site') continue
+      const existing = trust.find((choice) => choice.site === offer.entry)
+      if (existing === undefined) trust.push({ site: offer.entry, origins: [source] })
       else existing.origins.push(source)
     }
   }
@@ -124,13 +151,14 @@ export function taintBannerView(record: TaintRecord, offered: Record<string, str
     more: Math.max(0, hosts.length - TAINT_BANNER_MAX_HOSTS),
     unknown,
     trust,
+    local,
   }
 }
 
 export function TaintBanner({ sessionId, locale, onTrusted, acceptSyntheticClicks = false }: {
   sessionId: string | null
   locale: UiLocale
-  /** A "Trust" went through: the panel's copy of the settings is stale. */
+  /** A choice went through: the panel's copy of the settings is stale. */
   onTrusted?: () => void
   /** Test seam only: jsdom cannot produce a trusted click. Never set in the panel. */
   acceptSyntheticClicks?: boolean
@@ -152,6 +180,7 @@ export function TaintBanner({ sessionId, locale, onTrusted, acceptSyntheticClick
   const everySite = view.hosts.join(', ')
   // The choice being confirmed must still be on offer (the record can change under it).
   const pending = confirming !== null && view.trust.some((choice) => choice.site === confirming.site) ? confirming : null
+  const pendingName = pending === null ? undefined : siteNameParts(pending.site)
   return (
     <div className="taint-banner" role="status" data-testid="taint-banner">
       <div className="taint-banner-row">
@@ -197,9 +226,23 @@ export function TaintBanner({ sessionId, locale, onTrusted, acceptSyntheticClick
           ))}
         </ul>
       )}
-      {pending !== null && (
+      {view.local.map((choice) => (
+        <div className="taint-banner-row taint-local" key={choice.site} data-testid="taint-local-question">
+          <span>{copy.localQuestion(choice.site)}</span>
+          <button type="button" className="secondary taint-trust" onClick={(event) => { if (userClick(event)) trust(target, choice.origins) }}>
+            {copy.localYes}
+          </button>
+        </div>
+      ))}
+      {pending !== null && pendingName !== undefined && (
         <div className="taint-banner-row taint-confirm" data-testid="taint-trust-confirm">
-          <span>{copy.trustConfirm(pending.site)} {PANEL_COPY[locale].sitePolicy.trustedNote}</span>
+          <span>
+            {copy.trustConfirmLead}
+            <span className="taint-site" title={pending.site}>{pendingName.prefix}<strong>{pendingName.domain}</strong></span>
+            {copy.trustConfirmEnd}
+            {' '}
+            {copy.trustEffects}
+          </span>
           <button
             type="button"
             className="secondary taint-trust"

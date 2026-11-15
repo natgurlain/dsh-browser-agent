@@ -30,7 +30,8 @@ async function boot(tabUrl: string, settings: Record<string, unknown> = {}, chil
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const sessionData: Record<string, unknown> = {}
   const stored: Record<string, unknown> = {
-    dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge', token: TEST_BRIDGE_TOKEN, sharePageContent: 'auto', ...settings },
+    // The user said this local address is theirs (the default scope exempts only such origins).
+    dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge', token: TEST_BRIDGE_TOKEN, sharePageContent: 'auto', taintLocalOrigins: [LOCAL], ...settings },
   }
   vi.stubGlobal('chrome', {
     alarms: { create: vi.fn(), clear: vi.fn(async () => true), onAlarm: chromeEvent<[chrome.alarms.Alarm]>() },
@@ -78,7 +79,7 @@ async function boot(tabUrl: string, settings: Record<string, unknown> = {}, chil
   await import('../src/background/index.ts')
 
   const portMessages = chromeEvent<[unknown]>()
-  const port = { name: 'dsh-panel', postMessage: vi.fn(), onMessage: portMessages, onDisconnect: chromeEvent<[]>() } as unknown as chrome.runtime.Port
+  const port = { name: 'dsh-panel', sender: { id: chrome.runtime.id, url: chrome.runtime.getURL('panel/index.html') }, postMessage: vi.fn(), disconnect: vi.fn(), onMessage: portMessages, onDisconnect: chromeEvent<[]>() } as unknown as chrome.runtime.Port
   onConnect.emit(port)
   await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
   const socket = FakeWebSocket.instances[0]!
@@ -107,7 +108,18 @@ async function boot(tabUrl: string, settings: Record<string, unknown> = {}, chil
     return sent().find((frame) => frame.t === 'tool.result' && frame.id === id)!
   }
   const taint = (): Record<string, { sources: string[] }> => (sessionData.dshSessionTaint ?? {}) as Record<string, { sources: string[] }>
-  return { tool, taint, sent, answerRpcs, sessionData }
+  const settingsStored = (): Record<string, unknown> => stored.dshSettings as Record<string, unknown>
+  /** Save settings through the panel port, as the Settings page does. */
+  const saveSettings = async (next: Record<string, unknown>): Promise<void> => {
+    const id = `settings-${String(seq += 1)}`
+    portMessages.emit({ type: 'settings', id, settings: next })
+    await vi.waitFor(() => {
+      expect((port.postMessage as unknown as { mock: { calls: unknown[][] } }).mock.calls.some(([message]) => (
+        (message as { type?: string; id?: string }).type === 'settings.result' && (message as { id?: string }).id === id
+      ))).toBe(true)
+    })
+  }
+  return { tool, taint, sent, answerRpcs, sessionData, socket, onConnect, settingsStored, saveSettings }
 }
 
 afterEach(() => {
@@ -117,12 +129,72 @@ afterEach(() => {
 })
 
 describe('the worker vouches only for exempt reads', () => {
-  it('a local page: no taint here, and the result frame tells the bridge (default settings)', async () => {
+  it('a local page the user confirmed: no taint here, and the result frame tells the bridge, marked as local', async () => {
     const env = await boot(`${LOCAL}/app`)
     const result = await env.tool('browser_snapshot')
-    expect(result).toMatchObject({ ok: true, taintExempt: true })
+    expect(result).toMatchObject({ ok: true, taintExempt: true, taintExemptLocal: true })
     expect((await env.tool('browser_get_text', { selector: 'h1' })).taintExempt).toBe(true)
     expect(env.taint()[SESSION]).toBeUndefined()
+  })
+
+  it('a local address the user never confirmed taints (the shipped default scope)', async () => {
+    const env = await boot('http://localhost:8080/app')
+    expect(await env.tool('browser_snapshot')).not.toHaveProperty('taintExempt')
+    await vi.waitFor(() => { expect(env.taint()[SESSION]?.sources).toEqual(['http://localhost:8080']) })
+  })
+
+  it('F4: the Host says an ancestor read exempt pages: this session can never have a single source', async () => {
+    const env = await boot(`${EVIL}/inbox`)
+    const id = 'child-call'
+    env.socket.receive({ t: 'tool.call', id, name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 10_000, sessionId: SESSION, inheritedExemptReads: true })
+    await vi.waitFor(() => {
+      env.answerRpcs()
+      expect(env.sent().some((frame) => frame.t === 'tool.result' && frame.id === id)).toBe(true)
+    })
+    await vi.waitFor(() => { expect(env.taint()[SESSION]?.sources).toEqual(['(unknown)', EVIL]) })
+  })
+
+  it('F1: a page served by the DSH host itself is never exempt, whatever the user trusted', async () => {
+    // The bridge address is wss://bridge.example: its web UI shows every session's transcript.
+    const env = await boot('https://bridge.example/sessions', { taintTrustedSites: ['bridge.example'] })
+    expect(await env.tool('browser_snapshot')).not.toHaveProperty('taintExempt')
+    await vi.waitFor(() => { expect(env.taint()[SESSION]?.sources).toEqual(['https://bridge.example']) })
+  })
+
+  it('the panel port is refused to anything but an extension page', async () => {
+    const env = await boot(`${LOCAL}/app`)
+    const before = env.settingsStored().siteRules
+    const messages = chromeEvent<[unknown]>()
+    const disconnect = vi.fn()
+    const contentScript = {
+      name: 'dsh-panel',
+      sender: { id: chrome.runtime.id, url: 'https://evil.example/', tab: { id: 9 } },
+      postMessage: vi.fn(),
+      disconnect,
+      onMessage: messages,
+      onDisconnect: chromeEvent<[]>(),
+    } as unknown as chrome.runtime.Port
+    env.onConnect.emit(contentScript)
+    expect(disconnect).toHaveBeenCalled()
+    expect(messages.listeners.size).toBe(0)
+    // Nothing it sends is heard: it cannot write site rules or always-allowed origins.
+    messages.emit({ type: 'settings', id: 'x', settings: { siteRules: [{ pattern: 'evil.example', rule: 'trusted' }], trustedActionOrigins: ['https://evil.example'] } })
+    await Promise.resolve()
+    expect(env.settingsStored().siteRules).toEqual(before)
+    expect(contentScript.postMessage).not.toHaveBeenCalled()
+  })
+
+  it('a trusted site added in Settings now counts at once; one that predates the exemption waits for "Keep"', async () => {
+    const env = await boot('https://seraph.quest/board', { siteRules: [{ pattern: 'old.example', rule: 'trusted' }], trustedActionOrigins: ['https://old-allowed.example'] })
+    expect(env.settingsStored().taintTrustConfirmed ?? []).toEqual([])
+    await env.saveSettings({ siteRules: [{ pattern: 'old.example', rule: 'trusted' }, { pattern: 'seraph.quest', rule: 'trusted' }] })
+    expect(env.settingsStored().taintTrustConfirmed).toEqual(['rule:seraph.quest'])
+    // The panel's "Keep all" confirms the old ones.
+    await env.saveSettings({ taintTrustConfirmed: ['rule:seraph.quest', 'rule:old.example', 'origin:https://old-allowed.example', 'rule:gone.example'] })
+    expect(env.settingsStored().taintTrustConfirmed).toEqual(['origin:https://old-allowed.example', 'rule:old.example', 'rule:seraph.quest'])
+    // Removing an entry forgets its confirmation.
+    await env.saveSettings({ trustedActionOrigins: [] })
+    expect(env.settingsStored().taintTrustConfirmed).toEqual(['rule:old.example', 'rule:seraph.quest'])
   })
 
   it('an external page: tainted, and no flag on the frame', async () => {
@@ -160,12 +232,25 @@ describe('the worker vouches only for exempt reads', () => {
   })
 
   it('a site the user marked trusted: exempt; with the setting off, or under the blanket switch only, it taints', async () => {
-    const trusted = await boot('https://seraph.quest/board', { siteRules: [{ pattern: 'seraph.quest', rule: 'trusted' }] })
-    expect((await trusted.tool('browser_snapshot')).taintExempt).toBe(true)
+    const rule = { siteRules: [{ pattern: 'seraph.quest', rule: 'trusted' }], taintTrustConfirmed: ['rule:seraph.quest'] }
+    const trusted = await boot('https://seraph.quest/board', rule)
+    const vouched = await trusted.tool('browser_snapshot')
+    expect(vouched.taintExempt).toBe(true)
+    expect(vouched).not.toHaveProperty('taintExemptLocal')
     expect(trusted.taint()[SESSION]).toBeUndefined()
     vi.resetModules()
     FakeWebSocket.instances = []
-    const off = await boot('https://seraph.quest/board', { siteRules: [{ pattern: 'seraph.quest', rule: 'trusted' }], taintExemptTrustedSites: false })
+    // The same rule, stored before the exemption existed and never confirmed: it taints.
+    const unconfirmed = await boot('https://seraph.quest/board', { siteRules: rule.siteRules })
+    expect(await unconfirmed.tool('browser_snapshot')).not.toHaveProperty('taintExempt')
+    vi.resetModules()
+    FakeWebSocket.instances = []
+    // Plain http to a trusted host is never exempt.
+    const http = await boot('http://seraph.quest/board', rule)
+    expect(await http.tool('browser_snapshot')).not.toHaveProperty('taintExempt')
+    vi.resetModules()
+    FakeWebSocket.instances = []
+    const off = await boot('https://seraph.quest/board', { ...rule, taintExemptTrustedSites: false })
     expect(await off.tool('browser_snapshot')).not.toHaveProperty('taintExempt')
     vi.resetModules()
     FakeWebSocket.instances = []

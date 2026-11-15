@@ -195,7 +195,15 @@ export class SessionTaintRegistry {
   private readonly entries = new Map<string, TaintEntry>()
   private readonly parents = new Map<string, string>()
   /** Extension results per in-flight tool call: how many were requested, how many came back vouched exempt. */
-  private readonly vouchers = new Map<string, { expected: number; exempt: number }>()
+  private readonly vouchers = new Map<string, { expected: number; exempt: number; local: boolean }>()
+  /** Sessions that hold content of vouched-exempt reads (told to their descendants' calls). */
+  private readonly exemptReaders = new Set<string>()
+  /**
+   * Which vouchers this bridge honours: none (`any: false`), or all but the
+   * ones resting on a local page (`local: false`, the Host's
+   * `devLoop.trustLoopback: false`).
+   */
+  honour: { any: boolean; local: boolean } = { any: true, local: true }
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -252,13 +260,38 @@ export class SessionTaintRegistry {
       const oldest = this.vouchers.keys().next()
       if (oldest.done !== true) this.vouchers.delete(oldest.value)
     }
-    this.vouchers.set(key, { expected: 1, exempt: 0 })
+    this.vouchers.set(key, { expected: 1, exempt: 0, local: false })
   }
 
-  /** The extension answered one requested result; `exempt` is its `taintExempt` flag. */
-  noteResult(sessionId: string, callId: string, exempt: boolean): void {
+  /**
+   * The extension answered one requested result; `exempt` is its
+   * `taintExempt` flag, `local` whether that exemption rests on a local page.
+   */
+  noteResult(sessionId: string, callId: string, exempt: boolean, local = false): void {
     const entry = this.vouchers.get(voucherKey(sessionId, callId))
-    if (entry !== undefined && exempt) entry.exempt += 1
+    if (entry === undefined || !exempt) return
+    entry.exempt += 1
+    if (local) entry.local = true
+  }
+
+  /** Whether a voucher of this kind is honoured at all. */
+  honours(local: boolean): boolean {
+    return this.honour.any && (!local || this.honour.local)
+  }
+
+  /** The session holds content of an exempt read (a vouched result or injection). */
+  noteExemptRead(sessionId: string): void {
+    this.exemptReaders.add(sessionId)
+  }
+
+  /**
+   * Whether a session this one was spawned or forked from read exempt pages.
+   * Their content may be in this session's context while the extension has no
+   * record of it under this session's id, so the extension is told on every
+   * call (`inheritedExemptReads`) and counts an unknown source.
+   */
+  inheritsExemptReads(sessionId: string): boolean {
+    return this.ancestors(sessionId).some((ancestor) => this.exemptReaders.has(ancestor))
   }
 
   /**
@@ -272,7 +305,9 @@ export class SessionTaintRegistry {
     const key = voucherKey(sessionId, callId)
     const entry = this.vouchers.get(key)
     this.vouchers.delete(key)
-    return entry !== undefined && entry.expected > 0 && entry.exempt === entry.expected
+    const exempt = entry !== undefined && entry.expected > 0 && entry.exempt === entry.expected && this.honours(entry.local)
+    if (exempt) this.exemptReaders.add(sessionId)
+    return exempt
   }
 
   /** Clear only this session's own taint (a tainted ancestor still applies). */
@@ -310,6 +345,7 @@ export class SessionTaintRegistry {
     for (const parent of this.parents.values()) if (parent === sessionId) return false
     this.entries.delete(sessionId)
     this.parents.delete(sessionId)
+    this.exemptReaders.delete(sessionId)
     return true
   }
 }

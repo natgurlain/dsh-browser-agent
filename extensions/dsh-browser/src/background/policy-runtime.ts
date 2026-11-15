@@ -25,7 +25,18 @@ import { evaluateCallPolicy, type CallPolicyDecision, type CallPolicyTargets, ty
 import { EMPTY_MANAGED_POLICY, loadManagedPolicy, type ManagedPolicy } from '../security/managed-policy.ts'
 import { matchSitePattern, type SitePolicy, type SiteRuleEntry } from '../security/site-policy.ts'
 import { resultTaintsSession, TaintTracker, taintKey, UNKNOWN_SOURCE, type TaintRecord } from '../security/taint.ts'
-import { allTaintExempt, originTaintExempt, trustPatternFor, withTrustedSite, type TaintExemptionConfig } from '../security/taint-exempt.ts'
+import {
+  allTaintExempt,
+  anyLocalExempt,
+  originTaintExempt,
+  TAINT_EXEMPTION_SWITCHES,
+  trustOfferFor,
+  unconfirmedTrust,
+  type LoopbackScope,
+  type TaintExemptionConfig,
+  type TrustedMigration,
+  type TrustOffer,
+} from '../security/taint-exempt.ts'
 import { httpOrigin, parseHttpUrl } from '../security/web-url.ts'
 import type { CallPolicyHook, ToolCall } from './tools.ts'
 import { isDevToolsTool } from './authorization.ts'
@@ -51,24 +62,55 @@ export interface PolicySettings {
   taintExemptLocalPages?: boolean
   /** "Don't restrict sessions that only read sites I trust" (absent: off). */
   taintExemptTrustedSites?: boolean
+  /** Loopback origins the user said are theirs. */
+  taintLocalOrigins?: readonly string[]
+  /** Hosts whose pages are not treated as untrusted content (the banner's Trust). */
+  taintTrustedSites?: readonly string[]
+  /** Trusted rules and always-allowed origins confirmed for the exemption (keys, see taint-exempt.ts). */
+  taintTrustConfirmed?: readonly string[]
 }
 
 /**
  * Where a call's tab stood once the call settled: the top page's origin and
  * the origins of every frame in it. `opaque` means the top page has no web
  * origin (a browser page, a file), so its content cannot be attributed.
+ * `urls` are the frames' page URLs (path-scoped site rules).
  */
 export interface TabProvenance {
   top?: string
   frames: string[]
   opaque: boolean
+  urls?: string[]
 }
 
 /** Tools whose result can quote any frame of the tab, whatever frame they target (a dialog's text). */
 const WHOLE_TAB_PROVENANCE_TOOLS: ReadonlySet<string> = new Set(['browser_dialog'])
 
-/** Tools whose result quotes pages other than the one in the tab (source URLs and names of past downloads). */
-const NEVER_EXEMPT_TOOLS: ReadonlySet<string> = new Set(['browser_downloads'])
+/**
+ * Tools whose result is never exempt: the list of past downloads names other
+ * sites; a screenshot or a PDF carries the pixels of every subresource and
+ * frame, whatever origin served them (cross-origin images, a frame that
+ * loaded between the frame listing and the capture).
+ */
+const NEVER_EXEMPT_TOOLS: ReadonlySet<string> = new Set(['browser_downloads', 'browser_screenshot', 'browser_save_pdf'])
+
+/** What the caller knows about a settled result beyond its targets. */
+export interface ResultFacts {
+  /**
+   * The result carries console text collected for the whole tab (appended to
+   * action results while the debugger is attached): it can quote any frame
+   * and anything the page talked to, so the result is never exempt.
+   */
+  quotesConsole?: boolean
+}
+
+/** New persistent choices made on the banner. */
+export interface TaintTrustChange {
+  /** Hosts to add to the "not treated as untrusted" sites. */
+  sites: string[]
+  /** Loopback origins to remember as the user's own pages. */
+  localOrigins: string[]
+}
 
 export interface PolicyRuntimeOptions {
   settings: () => PolicySettings
@@ -77,11 +119,19 @@ export interface PolicyRuntimeOptions {
   /** Forward a clear to the bridge; rejects when it is not connected. */
   clearBridgeTaint: (sessionId: string | undefined) => Promise<void>
   /**
-   * Persist new user site rules through the settings path Settings itself
-   * saves with (normalized, managed overrides applied). Absent: the banner's
-   * "Trust" is refused.
+   * Persist the banner's choices through the settings path Settings itself
+   * saves with (normalized). Absent: the banner's "Trust" is refused.
    */
-  saveSiteRules?: (rules: SiteRuleEntry[]) => Promise<void>
+  saveTaintTrust?: (change: TaintTrustChange) => Promise<void>
+  /** Origins that are never exempt: whatever serves the DSH host (its web UI, the bridge). */
+  neverExemptOrigin?: (origin: string) => boolean
+  /**
+   * What the connected bridge honours (its `hello.ok` caps): a class it does
+   * not honour is off here too, so both sides agree. Absent: both honoured.
+   */
+  bridgeExemptions?: () => { local: boolean; trusted: boolean } | undefined
+  /** The two open product decisions (taint-exempt.ts); tests exercise both variants. */
+  switches?: { loopbackScope: LoopbackScope; trustedMigration: TrustedMigration }
   /** Called after managed policy changes so settings can be re-normalized. */
   onManagedChange?: (policy: ManagedPolicy) => void
   storage?: chrome.storage.StorageArea
@@ -96,10 +146,18 @@ interface CallRecord {
   touched: boolean
   /** A destination that is not a web URL: its content cannot be attributed. */
   opaque: boolean
+  /** Page URLs of the frames and destinations named (path-scoped site rules). */
+  urls: Set<string>
+}
+
+function newCallRecord(): CallRecord {
+  return { seen: new Set(), touched: false, opaque: false, urls: new Set() }
 }
 
 function noteTargets(record: CallRecord, targets: CallPolicyTargets): void {
   record.targets = targets
+  for (const url of targets.urls ?? []) record.urls.add(url)
+  if (targets.destination !== undefined) record.urls.add(targets.destination)
   for (const origin of targets.reads) record.seen.add(origin)
   for (const origin of targets.acts) record.seen.add(origin)
   if (targets.reads.length > 0 || targets.acts.length > 0) record.touched = true
@@ -234,7 +292,7 @@ export class PolicyRuntime {
 
   /** The hook a dispatch path consults; it remembers the targets for {@link recordResult}. */
   hook(callId: string, sessionId: string | undefined, unrestricted: boolean): CallPolicyHook {
-    const record: CallRecord = { seen: new Set(), touched: false, opaque: false }
+    const record = newCallRecord()
     this.calls.set(callId, record)
     return (call, targets) => {
       noteTargets(record, targets)
@@ -246,14 +304,15 @@ export class PolicyRuntime {
    * A policy evaluator that also collects the origins it is asked about, for
    * reads injected without a tool call ({@link injectionExempt}).
    */
-  provenanceEvaluator(sessionId: string | undefined, unrestricted: boolean): { policy: CallPolicyHook; origins: () => string[] | undefined } {
-    const record: CallRecord = { seen: new Set(), touched: false, opaque: false }
+  provenanceEvaluator(sessionId: string | undefined, unrestricted: boolean): { policy: CallPolicyHook; origins: () => string[] | undefined; urls: () => string[] } {
+    const record = newCallRecord()
     return {
       policy: (call, targets) => {
         noteTargets(record, targets)
         return this.evaluate({ ...call, sessionId }, targets, unrestricted)
       },
       origins: () => record.touched && !record.opaque ? [...record.seen] : undefined,
+      urls: () => [...record.urls],
     }
   }
 
@@ -264,16 +323,32 @@ export class PolicyRuntime {
     return config.localPages || config.trustedSites
   }
 
-  /** The exemptions in force now: the two settings, minus what managed policy forces off. */
+  /**
+   * The exemptions in force now: the two settings, minus what managed policy
+   * or the connected bridge forces off, with the user's lists.
+   */
   exemption(): TaintExemptionConfig {
     const settings = this.options.settings()
+    const bridge = this.options.bridgeExemptions?.()
+    const switches = this.options.switches ?? TAINT_EXEMPTION_SWITCHES
     return {
-      localPages: settings.taintExemptLocalPages === true && !this.managed.disableLocalTaintExemption,
-      trustedSites: settings.taintExemptTrustedSites === true && !this.managed.disableTrustedTaintExemption,
+      localPages: settings.taintExemptLocalPages === true && !this.managed.disableLocalTaintExemption && bridge?.local !== false,
+      trustedSites: settings.taintExemptTrustedSites === true && !this.managed.disableTrustedTaintExemption && bridge?.trusted !== false,
       // Unrestricted access is not an explicit choice about any one site.
       site: this.sitePolicy(false),
       trustedActionOrigins: settings.trustedActionOrigins ?? [],
+      localOrigins: settings.taintLocalOrigins ?? [],
+      taintTrustedSites: settings.taintTrustedSites ?? [],
+      trustConfirmed: settings.taintTrustConfirmed ?? [],
+      loopbackScope: switches.loopbackScope,
+      trustedMigration: switches.trustedMigration,
+      ...this.options.neverExemptOrigin === undefined ? {} : { neverExempt: this.options.neverExemptOrigin },
     }
+  }
+
+  /** Trusted rules and always-allowed origins waiting for the user's one-time confirmation (keys). */
+  unconfirmedTrust(): string[] {
+    return unconfirmedTrust(this.exemption())
   }
 
   /**
@@ -292,12 +367,14 @@ export class PolicyRuntime {
    *   never exempt;
    * - developer-tools results are never exempt: console output and captured
    *   network traffic quote whatever origins the page talked to, and page
-   *   JavaScript can return anything.
+   *   JavaScript can return anything. The same goes for any result that
+   *   carries the tab's console text, and for screenshots and PDFs (pixels of
+   *   every subresource).
    */
-  private exemptProvenance(name: string, record: CallRecord | undefined, fallbackOrigin: string | undefined, after: TabProvenance | undefined): string[] | undefined {
+  private exemptProvenance(name: string, record: CallRecord | undefined, fallbackOrigin: string | undefined, after: TabProvenance | undefined, facts: ResultFacts): { origins: string[]; local: boolean } | undefined {
     const config = this.exemption()
     if (!config.localPages && !config.trustedSites) return undefined
-    if (NEVER_EXEMPT_TOOLS.has(name) || isDevToolsTool(name)) return undefined
+    if (NEVER_EXEMPT_TOOLS.has(name) || isDevToolsTool(name) || facts.quotesConsole === true) return undefined
     const origins = new Set<string>()
     const judged = record?.targets !== undefined
     if (judged) {
@@ -317,7 +394,8 @@ export class PolicyRuntime {
       }
     }
     const list = [...origins]
-    return allTaintExempt(list, config) ? list : undefined
+    const urls = [...record?.urls ?? [], ...after?.urls ?? []]
+    return allTaintExempt(list, config, urls) ? { origins: list, local: anyLocalExempt(list, config) } : undefined
   }
 
   /**
@@ -331,8 +409,10 @@ export class PolicyRuntime {
    * not taint: only for a result proven exempt in a session that is still
    * untainted here. Anything else, a result this side does not taint for
    * other reasons included, leaves the bridge to its own (stricter) rule.
+   * `local` says the exemption rested on a local page (the bridge may refuse
+   * those on its own).
    */
-  recordResult(call: Pick<ToolCall, 'id' | 'name' | 'sessionId'>, ok: boolean, fallbackOrigin?: string, after?: TabProvenance): { exempt: boolean } {
+  recordResult(call: Pick<ToolCall, 'id' | 'name' | 'sessionId'>, ok: boolean, fallbackOrigin?: string, after?: TabProvenance, facts: ResultFacts = {}): { exempt: boolean; local?: boolean } {
     const record = this.calls.get(call.id)
     this.calls.delete(call.id)
     // A failed call that reached a page can still quote it (an open dialog's
@@ -340,10 +420,10 @@ export class PolicyRuntime {
     const reachedPage = record?.targets !== undefined || fallbackOrigin !== undefined
     if (!resultTaintsSession(call.name, true) || (!ok && !reachedPage)) return { exempt: false }
     if (this.taint.get(call.sessionId) === undefined) {
-      const exempt = this.exemptProvenance(call.name, record, fallbackOrigin, after)
+      const exempt = this.exemptProvenance(call.name, record, fallbackOrigin, after, facts)
       if (exempt !== undefined) {
-        this.taint.noteExemptRead(call.sessionId, exempt)
-        return { exempt: true }
+        this.taint.noteExemptRead(call.sessionId, exempt.origins)
+        return { exempt: true, local: exempt.local }
       }
     }
     const targets = record?.targets
@@ -402,13 +482,26 @@ export class PolicyRuntime {
   }
 
   /**
+   * The Host reports that a session this one was spawned or forked from read
+   * exempt pages. Their content may be in this session's context, and this
+   * extension does not know which pages they were: remember an unknown
+   * source, so that once this session is tainted no origin is ever its only
+   * source (and so never the exempt destination for what the parent read).
+   */
+  noteInheritedExemptReads(sessionId: string | undefined): void {
+    const record = this.taint.get(sessionId)
+    if (record === undefined) this.taint.noteExemptRead(sessionId, [UNKNOWN_SOURCE])
+    else if (!record.sources.includes(UNKNOWN_SOURCE)) this.taint.mark(sessionId, 'host-lineage', [UNKNOWN_SOURCE])
+  }
+
+  /**
    * The user attached a page selection to a prompt: its page text entered the
    * session. `origin` is the origin of the frame the selection was made in
    * (unknown without one). Returns whether the read was exempt, in which case
    * the bridge is not told to taint either.
    */
-  recordSelection(sessionId: string, origin: string | undefined): { exempt: boolean } {
-    if (origin !== undefined && this.taint.get(sessionId) === undefined && originTaintExempt(origin, this.exemption())) {
+  recordSelection(sessionId: string, origin: string | undefined, url?: string): { exempt: boolean } {
+    if (origin !== undefined && this.taint.get(sessionId) === undefined && originTaintExempt(origin, this.exemption(), url === undefined ? [] : [url])) {
       this.taint.noteExemptRead(sessionId, [origin])
       return { exempt: true }
     }
@@ -423,10 +516,15 @@ export class PolicyRuntime {
    * {@link provenanceEvaluator}) is known and all exempt. Without frame
    * provenance an injection always taints.
    */
-  injectionExempt(sessionId: string, origin: string | undefined, frames: readonly string[] | undefined): boolean {
+  injectionExempt(sessionId: string, origin: string | undefined, frames: readonly string[] | undefined, urls: readonly string[] = []): boolean {
     if (origin === undefined || frames === undefined || frames.length === 0) return false
     if (this.taint.get(sessionId) !== undefined) return false
-    return allTaintExempt([origin, ...frames], this.exemption())
+    return allTaintExempt([origin, ...frames], this.exemption(), urls)
+  }
+
+  /** Whether an exempt injection of these origins rests on a local page (told to the bridge). */
+  restsOnLocalPage(origins: readonly string[]): boolean {
+    return anyLocalExempt(origins, this.exemption())
   }
 
   /**
@@ -435,8 +533,8 @@ export class PolicyRuntime {
    * ({@link injectionExempt}); the frames it read, when known, are sources
    * like the page itself.
    */
-  recordInjection(sessionId: string, origin: string | undefined, frames?: readonly string[]): { exempt: boolean } {
-    if (origin !== undefined && this.injectionExempt(sessionId, origin, frames)) {
+  recordInjection(sessionId: string, origin: string | undefined, frames?: readonly string[], urls: readonly string[] = []): { exempt: boolean } {
+    if (origin !== undefined && this.injectionExempt(sessionId, origin, frames, urls)) {
       this.taint.noteExemptRead(sessionId, [origin, ...frames ?? []])
       return { exempt: true }
     }
@@ -460,21 +558,20 @@ export class PolicyRuntime {
   }
 
   /**
-   * Taint sources of each record the banner may offer to trust with one
-   * click, mapped to the site pattern that would be added (see
-   * {@link trustPatternFor}). A record with an unknown source offers none:
-   * an unknown source can never be trusted, so trusting the rest could not
-   * lift the taint.
+   * Taint sources of each record the banner may offer a one-click choice
+   * for (see {@link trustOfferFor}). A record with an unknown source offers
+   * none: an unknown source can never be trusted, so trusting the rest could
+   * not lift the taint.
    */
-  trustable(): Record<string, Record<string, string>> {
+  trustable(): Record<string, Record<string, TrustOffer>> {
     const config = this.exemption()
-    const result: Record<string, Record<string, string>> = {}
+    const result: Record<string, Record<string, TrustOffer>> = {}
     for (const [key, record] of Object.entries(this.taint.snapshot())) {
       if (record.sources.length === 0 || record.sources.includes(UNKNOWN_SOURCE)) continue
-      const offered: Record<string, string> = {}
+      const offered: Record<string, TrustOffer> = {}
       for (const source of record.sources) {
-        const pattern = trustPatternFor(source, config)
-        if (pattern !== undefined) offered[source] = pattern
+        const offer = trustOfferFor(source, config)
+        if (offer !== undefined) offered[source] = offer
       }
       if (Object.keys(offered).length > 0) result[key] = offered
     }
@@ -482,38 +579,47 @@ export class PolicyRuntime {
   }
 
   /**
-   * The banner's "Trust <site>": mark the named taint sources of one session
-   * trusted, persistently, exactly as adding a `trusted` site rule in
-   * Settings does. Only sources of that session's current record that
-   * {@link trustPatternFor} offers are accepted, so the message cannot be
-   * used to trust arbitrary sites. If every source of the record is exempt
-   * afterwards the taint is cleared here and on the Host (the same as
-   * Clear); otherwise the session stays tainted.
+   * The banner's one-click choices for one session: "Trust <site>" adds the
+   * source's host to the sites whose pages are not treated as untrusted
+   * content (a taint-only entry: it relaxes no approval card), and "these
+   * are my pages" remembers a loopback origin as the user's own. Only
+   * sources of that session's current record that {@link trustOfferFor}
+   * offers are accepted, so the message cannot be used to trust arbitrary
+   * sites. If every source of the record is exempt afterwards the taint is
+   * lifted here and on the Host; the record's sources stay remembered as
+   * exempt reads, so a page read later is never the session's only source.
+   * Otherwise the session stays tainted.
    */
   async trustSources(sessionId: string | undefined, origins: readonly string[]): Promise<{ trusted: string[]; cleared: boolean }> {
     const record = this.taint.get(sessionId)
-    const save = this.options.saveSiteRules
+    const save = this.options.saveTaintTrust
     if (record === undefined || save === undefined) return { trusted: [], cleared: false }
     // An unknown source can never be trusted: the banner offers only Clear then.
     if (record.sources.length === 0 || record.sources.includes(UNKNOWN_SOURCE)) return { trusted: [], cleared: false }
     const config = this.exemption()
-    const patterns = new Map<string, string>()
+    const offers = new Map<string, TrustOffer>()
     for (const origin of new Set(origins)) {
       if (!record.sources.includes(origin)) continue
-      const pattern = trustPatternFor(origin, config)
-      if (pattern !== undefined) patterns.set(origin, pattern)
+      const offer = trustOfferFor(origin, config)
+      if (offer !== undefined) offers.set(origin, offer)
     }
-    if (patterns.size === 0) return { trusted: [], cleared: false }
-    let rules = [...this.options.settings().siteRules]
-    for (const pattern of patterns.values()) rules = withTrustedSite(rules, pattern)
-    await save(rules)
-    // Judge what was actually stored (normalization or managed policy may have refused a rule).
+    if (offers.size === 0) return { trusted: [], cleared: false }
+    const chosen = [...offers.values()]
+    await save({
+      sites: [...new Set(chosen.filter((offer) => offer.kind === 'site').map((offer) => offer.entry))],
+      localOrigins: [...new Set(chosen.filter((offer) => offer.kind === 'local').map((offer) => offer.entry))],
+    })
+    // Judge what was actually stored (normalization may have refused an entry).
     const now = this.exemption()
-    const trusted = [...patterns.keys()].filter((origin) => originTaintExempt(origin, now))
+    const trusted = [...offers.keys()].filter((origin) => originTaintExempt(origin, now))
     const current = this.taint.get(sessionId)
     const cleared = current !== undefined && allTaintExempt(current.sources, now)
-    if (cleared) await this.clear(sessionId)
-    else this.broadcast()
+    if (cleared) {
+      this.taint.lift(sessionId)
+      await this.options.clearBridgeTaint(sessionId).catch(() => {})
+    } else {
+      this.broadcast()
+    }
     return { trusted, cleared }
   }
 
@@ -566,6 +672,7 @@ export class PolicyRuntime {
         type: 'taint.state',
         records: this.taint.snapshot(),
         trustable: this.trustable(),
+        unconfirmedTrust: this.unconfirmedTrust(),
         strictSessions: [...this.strictSessions],
         managed: { active: this.managed.active, siteRules: this.managed.siteRules },
       })

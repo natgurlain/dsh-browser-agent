@@ -71,6 +71,8 @@ export interface ToolCall {
   sessionId?: string
   /** The Host holds this session (or an ancestor agent) tainted (protocol `tool.call.tainted`). */
   tainted?: true
+  /** A session this one was spawned or forked from read taint-exempt pages (protocol `tool.call.inheritedExemptReads`). */
+  inheritedExemptReads?: true
   /** Set by the bridge's program runner: this call is one step of an approved `browser_run`. */
   program?: { id: string; step: number }
   /** External (MCP) client label for a bridge-owned external session's call. */
@@ -790,6 +792,19 @@ function stripDuplicateSnapshotPrompt(status: string): string {
 const landingPolicies = new WeakMap<ToolCall, CallPolicyHook>()
 
 /**
+ * Calls whose result carries console text collected for the whole tab while
+ * the debugger was attached. That text can come from any frame and quote
+ * anything the page talked to, so such a result is never exempt from taint
+ * (policy-runtime.ts). Keyed by the call object, like {@link landingPolicies}.
+ */
+const consoleQuotingCalls = new WeakSet<ToolCall>()
+
+/** Whether the result of `call` carries console errors of its tab. */
+export function callQuotedConsole(call: ToolCall): boolean {
+  return consoleQuotingCalls.has(call)
+}
+
+/**
  * Site policy for the page a navigation actually landed on (redirects,
  * script navigations, and child frames included): undefined when it may be
  * snapshotted, otherwise the answer to return instead — no page content.
@@ -1154,6 +1169,7 @@ async function dispatchOnceArmed(
     const trusted = guarded.value
     if (trusted !== undefined) {
       const errors = trustedConsoleMark === undefined ? [] : consoleErrorsSince(tabId, trustedConsoleMark)
+      if (errors.length > 0) consoleQuotingCalls.add(call)
       return withDialogNote(withSideEffects(trusted, trustedWatch?.stop() ?? [], errors, shareContent, budget.maxChars), guarded.dialog, dialogs)
     }
     if (!syntheticFallback) {
@@ -1253,6 +1269,7 @@ async function dispatchOnceArmed(
     await finishWatch(pointer, pendingWatch, 0)
   }
   const consoleErrors = consoleMark === undefined ? [] : consoleErrorsSince(tabId, consoleMark)
+  if (consoleErrors.length > 0) consoleQuotingCalls.add(call)
   const text = `${syntheticFallback ? `${rawText} (synthetic)` : rawText}${effectHint}${describeSideEffects(openedTabs, consoleErrors, shareContent)}`
   if (answerNavigationPending(response) && navigationWait !== undefined) {
     // A "leave site?" dialog stops the navigation: report it at once instead
