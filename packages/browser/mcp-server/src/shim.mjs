@@ -133,7 +133,9 @@ export async function loadEndpoint(env, isAlive = pidAlive) {
 export function httpFetch(url, { method = 'GET', headers = {}, body, signal } = {}) {
   return new Promise((resolve, reject) => {
     // agent: false: one connection per message, no pooled socket timeouts.
-    const req = httpRequest(url, { method, headers, signal, agent: false }, (res) => {
+    // Send a length like fetch does, not a chunked body.
+    const sent = body === undefined ? headers : { ...headers, 'content-length': String(Buffer.byteLength(body)) }
+    const req = httpRequest(url, { method, headers: sent, signal, agent: false }, (res) => {
       const chunks = []
       res.on('data', (chunk) => chunks.push(chunk))
       res.on('error', reject)
