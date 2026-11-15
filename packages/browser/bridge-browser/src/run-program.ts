@@ -26,6 +26,7 @@ import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-
 import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeServer } from './server.ts'
 import { toolCallIdArg } from './server.ts'
+import { UNTRUSTED_CONTENT_TAG, UNTRUSTED_NOTICE_LEAD } from './protocol.ts'
 
 /** Most steps one program may hold. */
 export const MAX_PROGRAM_STEPS = 25
@@ -199,7 +200,8 @@ function resultText(result: unknown): string {
  * untrusted-content notice, so a cut never splits the page-content boundary.
  */
 export function statusOf(text: string): string {
-  const boundary = text.search(/Security: Enclosed page content|<UNTRUSTED_PAGE_CONTENT/u)
+  const marks = [text.indexOf(UNTRUSTED_NOTICE_LEAD), text.indexOf(`<${UNTRUSTED_CONTENT_TAG}`)].filter((at) => at !== -1)
+  const boundary = marks.length === 0 ? -1 : Math.min(...marks)
   const head = (boundary === -1 ? text : text.slice(0, boundary)).trim()
   return head.length > MAX_STATUS_CHARS ? `${head.slice(0, MAX_STATUS_CHARS)}…` : head
 }

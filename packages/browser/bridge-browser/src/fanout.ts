@@ -31,7 +31,7 @@ import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-
 import type { BridgeServer } from './server.ts'
 import { toolCallIdArg } from './server.ts'
 import type { SessionLedger } from './session-ledger.ts'
-import { wrapUntrustedPageText } from './watchers.ts'
+import { wrapUntrustedPageText } from './protocol.ts'
 
 /** Most tasks in one fleet. */
 export const MAX_FLEET_TASKS = 8

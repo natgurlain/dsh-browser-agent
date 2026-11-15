@@ -24,6 +24,9 @@ import {
   parseBridgeFrame,
   isExternalSessionId,
   sanitizeRequesterLabel,
+  UNTRUSTED_NOTICE,
+  UNTRUSTED_NOTICE_LEAD,
+  wrapUntrustedPageText,
 } from '../src/protocol.ts'
 
 const NONCE = 'a'.repeat(64)
@@ -144,6 +147,18 @@ describe('bridge handshake primitives', () => {
     expect(helloProtocolVersion(JSON.stringify({ t: 'rpc' }))).toBeUndefined()
     expect(helloProtocolVersion('nope')).toBeUndefined()
     expect(helloProtocolVersion('[]')).toBeUndefined()
+  })
+})
+
+describe('untrusted-content fence', () => {
+  it('puts the notice on both sides of a nonce-tagged boundary', () => {
+    expect(wrapUntrustedPageText('page text', 'n-1')).toBe(
+      `${UNTRUSTED_NOTICE}\n<UNTRUSTED_PAGE_CONTENT nonce="n-1">\npage text\n</UNTRUSTED_PAGE_CONTENT nonce="n-1">\n${UNTRUSTED_NOTICE}`,
+    )
+    expect(UNTRUSTED_NOTICE.startsWith(UNTRUSTED_NOTICE_LEAD)).toBe(true)
+    const nonce = /nonce="([^"]+)"/u.exec(wrapUntrustedPageText('x'))![1]!
+    expect(nonce).toMatch(/^[0-9a-f-]{36}$/u)
+    expect(wrapUntrustedPageText('x')).not.toContain(nonce)
   })
 })
 
