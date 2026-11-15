@@ -19,6 +19,7 @@ const { runPluginCommand } = await import(pathToFileURL(require.resolve('@deepse
 const current = '@natgurlain/dsh-bridge-browser'
 const legacy = '@deepseek-ai/dsh-bridge-browser'
 const other = '@deepseek-ai/dsh-experimental-terminal-bundle'
+const BRIDGE_HOME_FILES = ['browser-mcp-token', 'browser-mcp.json', 'browser-bridge-sessions.json', 'browser-bridge-watchers.json', 'browser-workflow-schedules.json']
 
 function writeJson(path, value) {
   writeFileSync(path, JSON.stringify(value, null, 2) + '\n')
@@ -67,6 +68,9 @@ async function installation(name, { mode = 'checkout', bridges = [current], oldM
   writeFileSync(join(home, 'sessions', 'preserved.txt'), 'session data to preserve\n')
   writeJson(join(home, 'settings.json'), { account: 'preserved account settings' })
   writeFileSync(join(home, 'ext-bridge-token'), 'test-bridge-token\n')
+  for (const name of BRIDGE_HOME_FILES) writeFileSync(join(home, name), `${name}\n`)
+  mkdirSync(join(home, 'browser-audit'), { recursive: true })
+  writeFileSync(join(home, 'browser-audit', 'kept.jsonl'), 'audit\n')
   initProfile(profile, ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', other])
   const fixture = { base, home, source, extension, profile, bridge }
   for (const name of bridges) await addBridge(fixture, 'web', name)
@@ -111,6 +115,9 @@ test('managed installation: native removal, owned files, preserved data and repe
   assert.equal(existsSync(fixture.source), false)
   assert.equal(existsSync(fixture.extension), false)
   assert.equal(existsSync(join(fixture.home, 'ext-bridge-token')), false)
+  for (const name of BRIDGE_HOME_FILES) assert.equal(existsSync(join(fixture.home, name)), false, name)
+  assert.equal(readFileSync(join(fixture.home, 'browser-audit', 'kept.jsonl'), 'utf8'), 'audit\n')
+  assert.match(result.stdout, /Kept the audit log/u)
   preserved(fixture)
   const repeat = uninstall(fixture)
   assert.equal(repeat.status, 0, repeat.stderr)
@@ -139,6 +146,7 @@ test('other profiles retain their bridge, shared workspace and token', async () 
   assert.equal(result.status, 0, result.stdout + result.stderr)
   assert.equal(existsSync(fixture.source), true)
   assert.equal(readFileSync(join(fixture.home, 'ext-bridge-token'), 'utf8'), 'test-bridge-token\n')
+  for (const name of BRIDGE_HOME_FILES) assert.equal(existsSync(join(fixture.home, name)), true, name)
   assert.equal(readFileSync(join(fixture.home, 'profiles', 'another-profile', 'package.json'), 'utf8'), otherManifest)
   preserved(fixture)
 })

@@ -9,6 +9,14 @@ import { parseArgs } from 'node:util'
 
 const BRIDGES = ['@natgurlain/dsh-bridge-browser', '@yuxianglin/dsh-bridge-browser', '@deepseek-ai/dsh-bridge-browser']
 const DEPENDENCY_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies']
+// Files the bridge plugin writes into the DSH home (MCP bearer token and
+// endpoint, session ledger, watcher records, workflow schedules). The audit log
+// (browser-audit/) and session workspaces (browser-sessions/) are user data and stay.
+const BRIDGE_HOME_FILES = [
+  'browser-mcp-token', 'browser-mcp.json',
+  'browser-bridge-sessions.json', 'browser-bridge-watchers.json', 'browser-workflow-schedules.json',
+]
+const KEPT_HOME_DATA = ['browser-audit', 'browser-sessions']
 const scriptRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 function fail(zh, en) {
@@ -111,10 +119,12 @@ function inspect(home) {
     fail(`安装联接路径已被其他内容占用：${sourceLink}`, `The installation junction path contains other data: ${sourceLink}`)
   }
   regular(token, 'file')
-  // 其他 profile 仍引用桥插件时，保留共享联接、源码与 token。
+  const bridgeFiles = BRIDGE_HOME_FILES.map(name => join(home, name))
+  for (const file of bridgeFiles) regular(file, 'file')
+  // 其他 profile 仍引用桥插件时，保留共享联接、源码、token 与桥状态文件。
   const targets = [extension]
   if (otherProfiles.length === 0) {
-    targets.push(sourceLink, token)
+    targets.push(sourceLink, token, ...bridgeFiles)
     if (ownedManaged) targets.push(managed)
   }
   return {
@@ -128,6 +138,8 @@ async function loadRuntime(plan, runtimeRoot) {
     const manifest = join(plan.web.dir, 'node_modules', name, 'package.json')
     if (!stat(manifest)) return []
     const root = resolve(dirname(realpathSync(manifest)), '../../..')
+    // A linked checkout is recognized by the root package name; installer-legacy.test.mjs
+    // pins that name, so renaming the root package fails a test instead of breaking this.
     return json(join(root, 'package.json'))?.name === 'dsh-browser' ? [root] : []
   })
   const roots = runtimeRoot ? [absolute(runtimeRoot)]
@@ -223,6 +235,11 @@ async function main() {
   }
   if (runtime) await runtime.withFileLock(join(plan.web.dir, 'package.json'), execute)
   else await execute()
+  const kept = KEPT_HOME_DATA.map(name => join(home, name)).filter(path => stat(path))
+  if (kept.length) {
+    pair(`已保留审计日志与会话工作区，可手动删除：${kept.join(', ')}`,
+      `Kept the audit log and session workspaces; delete them by hand if you want: ${kept.join(', ')}`)
+  }
   pair('请在浏览器扩展管理页面移除“dsh 浏览器助手”，完成卸载。',
     'Remove dsh Browser Assistant from your browser to finish uninstalling.')
   console.log('Chrome: chrome://extensions · Edge: edge://extensions · Firefox: about:addons')

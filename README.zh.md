@@ -17,7 +17,7 @@
 
 ## 快速安装
 
-安装器会安装桥插件和 Chrome 扩展。
+安装器会安装桥插件和 Chrome 扩展。它下载当前 `main` 分支并从源码构建；目前不使用发布资产，也不校验校验和（见 [RELEASING.md](RELEASING.md)）。
 
 macOS 与 Linux：
 
@@ -66,6 +66,13 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 | 对话框 | `browser_dialog` | 回应 alert/confirm/prompt/离开页面对话框；被对话框阻塞的调用会立即以 `dialog open: …` 失败（Chrome） |
 | 下载 | `browser_downloads` | 列出最近下载或等待下载完成，返回本地文件路径；首次使用时请求可选的 `downloads` 权限 |
 | PDF | `browser_save_pdf` / `browser_pdf_text` | 把标签页保存为 PDF 到代理工作区（Chrome）；提取标签页中 PDF 的文本 |
+| 选择选项 | `browser_select` | 按值、标签或序号在 `<select>`、ARIA listbox 或 combobox 中选择选项 |
+| 提取表格 | `browser_extract` | 从表格或重复元素（schema）提取行，可跨页；`saveTo` 把 CSV/JSON 写入会话工作区 |
+| 批量操作 | `browser_run` | 按顺序执行最多 25 个浏览器操作，只需一张批准卡片；遇到第一个错误或 `expect` 失败即停止 |
+| 监视页面 | `browser_watch` / `browser_watches` | 当选择器或文本出现/消失、URL 匹配或出现某个请求时唤醒本会话；列出或取消监视器。需先在设置中开启，每个监视器都需批准 |
+| 批量阅读 | `browser_fanout` | 最多 8 个子代理各用一个后台标签页并行阅读（默认只读，`allowActions` 才可操作），返回结构化答案 |
+| 委派 | `delegate_browser_task` | 普通 DSH 会话把页面工作交给浏览器子代理，页面快照不会占满该会话 |
+| 已保存工作流 | `browser_workflow_list` / `browser_workflow_run` | 列出并重放之前保存的工作流（见[学习功能](#学习功能实验性默认全部关闭)） |
 | 读取区域 | `browser_get_text` | 懒加载内容 / 局部文本 |
 | 等待稳定 | `browser_wait` | 页面加载与渲染稳定检测 |
 | 发送图片 | `session.prompt` / `session.attachment` | 按宿主能力启用图片草稿、纯图片消息和持久历史预览 |
@@ -76,6 +83,19 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 
 每次点击前都会对目标中心做命中测试；被其他元素遮挡的目标会以 `covered by <元素>` 拒绝，而不是点到上层元素。`browser_click { trusted: true }` 使用真实鼠标输入（Chrome）；对自定义元素的普通点击若没有任何可见效果，会自动用真实输入重试一次。侧栏中的**停止按钮**（或 Ctrl+Shift+K / ⌘⇧K；Firefox 为 Alt+Shift+K；可在浏览器扩展快捷键页面改绑）会取消待确认请求和正在执行的操作、撤销会话信任与开发者工具授权、关闭不受限访问、断开调试器，并在你点击「重新连接」前保持断开。代理控制的标签页显示 **AI** 徽标。
 
+### 可见性与控制
+
+- **批准卡片**在操作发生前显示将要点击、输入或打开的确切内容，每张卡片只绑定这一个操作。
+- **暂停 / 接管。** “此步后暂停”让当前操作完成，并在你继续前挂起下一步。“接管”暂停代理，让你自己操作页面；继续后交还控制权，模型会被告知发生了什么变化。
+- **代理叠加层。** 代理操作前，幽灵光标和轮廓会标出每个目标；受控标签页带有彩色边框和停止按钮（可在设置中关闭叠加层）。
+- **步骤时间线与审计日志。** 侧栏列出一次运行的每个步骤。每个操作、批准和紧急停止都会写入 `~/.dsh/browser-audit/` 下防篡改的审计日志，可在设置中导出。
+- **站点规则。** 在设置中把站点设为禁止、只读或总是询问。代理读取不可信内容后，向其他站点写入需要重新批准（污染规则）。
+- **严格模式**（Chrome）。对你列出的站点或某个代理会话，页面发出的写请求会在网络层挂起，直到你批准。
+
+### 在 Claude Code、Cursor 或 Codex 中使用浏览器（MCP）
+
+在 `bridge-browser` 插件配置中设置 `mcp: { enabled: true }`，然后在 MCP 客户端中注册 stdio shim `packages/browser/mcp-server/bin/dsh-browser-mcp.mjs`，例如 `claude mcp add dsh-browser -- node /abs/path/to/dsh-browser-mcp.mjs`。每个 MCP 调用都经过与 DSH 自身会话相同的批准卡片、站点策略、污染规则、紧急停止和审计日志，每张卡片都会标明发出请求的 MCP 客户端。Cursor 和 Codex 的配置示例见 [packages/browser/mcp-server/README.md](packages/browser/mcp-server/README.md)。
+
 ### 学习功能（实验性，默认全部关闭）
 
 在侧栏 **设置 → 学习功能（实验性）** 中开启。每个重放或学到的操作仍然经过暂停闸门、站点策略、污染规则、紧急停止、批准卡片和审计日志。
@@ -85,7 +105,7 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
   - 面板可以把工作流定时在它所属的会话中运行，最短每分钟一次。批准卡片照常询问，无人回应时默认拒绝。含敏感输入的工作流不能定时。
 - **观察我。** 观察期间记录你在标签页上的点击和输入，从不记录密码，敏感字段会被遮盖。在表格或列表行上重复两次后，面板会提供 **按同样方式完成剩余 N 项**，它作为一个 `browser_run` 程序运行，只需批准一张卡片。
 - **站点驱动**（仅 Chrome，需允许开发者工具）。对你列出的站点，代理操作背后的同源请求会被建议为一个类型化工具（`browser_site_<主机>_<名称>`）。经你批准才会保存；Cookie、令牌和敏感字段从不存储，令牌每次都从页面读取。每次使用都会在单独的卡片上显示确切请求；驱动失败时代理改用页面界面。驱动可以导出和导入为 JSON。
-- **失败样例。** 步骤失败时，在会话工作区的 `browser-fixtures/` 下保存脱敏的页面副本（敏感值已遮盖，脚本已移除）和预期操作。被阻止或未共享的页面会跳过，每次保存都会记入审计日志。`node benchmark/import-fixtures.mjs <目录>` 可把这些文件转为基准任务。`benchmark/online-mind2web/` 在运行时加载 Online-Mind2Web 子集，并生成静态排行榜。
+- **失败样例。** 步骤失败时，在会话工作区的 `browser-fixtures/` 下保存脱敏的页面副本（敏感值已遮盖，脚本已移除）和预期操作。被阻止或未共享的页面会跳过，每次保存都会记入审计日志。`node benchmark/import-fixtures.mjs <目录>` 可把这些文件转为基准任务文件。`benchmark/online-mind2web/` 在运行时加载 Online-Mind2Web 子集，并用其他地方产生的结果生成静态排行榜。两者都还没有 runner：`benchmark/run.mjs` 只运行内置任务（见 [benchmark/README.md](benchmark/README.md)）。
 
 ## 详细安装与使用
 
@@ -99,7 +119,7 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 
 ```sh
 git clone https://github.com/natgurlain/dsh-browser-agent.git
-cd dsh-browser
+cd dsh-browser-agent
 ./scripts/install.sh
 ```
 
@@ -132,7 +152,7 @@ pnpm install
 pnpm --filter dsh-browser-extension run build:firefox
 ```
 
-桥地址仍会自动探测。Firefox 的 `moz-extension://` UUID 不能证明扩展身份，因此需要把 `~/.dsh/ext-bridge-token` 中的 bearer token 填入扩展设置（dsh 启动日志会报告该文件路径）。签名发布时可直接使用同一份 `dist-firefox/` 产物。
+桥地址仍会自动探测。Firefox 附加组件不由安装器安装，因此需要把 `~/.dsh/ext-bridge-token` 中的桥接 token 复制到扩展设置中（dsh 启动日志会报告该文件路径）。签名发布时可直接使用同一份 `dist-firefox/` 产物。
 
 ### 启动与使用
 
@@ -148,7 +168,7 @@ cd ~/.dsh/dsh-browser && pnpm start
 npx @deepseek-ai/dsh@0.2.2-rc.2 web
 ```
 
-Chrome 本机使用无需配置；Firefox 需要填写上述本地桥 token。打开页面，点击 DeepSeek 鲸鱼图标，等待侧边栏显示**已连接**。已有 HTTP(S) 标签页会在第一次操作时自动加载。在浏览器受保护页面和扩展商店中，模型可以读取标签页元数据，并通过浏览器级能力导航到 HTTP(S)、后退、前进和刷新，但不能读取或操作受保护页面的 DOM。
+Chrome 本机使用无需配置：安装器会把桥接 token 放到已安装的扩展目录中，插件会让这份副本保持最新。Firefox 需要填写上述本地桥 token。打开页面，点击 DeepSeek 鲸鱼图标，等待侧边栏显示**已连接**。已有 HTTP(S) 标签页会在第一次操作时自动加载。在浏览器受保护页面和扩展商店中，模型可以读取标签页元数据，并通过浏览器级能力导航到 HTTP(S)、后退、前进和刷新，但不能读取或操作受保护页面的 DOM。
 
 ## 故障排查
 
@@ -163,9 +183,13 @@ Chrome 本机使用无需配置；Firefox 需要填写上述本地桥 token。�
 
 ### 桥接安全
 
-- 每个客户端都必须认证（包括本机回环连接）：双方基于桥接 token 做 HMAC 双向挑战应答；token 本身从不在网络上传输，扩展也会拒绝无法反向证明自己持有 token 的桥。
+- 所有客户端（包括本机回环）都通过桥接令牌完成双向 HMAC 质询-应答（握手 v3）；令牌本身不经过网络，扩展会拒绝无法反向证明令牌的桥接。
+- 两侧证明都绑定扩展实际拨号的地址和端口，桥接会与它接受的套接字核对，因此从其他端口转发握手的本地进程无法完成握手。握手之后每一帧（双向）都带有按连接派生的密钥和严格递增序号的 MAC；未封装、重放、乱序或篡改的帧会直接断开连接。帧只做认证、不加密。经端口转发（Docker `-p`、SSH 隧道）以不同端口访问桥接时会被拒绝，除非在插件配置 `forwardedPorts` 中列出该回环端口**并且**设置 `allowForwardedPorts: true`。在转发端口上监听的程序位于中间，可以读取每一帧（会话记录、页面内容），因此只列出你控制的转发：在列出的端口空闲时绑定它的本地进程可以借它中转。双方声明的能力（caps）也绑定在两侧证明中（协议 v4），即使是受信任的转发也无法开启开发者工具组或修改快照上限。桥接 URL 中的 DNS 名称仅在桥接监听回环地址时被接受；局域网或远程桥接必须用 IP 地址连接。
+- 插件配置中固定的 `token` 至少 32 个可打印字符且具备足够熵（例如 `openssl rand -hex 32`），否则插件启动失败，因为截获的握手可让本地观察者离线猜测弱 token。
 - Chrome 连接只接受 manifest key 固定的扩展 ID（`klmdgljhcjbbpjcplbanjeclilghnaoh`）。若使用不同 key 的构建或 Web Store 版本，请在 bridge-browser 插件配置中设置 `allowedChromeExtensionIds`；用 `pnpm --filter dsh-browser-extension run build:store` 构建商店包，该命令会去掉商店不接受的 `key`。
-- 桥只转发扩展实际用到的 Host 方法，且只作用于它创建的会话或其侧栏能列出的会话；它会拒绝把会话切换到完全访问权限预设（`danger-full-access`、`auto`）。如需允许从浏览器切换，请在插件配置中设置 `allowDangerFullAccess: true`。
+- 桥只转发扩展实际用到的 Host 方法。扩展只能在桥接自己创建的会话中发送提示、修改设置、注入页面快照或删除会话：`session.create` 总是新建会话（忽略扩展传入的 `sessionId`、`cwd`、`workspaceId`），归属记录在 `~/.dsh/browser-bridge-sessions.json` 和桥接工作区目录中。桌面端和 CLI 会话不再出现在侧边栏的历史列表中；它们驱动浏览器时，仍可查看历史（用于审批）和停止，但不能从浏览器发送提示。子代理会话始终不可访问。
+- 新的浏览器会话即使宿主默认是完全访问，也会以受限预设启动；切换到完全访问预设，以及在当前运行完全访问预设的会话中发送提示、注入或执行命令都会被拒绝。只有宿主预设表中沙箱为 `read-only` 或 `workspace-write` 的预设（或列在 `safePermissionPresets` 中的预设）被视为受限；未知预设、改名的完全访问预设以及 `custom` 都会被拒绝，`/permission` 只接受严格的 `/permission <preset>` 形式。在插件配置中设置 `allowDangerFullAccess: true` 可解除这些限制。
+- 中转站的已存密钥只会发送到保存时的地址：用不同地址测试模型列表需要重新输入密钥；修改中转站地址但未重新输入密钥时，已存密钥会被清除。
 
 ## 开发
 
@@ -194,7 +218,7 @@ pnpm --filter dsh-browser-extension run test
 - 启动前桥接插件必须已有 `lib/` 供 Loader 加载；`scripts/install.sh` 和根目录 `pnpm run build` 都会先构建插件再构建扩展。
 - `@deepseek-ai/dsh` 与桥接插件的依赖固定在同一条经过验证的公开发布线上；升级时必须同时更新 manifest、锁文件并重跑根目录检查。
 
-`check:runtime` 检查实际解析的 DSH 依赖和锁文件；`test:smoke` 使用临时 DSH home 启动真实 web 宿主，验证桥接和重启后的会话读取，无需模型密钥。CI 在干净安装后运行这些检查。
+`check:runtime` 检查实际解析的 DSH 依赖和锁文件；`test:smoke` 使用临时 DSH home 启动真实 web 宿主，验证桥接和重启后的会话读取，无需模型密钥。每次推送到 `main` 和每个拉取请求时，CI 都会运行这些检查（`pnpm install --frozen-lockfile`，使用缓存的 pnpm store），同时在 Linux、macOS 和 Windows 上运行 `pnpm test:scripts`，并运行 `pnpm test:benchmark`。
 
 构建后运行 `pnpm test:browser`，需要已安装 Playwright Chromium，或通过 `CHROMIUM_PATH` 指定支持加载未打包扩展的 Chromium 可执行文件。测试会启动真实 DSH 和 Chromium，验证页面共享、开发者工具授权、输入、iframe 上传与定位，以及 CSS 修改。测试开启并确认跨站 iframe 的进程隔离，覆盖同源、跨源和嵌套 iframe 中的元素点击、输入与滚动。测试无需模型密钥，结果保存在 `.artifacts/browser-smoke/`。
 
@@ -207,12 +231,3 @@ pnpm --filter dsh-browser-extension run test
 - 文本快照会遮盖密码和卡号值；截图保留可见像素，不会遮盖字段。
 - 页面操作默认需要审批。你可以信任指定网站，或开启**允许模型完全控制浏览器**。开发者工具需要单独授权。
 - 切换标签页后，助手会询问接下来操作哪个页面。
-
-### 桥接安全
-
-- 所有客户端（包括本机回环）都通过桥接令牌完成双向 HMAC 质询-应答（握手 v3）；令牌本身不经过网络，扩展会拒绝无法反向证明令牌的桥接。
-- 两侧证明都绑定扩展实际拨号的地址和端口，桥接会与它接受的套接字核对，因此从其他端口转发握手的本地进程无法完成握手。握手之后每一帧（双向）都带有按连接派生的密钥和严格递增序号的 MAC；未封装、重放、乱序或篡改的帧会直接断开连接。帧只做认证、不加密。经端口转发（Docker `-p`、SSH 隧道）以不同端口访问桥接时会被拒绝，除非在插件配置 `forwardedPorts` 中列出该回环端口**并且**设置 `allowForwardedPorts: true`。在转发端口上监听的程序位于中间，可以读取每一帧（会话记录、页面内容），因此只列出你控制的转发。双方声明的能力（caps）也绑定在两侧证明中（协议 v4），即使是受信任的转发也无法开启开发者工具组或修改快照上限。桥接 URL 中的 DNS 名称仅在桥接监听回环地址时被接受；局域网或远程桥接必须用 IP 地址连接。
-- 插件配置中固定的 `token` 至少 32 个可打印字符且具备足够熵（例如 `openssl rand -hex 16`），否则插件启动失败。
-- 扩展只能在桥接自己创建的会话中发送提示、修改设置、注入页面快照或删除会话：`session.create` 总是新建会话（忽略扩展传入的 `sessionId`、`cwd`、`workspaceId`），归属记录在 `~/.dsh/browser-bridge-sessions.json` 和桥接工作区目录中。桌面端和 CLI 会话不再出现在侧边栏的历史列表中；它们驱动浏览器时，仍可查看历史（用于审批）和停止，但不能从浏览器发送提示。子代理会话始终不可访问。
-- 新的浏览器会话即使宿主默认是完全访问，也会以受限预设启动；切换到完全访问预设，以及在当前运行完全访问预设的会话中发送提示、注入或执行命令都会被拒绝。只有宿主预设表中沙箱为 `read-only` 或 `workspace-write` 的预设（或列在 `safePermissionPresets` 中的预设）被视为受限；未知预设、改名的完全访问预设以及 `custom` 都会被拒绝，`/permission` 只接受严格的 `/permission <preset>` 形式。在插件配置中设置 `allowDangerFullAccess: true` 可解除这些限制。
-- 中转站的已存密钥只会发送到保存时的地址：用不同地址测试模型列表需要重新输入密钥；修改中转站地址但未重新输入密钥时，已存密钥会被清除。

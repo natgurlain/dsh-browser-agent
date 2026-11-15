@@ -77,7 +77,7 @@ args = ["/absolute/path/to/dsh-browser/packages/browser/mcp-server/bin/dsh-brows
 | `DSH_BROWSER_MCP_URL` | Use this endpoint URL instead of the one in the endpoint file. Only loopback `http://` URLs are accepted. |
 | `DSH_BROWSER_MCP_TOKEN` | Use this token instead of the one in the token file. |
 
-The shim refuses a token file that is a symlink, belongs to another user, or is readable by group or others. When DSH restarts, the port and the session table change. The shim re-reads the endpoint file and replays the client's `initialize` once. The client is then on a fresh external session, with fresh taint and a new audit log.
+The shim refuses a token file that is a symlink, belongs to another user, or is readable by group or others. When DSH restarts, the port and the session table change. The shim re-reads the endpoint file and replays the client's `initialize` once. The client is then on a fresh external session, with fresh taint and a new audit log. A message is re-sent only when the connection was refused or reset, or the endpoint moved to a new port. A tool call that was already delivered and is waiting for your approval is never sent twice, however long it waits. When the MCP client closes the shim's stdin, calls still in flight are abandoned and the MCP session is ended.
 
 ## Behaviour notes
 

@@ -14,6 +14,7 @@ import assert from 'node:assert/strict'
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { BASE_CAPS } from '../lib/dsh-harness.mjs'
 
 /**
  * @param {object} deps
@@ -31,7 +32,7 @@ import { randomUUID } from 'node:crypto'
 export async function smokeDevLoop({ place, owner, rpc, wsUrl, connectClient, waitFor, temp, home, probe, methods }) {
   const coding = `session-${randomUUID()}`
   await place(coding, temp)
-  const caps = { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60, client: { id: 'smoke-devloop-panel', browser: 'chrome' } }
+  const caps = { ...BASE_CAPS, client: { id: 'smoke-devloop-panel', browser: 'chrome' } }
   const panel = await connectClient(wsUrl, caps)
   const call = async (method, payload) => {
     const answer = await panel.request(method, payload)

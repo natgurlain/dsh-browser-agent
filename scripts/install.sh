@@ -301,7 +301,10 @@ fi
 EXT="$ROOT/extensions/dsh-browser"
 PLUGIN="$ROOT/packages/browser/bridge-browser"
 WEB_PROFILE_MANIFEST="$DSH_HOME_DIR/profiles/web/package.json"
-LEGACY_PLUGIN="@deepseek-ai/dsh-bridge-browser"
+# Earlier package names of this bridge (upstream and its origin). Installing over
+# either must not leave the old, unhardened bridge registered next to this one;
+# scripts/uninstall.mjs knows the same names.
+LEGACY_PLUGINS="@deepseek-ai/dsh-bridge-browser @yuxianglin/dsh-bridge-browser"
 
 # Bridge token provisioning (zero-config Chrome). Kept in its own function so other
 # installer changes stay independent. The plugin creates ~/.dsh/ext-bridge-token on
@@ -339,9 +342,11 @@ print_step 1 "构建浏览器桥" "Build the browser bridge"
 (cd "$ROOT" && pnpm --filter @natgurlain/dsh-bridge-browser run build >/dev/null 2>&1)
 
 print_step 2 "注册到本机 web profile" "Register with the local web profile"
-if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$LEGACY_PLUGIN"; then
-  (cd "$ROOT" && pnpm exec dsh plugin --profile web remove "$LEGACY_PLUGIN" >/dev/null)
-fi
+for legacy_plugin in $LEGACY_PLUGINS; do
+  if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$legacy_plugin"; then
+    (cd "$ROOT" && pnpm exec dsh plugin --profile web remove "$legacy_plugin" >/dev/null)
+  fi
+done
 (cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "@natgurlain/dsh-bridge-browser@link:$PLUGIN" >/dev/null)
 
 print_step 3 "构建 Chrome 扩展" "Build the Chrome extension"
@@ -356,7 +361,9 @@ else
   IS_UPDATE=0
 fi
 mkdir -p "$DIST_DIR"
-rsync -a --delete-after "$EXT/dist/" "$DIST_DIR/"
+# bridge-token is not in dist/: keep the existing copy (provisioned below) instead
+# of deleting and re-creating it on every update.
+rsync -a --delete-after --exclude '/bridge-token' "$EXT/dist/" "$DIST_DIR/"
 if [ -f "$ROOT/.managed-by-install-sh" ]; then
   INSTALL_MODE="managed"
 else

@@ -2,7 +2,7 @@
   "name": "@natgurlain/dsh-browser-mcp",
   "description": "stdio MCP server shim: lets Claude Code, Cursor, Codex and other MCP clients drive the browser through a running DSH browser bridge",
   "version": "0.0.1",
-  "author": "Yuxiang Lin",
+  "author": "natgurlain",
   "license": "MIT",
   "private": true,
   "type": "module",

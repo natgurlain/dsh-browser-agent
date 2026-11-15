@@ -17,7 +17,7 @@ Pages become structured text with a numbered inventory of interactive elements. 
 
 ## Quick install
 
-The installer installs the bridge plugin and Chrome extension.
+The installer installs the bridge plugin and Chrome extension. It downloads the current `main` branch and builds it from source; it does not use the release assets or verify checksums yet (see [RELEASING.md](RELEASING.md)).
 
 macOS and Linux:
 
@@ -66,6 +66,13 @@ The paired Playwright / extension duration ratio was **1.24** (95% CI **1.16–1
 | Dialogs | `browser_dialog` | Answer an alert/confirm/prompt/leave-site dialog; calls blocked by an open dialog fail fast with `dialog open: …` (Chrome) |
 | Downloads | `browser_downloads` | List recent downloads or wait for one; returns local file paths. Asks for the optional `downloads` permission on first use |
 | PDF | `browser_save_pdf` / `browser_pdf_text` | Save the tab as a PDF in the agent workspace (Chrome); extract the text of a PDF open in the tab |
+| Choose options | `browser_select` | Pick options in a `<select>`, ARIA listbox or combobox by value, label or index |
+| Extract tables | `browser_extract` | Rows from a table or repeated elements (schema), optionally across pages; `saveTo` writes CSV/JSON to the session workspace |
+| Batch actions | `browser_run` | Up to 25 browser actions in order behind one approval card; stops at the first error or failed `expect` |
+| Watch a page | `browser_watch` / `browser_watches` | Wake this session when a selector or text appears or disappears, the URL matches, or a request is seen; list or cancel watchers. Off until enabled in settings, and each watcher is approved |
+| Read many pages | `browser_fanout` | Up to 8 subagents, each with its own background tab, read in parallel (read-only unless `allowActions`) and return structured answers |
+| Delegate | `delegate_browser_task` | A regular DSH session hands page work to the browser subagent, so snapshots stay out of its conversation |
+| Saved workflows | `browser_workflow_list` / `browser_workflow_run` | List and replay workflows saved from earlier runs (see [Learning features](#learning-features-experimental-all-off-by-default)) |
 | Read region | `browser_get_text` | Lazy-loaded or partial page text |
 | Wait for stability | `browser_wait` | Page-load and render-settle detection |
 | Send images | `session.prompt` / `session.attachment` | Host-capability-gated image drafts, image-only prompts, and durable history previews |
@@ -75,6 +82,15 @@ The paired Playwright / extension duration ratio was **1.24** (95% CI **1.16–1
 Clicks, text entry, and scrolling run in the selected document, including cross-origin iframes. Chrome uses its debugger for native keyboard events, caret insertion, system paste, and file uploads. Screenshots require an active tab in a focused window; `browser_follow_tab { activate: true }` brings the controlled page to the front.
 
 Before every click the target's center is hit-tested; a target covered by another element is refused with `covered by <element>` instead of clicking what lies on top. `browser_click { trusted: true }` clicks with real mouse input (Chrome), and a plain click on a custom element that visibly changed nothing is retried that way once. The **stop button** in the side panel (or Ctrl+Shift+K / ⌘⇧K; Alt+Shift+K in Firefox; rebindable on the browser's extension shortcuts page) cancels pending approvals and running actions, revokes session trust and developer-tools grants, turns unrestricted access off, detaches the debugger, and disconnects until you press Reconnect. Tabs the agent controls show an **AI** badge.
+
+### Visibility and control
+
+- **Approval cards** show exactly what will be clicked, typed or opened before it happens, and each card is bound to that one action.
+- **Pause / take over.** *Pause after this step* lets the current action finish and holds the next one until you resume. *Take over* pauses the agent so you can use the page yourself; resume hands control back, and the model is told what changed.
+- **Agent overlay.** A ghost cursor and outline mark each target before the agent acts, and controlled tabs get a colored frame with a Stop button (Settings can turn the overlay off).
+- **Step timeline and audit log.** The side panel lists each step of a run. Every action, approval and kill-switch engagement is written to a tamper-evident audit log under `~/.dsh/browser-audit/`, which you can export from Settings.
+- **Site rules.** In Settings, mark a site as blocked, read-only or always ask. After the agent reads untrusted content, writes to other sites need a fresh approval (taint rules).
+- **Strict mode** (Chrome). For sites you list, or for one agent session, the page's outgoing writes are held at the network layer until you approve them.
 
 ### Use the browser from Claude Code, Cursor or Codex (MCP)
 
@@ -89,7 +105,7 @@ Turn them on in the side panel under **Settings → Learning (experimental)**. E
   - The panel can schedule a workflow to run in its own conversation, at most once per minute. Its approval cards still ask and fail closed when nobody answers. Workflows with sensitive inputs cannot be scheduled.
 - **Watch me.** While watching, your own clicks and typing on the tab are recorded. Passwords are never recorded and sensitive fields are masked. After two repetitions over table or list rows, the panel offers **Do the remaining N like this**, which runs as a single `browser_run` program behind one card.
 - **Site drivers** (Chrome only; developer tools must be allowed). For sites you list, the same-origin request behind an agent action is proposed as a typed tool (`browser_site_<host>_<name>`). Nothing is saved until you approve it, and cookies, tokens and sensitive fields are never stored: tokens are read from the page each time. Every use shows the exact request on its own card. If a driver fails, the agent goes back to the page UI. Drivers can be exported and imported as JSON.
-- **Failure fixtures.** A failed step saves a sanitized copy of the page, with sensitive values masked and scripts removed, plus the intended action under `browser-fixtures/` in the session workspace. Pages that are blocked or not shared are skipped, and each save is recorded in the audit log. `node benchmark/import-fixtures.mjs <dir>` turns these files into benchmark tasks. `benchmark/online-mind2web/` loads an Online-Mind2Web subset at runtime and renders a static leaderboard.
+- **Failure fixtures.** A failed step saves a sanitized copy of the page, with sensitive values masked and scripts removed, plus the intended action under `browser-fixtures/` in the session workspace. Pages that are blocked or not shared are skipped, and each save is recorded in the audit log. `node benchmark/import-fixtures.mjs <dir>` turns these files into benchmark task files. `benchmark/online-mind2web/` loads an Online-Mind2Web subset at runtime and renders a static leaderboard from results produced elsewhere. Neither has a runner yet: `benchmark/run.mjs` runs only the built-in tasks (see [benchmark/README.md](benchmark/README.md)).
 
 ## Detailed installation and usage
 
@@ -103,7 +119,7 @@ To install the current branch from a source checkout instead:
 
 ```sh
 git clone https://github.com/natgurlain/dsh-browser-agent.git
-cd dsh-browser
+cd dsh-browser-agent
 ./scripts/install.sh
 ```
 
@@ -169,7 +185,7 @@ Local Chrome use requires no configuration: the installer places the bridge toke
 
 - Every client authenticates, loopback included, with a mutual HMAC challenge-response over the bridge token (handshake v3); the token itself never crosses the wire, and the extension refuses a bridge that cannot prove the token back.
 - Both proofs bind the address and port the extension dialed, and the bridge checks them against the socket it accepted, so a local process that relays the handshake from another port cannot complete it. Every later frame in both directions carries a MAC under a per-connection key and a strict sequence number; an unsealed, replayed, reordered, or altered frame closes the connection. Frames are authenticated, not encrypted: another local process able to observe loopback traffic can still read them. Because of the endpoint binding, a bridge reached through a port forward (Docker `-p`, SSH tunnels) on a different port is refused unless that loopback port is listed in the plugin config's `forwardedPorts` **and** `allowForwardedPorts: true` is set. Whatever listens on a forwarded port sits in the middle and can read every frame (session transcripts, page content), so list only forwards you control: a local process that binds a listed port while it is free can relay through it. The advertised capabilities are bound into both proofs too (protocol v4), so even a trusted forward cannot switch the developer-tools group on or change snapshot limits. A DNS name in the bridge URL is accepted only when the bridge listens on loopback; LAN or remote bridges must be dialed by IP address.
-- A token pinned in the plugin config must be at least 32 printable characters with real entropy (for example `openssl rand -hex 16`); a weaker token stops the plugin at startup, since a captured handshake would let a local observer guess it offline.
+- A token pinned in the plugin config must be at least 32 printable characters with real entropy (for example `openssl rand -hex 32`); a weaker token stops the plugin at startup, since a captured handshake would let a local observer guess it offline.
 - Chrome connections are accepted only from the extension ID fixed by the manifest key (`klmdgljhcjbbpjcplbanjeclilghnaoh`). Set `allowedChromeExtensionIds` in the bridge-browser plugin config for a differently keyed build or a Web Store listing; build a store package with `pnpm --filter dsh-browser-extension run build:store`, which omits the `key` the store rejects.
 - The bridge forwards only the Host methods the extension uses. It acts only in sessions it created itself: `session.create` always mints a fresh session (any `sessionId`, `cwd`, or `workspaceId` from the extension is dropped), ownership is remembered in `~/.dsh/browser-bridge-sessions.json` and by the bridge workspace directory, and only those sessions can be prompted, changed, injected into, or deleted from the browser. Desktop and CLI sessions no longer appear in the panel's history picker; when one of them drives the browser, its history can still be shown (for an approval) and stopped, but not prompted. Subagent sessions are never reachable.
 - Full access stays out of the browser's reach: new browser sessions start on a restricted preset even when the Host default is full access; switching to a full-access preset, and prompting, injecting into, or running commands in a session that currently runs one, is refused. A preset counts as restricted only when the Host's preset table bundles a `read-only` or `workspace-write` sandbox (or you list it in `safePermissionPresets`); unknown presets, renamed full-access presets, and `custom` are refused, and `/permission` lines are accepted only in the exact `/permission <preset>` form. Set `allowDangerFullAccess: true` in the plugin config to lift these limits.
@@ -202,7 +218,7 @@ Notes:
 - The bridge plugin must have a built `lib/` before startup because the loader consumes it; both `scripts/install.sh` and the root `pnpm run build` build the plugin before the extension.
 - The dependencies of `@deepseek-ai/dsh` and the bridge plugin are pinned to the same tested public release line. An upgrade must update the manifests and lockfile together and rerun the root checks.
 
-`check:runtime` checks the resolved DSH dependencies and lockfile; `test:smoke` starts the real web host in a temporary DSH home and verifies the bridge and session reads after a restart, without model credentials. CI runs these checks after a clean installation.
+`check:runtime` checks the resolved DSH dependencies and lockfile; `test:smoke` starts the real web host in a temporary DSH home and verifies the bridge and session reads after a restart, without model credentials. CI runs these checks on every push to `main` and every pull request (`pnpm install --frozen-lockfile` with a cached pnpm store), together with `pnpm test:scripts` on Linux, macOS and Windows and `pnpm test:benchmark`.
 
 After building, run `pnpm test:browser` with a Playwright Chromium installation, or set `CHROMIUM_PATH` to a Chromium executable that supports loading unpacked extensions. This starts real DSH and Chromium instances to verify sharing controls, developer-tools consent, input, iframe uploads and targeting, and CSS edits. Site isolation is enabled and verified for cross-site frames; element clicks, input, and scrolling cover same-origin, cross-origin, and nested frames. It needs no model credentials and saves results under `.artifacts/browser-smoke/`.
 

@@ -4,6 +4,7 @@
 // session audit log, pause/resume injection) without any external model.
 import { once } from 'node:events'
 import { createServer } from 'node:http'
+import { readJson, streamReply } from '../lib/dsh-harness.mjs'
 
 /**
  * @param {Array<{ name: string, args: Record<string, unknown> }>} steps - tool calls, in order.
@@ -12,10 +13,7 @@ import { createServer } from 'node:http'
 export async function startScriptedModel(steps, finalText) {
   const state = { requests: 0, sawResumeContext: false, toolResults: [] }
   const server = createServer(async (request, response) => {
-    const chunks = []
-    for await (const chunk of request) chunks.push(chunk)
-    let body = {}
-    try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}') } catch { /* not JSON */ }
+    const body = await readJson(request)
     if (!String(request.url).endsWith('/chat/completions')) {
       response.writeHead(404).end()
       return
@@ -34,23 +32,19 @@ export async function startScriptedModel(steps, finalText) {
     // A step may "think" first, leaving the panel time to show the running controls.
     if (next?.delayMs !== undefined) await new Promise(resolve => setTimeout(resolve, next.delayMs))
     const id = `chatcmpl-${state.requests}`
-    const base = { id, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model: body.model ?? 'scripted' }
-    const delta = next === undefined
-      ? { role: 'assistant', content: finalText }
-      : { role: 'assistant', tool_calls: [{ index: 0, id: `call_${state.requests}`, type: 'function', function: { name: next.name, arguments: JSON.stringify(next.args) } }] }
-    const finish = next === undefined ? 'stop' : 'tool_calls'
+    const model = body.model ?? 'scripted'
+    const callId = `call_${state.requests}`
     if (body.stream === true) {
-      response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
-      response.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`)
-      response.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: finish }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } })}\n\n`)
-      response.end('data: [DONE]\n\n')
+      streamReply(response, next === undefined ? { text: finalText } : { tool: { name: next.name, args: next.args, id: callId } }, { id, model })
       return
     }
+    const base = { id, object: 'chat.completion', created: Math.floor(Date.now() / 1000), model }
+    const finish = next === undefined ? 'stop' : 'tool_calls'
     const message = next === undefined
       ? { role: 'assistant', content: finalText }
-      : { role: 'assistant', content: null, tool_calls: delta.tool_calls.map(({ index: _index, ...call }) => call) }
+      : { role: 'assistant', content: null, tool_calls: [{ id: callId, type: 'function', function: { name: next.name, arguments: JSON.stringify(next.args) } }] }
     response.writeHead(200, { 'content-type': 'application/json' })
-    response.end(JSON.stringify({ ...base, object: 'chat.completion', choices: [{ index: 0, message, finish_reason: finish }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }))
+    response.end(JSON.stringify({ ...base, choices: [{ index: 0, message, finish_reason: finish }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }))
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')

@@ -1,27 +1,26 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { chmod, cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { createConnection, createServer as createTcpServer } from 'node:net'
-import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { pathToFileURL } from 'node:url'
+import {
+  addBridgePlugin, assertBridgeBuilt, closedPort, providerYaml, readJson, resolveDsh, smokeEnv, startHost, streamReply, waitFor as pollFor,
+} from './lib/dsh-harness.mjs'
 
-const root = fileURLToPath(new URL('../', import.meta.url))
-const bridge = join(root, 'packages/browser/bridge-browser')
+const dsh = resolveDsh()
+assertBridgeBuilt(dsh)
+const { root, bridge, cli, bridgeRequire } = dsh
 const builtExtension = join(root, 'extensions/dsh-browser/dist')
-const require = createRequire(join(root, 'package.json'))
-const bridgeRequire = createRequire(join(bridge, 'package.json'))
 const { chromium } = bridgeRequire('playwright-core')
-const cli = join(dirname(require.resolve('@deepseek-ai/dsh/package.json')), 'lib/bin.js')
 const { PINNED_CHROME_EXTENSION_ID } = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
 const { startScriptedModel } = await import(pathToFileURL(join(root, 'scripts/fixtures/scripted-model.mjs')).href)
 const { runAgentUxSmoke, assertKillSwitchAudited } = await import(pathToFileURL(join(root, 'scripts/fixtures/agent-ux-smoke.mjs')).href)
 const { runPhase3Smoke } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-smoke.mjs')).href)
-const { phase3Reply, streamReply } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-model.mjs')).href)
+const { phase3Reply } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-model.mjs')).href)
 const { handleLearningRequest, runLearningSmoke } = await import(pathToFileURL(join(root, 'scripts/fixtures/learning-smoke.mjs')).href)
 const artifacts = process.env.DSH_SMOKE_ARTIFACTS ?? join(root, '.artifacts/browser-smoke')
 await mkdir(artifacts, { recursive: true })
@@ -48,12 +47,10 @@ installedManifest.optional_permissions = installedManifest.optional_permissions.
 await writeFile(join(extension, 'manifest.json'), JSON.stringify(installedManifest, null, 2))
 const downloadDirectory = join(directory, 'downloads')
 await mkdir(downloadDirectory)
-const env = { ...process.env, DSH_HOME: join(directory, 'home'), TMPDIR: runtimeTmp, DSH_TELEMETRY_DISABLED: '1' }
-delete env.DSH_EXT_TOKEN
-delete env.DSH_BROWSER_SESSION_WORKSPACE
+const env = smokeEnv(join(directory, 'home'), { TMPDIR: runtimeTmp })
+/** The running `dsh web` (from startHost), once started. */
 let host
 let browser
-let hostLog = ''
 const results = []
 let bridgeProxy
 let savedPdfPath = ''
@@ -67,12 +64,9 @@ let screenshots = []
 // Phase 3 conversations (page watcher, tab fleet workers) pick replies from the conversation itself.
 const phase3State = {}
 const phase3Model = createServer(async (request, response) => {
-  const chunks = []
-  for await (const chunk of request) chunks.push(chunk)
-  let body = {}
-  try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}') } catch { /* not JSON */ }
+  const body = await readJson(request)
   if (!String(request.url).endsWith('/chat/completions')) { response.writeHead(404).end(); return }
-  streamReply(response, phase3Reply(body, phase3State) ?? { text: 'Phase 3 model idle.' }, 'phase3-check')
+  streamReply(response, phase3Reply(body, phase3State) ?? { text: 'Phase 3 model idle.' }, { model: 'phase3-check' })
 })
 phase3Model.listen(0, '127.0.0.1')
 await once(phase3Model, 'listening')
@@ -82,25 +76,8 @@ const scripted = await startScriptedModel([
   { name: 'browser_screenshot', args: {} },
 ], 'Timeline smoke done.')
 
-async function waitFor(check, label, timeout = 60_000) {
-  const deadline = Date.now() + timeout
-  while (Date.now() < deadline) {
-    if (host && (host.exitCode !== null || host.signalCode !== null)) throw new Error(`Host exited while waiting for ${label}: ${hostLog}`)
-    const result = await check()
-    if (result) return result
-    await delay(100)
-  }
-  throw new Error(`Timed out waiting for ${label}: ${hostLog}`)
-}
-
-async function command(args) {
-  const child = spawn(process.execPath, [cli, ...args], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })
-  let output = ''
-  child.stdout.on('data', data => { output += data })
-  child.stderr.on('data', data => { output += data })
-  const [code] = await once(child, 'exit')
-  assert.equal(code, 0, output)
-}
+/** Poll until truthy; fails early (with the DSH log) once DSH has exited. */
+const waitFor = (check, label, timeout = 60_000) => pollFor(check, label, { timeout, host })
 
 const inner = `<!doctype html><body style="margin:0;min-height:1000px"><button id="inner" style="position:absolute;left:20px;top:20px;width:100px;height:50px">Inner target</button>
   <input id="upload" type="file" style="position:absolute;left:10px;top:100px;width:130px">
@@ -312,11 +289,7 @@ const server = createServer((request, response) => {
 server.listen(0, '127.0.0.1')
 await once(server, 'listening')
 const origin = `http://127.0.0.1:${server.address().port}`
-const unavailableServer = createTcpServer()
-unavailableServer.listen(0, '127.0.0.1')
-await once(unavailableServer, 'listening')
-const unavailablePort = unavailableServer.address().port
-await new Promise(resolve => unavailableServer.close(resolve))
+const unavailablePort = await closedPort()
 // 保持真实 TCP 请求未响应，用于验证停止生成和断线期间的状态变化。
 const pendingServer = createTcpServer(socket => {
   pendingSockets.add(socket)
@@ -329,7 +302,7 @@ await once(pendingServer, 'listening')
 const pendingPort = pendingServer.address().port
 
 try {
-  await command(['plugin', '--profile', 'web', 'add', '-w', `@natgurlain/dsh-bridge-browser@link:${bridge}`])
+  await addBridgePlugin(dsh, env)
   // A TCP forward in front of the bridge lets the smoke take it offline and
   // back. The handshake binds the port the extension dialed, so the bridge is
   // told that this loopback port forwards to it (`forwardedPorts`).
@@ -359,37 +332,18 @@ try {
     '- id: tool-executor-ptc', '  disabled: true',
     '- id: agent-default-model', '  config:',
     '    provider: connection-check', '    model: connection-check',
-    '- id: llm-pi-ai', '  config:', '    providers:', '      connection-check:',
-    '        api: openai-completions',
-    `        baseURL: http://127.0.0.1:${unavailablePort}/v1`,
-    '        headers:', '          Authorization: Bearer local-connection-check',
-    '        models:', '          - id: connection-check', '            input: [text, image]',
-    '          - id: connection-check-next', '            input: [text, image]',
-    '        retryPolicy:', '          mode: normal', '          maxRetries: 0',
-    '      pending-check:', '        api: openai-completions',
-    `        baseURL: http://127.0.0.1:${pendingPort}/v1`,
-    '        headers:', '          Authorization: Bearer local-pending-check',
-    '        models:', '          - id: pending-check',
-    '        retryPolicy:', '          mode: normal', '          maxRetries: 0',
-    '      phase3-check:', '        api: openai-completions',
-    `        baseURL: http://127.0.0.1:${phase3Model.address().port}/v1`,
-    '        headers:', '          Authorization: Bearer local-phase3-check',
-    '        models:', '          - id: phase3-check', '            input: [text, image]',
-    '        retryPolicy:', '          mode: normal', '          maxRetries: 0',
-    '      scripted-check:', '        api: openai-completions',
-    `        baseURL: http://127.0.0.1:${scripted.port}/v1`,
-    '        headers:', '          Authorization: Bearer local-scripted-check',
-    '        models:', '          - id: scripted-check', '            input: [text, image]',
-    '        retryPolicy:', '          mode: normal', '          maxRetries: 0',
+    '- id: llm-pi-ai', '  config:', '    providers:',
+    ...providerYaml('connection-check', unavailablePort, ['connection-check', 'connection-check-next'], { input: ['text', 'image'] }),
+    ...providerYaml('pending-check', pendingPort, ['pending-check']),
+    ...providerYaml('phase3-check', phase3Model.address().port, ['phase3-check'], { input: ['text', 'image'] }),
+    ...providerYaml('scripted-check', scripted.port, ['scripted-check'], { input: ['text', 'image'] }),
     '- insert:', '    - id: browser-smoke-probe',
     `      name: ${JSON.stringify(pathToFileURL(join(root, 'scripts/fixtures/browser-probe.mjs')).href)}`,
     '      config:', `        token: ${JSON.stringify(token)}`, '',
   ].join('\n'))
-  host = spawn(process.execPath, [cli, 'web', '--patch', patch, '--no-open', '--port', '0'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] })
-  host.stdout.on('data', data => { hostLog += data })
-  host.stderr.on('data', data => { hostLog += data })
-  const base = await waitFor(() => hostLog.match(/dsh web: (http:\/\/127\.0\.0\.1:\d+)/)?.[1], 'DSH startup')
-  const probe = await waitFor(() => hostLog.match(/Browser smoke probe: (http:\/\/127\.0\.0\.1:\d+)/)?.[1], 'tool probe startup')
+  host = await startHost({ cli, patch, env })
+  const { base } = host
+  const probe = await waitFor(() => host.log.match(/Browser smoke probe: (http:\/\/127\.0\.0\.1:\d+)/)?.[1], 'tool probe startup')
   const configResponse = await fetch(`${base}/ext/bridge-config`)
   assert.equal(configResponse.status, 200)
   const config = await configResponse.json()
@@ -1339,11 +1293,9 @@ try {
   await new Promise(resolve => pendingServer.close(resolve))
   await scripted.close()
   await new Promise(resolve => phase3Model.close(resolve))
-  if (host && host.exitCode === null && host.signalCode === null) {
-    host.kill('SIGTERM')
-    await once(host, 'exit')
-  }
+  // SIGTERM, then SIGKILL after 10 s: a hung DSH must not hang CI.
+  await host?.stop()
   await new Promise(resolve => server.close(resolve))
   await new Promise(resolve => childServer.close(resolve))
-  await writeFile(join(directory, 'host.log'), hostLog)
+  await writeFile(join(directory, 'host.log'), host?.log ?? '')
 }

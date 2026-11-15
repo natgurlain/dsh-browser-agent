@@ -15,6 +15,7 @@ import { request as httpRequest } from 'node:http'
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { BASE_CAPS } from '../lib/dsh-harness.mjs'
 
 /**
  * @param {object} deps
@@ -58,7 +59,7 @@ export async function smokeMcp({ root, home, wsUrl, connectClient, waitFor, meth
   assert.equal(await raw({ host: `rebind.example:${url.port}` }), 403, 'a foreign Host is refused (DNS rebinding)')
 
   // The extension + side panel stand-in.
-  const caps = { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60, client: { id: 'smoke-mcp-panel-01', browser: 'chrome' } }
+  const caps = { ...BASE_CAPS, client: { id: 'smoke-mcp-panel-01', browser: 'chrome' } }
   const panel = await connectClient(wsUrl, caps)
   const toolCalls = () => panel.frames.filter(value => value.t === 'tool.call')
 

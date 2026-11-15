@@ -16,7 +16,7 @@ const temps = []
 after(async () => { for (const dir of temps) await rm(dir, { recursive: true, force: true }) })
 
 /** A stand-in bridge endpoint that records what the shim sends. */
-async function fakeBridge() {
+async function fakeBridge(t, { hold } = {}) {
   const seen = []
   let generation = 0
   const sessions = new Set()
@@ -36,11 +36,13 @@ async function fakeBridge() {
     }
     if (!sessions.has(req.headers['mcp-session-id'])) { res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: message.id ?? null, error: { code: -32600, message: 'unknown session' } })); return }
     if (message.id === undefined) { res.writeHead(202).end(); return }
+    if (hold !== undefined && message.method === 'tools/call') await hold(message)
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { echoed: message.method, session: req.headers['mcp-session-id'], version: req.headers['mcp-protocol-version'] } }))
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
+  t?.after(() => { server.closeAllConnections(); server.close() })
   return { server, seen, sessions, url: `http://127.0.0.1:${server.address().port}/mcp` }
 }
 
@@ -53,8 +55,9 @@ async function home(url, { tokenMode = 0o600 } = {}) {
   return dir
 }
 
-function shim(env) {
+function shim(t, env) {
   const child = spawn(process.execPath, [bin], { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'] })
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL') })
   const lines = []
   const waiters = []
   createInterface({ input: child.stdout }).on('line', (line) => {
@@ -66,20 +69,23 @@ function shim(env) {
     child,
     lines,
     send: (message) => child.stdin.write(`${JSON.stringify(message)}\n`),
-    next: (id) => {
+    next: (id, ms = 10_000) => {
       const found = lines.find((line) => line.id === id)
       if (found) return Promise.resolve(found)
-      return new Promise((resolve) => waiters.push({ match: (line) => line.id === id, resolve }))
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`no answer to ${JSON.stringify(id)} within ${ms} ms`)), ms)
+        waiters.push({ match: (line) => line.id === id, resolve: (message) => { clearTimeout(timer); resolve(message) } })
+      })
     },
   }
 }
 
 const init = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test-client', version: '1' } } }
 
-test('proxies stdio to the endpoint with token, session and protocol headers, and ends the session on exit', async () => {
-  const bridge = await fakeBridge()
+test('proxies stdio to the endpoint with token, session and protocol headers, and ends the session on exit', async (t) => {
+  const bridge = await fakeBridge(t)
   const dir = await home(bridge.url)
-  const client = shim({ DSH_HOME: dir })
+  const client = shim(t, { DSH_HOME: dir })
   client.send(init)
   assert.equal((await client.next(1)).result.protocolVersion, '2025-06-18')
   client.send({ jsonrpc: '2.0', method: 'notifications/initialized' })
@@ -92,13 +98,12 @@ test('proxies stdio to the endpoint with token, session and protocol headers, an
   await once(client.child, 'exit')
   assert.equal(bridge.seen.at(-1).method, 'DELETE')
   assert.equal(bridge.sessions.size, 0)
-  bridge.server.close()
 })
 
-test('replays initialize once when the bridge forgot the session (DSH restarted)', async () => {
-  const bridge = await fakeBridge()
+test('replays initialize once when the bridge forgot the session (DSH restarted)', async (t) => {
+  const bridge = await fakeBridge(t)
   const dir = await home(bridge.url)
-  const client = shim({ DSH_HOME: dir })
+  const client = shim(t, { DSH_HOME: dir })
   client.send(init)
   await client.next(1)
   bridge.sessions.clear()
@@ -108,12 +113,59 @@ test('replays initialize once when the bridge forgot the session (DSH restarted)
   assert.ok(!client.lines.some((line) => String(line.id).startsWith('dsh-browser-mcp-reinit')), 'the replayed initialize stays inside the shim')
   client.child.stdin.end()
   await once(client.child, 'exit')
-  bridge.server.close()
 })
 
-test('answers with an actionable error when DSH is not running', async () => {
+test('follows DSH to a new port when the old one refuses connections, re-sending the call once', async (t) => {
+  const first = await fakeBridge(t)
+  const dir = await home(first.url)
+  const client = shim(t, { DSH_HOME: dir })
+  client.send(init)
+  await client.next(1)
+  // DSH restarts: the old port closes and the new process rewrites the endpoint file.
+  first.server.closeAllConnections()
+  await new Promise((resolve) => first.server.close(resolve))
+  const second = await fakeBridge(t)
+  await writeFile(join(dir, 'browser-mcp.json'), JSON.stringify({ url: second.url, pid: 1 }), { mode: 0o600 })
+  client.send({ jsonrpc: '2.0', id: 'call', method: 'tools/call', params: { name: 'browser_snapshot', arguments: {} } })
+  const answered = await client.next('call')
+  assert.equal(answered.result.session, 's-1', 'answered by the new bridge on its own session')
+  assert.equal(second.seen.filter((entry) => entry.body?.method === 'tools/call').length, 1)
+  assert.equal(second.seen[0].body.method, 'initialize', 'the client initialize was replayed first')
+  client.child.stdin.end()
+  await once(client.child, 'exit')
+})
+
+test('a call the bridge holds (pending approval) is answered once and never re-posted', async (t) => {
+  const bridge = await fakeBridge(t, { hold: () => new Promise((resolve) => setTimeout(resolve, 1_500)) })
+  const dir = await home(bridge.url)
+  const client = shim(t, { DSH_HOME: dir })
+  client.send(init)
+  await client.next(1)
+  client.send({ jsonrpc: '2.0', id: 'held', method: 'tools/call', params: { name: 'browser_click', arguments: {} } })
+  assert.equal((await client.next('held')).result.echoed, 'tools/call')
+  assert.equal(bridge.seen.filter((entry) => entry.body?.method === 'tools/call').length, 1)
+  client.child.stdin.end()
+  await once(client.child, 'exit')
+})
+
+test('ends promptly when stdin closes while a call is held, and deletes the session', async (t) => {
+  const bridge = await fakeBridge(t, { hold: () => new Promise(() => {}) })
+  const dir = await home(bridge.url)
+  const client = shim(t, { DSH_HOME: dir })
+  client.send(init)
+  await client.next(1)
+  client.send({ jsonrpc: '2.0', id: 'held', method: 'tools/call', params: { name: 'browser_click', arguments: {} } })
+  while (!bridge.seen.some((entry) => entry.body?.method === 'tools/call')) await new Promise((resolve) => setTimeout(resolve, 10))
+  const started = Date.now()
+  client.child.stdin.end()
+  await once(client.child, 'exit')
+  assert.ok(Date.now() - started < 3_000, 'exited without waiting for the held call')
+  assert.equal(bridge.seen.at(-1).method, 'DELETE')
+})
+
+test('answers with an actionable error when DSH is not running', async (t) => {
   const dir = await home(undefined)
-  const client = shim({ DSH_HOME: dir })
+  const client = shim(t, { DSH_HOME: dir })
   client.send(init)
   const failed = await client.next(1)
   assert.equal(failed.error.code, -32000)

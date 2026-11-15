@@ -11,6 +11,11 @@
  *
  * When DSH restarts (new port, new session table) the shim re-reads the
  * endpoint file and replays the client's `initialize` once, transparently.
+ * A message is re-sent only when it cannot have reached a bridge (connection
+ * refused or reset) or the endpoint moved: a tool call that is still waiting
+ * on an approval is never posted twice. Requests use `node:http`, which has
+ * no client-side header timeout (Node's `fetch` gives up after 300 s, shorter
+ * than an approval may wait), and are aborted when stdin ends.
  *
  * Zero dependencies; Node 20+.
  *
@@ -24,6 +29,7 @@
 
 import { constants } from 'node:fs'
 import { lstat, open } from 'node:fs/promises'
+import { request as httpRequest } from 'node:http'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
@@ -120,12 +126,57 @@ export async function loadEndpoint(env, isAlive = pidAlive) {
 }
 
 /**
+ * A minimal `fetch` over `node:http`: no header or body timeout, so a call
+ * held for an approval waits as long as the bridge holds it. Supports the
+ * subset the shim uses (method, headers, string body, signal).
+ */
+export function httpFetch(url, { method = 'GET', headers = {}, body, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    // agent: false: one connection per message, no pooled socket timeouts.
+    // Send a length like fetch does, not a chunked body.
+    const sent = body === undefined ? headers : { ...headers, 'content-length': String(Buffer.byteLength(body)) }
+    const req = httpRequest(url, { method, headers: sent, signal, agent: false }, (res) => {
+      const chunks = []
+      res.on('data', (chunk) => chunks.push(chunk))
+      res.on('error', reject)
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8')
+        resolve({
+          status: res.statusCode ?? 0,
+          headers: { get: (name) => { const value = res.headers[name.toLowerCase()]; return value === undefined ? null : Array.isArray(value) ? value.join(', ') : value } },
+          text: async () => text,
+        })
+      })
+    })
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
+const RETRYABLE = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE'])
+
+/**
+ * Whether a failed post certainly or very likely never reached a live bridge
+ * call handler (nothing listening, or the connection dropped by a dying DSH).
+ * Timeouts and anything else are not retried: the call may still be running.
+ */
+export function isConnectionFailure(error) {
+  for (let current = error, depth = 0; current !== null && typeof current === 'object' && depth < 4; current = current.cause, depth += 1) {
+    if (typeof current.code === 'string' && RETRYABLE.has(current.code)) return true
+  }
+  return false
+}
+
+const isAbort = (error) => error !== null && typeof error === 'object' && (error.name === 'AbortError' || error.code === 'ABORT_ERR')
+
+/**
  * Run the shim until stdin ends.
- * @param io - `{ stdin, stdout, stderr, env, fetch? }`.
+ * @param io - `{ stdin, stdout, stderr, env, fetch? }` (`fetch` defaults to {@link httpFetch}).
  * @returns the process exit code.
  */
 export async function runShim(io) {
-  const doFetch = io.fetch ?? globalThis.fetch
+  const doFetch = io.fetch ?? httpFetch
+  const closing = new AbortController()
   const log = (text) => { io.stderr.write(`dsh-browser-mcp: ${text}\n`) }
   const write = (message) => { io.stdout.write(`${JSON.stringify(message)}\n`) }
   const state = { endpoint: undefined, sessionId: undefined, protocolVersion: undefined, initParams: undefined, reinits: 0 }
@@ -144,7 +195,7 @@ export async function runShim(io) {
     }
     if (state.sessionId !== undefined && message.method !== 'initialize') headers['mcp-session-id'] = state.sessionId
     if (state.protocolVersion !== undefined && message.method !== 'initialize') headers['mcp-protocol-version'] = state.protocolVersion
-    const response = await doFetch(target.url, { method: 'POST', headers, body: JSON.stringify(message) })
+    const response = await doFetch(target.url, { method: 'POST', headers, body: JSON.stringify(message), signal: closing.signal })
     const text = await response.text()
     let body
     if (text !== '') {
@@ -189,12 +240,20 @@ export async function runShim(io) {
     let answer
     try {
       answer = message.method === 'initialize' ? await initialize(target, message) : await post(target, message)
-    } catch {
-      // DSH may have restarted on another port: re-read the endpoint and retry once.
+    } catch (error) {
+      if (closing.signal.aborted || isAbort(error)) return
+      // DSH may have restarted on another port: re-read the endpoint. Re-send
+      // only if the message cannot have reached a bridge or the endpoint moved;
+      // a tools/call that was cut off while waiting may still be running.
       const previous = target.url
       target = await endpoint(true)
       if ('error' in target) {
         fail(message, target.error)
+        return
+      }
+      if (!isConnectionFailure(error) && target.url === previous) {
+        log(`lost the answer to ${message.method ?? 'a message'}: ${error instanceof Error ? (error.cause?.message ?? error.message) : String(error)}`)
+        fail(message, 'the connection to the DSH browser bridge failed before it answered; the request was not re-sent because it may still be running. Check the browser, then retry if needed.')
         return
       }
       try {
@@ -202,7 +261,8 @@ export async function runShim(io) {
           if (!await reinitialize(target)) throw new Error('reinitialize failed')
         }
         answer = message.method === 'initialize' ? await initialize(target, message) : await post(target, message)
-      } catch {
+      } catch (retryError) {
+        if (closing.signal.aborted || isAbort(retryError)) return
         fail(message, NOT_RUNNING)
         return
       }
@@ -249,8 +309,10 @@ export async function runShim(io) {
     inflight.add(task)
     void task.finally(() => inflight.delete(task))
   }
+  // The client went away: nobody can read further answers. Abort what is in
+  // flight, then end the MCP session so its external session stops.
+  closing.abort()
   await Promise.allSettled([...inflight])
-  // The client went away: end the MCP session so its external session stops.
   const target = state.endpoint
   if (state.sessionId !== undefined && target !== undefined && !('error' in target)) {
     await doFetch(target.url, {

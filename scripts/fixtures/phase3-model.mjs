@@ -84,16 +84,3 @@ export function phase3Reply(body, state) {
   return undefined
 }
 
-/** Encode a reply as one streamed chat-completions response. */
-export function streamReply(response, reply, model = 'scripted') {
-  const id = `chatcmpl-p3-${Math.random().toString(36).slice(2, 10)}`
-  const base = { id, object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model }
-  const delta = 'tool' in reply
-    ? { role: 'assistant', tool_calls: [{ index: 0, id: `call_${Math.random().toString(36).slice(2, 10)}`, type: 'function', function: { name: reply.tool.name, arguments: JSON.stringify(reply.tool.args) } }] }
-    : { role: 'assistant', content: reply.text }
-  const finish = 'tool' in reply ? 'tool_calls' : 'stop'
-  response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
-  response.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`)
-  response.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: finish }], usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } })}\n\n`)
-  response.end('data: [DONE]\n\n')
-}
