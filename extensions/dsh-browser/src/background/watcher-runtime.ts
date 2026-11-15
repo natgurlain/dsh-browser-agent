@@ -31,6 +31,8 @@ export interface PageWatcherRuntimeOptions {
   /** Kill switch engaged, or the user paused / took over. */
   blocked: () => boolean
   shareContent: () => boolean
+  /** Site policy hides the page from the agent (blocked / managed-disallowed). */
+  pageHidden?: (url: string) => boolean
   /** Bridge RPC (resolves with the server-response envelope). */
   rpc: (method: string, payload: unknown) => Promise<unknown>
   /** Record that page content entered a session (extension-side taint). */
@@ -69,11 +71,15 @@ export class PageWatcherRuntime {
       enabled: this.options.enabled,
       blocked: this.options.blocked,
       shareContent: this.options.shareContent,
+      ...(this.options.pageHidden === undefined ? {} : { pageHidden: this.options.pageHidden }),
       fire: async (payload) => {
         const answer = unwrapServerResponse(await this.options.rpc(BRIDGE_WATCH_FIRE_METHOD, payload))
-        if (typeof payload.matched === 'string' && (answer as { woken?: unknown } | undefined)?.woken === true) {
+        // Every wake carries page-controlled data (at least its URL): it taints like a read.
+        if ((answer as { woken?: unknown } | undefined)?.woken === true) {
           const watcher = this.registry.get(String(payload.watchId))
-          this.options.noteTaint(String(payload.sessionId), watcher?.origin ?? '')
+          let origin = watcher?.origin ?? ''
+          try { origin = new URL(String(payload.url)).origin } catch { /* keep the approved origin */ }
+          this.options.noteTaint(String(payload.sessionId), origin)
         }
         return answer
       },

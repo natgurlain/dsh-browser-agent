@@ -197,6 +197,21 @@ describe('handleWatchHit', () => {
       .toEqual({ accepted: true })
     expect(armedFor(registry, 7, PAGE)).toEqual([])
   })
+
+  it('suspends URL, network and content watchers on a page site policy hides, without disclosing its URL', async () => {
+    const hidden = (url: string) => url.startsWith('https://pay.example')
+    const url = await setup({ condition: { kind: 'url', pattern: '/checkout' }, maxFires: 3 }, { pageHidden: hidden })
+    expect(await handleWatchHit({ watchId: 'w-1', matched: 'https://pay.example/checkout' }, { tabId: 7, url: 'https://pay.example/checkout', frameId: undefined, urlWatcher: true }, url.deps))
+      .toEqual({ accepted: false, reason: 'blocked-site' })
+    expect(url.fire).not.toHaveBeenCalled()
+    expect(url.registry.get('w-1')).toMatchObject({ fires: 0, lastMiss: expect.stringMatching(/suspended/) })
+    // A site blocked after approval suspends network and content watchers on the approved origin too.
+    for (const condition of [{ kind: 'network', pattern: '/api' }, { kind: 'text', text: 'x', gone: false }] as const) {
+      const net = await setup({ condition, maxFires: 3 }, { pageHidden: () => true })
+      expect(await handleWatchHit({ watchId: 'w-1', matched: 'https://shop.example/api' }, sender, net.deps)).toEqual({ accepted: false, reason: 'blocked-site' })
+      expect(net.fire).not.toHaveBeenCalled()
+    }
+  })
 })
 
 describe('content observer', () => {

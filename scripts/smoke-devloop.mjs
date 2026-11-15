@@ -39,6 +39,8 @@ export async function smokeDevLoop({ place, owner, rpc, wsUrl, connectClient, wa
     return answer.result.result
   }
   try {
+    // Only sessions on a restricted preset can be linked; the owner puts the coding session on one.
+    await owner('commands', 'execute', { agentId: coding, line: '/permission workspace-write', submittedAttachments: [] })
     // The picker lists the user's coding sessions, never the bridge's own.
     const candidates = await call(methods.BRIDGE_DEVLOOP_CANDIDATES_METHOD, {})
     assert.ok(candidates.ok && candidates.value.items.some(item => item.sessionId === coding), 'the coding session is offered')

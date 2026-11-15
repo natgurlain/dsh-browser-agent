@@ -644,6 +644,7 @@ const pageWatchers = new PageWatcherRuntime({
   enabled: () => settingsLoaded && settings.allowPageWatchers,
   blocked: () => killSwitchEngaged || pauseGate.holding(),
   shareContent: () => unrestrictedAccessEnabled() || settings.sharePageContent !== 'off',
+  pageHidden: (url) => policyRuntime.pageHidden(url),
   rpc: (method, payload) => gatewayRpc(method, payload),
   noteTaint: (sessionId, origin) => { policyRuntime.recordInjection(sessionId, origin) },
 })

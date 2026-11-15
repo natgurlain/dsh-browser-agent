@@ -486,6 +486,12 @@ export interface WatchHitDeps {
   blocked: () => boolean
   /** Whether page content may leave the page. */
   shareContent: () => boolean
+  /**
+   * Whether site policy hides this page from the agent entirely (blocked, or
+   * outside the managed allowlist). Such a watcher is suspended there: it
+   * does not fire and its URL is not disclosed.
+   */
+  pageHidden?: (url: string) => boolean
   /** Ask the bridge to wake the session; resolves with its answer. */
   fire: (payload: Record<string, unknown>) => Promise<unknown>
   changed: () => void
@@ -519,6 +525,13 @@ export async function handleWatchHit(
   }
   if (!deps.enabled()) return { accepted: false, reason: 'disabled' }
   if (deps.blocked()) return { accepted: false, reason: 'paused' }
+  // Site policy as of now, not as of approval: a blocked page suspends the watcher.
+  const pageUrl = sender.url ?? watcher.url
+  if (deps.pageHidden?.(pageUrl) === true || deps.pageHidden?.(watcher.url) === true) {
+    await deps.registry.recordMiss(watcher.id, 'suspended: the page is blocked by site policy')
+    deps.changed()
+    return { accepted: false, reason: 'blocked-site' }
+  }
   const admitted = deps.registry.admitFire(watcher)
   if (!admitted.ok) return { accepted: false, reason: admitted.reason }
   const matched = deps.shareContent() && typeof hit.matched === 'string' ? hit.matched.slice(0, MAX_MATCHED_CHARS) : undefined
@@ -529,7 +542,7 @@ export async function handleWatchHit(
       sessionId: watcher.sessionId,
       prompt: watcher.prompt,
       condition: describeCondition(watcher.condition),
-      url: sender.url ?? watcher.url,
+      url: pageUrl,
       fires: watcher.fires + 1,
       maxFires: watcher.maxFires,
       ...(matched === undefined ? {} : { matched }),
