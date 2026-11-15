@@ -1,21 +1,54 @@
 # dsh Browser Agent
 
-> 基于 Yuxiang Lin 及贡献者的 [dsh-browser](https://github.com/omdsh-dev/dsh-browser)（MIT 许可）。见 [NOTICE](NOTICE)。
-
 [English](README.md) | **中文**
 
-<img width="1701" height="897" alt="dsh 浏览器操作" src="https://github.com/user-attachments/assets/3b1f3a25-f962-4e02-a9ef-d23e0d01fc8e" />
+让 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）在你日常使用的浏览器里工作。智能体读取你正在看的页面，点击、输入、导航、管理标签页，用的是你自己的 Chrome、Brave 或 Firefox（其他 Chromium 浏览器应当也可用），保留你的登录态和 Cookie；你在侧边栏里查看并批准它的每一步。
 
-把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 连接到你正在使用的 Chrome 或 Firefox 标签页。模型可以读取页面内容、操作控件、导航和管理标签页，同时保留登录态、会话和 Cookie。侧边栏提供对话界面。
+<img width="1836" height="1312" alt="Brave 中的 dsh Browser Agent 侧边栏，正在回答关于旁边 GitHub 页面的问题" src="docs/images/dsh-browser-agent-dark.webp" />
 
-`dsh` 是由 DeepSeek AI 开发的开源、插件化 agent harness（智能体框架）。本仓库将配套的浏览器桥插件与 Chrome/Firefox MV3 扩展组成一个独立的 pnpm workspace。
+> 基于 Yuxiang Lin 及贡献者的 [dsh-browser](https://github.com/omdsh-dev/dsh-browser)（MIT 许可）。见 [NOTICE](NOTICE)。
 
-页面会转换为结构化文本和带编号的交互元素清单。工具通过编号或选择器定位元素；`browser_screenshot` 经批准后截取受控标签页的可视区域。宿主声明图片能力时，侧栏也可发送 PNG、JPEG、WebP 和 GIF 附件。
+## 这是什么
 
-> [!IMPORTANT]
-> 桥接插件支持 DSH 0.2.2-rc.1 至 0.2.2-rc.3（均已测试，见 [docs/dsh-matrix.md](docs/dsh-matrix.md)）。工作区默认安装 0.2.2-rc.2。在桌面应用自带的 0.2.2-rc.1 上，失败后“继续”和删除会话时等待 worktree 清理这两项不可用。
+本仓库包含两个配套的部分：
 
-## 快速安装
+- **浏览器扩展**（Manifest V3），带一个用于对话的侧边栏。它把页面转换成结构化文本和带编号的可交互元素清单，并在真实标签页里执行智能体的操作。
+- **DSH 插件**（“桥”），为 DSH 提供 `browser_*` 工具，并通过本机的、经过认证的连接与扩展通信。
+
+它可以配合 DeepSeek Harness 桌面应用或 `dsh web` 使用，使用你在其中配置的模型，也可以通过 MCP 由 Claude Code、Cursor 或 Codex 驱动。
+
+## 为什么用它
+
+- **用你真实的浏览器。** 不需要单独的配置文件、重新登录或无头窗口：智能体就在你眼前的标签页里工作。
+- **始终由你掌控。** 会改变内容的操作先弹出审批卡，写明将要点击、输入或打开什么。你可以暂停、接管页面，或按“停止”一次切断一切。
+- **为不可信页面而设计。** 智能体读过网页之后，向其他站点、剪贴板或文件发送数据都要先询问，并且该会话的 shell 和文件工具会被关闭，试图劫持智能体的页面无处外传数据。银行、密码管理和云控制台类站点默认只读。
+- **上锁的入口。** 扩展与 DSH 每次连接都用一个不经网络传输的共享密钥互相证明身份；本机上的其他程序和其他扩展无法连接。
+- **全程留痕。** 每个操作、审批和停止都写入可导出的防篡改审计日志。
+- **不止点击。** 表格导出 CSV、PDF、下载、文件上传、悬停与拖拽、对话框、多标签页并行阅读、页面监视，以及可重放或定时运行的已保存工作流。
+- **用着舒服。** 浅色和深色主题、中英文界面、可调字号。
+
+## 快速开始
+
+需要 DeepSeek Harness（桌面应用，或 `dsh` 0.2.2-rc.1 至 rc.3）和一个 Chromium 浏览器或 Firefox。
+
+```sh
+git clone https://github.com/natgurlain/dsh-browser-agent.git
+cd dsh-browser-agent
+./scripts/install.sh
+```
+
+安装器会构建扩展和插件，把插件注册到 DeepSeek Harness 桌面应用和 `web` profile，并打开浏览器的扩展管理页。它使用机器上已有的 Node.js 24.9+ 和 pnpm（包括桌面应用自带的），找不到时会告诉你该安装什么。然后：
+
+1. 在扩展管理页开启**开发者模式**，点击**加载已解压的扩展程序**，选择 `~/.dsh/browser-extension`（仅首次；更新后点击**重新加载**）。
+2. 打开 DeepSeek Harness（如果正在运行，请重启）。
+3. 打开任意网页，点击工具栏中的鲸鱼图标，等待显示**已连接**。
+
+无需填写地址或密码：安装器已把扩展在本机发现并认证 DSH 所需的信息准备好。
+
+> [!NOTE]
+> 状态：早期阶段。macOS 和 Linux 的安装经常运行；Windows 安装器（`scripts/install.ps1`）已提供，但尚未在 Windows 机器上运行过。支持的 DSH 版本见 [docs/dsh-matrix.md](docs/dsh-matrix.md)；在 0.2.2-rc.1 上，失败后“继续”和删除会话时等待 worktree 清理这两项不可用。
+
+## 从发布版本安装
 
 安装器会安装桥插件和 Chrome 扩展。它下载一个带标签的发布版本，把每个下载的文件与该版本的 `SHA256SUMS` 逐一比对，校验通过后才解压并从源码构建。校验值不符、缺少 `SHA256SUMS` 或下载不完整时，安装会在解压或执行任何内容之前停止。
 
@@ -58,7 +91,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-
 
 ## 性能基准
 
-在 2026 年 8 月 18 日完成的 60 次配对端到端评测中，两个后端分配到的 30 次运行均全部成功；dsh 浏览器操作使用了更少的模型/工具轮次，并以更短时间完成任务：
+以下数据来自上游项目 dsh-browser，尚未在本分支上重新测量。在其 2026 年 8 月 18 日完成的 60 次配对端到端评测中，两个后端分配到的 30 次运行均全部成功；dsh 浏览器操作使用了更少的模型/工具轮次，并以更短时间完成任务：
 
 | 后端 | 成功率 | 平均端到端耗时 | 平均浏览器工具调用 |
 |---|---:|---:|---:|
@@ -135,7 +168,7 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 
 ### 安装或更新
 
-运行[快速安装命令](#快速安装)即可安装。在 macOS 和 Linux 上只需一条命令，其余由安装器完成：
+运行[发布版本安装命令](#从发布版本安装)，或在 checkout 中运行 `./scripts/install.sh` 即可安装。在 macOS 和 Linux 上只需一条命令，其余由安装器完成：
 
 - **DeepSeek Harness 桌面应用。** 检测到应用时（macOS 的 `/Applications` 或 `~/Applications`；其他位置用 `DSH_DESKTOP_APP=<路径>` 指定，`DSH_DESKTOP_APP=none` 则跳过），除了 `web` profile，还会通过应用自带的 CLI 把桥插件注册到应用专用的 `desktop` profile。安装后请退出并重新打开应用。如果应用的 DSH 版本不在插件支持的范围内，安装器会明确说明，只注册 `web` profile，并提示先更新应用再重新运行；它不会绕过版本检查。
 - **Node.js 与 pnpm。** PATH 上的 `node` 不存在或低于 24.9.0 时，安装器使用本机已经安装的版本：先是应用自带的 Node，然后是 asdf、nvm、fnm、volta 或 mise 中已有的合适版本。PATH 上的 `pnpm` 无法运行时，依次使用应用自带的 pnpm、Corepack、`npx`。安装器不会替你安装任何东西；找不到合适的 Node 时，它会给出本机已有工具对应的安装命令。

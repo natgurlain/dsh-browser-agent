@@ -929,6 +929,21 @@ open_browser_extensions() {
 
   if is_macos; then
     if [ -n "$target" ]; then
+      # `open -a <app> chrome://…` is refused by LaunchServices for some
+      # browsers (seen with Brave: no handler is registered for the scheme), so
+      # ask the browser itself first. Its name is the bundle name without ".app".
+      local app_name="${target##*/}"
+      app_name="${app_name%.app}"
+      if command -v osascript >/dev/null 2>&1 &&
+        osascript \
+          -e 'on run argv' \
+          -e 'tell application (item 1 of argv)' \
+          -e 'open location (item 2 of argv)' \
+          -e 'activate' \
+          -e 'end tell' \
+          -e 'end run' "$app_name" "$url" >/dev/null 2>&1; then
+        return 0
+      fi
       open -a "$target" "$url" >/dev/null 2>&1 && return 0
       return 1
     fi

@@ -33,14 +33,16 @@ type View =
  *   "Pair again…" and a confirmation that says when that is the right thing to do.
  * @param props.needed - say above the card that this browser is not connected.
  * @param props.autoStart - with `first`: ask as soon as the card appears.
+ * @param props.titled - false inside a settings group that already carries the title.
  * @param props.onPaired - called once the token is stored.
  */
-export function PairingCard({ api, copy, mode, needed = false, autoStart = false, onPaired }: {
+export function PairingCard({ api, copy, mode, needed = false, autoStart = false, titled = true, onPaired }: {
   api: PairingApi
   copy: PanelCopy['pairing']
   mode: 'first' | 'again'
   needed?: boolean
   autoStart?: boolean
+  titled?: boolean
   onPaired?: () => void
 }): React.JSX.Element {
   const [view, setView] = useState<View>({ kind: 'idle' })
@@ -74,7 +76,7 @@ export function PairingCard({ api, copy, mode, needed = false, autoStart = false
 
   return (
     <section className={needed ? 'pairing-card needed' : 'pairing-card'} data-testid="pairing-card">
-      <strong>{copy.title}</strong>
+      {titled ? <strong>{copy.title}</strong> : null}
       {needed && !again ? <p className="pairing-needed">{copy.needed}</p> : null}
       {view.kind === 'code' ? (
         <>

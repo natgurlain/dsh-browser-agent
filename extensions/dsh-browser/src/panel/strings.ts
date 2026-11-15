@@ -118,6 +118,16 @@ export interface PanelCopy {
     back: string
     eyebrow: string
     title: string
+    token: string
+    pageSnapshots: string
+    textSizeHelp: string
+    reconnect: string
+    discard: string
+    unsavedChanges: string
+    appliesImmediately: string
+    learnMore: string
+    groups: Record<'access' | 'debugger', string>
+    sections: Record<'connection' | 'appearance' | 'permissions' | 'behaviour' | 'automation' | 'models' | 'about', { title: string; help: string }>
     language: string
     languageHelp: string
     languageAuto: string
@@ -151,8 +161,10 @@ export interface PanelCopy {
     sharingOff: string
     unrestrictedBrowserAccess: string
     unrestrictedBrowserAccessHelp: string
+    unrestrictedBrowserAccessMore: string
     allowDevTools: string
     allowDevToolsHelp: string
+    allowDevToolsMore: string
     devToolsUnsupported: string
     devToolsOff: string
     devToolsIdle: string
@@ -161,18 +173,23 @@ export interface PanelCopy {
     devToolsDetach: string
     approvalNotifications: string
     approvalNotificationsHelp: string
+    approvalNotificationsMore: string
     approvalTimeout: string
     approvalTimeoutHelp: string
+    approvalTimeoutMore: string
     catchPageDialogs: string
     catchPageDialogsHelp: string
+    catchPageDialogsMore: string
     autoResumeSession: string
     autoResumeSessionHelp: string
     showAgentOverlay: string
     showAgentOverlayHelp: string
     allowPageWatchers: string
     allowPageWatchersHelp: string
+    allowPageWatchersMore: string
     trustedOrigins: string
     trustedOriginsHelp: string
+    trustedOriginsMore: string
     trustedOriginInput: string
     add: string
     invalidOrigin: string
@@ -281,6 +298,7 @@ export interface PanelCopy {
   audit: {
     section: string
     help: string
+    more: string
     exportButton: string
     exporting: string
     exported: (count: number, verified: boolean) => string
@@ -306,18 +324,26 @@ export interface PanelCopy {
   /** Settings → Site policy (security/site-policy.ts). */
   sitePolicy: {
     title: string
+    rulesTitle: string
     help: string
+    more: string
     builtIn: string
     builtInHelp: (patterns: number) => string
     patternLabel: string
+    noRules: string
+    invalidPattern: string
+    patternPlaceholder: string
     ruleLabel: string
     rules: Record<SiteRule, string>
     add: string
     remove: string
+    removeItem: (item: string) => string
     strictTitle: string
     strictHelp: string
+    strictMore: string
     strictUnavailable: string
     strictSiteLabel: string
+    noStrictSites: string
     managedIntro: string
     managedNoUnrestricted: string
     managedNoDevTools: string
@@ -344,9 +370,12 @@ export interface PanelCopy {
   devLoop: {
     title: string
     help: string
+    more: string
     caution: string
+    cautionMore: string
     openLocalhost: string
     unlink: string
+    noLinks: string
     linkTab: string
     noSessions: string
     sessionLabel: string
@@ -399,18 +428,25 @@ export interface PanelCopy {
     imported: (count: number) => string
     settingsTitle: string
     settingsHelp: string
+    settingsMore: string
     workflowsTitle: string
     workflowsHelp: string
+    workflowsMore: string
     watchMeTitle: string
     watchMeHelp: string
+    watchMeMore: string
     driversTitle: string
-    driversUnavailable: string
     driversHelp: string
+    driversUnavailable: string
+    driversMore: string
     driverSiteLabel: string
+    invalidDriverSite: string
     add: string
     remove: string
+    removeItem: (item: string) => string
     fixturesTitle: string
     fixturesHelp: string
+    fixturesMore: string
     requestFailed: string
     disconnected: string
   }
@@ -674,22 +710,40 @@ const EN: PanelCopy = {
     back: 'Back to chat',
     eyebrow: 'Browser assistant',
     title: 'Settings',
+    token: 'Token',
+    pageSnapshots: 'Page snapshots',
+    textSizeHelp: 'Scales all text in the panel.',
+    reconnect: 'Reconnect',
+    discard: 'Discard',
+    unsavedChanges: 'Unsaved changes',
+    appliesImmediately: 'Applies immediately',
+    learnMore: 'Learn more',
+    groups: { access: 'Access', debugger: 'Debugger' },
+    sections: {
+      connection: { title: 'Connection', help: 'How this panel reaches dsh on your computer.' },
+      appearance: { title: 'Appearance', help: 'Language, colours and text size. Changes apply immediately.' },
+      permissions: { title: 'Permissions & safety', help: 'What the assistant may read and do, and on which sites.' },
+      behaviour: { title: 'Behaviour', help: 'Approvals, conversations and what you see on the page.' },
+      automation: { title: 'Automation', help: 'Page watchers, the dev loop and experimental learning features.' },
+      models: { title: 'Models & API relay', help: 'Use your own API relay as a model provider.' },
+      about: { title: 'About', help: 'Updates, audit log and uninstall.' },
+    },
     language: 'Language',
-    languageHelp: 'Language of the assistant panel and its notifications. Takes effect immediately.',
+    languageHelp: 'Language of the panel and its notifications.',
     languageAuto: 'Automatic (follow Chrome)',
     languageEnglish: 'English',
     languageChinese: '中文',
     theme: 'Theme',
-    themeHelp: 'Colours of the assistant panel. Automatic follows the browser or system setting.',
+    themeHelp: 'Automatic follows your browser or system.',
     themeAuto: 'Automatic (follow system)',
     themeLight: 'Light',
     themeDark: 'Dark',
     bridgeAddress: 'Bridge address',
-    bridgeHelp: 'Leave blank to detect a local service automatically',
-    bridgePlaceholder: 'Auto-detect (desktop beacon 43189–43198 included)',
+    bridgeHelp: 'Leave blank to find dsh on this computer automatically.',
+    bridgePlaceholder: 'Auto-detect',
     detect: 'Detect',
     detectCancel: 'Cancel',
-    detectHelp: 'Probes this machine once and lists every local dsh instance.',
+    detectHelp: 'Lists every dsh on this computer, including desktop beacon ports 43189–43198.',
     detectProgress: (done, total) => `Detecting ${done} / ${total} ports…`,
     detectEmpty: 'No service found.',
     detectPick: 'Select an instance to fill in its address.',
@@ -701,37 +755,44 @@ const EN: PanelCopy = {
       ...mcp ? ['MCP clients'] : [],
     ].join(', ')}`,
     detectSource: { fixed: 'fixed port', beacon: 'beacon' },
-    tokenHelp: 'Filled in by pairing. Paste it by hand only for remote deployments or when pairing is unavailable',
-    tokenPlaceholder: 'Set by pairing, or paste for remote deployments',
+    tokenHelp: 'Only needed for Firefox and remote deployments.',
+    tokenPlaceholder: 'Paste the bridge token',
     pageSharing: 'Page content sharing',
-    pageSharingHelp: 'Control when the assistant can read page text',
-    sharingAuto: 'Share automatically (default)',
+    pageSharingHelp: 'When the assistant may read the text of a page.',
+    sharingAuto: 'Automatic (default)',
     sharingAsk: 'Ask every time',
     sharingOff: 'Off',
     unrestrictedBrowserAccess: 'Allow unrestricted browser control',
-    unrestrictedBrowserAccessHelp: 'Trust every site except those your site policy restricts: the model reads pages, inspects open tab titles and URLs, and acts—including following and closing tabs—without confirmation. Blocked, read-only, and always-ask sites (including the built-in protections), untrusted-content safeguards, and managed policy still apply. Browser-protected page content remains inaccessible.',
+    unrestrictedBrowserAccessHelp: 'Reads and acts on every site without asking, except sites your site rules restrict.',
+    unrestrictedBrowserAccessMore: 'Trust every site except those your site policy restricts: the model reads pages, inspects open tab titles and URLs, and acts—including following and closing tabs—without confirmation. Blocked, read-only, and always-ask sites (including the built-in protections), untrusted-content safeguards, and managed policy still apply. Browser-protected page content remains inaccessible.',
     allowDevTools: 'Allow developer tools',
-    allowDevToolsHelp: 'High privilege: lets the model inspect and modify page elements and CSS, run JavaScript in the page, and read captured network requests. Off by default, where every call asks for approval. When on, it applies to every site and turns itself off after 8 hours. Running JavaScript still asks on every call unless you tick "Trust JavaScript on this site for this conversation" on its card, which lasts 30 minutes; reading unredacted headers or bodies always asks. Chrome cannot keep its own DevTools open on a tab while this is attached.',
+    allowDevToolsHelp: 'High privilege: inspect and change pages, run JavaScript, read network requests. Turns itself off after 8 hours.',
+    allowDevToolsMore: 'High privilege: lets the model inspect and modify page elements and CSS, run JavaScript in the page, and read captured network requests. Off by default, where every call asks for approval. When on, it applies to every site and turns itself off after 8 hours. Running JavaScript still asks on every call unless you tick "Trust JavaScript on this site for this conversation" on its card, which lasts 30 minutes; reading unredacted headers or bodies always asks. Chrome cannot keep its own DevTools open on a tab while this is attached.',
     devToolsUnsupported: 'Unavailable — this browser does not provide the debugger API.',
     devToolsOff: 'Off — every call asks for approval.',
     devToolsIdle: 'Enabled — the debugger attaches on the first call. JavaScript still asks each time.',
     devToolsAttached: 'Debugger attached',
     devToolsError: 'Last error:',
     devToolsDetach: 'Detach now',
-    catchPageDialogs: 'Catch page dialogs — shows Chrome\'s debugging bar',
-    catchPageDialogsHelp: 'Attach the debugger before clicks, key presses, and navigation so alert/confirm/prompt/leave-site dialogs are reported and the agent can answer them. While attached, Chrome shows a "being debugged" bar that can shift the page.',
+    catchPageDialogs: 'Catch page dialogs',
+    catchPageDialogsHelp: 'Lets the agent see and answer alert and confirm dialogs. Shows Chrome\'s debugging bar.',
+    catchPageDialogsMore: 'Attach the debugger before clicks, key presses, and navigation so alert/confirm/prompt/leave-site dialogs are reported and the agent can answer them. While attached, Chrome shows a "being debugged" bar that can shift the page.',
     approvalNotifications: 'Browser approval notifications',
-    approvalNotificationsHelp: 'Notify you when an approval arrives while the side panel is closed. Simple actions can be allowed from the notification; code, typing, and uploads open the full card.',
-    approvalTimeout: 'Approval wait without the side panel (minutes)',
-    approvalTimeoutHelp: 'How long an approval waits for an answer while the side panel is closed — from a notification, the dsh web UI, or the CLI — before it is denied. 1–14 minutes.',
+    approvalNotificationsHelp: 'Notifies you when an approval arrives while the side panel is closed.',
+    approvalNotificationsMore: 'Simple actions can be allowed from the notification; code, typing, and uploads open the full card.',
+    approvalTimeout: 'Approval wait with the panel closed',
+    approvalTimeoutHelp: 'Minutes an unanswered approval waits before it is denied (1–14).',
+    approvalTimeoutMore: 'How long an approval waits for an answer while the side panel is closed — from a notification, the dsh web UI, or the CLI — before it is denied. 1–14 minutes.',
     autoResumeSession: "Resume this page's conversation",
-    autoResumeSessionHelp: 'Reopen the conversation associated with this tab and page path; other pages start a new conversation',
+    autoResumeSessionHelp: 'Reopens the conversation for this tab and page. Other pages start a new one.',
     showAgentOverlay: 'Show the agent on the page',
-    showAgentOverlayHelp: 'A ghost cursor and outline mark each target before the agent acts, and controlled tabs get a colored frame with a Stop button',
+    showAgentOverlayHelp: 'Marks each target before the agent acts. Controlled tabs get a coloured frame and a Stop button.',
     allowPageWatchers: 'Allow the agent to watch pages',
-    allowPageWatchersHelp: 'The agent may ask to keep watching a page and wake itself when something changes. Each watcher needs your approval; turning this off cancels them all',
+    allowPageWatchersHelp: 'The agent may ask to keep watching a page. Each watcher needs your approval.',
+    allowPageWatchersMore: 'A watcher wakes the agent when something on the page changes. Turning this off cancels every watcher.',
     trustedOrigins: 'Always-allowed domains',
-    trustedOriginsHelp: 'The approval dialog can trust a domain for the current side-panel session only. Domains added here permanently skip action confirmation when every known origin is trusted. Wildcards include the base domain and subdomains, and stay scoped to their scheme and port; `*.example.com` defaults to HTTPS.',
+    trustedOriginsHelp: 'Actions on these domains never ask for confirmation.',
+    trustedOriginsMore: 'The approval dialog can trust a domain for the current side-panel session only. Domains added here permanently skip action confirmation when every known origin is trusted. Wildcards include the base domain and subdomains, and stay scoped to their scheme and port; `*.example.com` defaults to HTTPS.',
     trustedOriginInput: 'Domain to always trust (e.g. https://example.com or https://*.example.com)',
     add: 'Add',
     invalidOrigin: 'Enter an http:// or https:// origin, or a wildcard such as https://*.example.com.',
@@ -742,7 +803,7 @@ const EN: PanelCopy = {
     cancel: 'Cancel',
     snapshotHint: (maxChars) => `Page snapshots are limited to ${maxChars} characters and longer content is truncated. Change snapshotMaxChars in the dsh plugin to adjust this limit.`,
     relaySection: 'Models & API relay',
-    relayHelp: 'Point the assistant at your own API relay. Each profile becomes one provider route; changes take effect on the next message without a restart.',
+    relayHelp: 'Each profile becomes one provider route. Saved changes take effect on the next message, without a restart. Removing a saved profile applies immediately.',
     relayName: 'Profile name',
     relayNamePlaceholder: 'e.g. my-relay',
     relayProtocol: 'API format',
@@ -853,7 +914,8 @@ const EN: PanelCopy = {
   },
   audit: {
     section: 'Audit log',
-    help: 'Every browser action, approval, navigation, and result is written to a tamper-evident (hash-chained) log on this computer. Typed text and secrets are never stored.',
+    help: 'Browser actions and approvals are kept in a tamper-evident log on this computer.',
+    more: 'Every browser action, approval, navigation, and result is written to a tamper-evident (hash-chained) log on this computer. Typed text and secrets are never stored.',
     exportButton: 'Export audit log',
     exporting: 'Exporting…',
     exported: (count, verified) => `Exported ${count} entr${count === 1 ? 'y' : 'ies'}${verified ? ' — chain verified' : ' — chain verification FAILED'}`,
@@ -876,18 +938,26 @@ const EN: PanelCopy = {
   },
   sitePolicy: {
     title: 'Site policy',
-    help: 'Per-site rules apply before every other setting. "Unrestricted access" trusts every site except these. Patterns: example.com (and subdomains), *bank*, github.com/settings.',
+    rulesTitle: 'Site rules',
+    help: 'Rules for specific sites. They apply before every other setting.',
+    more: '"Unrestricted access" trusts every site except these. Patterns: example.com (and subdomains), *bank*, github.com/settings.',
     builtIn: 'Built-in protections',
     builtInHelp: (patterns) => `Banking and payment, password vaults, account pages, and cloud consoles are read-only (${String(patterns)} patterns).`,
     patternLabel: 'Site pattern',
+    noRules: 'No site rules yet.',
+    invalidPattern: 'Enter a site such as example.com, *bank* or github.com/settings.',
+    patternPlaceholder: 'example.com or *.bank.com',
     ruleLabel: 'Rule',
     rules: { blocked: 'Blocked (no reads)', 'read-only': 'Read-only', ask: 'Always ask', trusted: 'Trusted' },
     add: 'Add',
     remove: 'Remove',
+    removeItem: (item) => `Remove ${item}`,
     strictTitle: 'Strict mode (commit gate)',
-    strictHelp: 'On these sites, every POST/PUT/PATCH/DELETE or form submission the page sends during an agent action waits for your approval, with the fields shown (sensitive ones masked). It attaches the debugger, so Chrome shows its debugging bar. WebSocket messages and sendBeacon cannot be intercepted.',
+    strictHelp: 'On these sites, form submissions and write requests during an agent action wait for your approval.',
+    strictMore: 'On these sites, every POST/PUT/PATCH/DELETE or form submission the page sends during an agent action waits for your approval, with the fields shown (sensitive ones masked). It attaches the debugger, so Chrome shows its debugging bar. WebSocket messages and sendBeacon cannot be intercepted.',
     strictUnavailable: 'Unavailable in this browser: strict mode needs the Chrome debugger.',
     strictSiteLabel: 'Strict mode site',
+    noStrictSites: 'No strict-mode sites yet.',
     managedIntro: 'Managed by your administrator (overrides the settings above):',
     managedNoUnrestricted: 'Unrestricted access is disabled.',
     managedNoDevTools: 'Developer tools are disabled.',
@@ -910,10 +980,13 @@ const EN: PanelCopy = {
   },
   devLoop: {
     title: 'Dev loop',
-    help: 'Link a localhost tab to a DSH coding session. After each turn in which that session edits files, it receives this tab\'s new console errors, failed requests and page changes as read-only context. It can never be prompted from here.',
-    caution: 'Caution: if your local app renders untrusted data (user content, scraped or proxied pages), that text can reach the coding session this way. Set devLoop.trustLoopback: false in the bridge config to treat such injections as untrusted web content (the session then becomes read-only until you clear it).',
+    help: 'Link a localhost tab to a DSH coding session so it sees console errors and failed requests.',
+    more: 'Link a localhost tab to a DSH coding session. After each turn in which that session edits files, it receives this tab\'s new console errors, failed requests and page changes as read-only context. It can never be prompted from here.',
+    caution: 'If your local app renders untrusted data, that text can reach the coding session.',
+    cautionMore: 'User content and scraped or proxied pages count as untrusted data. Set devLoop.trustLoopback: false in the bridge config to treat such injections as untrusted web content (the session then becomes read-only until you clear it).',
     openLocalhost: 'Open the localhost page (localhost, 127.0.0.1 or [::1]) in this window first.',
     unlink: 'Unlink',
+    noLinks: 'No tab is linked.',
     linkTab: 'Link this tab to a coding session…',
     noSessions: 'No DSH coding session found. Start one in DSH (Desktop or CLI) first.',
     sessionLabel: 'Coding session',
@@ -964,19 +1037,26 @@ const EN: PanelCopy = {
     importDrivers: 'Import…',
     imported: (count) => `Imported ${String(count)} driver(s).`,
     settingsTitle: 'Learning (experimental)',
-    settingsHelp: 'All off by default. These features record what happens in the browser so it can be repeated; every replayed action still goes through site rules, the pause and kill switches, and approval cards. They apply immediately, without Save.',
+    settingsHelp: 'Off by default. Records what happens in the browser so it can be repeated.',
+    settingsMore: 'Every replayed action still goes through site rules, the pause and kill switches, and approval cards.',
     workflowsTitle: 'Record runs for "Save as workflow"',
-    workflowsHelp: 'Keeps the agent\'s successful steps in memory with how to find each element again (role, name, text, CSS). Values typed into password or other sensitive fields are never recorded. Saved workflows are JSON files in the session workspace and become skills; they can be replayed or scheduled.',
-    watchMeTitle: 'Watch me (experimental)',
-    watchMeHelp: 'Shows a "Watch me" button. While it is on, your own clicks and typing on the current tab are recorded (passwords never; sensitive fields masked) to offer "Do the remaining N like this" after you repeat something twice.',
-    driversTitle: 'Site drivers (experimental)',
+    workflowsHelp: 'Keeps the agent\'s successful steps so a run can be saved as a workflow.',
+    workflowsMore: 'Keeps the agent\'s successful steps in memory with how to find each element again (role, name, text, CSS). Values typed into password or other sensitive fields are never recorded. Saved workflows are JSON files in the session workspace and become skills; they can be replayed or scheduled.',
+    watchMeTitle: 'Watch me',
+    watchMeHelp: 'Adds a "Watch me" button that records your own clicks and typing so the agent can repeat them.',
+    watchMeMore: 'Shows a "Watch me" button. While it is on, your own clicks and typing on the current tab are recorded (passwords never; sensitive fields masked) to offer "Do the remaining N like this" after you repeat something twice.',
+    driversTitle: 'Site drivers',
+    driversHelp: 'Learns the request behind an agent action on sites you list and proposes a reusable tool.',
     driversUnavailable: 'Unavailable in this browser: site drivers need the Chrome debugger.',
-    driversHelp: 'For the sites listed below, learns the same-origin request behind an agent action (needs developer tools allowed, so network capture runs) and proposes a reusable tool. Nothing is saved until you approve it; secrets and cookies are never stored. Every use shows the exact request on an approval card.',
+    driversMore: 'For the sites listed below, learns the same-origin request behind an agent action (needs developer tools allowed, so network capture runs) and proposes a reusable tool. Nothing is saved until you approve it; secrets and cookies are never stored. Every use shows the exact request on an approval card.',
     driverSiteLabel: 'Site for drivers',
+    invalidDriverSite: 'Enter a site address such as https://shop.example.com.',
     add: 'Add',
     remove: 'Remove',
+    removeItem: (item) => `Remove ${item}`,
     fixturesTitle: 'Save failures as test fixtures',
-    fixturesHelp: 'When a step fails (element not found, page guard, failed after a retry, other errors), saves the page and the intended action under browser-fixtures/ in the session workspace. Denied, timed-out and cancelled steps and blocked sites are never captured. Sensitive field values are masked; a full MHTML copy is used only for pages without sensitive fields and if you grant the page-capture permission.',
+    fixturesHelp: 'When a step fails, saves the page and the intended action in the session workspace.',
+    fixturesMore: 'When a step fails (element not found, page guard, failed after a retry, other errors), saves the page and the intended action under browser-fixtures/ in the session workspace. Denied, timed-out and cancelled steps and blocked sites are never captured. Sensitive field values are masked; a full MHTML copy is used only for pages without sensitive fields and if you grant the page-capture permission.',
     requestFailed: 'The request failed.',
     disconnected: 'Lost the connection to the extension. Try again.',
   },
@@ -1242,22 +1322,40 @@ const ZH: PanelCopy = {
     back: '返回对话',
     eyebrow: '浏览器助手',
     title: '设置',
+    token: '令牌 Token',
+    pageSnapshots: '页面快照',
+    textSizeHelp: '缩放侧栏中的所有文字。',
+    reconnect: '重新连接',
+    discard: '放弃更改',
+    unsavedChanges: '有未保存的更改',
+    appliesImmediately: '立即生效',
+    learnMore: '了解详情',
+    groups: { access: '访问', debugger: '调试器' },
+    sections: {
+      connection: { title: '连接', help: '侧栏如何连接本机的 dsh。' },
+      appearance: { title: '外观', help: '语言、配色和字号。更改立即生效。' },
+      permissions: { title: '权限与安全', help: '助手可以读取和操作什么，以及在哪些站点上。' },
+      behaviour: { title: '行为', help: '审批、会话以及页面上的显示。' },
+      automation: { title: '自动化', help: '页面监视、开发闭环和实验性的学习功能。' },
+      models: { title: '模型与中转服务', help: '把你自己的 API 中转站用作模型提供方。' },
+      about: { title: '关于', help: '更新、审计日志和卸载。' },
+    },
     language: '界面语言',
-    languageHelp: '助手侧栏与通知所用语言，切换后立即生效。',
+    languageHelp: '助手侧栏与通知所用的语言。',
     languageAuto: '自动（跟随 Chrome）',
     languageEnglish: 'English',
     languageChinese: '中文',
     theme: '外观主题',
-    themeHelp: '助手侧栏的配色。“自动”会跟随浏览器或系统设置。',
+    themeHelp: '“自动”会跟随浏览器或系统设置。',
     themeAuto: '自动（跟随系统）',
     themeLight: '浅色',
     themeDark: '深色',
     bridgeAddress: '桥地址',
-    bridgeHelp: '留空时自动检测本机服务',
-    bridgePlaceholder: '自动检测（含桌面版信标 43189–43198）',
+    bridgeHelp: '留空则自动查找本机的 dsh。',
+    bridgePlaceholder: '自动检测',
     detect: '自动检测',
     detectCancel: '取消',
-    detectHelp: '探测一次本机，并列出所有本地 dsh 实例。',
+    detectHelp: '列出本机所有 dsh 实例，包括桌面版信标端口 43189–43198。',
     detectProgress: (done, total) => `正在探测 ${done} / ${total} 个端口…`,
     detectEmpty: '未找到服务。',
     detectPick: '点击实例即可填入它的地址。',
@@ -1269,37 +1367,44 @@ const ZH: PanelCopy = {
       ...mcp ? ['MCP 客户端'] : [],
     ].join('、')}`,
     detectSource: { fixed: '固定端口', beacon: '信标' },
-    tokenHelp: '配对后自动填写。仅远程部署或无法配对时才需手动粘贴',
-    tokenPlaceholder: '由配对填写，远程部署时可粘贴',
+    tokenHelp: '仅 Firefox 和远程部署需要填写。',
+    tokenPlaceholder: '粘贴桥令牌',
     pageSharing: '页面内容共享',
-    pageSharingHelp: '控制助手何时可以读取页面文字',
+    pageSharingHelp: '助手何时可以读取页面文字。',
     sharingAuto: '自动共享（默认）',
     sharingAsk: '每次询问',
     sharingOff: '关闭',
     unrestrictedBrowserAccess: '允许模型完全控制浏览器',
-    unrestrictedBrowserAccessHelp: '信任除站点策略限制之外的所有站点：模型无需确认即可读取页面、查看已打开标签页的标题和链接，并执行包括跟随、关闭标签页在内的操作。被禁止、只读和每次询问的站点（包括内置保护）、不受信任内容防护以及管理员策略仍然生效。浏览器受保护页面的内容仍不可访问。',
+    unrestrictedBrowserAccessHelp: '无需确认即可读取并操作所有站点，站点规则限制的站点除外。',
+    unrestrictedBrowserAccessMore: '信任除站点策略限制之外的所有站点：模型无需确认即可读取页面、查看已打开标签页的标题和链接，并执行包括跟随、关闭标签页在内的操作。被禁止、只读和每次询问的站点（包括内置保护）、不受信任内容防护以及管理员策略仍然生效。浏览器受保护页面的内容仍不可访问。',
     allowDevTools: '允许开发者工具',
-    allowDevToolsHelp: '高权限功能：允许模型查看并修改页面元素与 CSS、在页面中执行 JavaScript、读取已捕获的网络请求。默认关闭，关闭时每次调用都会弹出审批。开启后对所有站点生效，8 小时后自动关闭。执行 JavaScript 仍会每次确认，除非您在审批卡上勾选“本对话中信任在该站点上执行 JavaScript”（有效 30 分钟）；读取不脱敏的请求头或正文始终需要确认。附加调试器期间，Chrome 无法在同一标签页打开自带的开发者工具。',
+    allowDevToolsHelp: '高权限：查看并修改页面、执行 JavaScript、读取网络请求。8 小时后自动关闭。',
+    allowDevToolsMore: '高权限功能：允许模型查看并修改页面元素与 CSS、在页面中执行 JavaScript、读取已捕获的网络请求。默认关闭，关闭时每次调用都会弹出审批。开启后对所有站点生效，8 小时后自动关闭。执行 JavaScript 仍会每次确认，除非您在审批卡上勾选“本对话中信任在该站点上执行 JavaScript”（有效 30 分钟）；读取不脱敏的请求头或正文始终需要确认。附加调试器期间，Chrome 无法在同一标签页打开自带的开发者工具。',
     devToolsUnsupported: '不可用 —— 当前浏览器未提供调试器 API。',
     devToolsOff: '已关闭 —— 每次调用都会请求审批。',
     devToolsIdle: '已开启 —— 首次调用时附加调试器；执行 JavaScript 仍需逐次确认。',
     devToolsAttached: '调试器已附加',
     devToolsError: '最近一次错误：',
     devToolsDetach: '立即断开',
-    catchPageDialogs: '捕获页面对话框——会显示 Chrome 调试提示栏',
-    catchPageDialogsHelp: '在点击、按键和导航前连接调试器，以便报告 alert/confirm/prompt/离开页面对话框并由代理回应。连接期间 Chrome 会显示“正在调试”提示栏，可能使页面位移。',
+    catchPageDialogs: '捕获页面对话框',
+    catchPageDialogsHelp: '让代理看到并回应 alert、confirm 等对话框。会显示 Chrome 调试提示栏。',
+    catchPageDialogsMore: '在点击、按键和导航前连接调试器，以便报告 alert/confirm/prompt/离开页面对话框并由代理回应。连接期间 Chrome 会显示“正在调试”提示栏，可能使页面位移。',
     approvalNotifications: '浏览器审批通知',
-    approvalNotificationsHelp: '侧栏关闭时收到审批请求，通过系统通知提醒你。简单操作可在通知中直接允许；代码、输入和上传会打开完整审批卡片。',
-    approvalTimeout: '侧栏关闭时的审批等待（分钟）',
-    approvalTimeoutHelp: '侧栏关闭时，审批请求（通知、dsh 网页端或命令行均可回答）等待多久后自动拒绝。范围 1–14 分钟。',
+    approvalNotificationsHelp: '侧栏关闭时收到审批请求，通过系统通知提醒你。',
+    approvalNotificationsMore: '简单操作可在通知中直接允许；代码、输入和上传会打开完整审批卡片。',
+    approvalTimeout: '侧栏关闭时的审批等待',
+    approvalTimeoutHelp: '审批请求无人回答时，等待多少分钟后自动拒绝（1–14）。',
+    approvalTimeoutMore: '侧栏关闭时，审批请求（通知、dsh 网页端或命令行均可回答）等待多久后自动拒绝。范围 1–14 分钟。',
     autoResumeSession: '续接当前页面会话',
-    autoResumeSessionHelp: '重新打开当前标签页此页面的会话；其他页面会新建会话',
+    autoResumeSessionHelp: '重新打开此标签页当前页面的会话；其他页面会新建会话。',
     showAgentOverlay: '在页面上显示助手操作',
-    showAgentOverlayHelp: '助手操作前用光标和高亮框标出目标，受控标签页显示彩色边框和停止按钮',
+    showAgentOverlayHelp: '助手操作前标出目标；受控标签页显示彩色边框和停止按钮。',
     allowPageWatchers: '允许助手监视页面',
-    allowPageWatchersHelp: '助手可以请求持续监视页面，并在页面变化时自行唤醒。每个监视都需要您批准；关闭此项会取消全部监视',
+    allowPageWatchersHelp: '助手可以请求持续监视页面。每个监视都需要您批准。',
+    allowPageWatchersMore: '页面变化时，监视会唤醒助手。关闭此项会取消全部监视。',
     trustedOrigins: '永久免确认域名',
-    trustedOriginsHelp: '审批框可只信任本次侧栏会话。这里添加的域名仅在所有已知来源均受信任时免除操作确认。通配符包含主域及其子域，并严格区分协议和端口；`*.example.com` 默认使用 HTTPS。',
+    trustedOriginsHelp: '这些域名上的操作不再请求确认。',
+    trustedOriginsMore: '审批框可只信任本次侧栏会话。这里添加的域名仅在所有已知来源均受信任时免除操作确认。通配符包含主域及其子域，并严格区分协议和端口；`*.example.com` 默认使用 HTTPS。',
     trustedOriginInput: '要永久信任的域名（如 https://example.com 或 https://*.example.com）',
     add: '添加',
     invalidOrigin: '请输入 http://、https:// 来源或 https://*.example.com 形式的通配符。',
@@ -1310,7 +1415,7 @@ const ZH: PanelCopy = {
     cancel: '取消',
     snapshotHint: (maxChars) => `页面快照上限为 ${maxChars} 字符，超出内容会被截断。可在 dsh 插件中调整 snapshotMaxChars。`,
     relaySection: '模型与中转服务',
-    relayHelp: '把助手接到你自己的 API 中转站。每个档案对应一条提供方路由，保存后下一条消息即生效，无需重启。',
+    relayHelp: '每个档案对应一条提供方路由。保存后下一条消息即生效，无需重启。删除已保存的档案会立即生效。',
     relayName: '档案名称',
     relayNamePlaceholder: '例如 my-relay',
     relayProtocol: '接口格式',
@@ -1421,7 +1526,8 @@ const ZH: PanelCopy = {
   },
   audit: {
     section: '审计日志',
-    help: '每次浏览器操作、审批、跳转和结果都会写入本机上防篡改（哈希链）的日志。输入的文字和密钥不会被记录。',
+    help: '浏览器操作和审批会写入本机上防篡改的日志。',
+    more: '每次浏览器操作、审批、跳转和结果都会写入本机上防篡改（哈希链）的日志。输入的文字和密钥不会被记录。',
     exportButton: '导出审计日志',
     exporting: '正在导出…',
     exported: (count, verified) => `已导出 ${count} 条记录${verified ? '，哈希链校验通过' : '，哈希链校验失败'}`,
@@ -1444,18 +1550,26 @@ const ZH: PanelCopy = {
   },
   sitePolicy: {
     title: '站点策略',
-    help: '站点规则优先于其他所有设置。「完全访问」信任除这些站点外的所有站点。格式：example.com（含子域名）、*bank*、github.com/settings。',
+    rulesTitle: '站点规则',
+    help: '针对特定站点的规则，优先于其他所有设置。',
+    more: '「完全访问」信任除这些站点外的所有站点。格式：example.com（含子域名）、*bank*、github.com/settings。',
     builtIn: '内置保护',
     builtInHelp: (patterns) => `银行与支付、密码库、账户页面和云控制台默认只读（${String(patterns)} 条规则）。`,
     patternLabel: '站点规则',
+    noRules: '还没有站点规则。',
+    invalidPattern: '请输入站点，例如 example.com、*bank* 或 github.com/settings。',
+    patternPlaceholder: 'example.com 或 *.bank.com',
     ruleLabel: '规则',
     rules: { blocked: '禁止（不可读取）', 'read-only': '只读', ask: '每次询问', trusted: '信任' },
     add: '添加',
     remove: '移除',
+    removeItem: (item) => `移除 ${item}`,
     strictTitle: '严格模式（提交闸门）',
-    strictHelp: '在这些站点上，代理操作期间页面发出的每个 POST/PUT/PATCH/DELETE 或表单提交都需要您批准，并显示字段（敏感字段已遮盖）。它会附加调试器，Chrome 会显示调试提示条。WebSocket 消息和 sendBeacon 无法拦截。',
+    strictHelp: '在这些站点上，代理操作期间的表单提交和写入请求需要您批准。',
+    strictMore: '在这些站点上，代理操作期间页面发出的每个 POST/PUT/PATCH/DELETE 或表单提交都需要您批准，并显示字段（敏感字段已遮盖）。它会附加调试器，Chrome 会显示调试提示条。WebSocket 消息和 sendBeacon 无法拦截。',
     strictUnavailable: '此浏览器不可用：严格模式需要 Chrome 调试器。',
     strictSiteLabel: '严格模式站点',
+    noStrictSites: '还没有严格模式站点。',
     managedIntro: '由管理员管理（优先于上方设置）：',
     managedNoUnrestricted: '已禁用完全访问。',
     managedNoDevTools: '已禁用开发者工具。',
@@ -1478,10 +1592,13 @@ const ZH: PanelCopy = {
   },
   devLoop: {
     title: '开发闭环',
-    help: '将本地页面标签关联到 DSH 编码会话。该会话每次编辑文件后，会以只读上下文收到此标签新的控制台错误、失败请求和页面变化；此处永远不会向它发送提示。',
-    caution: '注意：如果本地应用会渲染不可信数据（用户内容、抓取或代理的页面），这些文本可能借此进入编码会话。可在桥接配置中设置 devLoop.trustLoopback: false，将此类注入视为不可信网页内容（会话随后变为只读，直到你清除）。',
+    help: '将本地页面标签关联到 DSH 编码会话，让它看到控制台错误和失败请求。',
+    more: '将本地页面标签关联到 DSH 编码会话。该会话每次编辑文件后，会以只读上下文收到此标签新的控制台错误、失败请求和页面变化；此处永远不会向它发送提示。',
+    caution: '如果本地应用会渲染不可信数据，这些文本可能借此进入编码会话。',
+    cautionMore: '用户内容、抓取或代理的页面都属于不可信数据。可在桥接配置中设置 devLoop.trustLoopback: false，将此类注入视为不可信网页内容（会话随后变为只读，直到你清除）。',
     openLocalhost: '请先在此窗口打开本地页面（localhost、127.0.0.1 或 [::1]）。',
     unlink: '取消关联',
+    noLinks: '尚未关联任何标签。',
     linkTab: '将此标签关联到编码会话…',
     noSessions: '未找到 DSH 编码会话。请先在 DSH（桌面版或 CLI）中开始一个会话。',
     sessionLabel: '编码会话',
@@ -1532,19 +1649,26 @@ const ZH: PanelCopy = {
     importDrivers: '导入…',
     imported: (count) => `已导入 ${String(count)} 个驱动。`,
     settingsTitle: '学习功能（实验性）',
-    settingsHelp: '默认全部关闭。这些功能会记录浏览器中的操作以便重复执行；每个重放的操作仍然经过站点规则、暂停与紧急停止以及批准卡片。这些开关立即生效，无需保存。',
+    settingsHelp: '默认全部关闭。记录浏览器中的操作以便重复执行。',
+    settingsMore: '每个重放的操作仍然经过站点规则、暂停与紧急停止以及批准卡片。',
     workflowsTitle: '记录运行以便「保存为工作流」',
-    workflowsHelp: '在内存中保存代理成功执行的步骤以及重新定位每个元素的方式（角色、名称、文本、CSS）。输入到密码等敏感字段的值从不记录。保存的工作流是会话工作区中的 JSON 文件并注册为技能，可重放或定时运行。',
-    watchMeTitle: '观察我（实验性）',
-    watchMeHelp: '显示「观察我」按钮。开启观察时，会记录您在当前标签页上的点击和输入（从不记录密码，敏感字段被遮盖），在您重复两次后提供「按同样方式完成剩余 N 项」。',
-    driversTitle: '站点驱动（实验性）',
+    workflowsHelp: '保留代理成功执行的步骤，以便将运行保存为工作流。',
+    workflowsMore: '在内存中保存代理成功执行的步骤以及重新定位每个元素的方式（角色、名称、文本、CSS）。输入到密码等敏感字段的值从不记录。保存的工作流是会话工作区中的 JSON 文件并注册为技能，可重放或定时运行。',
+    watchMeTitle: '观察我',
+    watchMeHelp: '显示「观察我」按钮，记录您自己的点击和输入，让代理照着重复。',
+    watchMeMore: '显示「观察我」按钮。开启观察时，会记录您在当前标签页上的点击和输入（从不记录密码，敏感字段被遮盖），在您重复两次后提供「按同样方式完成剩余 N 项」。',
+    driversTitle: '站点驱动',
+    driversHelp: '在您列出的站点上学习代理操作背后的请求，并建议可复用的工具。',
     driversUnavailable: '此浏览器不可用：站点驱动需要 Chrome 调试器。',
-    driversHelp: '对下方列出的站点，学习代理操作背后的同源请求（需允许开发者工具以进行网络捕获）并建议一个可复用的工具。经您批准才会保存；从不存储密钥和 Cookie。每次使用都会在批准卡片上显示确切请求。',
+    driversMore: '对下方列出的站点，学习代理操作背后的同源请求（需允许开发者工具以进行网络捕获）并建议一个可复用的工具。经您批准才会保存；从不存储密钥和 Cookie。每次使用都会在批准卡片上显示确切请求。',
     driverSiteLabel: '站点驱动的站点',
+    invalidDriverSite: '请输入站点地址，例如 https://shop.example.com。',
     add: '添加',
     remove: '移除',
+    removeItem: (item) => `移除 ${item}`,
     fixturesTitle: '将失败保存为测试样例',
-    fixturesHelp: '步骤失败（找不到元素、页面防护拦截、重试后仍失败、其他错误）时，将页面和预期操作保存到会话工作区的 browser-fixtures/ 下。被拒绝、超时和取消的步骤以及被禁止的站点从不保存。敏感字段值会被遮盖；仅当页面没有敏感字段且您授予页面捕获权限时才保存完整 MHTML。',
+    fixturesHelp: '步骤失败时，将页面和预期操作保存到会话工作区。',
+    fixturesMore: '步骤失败（找不到元素、页面防护拦截、重试后仍失败、其他错误）时，将页面和预期操作保存到会话工作区的 browser-fixtures/ 下。被拒绝、超时和取消的步骤以及被禁止的站点从不保存。敏感字段值会被遮盖；仅当页面没有敏感字段且您授予页面捕获权限时才保存完整 MHTML。',
     requestFailed: '请求失败。',
     disconnected: '与扩展的连接已断开，请重试。',
   },
