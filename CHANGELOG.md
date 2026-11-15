@@ -31,6 +31,12 @@ handshake changed and an older extension or plugin is refused.
   keeps the audit log and session workspaces.
 - The installer provisions the bridge token into the installed extension, so no address or
   token has to be entered, and keeps it across updates.
+- `install.sh` also registers the bridge with the DeepSeek Harness desktop app, through the
+  CLI bundled in the app, and the uninstaller removes it there. An app whose DSH version
+  the plugin does not support is reported and skipped; the version check is never overridden.
+- `install.sh` uses an already installed Node.js or pnpm when the one on PATH is missing or
+  unusable (the app's, then asdf, nvm, fnm, volta or mise), and opens the Chromium browser
+  that is installed (Chrome, Chromium, Brave, Edge, Vivaldi or Arc) instead of assuming Chrome.
 - The Windows release path (`install.ps1`, `uninstall.ps1`) has not been run on Windows yet.
 
 ### Bridge

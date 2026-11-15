@@ -135,7 +135,13 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 
 ### 安装或更新
 
-运行[快速安装命令](#快速安装)即可安装。安装器打开 `chrome://extensions` 后，首次安装时加载 `~/.dsh/browser-extension` 目录；更新后点击**重新加载**。如果 dsh 已在运行，请重启。
+运行[快速安装命令](#快速安装)即可安装。在 macOS 和 Linux 上只需一条命令，其余由安装器完成：
+
+- **DeepSeek Harness 桌面应用。** 检测到应用时（macOS 的 `/Applications` 或 `~/Applications`；其他位置用 `DSH_DESKTOP_APP=<路径>` 指定，`DSH_DESKTOP_APP=none` 则跳过），除了 `web` profile，还会通过应用自带的 CLI 把桥插件注册到应用专用的 `desktop` profile。安装后请退出并重新打开应用。如果应用的 DSH 版本不在插件支持的范围内，安装器会明确说明，只注册 `web` profile，并提示先更新应用再重新运行；它不会绕过版本检查。
+- **Node.js 与 pnpm。** PATH 上的 `node` 不存在或低于 24.9.0 时，安装器使用本机已经安装的版本：先是应用自带的 Node，然后是 asdf、nvm、fnm、volta 或 mise 中已有的合适版本。PATH 上的 `pnpm` 无法运行时，依次使用应用自带的 pnpm、Corepack、`npx`。安装器不会替你安装任何东西；找不到合适的 Node 时，它会给出本机已有工具对应的安装命令。
+- **浏览器。** 安装器会打开你已安装的 Chromium 浏览器（Chrome、Chromium、Brave、Edge、Vivaldi 或 Arc；默认浏览器在其中时优先使用）的扩展管理页，提示文字也使用该浏览器的名称。首次安装时加载 `~/.dsh/browser-extension` 目录；更新后点击**重新加载**。
+
+安装结束时的摘要会列出桥插件注册到了哪里、跳过了什么。Windows 的 `install.ps1` 只注册 `web` profile，也只检测 Chrome 或 Chromium。如果 dsh 已在运行，请重启。
 
 更新时，在侧栏打开**设置 → 软件更新**。检查会把当前版本与 GitHub 上的最新发布版本比较，并给出一条用本机已有的安装器安装该版本的命令，例如：
 
@@ -150,7 +156,8 @@ DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release
 | `--release latest` 或 `--release vX.Y.Z` | `DSH_BROWSER_VERSION` | 下载该发布版本并用它的 `SHA256SUMS` 校验。不在 checkout 中运行时，这是默认行为。 |
 | `--unverified-branch <name>` | `DSH_BROWSER_UNVERIFIED_BRANCH` | 仅用于开发：安装分支归档。分支没有校验值，内容不会被校验。 |
 | | `DSH_BROWSER_GITHUB_TOKEN` | 私有仓库使用的 token。只会发送到 `api.github.com`，不会被打印。未设置时安装器会改用已登录的 `gh`。 |
-| | `DSH_BROWSER_NO_LAUNCH=1` | 不打开 Chrome，也不改动剪贴板。 |
+| | `DSH_BROWSER_NO_LAUNCH=1` | 不打开浏览器，也不改动剪贴板。 |
+| | `DSH_DESKTOP_APP=<路径>` 或 `none` | DeepSeek Harness 桌面应用的位置；`none` 表示不处理桌面应用（适用于 `install.sh` 和卸载器）。 |
 
 如需从源码 checkout 安装（不下载任何文件；仓库私有期间也用这种方式安装）：
 
@@ -180,6 +187,8 @@ Windows 请运行：
 
 在源码目录中运行 `bash scripts/uninstall.sh` 或 `.\scripts\uninstall.ps1`。
 
+卸载器也会通过应用自带的 CLI 从桌面应用的 `desktop` profile 中移除桥插件（应用不在 `/Applications` 或 `~/Applications` 时，用 `--desktop-app <路径>` 或 `DSH_DESKTOP_APP` 指定）。找不到应用时，该注册及其共用的文件会保留，卸载器会给出说明。
+
 ### Firefox 源码构建
 
 Firefox 使用独立的 MV3 manifest、事件页后台和 Sidebar。在 checkout 中构建后，打开 `about:debugging#/runtime/this-firefox`，选择「临时载入附加组件」，再选取 `extensions/dsh-browser/dist-firefox/manifest.json`：
@@ -192,6 +201,8 @@ pnpm --filter dsh-browser-extension run build:firefox
 桥地址仍会自动探测。Firefox 附加组件不由安装器安装，因此需要把 `~/.dsh/ext-bridge-token` 中的桥接 token 复制到扩展设置中（dsh 启动日志会报告该文件路径）。签名发布时可直接使用同一份 `dist-firefox/` 产物。
 
 ### 启动与使用
+
+使用 DeepSeek Harness 桌面应用时，直接打开应用即可（安装后请重启应用）。下面的 `pnpm start` 和 `dsh web` 启动的是独立的 `web` profile，不包含桌面应用里配置的模型。
 
 启动托管安装：
 

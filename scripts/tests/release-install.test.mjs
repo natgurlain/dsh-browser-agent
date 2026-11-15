@@ -7,9 +7,11 @@
 // build-and-register dry run is the last test and runs only with DSH_RELEASE_E2E=1
 // (see RELEASING.md).
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
-  appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
+  appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync,
+  symlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
@@ -34,9 +36,12 @@ function sandbox(t) {
   const ghConfig = join(base, 'gh-config')
   for (const dir of [home, temporary, ghConfig]) mkdirSync(dir, { recursive: true })
   const env = { ...process.env, HOME: home, DSH_HOME: dshHome, TMPDIR: temporary, GH_CONFIG_DIR: ghConfig,
-    NO_PROXY: '127.0.0.1,localhost', no_proxy: '127.0.0.1,localhost', DSH_BROWSER_NO_LAUNCH: '1' }
+    NO_PROXY: '127.0.0.1,localhost', no_proxy: '127.0.0.1,localhost', DSH_BROWSER_NO_LAUNCH: '1',
+    // No desktop app unless a test builds one; a real one on this machine is never touched.
+    DSH_DESKTOP_APP: 'none' }
   for (const name of Object.keys(env)) {
-    if (/^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|DSH_BROWSER_(?!NO_LAUNCH).*)$/.test(name)) delete env[name]
+    // The version-manager variables would let the installer find this machine's own Node installs.
+    if (/^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|DSH_BROWSER_(?!NO_LAUNCH).*|DSH_INSTALL_BROWSER|ASDF_DATA_DIR|NVM_DIR|FNM_DIR|VOLTA_HOME|MISE_DATA_DIR|XDG_DATA_HOME)$/.test(name)) delete env[name]
   }
   return { base, home, dshHome, temporary, env, managed: join(dshHome, 'dsh-browser'), ran: join(base, 'payload-ran') }
 }
@@ -249,8 +254,12 @@ test('local checkout: no option means no download at all', { skip }, async (t) =
   assert.equal(existsSync(box.managed), false)
 })
 
-/** A minimal checkout holding the real install.sh, plus a bin directory of stub commands. */
-function stubCheckout(box, stubs) {
+/**
+ * A minimal checkout holding the real install.sh, plus a bin directory of stub commands.
+ * `complete` adds what the steps after the build read, so the installer can run to its end;
+ * `path` replaces the inherited PATH behind the stubs.
+ */
+function stubCheckout(box, stubs, { complete = false, env = {}, path = process.env.PATH } = {}) {
   const checkout = join(box.base, 'checkout')
   for (const dir of ['scripts', 'extensions/dsh-browser', 'packages/browser/bridge-browser']) {
     mkdirSync(join(checkout, dir), { recursive: true })
@@ -261,6 +270,15 @@ function stubCheckout(box, stubs) {
   }
   writeFileSync(join(checkout, 'package.json'), JSON.stringify({ packageManager: 'pnpm@11.7.0+sha512.abc' }))
   writeFileSync(join(checkout, 'scripts', 'install.sh'), readFileSync(installer))
+  if (complete) {
+    writeFileSync(join(checkout, 'packages/browser/bridge-browser/package.json'),
+      JSON.stringify({ name: '@natgurlain/dsh-bridge-browser', engines: { dsh: '^0.2.2-rc.2' } }))
+    mkdirSync(join(checkout, 'extensions/dsh-browser/dist'))
+    writeFileSync(join(checkout, 'extensions/dsh-browser/dist/manifest.json'), '{}')
+    for (const name of ['write-install-info.mjs', 'provision-bridge-token.mjs']) {
+      copyFileSync(join(root, 'scripts', name), join(checkout, 'scripts', name))
+    }
+  }
   const bin = join(box.base, 'bin')
   mkdirSync(bin)
   for (const [name, body] of Object.entries(stubs)) {
@@ -268,7 +286,7 @@ function stubCheckout(box, stubs) {
     chmodSync(join(bin, name), 0o755)
   }
   return run('bash', [join(checkout, 'scripts', 'install.sh')], {
-    env: { ...box.env, PATH: `${bin}${delimiter}${process.env.PATH}`, STUB_RAN: box.ran },
+    env: { ...box.env, PATH: `${bin}${delimiter}${path}`, STUB_RAN: box.ran, ...env },
     cwd: box.base,
   })
 }
@@ -309,6 +327,234 @@ test('working pnpm on PATH is used as is, with no fallback notice', { skip }, as
   assert.equal(result.status, 7, result.stdout + result.stderr)
   assert.doesNotMatch(result.stdout, /instead/)
   assert.deepEqual(ranLines(box), ['pnpm install --frozen-lockfile'])
+})
+
+// Succeeds at everything and records each call with the node it would run on.
+const WORKING_PNPM = '[ "$1" = --version ] && exit 0\nprintf \'pnpm[%s] %s\\n\' "$(command -v node)" "$*" >>"$STUB_RAN"'
+// A node older than the 24.9.0 the build needs.
+const OLD_NODE = 'printf 18.19.0'
+const BRIDGE_LINK = box => `@natgurlain/dsh-bridge-browser@link:${join(box.base, 'checkout', 'packages/browser/bridge-browser')}`
+
+function executable(path, text) {
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, text)
+  chmodSync(path, 0o755)
+  return path
+}
+
+/**
+ * A stand-in for "DeepSeek Harness.app" with the layout the installer was written against,
+ * plus the desktop profile the app creates on first start. The bundled CLI records its
+ * arguments; `cli` selects what `plugin --profile desktop add` then does.
+ */
+function desktopApp(box, { cli = 'ok', node = false, pnpm = false, profile = true } = {}) {
+  const app = join(box.base, 'Applications', 'DeepSeek Harness.app')
+  const runtime = join(app, 'Contents', 'Resources', 'runtime')
+  mkdirSync(runtime, { recursive: true })
+  writeFileSync(join(runtime, 'versions.json'), JSON.stringify({ schemaVersion: 1, node: '24.21.0', pnpm: '11.28.5' }))
+  const outcome = {
+    ok: 'exit 0',
+    reject: 'echo \'dsh: installation rejected: Plugin @natgurlain/dsh-bridge-browser@0.0.7 is incompatible with dsh 0.2.2-rc.1: requirements {"engines.dsh":"^0.2.2-rc.2"}; to override run: dsh plugin allow-version @natgurlain/dsh-bridge-browser --accept-risk\' >&2\nexit 1',
+    fail: 'echo "dsh: profile lock is held" >&2\nexit 5',
+  }[cli]
+  executable(join(runtime, 'cli', 'bin', 'dsh'),
+    `#!/bin/sh\nprintf 'desktop-cli %s\\n' "$*" >>"$STUB_RAN"\n${outcome}\n`)
+  const bundledNode = join(runtime, 'bin', 'node')
+  if (node) executable(bundledNode, `#!/bin/sh\nexec "${process.execPath}" "$@"\n`)
+  const bundledPnpm = join(runtime, 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
+  if (pnpm) {
+    executable(bundledPnpm, `import { appendFileSync } from 'node:fs'
+const args = process.argv.slice(2)
+if (args[0] !== '--version') appendFileSync(process.env.STUB_RAN, 'bundled-pnpm ' + args.join(' ') + '\\n')
+`)
+  }
+  if (profile) {
+    mkdirSync(join(box.dshHome, 'profiles', 'desktop'), { recursive: true })
+    writeFileSync(join(box.dshHome, 'profiles', 'desktop', 'package.json'), '{}')
+  }
+  return { app, bundledNode, bundledPnpm, env: { DSH_DESKTOP_APP: app } }
+}
+
+const cliCalls = box => ranLines(box).filter(line => line.startsWith('desktop-cli '))
+const webRegistered = box => ranLines(box).some(line => line.endsWith(`exec dsh plugin --profile web add -w ${BRIDGE_LINK(box)}`))
+
+test('desktop app present and compatible: registered in both profiles, the summary leads with the app', { skip }, async (t) => {
+  const box = sandbox(t)
+  const desktop = desktopApp(box)
+  const result = await stubCheckout(box, { pnpm: WORKING_PNPM }, { complete: true, env: desktop.env })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.equal(webRegistered(box), true, ranLines(box).join('\n'))
+  assert.deepEqual(cliCalls(box), [`desktop-cli plugin --profile desktop add -w ${BRIDGE_LINK(box)}`])
+  assert.match(result.stdout, /• web profile: registered/)
+  assert.match(result.stdout, /• DeepSeek Harness desktop app: registered \(.*DeepSeek Harness\.app\)/)
+  const lead = result.stdout.indexOf('• Open DeepSeek Harness (restart it if it was running)')
+  const alternative = result.stdout.indexOf('• Alternative without the desktop app (the separate web profile')
+  assert.ok(lead > 0 && alternative > lead, result.stdout)
+  assert.ok(result.stdout.indexOf('pnpm start') > alternative, 'pnpm start is only the alternative')
+  assert.match(result.stdout, /npx @deepseek-ai\/dsh@0\.2\.2-rc\.2 web/)
+  assert.doesNotMatch(result.stdout + result.stderr, /WARNING/)
+  assert.equal(existsSync(join(box.dshHome, 'browser-extension', 'install-info.json')), true)
+})
+
+test('desktop app running: the plugin is still added and the user is told to quit and reopen it', { skip }, async (t) => {
+  const box = sandbox(t)
+  const desktop = desktopApp(box)
+  const main = join(desktop.app, 'Contents', 'MacOS', 'DeepSeek Harness')
+  mkdirSync(dirname(main), { recursive: true })
+  symlinkSync(process.execPath, main)
+  const app = spawn(main, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' })
+  t.after(() => app.kill('SIGKILL'))
+  const result = await stubCheckout(box, { pnpm: WORKING_PNPM }, { complete: true, env: desktop.env })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.equal(cliCalls(box).length, 1)
+  assert.match(result.stdout, /DeepSeek Harness is running: the plugin was added, and it takes effect after you quit and reopen the app\./)
+  assert.match(result.stdout, /• Open DeepSeek Harness \(it is running now: quit it and open it again\)/)
+  assert.equal(app.exitCode, null, 'the installer does not stop the app')
+})
+
+test('desktop app that rejects the plugin version: web is registered, exit 0, a warning, never the override', { skip }, async (t) => {
+  const box = sandbox(t)
+  const desktop = desktopApp(box, { cli: 'reject' })
+  const result = await stubCheckout(box, { pnpm: WORKING_PNPM }, { complete: true, env: desktop.env })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.equal(webRegistered(box), true)
+  assert.deepEqual(cliCalls(box), [`desktop-cli plugin --profile desktop add -w ${BRIDGE_LINK(box)}`])
+  assert.equal(ranLines(box).some(line => /allow-version|accept-risk/.test(line)), false, 'the override is never invoked')
+  assert.match(result.stderr, /WARNING: the DeepSeek Harness app has DSH 0\.2\.2-rc\.1 and this plugin supports \^0\.2\.2-rc\.2, so the app rejected it\. Update the DeepSeek Harness app, then run this installer again\./)
+  assert.match(result.stderr, /exit code: 1/)
+  assert.match(result.stderr, /command: .*cli\/bin\/dsh plugin --profile desktop add -w /)
+  assert.match(result.stdout, /• web profile: registered/)
+  assert.match(result.stdout, /• DeepSeek Harness desktop app: NOT registered\. WARNING: the app has DSH 0\.2\.2-rc\.1 and this plugin supports \^0\.2\.2-rc\.2\. Update the DeepSeek Harness app, then run this installer again\./)
+  assert.doesNotMatch(result.stdout, /• Open DeepSeek Harness/)
+  assert.match(result.stdout, /• Start the pinned version: cd .* && pnpm start/)
+  assert.match(result.stdout, /Note: this starts the separate web profile/)
+})
+
+test('desktop app whose CLI fails for another reason: everything else is installed, then exit 1', { skip }, async (t) => {
+  const box = sandbox(t)
+  const desktop = desktopApp(box, { cli: 'fail' })
+  const result = await stubCheckout(box, { pnpm: WORKING_PNPM }, { complete: true, env: desktop.env })
+  assert.equal(result.status, 1, result.stdout + result.stderr)
+  assert.match(result.stderr, /WARNING: registering with the DeepSeek Harness desktop app failed/)
+  assert.match(result.stderr, /exit code: 5/)
+  assert.match(result.stderr, /dsh: profile lock is held/)
+  assert.match(result.stdout, /• DeepSeek Harness desktop app: NOT registered\. WARNING: its bundled CLI failed/)
+  assert.equal(existsSync(join(box.dshHome, 'browser-extension', 'manifest.json')), true)
+})
+
+test('desktop app absent, or never started: the web profile only, summary as before', { skip }, async (t) => {
+  const box = sandbox(t)
+  const result = await stubCheckout(box, { pnpm: WORKING_PNPM }, { complete: true })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.equal(webRegistered(box), true)
+  assert.deepEqual(cliCalls(box), [])
+  assert.match(result.stdout, /• web profile: registered/)
+  assert.match(result.stdout, /• DeepSeek Harness desktop app: skipped, /)
+  assert.match(result.stdout, /• Start the pinned version: cd .* && pnpm start/)
+  assert.match(result.stdout, /• Or start the pinned version directly: npx @deepseek-ai\/dsh@0\.2\.2-rc\.2 web/)
+  assert.doesNotMatch(result.stdout, /Open DeepSeek Harness/)
+
+  const unopened = sandbox(t)
+  const desktop = desktopApp(unopened, { profile: false })
+  const skipped = await stubCheckout(unopened, { pnpm: WORKING_PNPM }, { complete: true, env: desktop.env })
+  assert.equal(skipped.status, 0, skipped.stdout + skipped.stderr)
+  assert.deepEqual(cliCalls(unopened), [])
+  assert.match(skipped.stdout, /• DeepSeek Harness desktop app: skipped, .*profiles\/desktop does not exist\. Open the app once, then run this installer again\./)
+
+  const missing = sandbox(t)
+  const wrong = await stubCheckout(missing, { pnpm: WORKING_PNPM }, { complete: true, env: { DSH_DESKTOP_APP: join(missing.base, 'nowhere.app') } })
+  assert.equal(wrong.status, 0, wrong.stdout + wrong.stderr)
+  assert.match(wrong.stdout, /DSH_DESKTOP_APP names a directory that does not exist/)
+})
+
+test('node on PATH too old, the app bundles one: the build runs on the bundled Node', { skip }, async (t) => {
+  const box = sandbox(t)
+  const desktop = desktopApp(box, { node: true })
+  const result = await stubCheckout(box, { node: OLD_NODE, pnpm: WORKING_PNPM }, { complete: true, env: desktop.env })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.match(result.stdout, new RegExp(`No usable Node\\.js on PATH; using Node\\.js ${process.versions.node.replaceAll('.', '\\.')} from the DeepSeek Harness app \\(for this install only\\): .*runtime/bin/node`))
+  assert.equal(ranLines(box)[0], `pnpm[${desktop.bundledNode}] install --frozen-lockfile`)
+  assert.equal(JSON.parse(readFileSync(join(box.dshHome, 'browser-extension', 'install-info.json'), 'utf8')).mode, 'checkout')
+})
+
+test('a build that fails on the bundled Node is retried on the next installed Node', { skip }, async (t) => {
+  const box = sandbox(t)
+  const desktop = desktopApp(box, { node: true })
+  const managed = executable(join(box.home, '.asdf', 'installs', 'nodejs', '24.11.0', 'bin', 'node'), `#!/bin/sh\nexec "${process.execPath}" "$@"\n`)
+  // Fails whenever the node in use is the app's.
+  const pnpm = `${WORKING_PNPM}\ncase "$(command -v node)" in *"DeepSeek Harness.app"*) echo "electron cannot build this" >&2; exit 9 ;; esac`
+  const result = await stubCheckout(box, { node: OLD_NODE, pnpm }, { complete: true, env: desktop.env })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.match(result.stderr, /electron cannot build this/)
+  assert.match(result.stdout, /using Node\.js .* from asdf \(for this install only\): .*\.asdf\/installs\/nodejs\/24\.11\.0\/bin\/node/)
+  assert.match(result.stdout, /That step failed with the Node\.js bundled in the DeepSeek Harness app; retrying/)
+  assert.deepEqual(ranLines(box).slice(0, 2), [
+    `pnpm[${desktop.bundledNode}] install --frozen-lockfile`, `pnpm[${managed}] install --frozen-lockfile`,
+  ])
+})
+
+test('node on PATH too old, a version manager already has a suitable one: that one is used', { skip }, async (t) => {
+  const box = sandbox(t)
+  const managed = executable(join(box.home, '.nvm', 'versions', 'node', 'v24.12.0', 'bin', 'node'), `#!/bin/sh\nexec "${process.execPath}" "$@"\n`)
+  executable(join(box.home, '.nvm', 'versions', 'node', 'v18.19.0', 'bin', 'node'), '#!/bin/sh\nprintf 18.19.0\n')
+  const result = await stubCheckout(box, { node: OLD_NODE, pnpm: RECORDING })
+  assert.equal(result.status, 7, result.stdout + result.stderr)
+  assert.match(result.stdout, /using Node\.js .* from nvm \(for this install only\): .*v24\.12\.0\/bin\/node/)
+  assert.equal(managed.includes('v24.12.0'), true)
+})
+
+test('node on PATH too old and nothing else installed: stops with the commands for the tools present', { skip }, async (t) => {
+  const box = sandbox(t)
+  const result = await stubCheckout(box, { node: OLD_NODE, pnpm: RECORDING, asdf: 'exit 0', brew: 'exit 0' })
+  assert.equal(result.status, 1, result.stdout + result.stderr)
+  assert.match(result.stderr, /Error: Node\.js 24\.9\.0 or newer is required; node on PATH is 18\.19\.0 \(.*\/bin\/node\)\./)
+  assert.match(result.stderr, /asdf: {3}asdf plugin add nodejs; asdf install nodejs 24\.11\.0; asdf set nodejs 24\.11\.0/)
+  assert.match(result.stderr, /brew: {3}brew install node/)
+  assert.doesNotMatch(result.stdout, /\[1\/4\]/)
+  assert.deepEqual(ranLines(box), [], 'nothing is installed or built')
+})
+
+test('broken pnpm on PATH, the app bundles one: the bundled pnpm is preferred over Corepack', { skip }, async (t) => {
+  const box = sandbox(t)
+  const desktop = desktopApp(box, { pnpm: true })
+  const result = await stubCheckout(box, { pnpm: BROKEN, corepack: RECORDING }, { complete: true, env: desktop.env })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.match(result.stdout, /pnpm on PATH does not run with this Node; using the pnpm bundled in the DeepSeek Harness app instead: .*pnpm\.mjs/)
+  assert.equal(ranLines(box)[0], 'bundled-pnpm install --frozen-lockfile')
+  assert.equal(ranLines(box).some(line => line.startsWith('corepack ')), false)
+})
+
+/** A PATH holding only the named system tools, so no browser of this machine is on it. */
+function toolsOnly(box) {
+  const tools = join(box.base, 'tools')
+  mkdirSync(tools)
+  for (const name of ['bash', 'sh', 'rsync', 'mktemp', 'cat', 'tail', 'head', 'cut', 'sleep', 'rm', 'mkdir', 'dirname',
+    'basename', 'uname', 'id', 'sed', 'grep', 'awk', 'tr', 'sort', 'ls', 'find', 'ps', 'chmod', 'cp', 'mv', 'env']) {
+    const found = process.env.PATH.split(delimiter).map(dir => join(dir, name)).find(path => existsSync(path))
+    if (found) symlinkSync(found, join(tools, name))
+  }
+  symlinkSync(process.execPath, join(tools, 'node'))
+  return tools
+}
+
+test('only Brave installed: nothing is installed, and the instructions say Brave and brave://extensions', {
+  skip: skip || (process.platform === 'darwin' ? 'macOS detects browsers in /Applications, which a test cannot stage' : false),
+}, async (t) => {
+  const box = sandbox(t)
+  const record = 'printf \'%s %s\\n\' "$(basename "$0")" "$*" >>"$STUB_RAN"'
+  const result = await stubCheckout(box, {
+    pnpm: WORKING_PNPM, 'brave-browser': record, 'apt-get': record, sudo: record, brew: record, dnf: record,
+  }, {
+    complete: true, path: toolsOnly(box),
+    // The installer may open the browser, and is even allowed to install one.
+    env: { DSH_BROWSER_NO_LAUNCH: '0', DSH_INSTALL_BROWSER: '1', DISPLAY: ':99' },
+  })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  const calls = ranLines(box).filter(line => !line.startsWith('pnpm['))
+  assert.deepEqual(calls, ['brave-browser chrome://extensions'], 'only Brave is started; no package manager runs')
+  assert.match(result.stdout, /\[4\/4\] Prepare the extension and open Brave/)
+  assert.match(result.stdout, /Brave Extensions \(brave:\/\/extensions\) is open\. Complete these steps:/)
+  assert.doesNotMatch(result.stdout, /Google Chrome|chrome:\/\/extensions|was detected|DSH_INSTALL_BROWSER/)
 })
 
 test('branch opt-in: --unverified-branch installs a branch archive and says it is unverified', { skip }, async (t) => {

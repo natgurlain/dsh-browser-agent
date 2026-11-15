@@ -773,7 +773,7 @@ Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('install', '--
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', $BridgePlugin, 'run', 'build') `
   -FailZh "桥插件构建失败。" -FailEn "The bridge plugin build failed."
 
-Write-Step 2 "注册到本机 web profile" "Register with the local web profile"
+Write-Step 2 "注册到 DSH（web profile）" "Register with DSH (web profile)"
 # Initialize through dsh without forwarding a package path through cmd.exe.
 if (-not (Test-Path -LiteralPath $WebProfileManifest -PathType Leaf)) {
   Invoke-Quiet -WorkingDirectory $Root -Command 'node' `
@@ -885,6 +885,13 @@ if ($IsUpdate) {
   Write-Host ("   {0}" -f $DistDir)
 }
 
+# The same summary install.sh prints. This script registers the web profile only: it does
+# not look for the DeepSeek Harness desktop app, its bundled CLI, Node or pnpm.
+Write-Host ''
+Write-Pair "DSH 注册结果：" "DSH targets:"
+Write-Pair "web profile：已注册" "• web profile: registered"
+Write-Pair "DeepSeek Harness 桌面应用：已跳过，Windows 安装脚本暂不注册桌面应用。" "• DeepSeek Harness desktop app: skipped, the Windows installer does not register the desktop app yet."
+
 Write-Host ''
 Write-Pair "加载完成后：" "After loading the extension:"
 Write-Pair "点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "• Click the DeepSeek whale icon in the toolbar to open the side panel"
@@ -893,5 +900,6 @@ $QuotedRoot = "'" + $Root.Replace("'", "''") + "'"
 Write-Host ("• Start the pinned version: cd {0}; pnpm start" -f $QuotedRoot)
 Write-Host ("   启动固定版本：cd {0}; pnpm start" -f $QuotedRoot)
 Write-Pair "或直接启动固定版本：npx @deepseek-ai/dsh@0.2.2-rc.2 web" "• Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.2-rc.2 web"
+Write-Pair "注意：这样启动的是独立的 web profile，不包含 DeepSeek Harness 桌面应用里配置的模型。" "  Note: this starts the separate web profile, which has none of the models configured in the DeepSeek Harness desktop app."
 Write-Host ''
 Write-Pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/natgurlain/dsh-browser-agent" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/natgurlain/dsh-browser-agent"

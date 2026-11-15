@@ -1,6 +1,7 @@
+import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import {
-  lstatSync, readFileSync, readdirSync, realpathSync, rmSync,
+  accessSync, constants, lstatSync, readFileSync, readdirSync, realpathSync, rmSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep, toNamespacedPath } from 'node:path'
@@ -87,14 +88,46 @@ function profiles(home) {
   })
 }
 
-function inspect(home) {
+// The DeepSeek Harness desktop app owns the reserved profile "desktop". DSH's own plugin
+// operations refuse it; only the CLI bundled in the app may change it. The app is looked
+// for where install.sh looks: --desktop-app or DSH_DESKTOP_APP ("none" skips it), then on
+// macOS /Applications and ~/Applications.
+function desktopCli(override) {
+  if (override === 'none') return undefined
+  const apps = override ? [absolute(override)]
+    : process.platform === 'darwin'
+      ? [join('/Applications', 'DeepSeek Harness.app'), join(homedir(), 'Applications', 'DeepSeek Harness.app')]
+      : []
+  for (const app of apps) {
+    for (const runtime of [['Contents', 'Resources', 'runtime'], ['Resources', 'runtime'], ['resources', 'runtime']]) {
+      for (const bin of [['cli', 'bin', 'dsh'], ['bin', 'dsh']]) {
+        const cli = join(app, ...runtime, ...bin)
+        if (stat(cli)?.isFile()) return { app, cli }
+      }
+    }
+  }
+  return undefined
+}
+
+function inspect(home, desktopApp) {
   const extension = join(home, 'browser-extension')
   const managed = join(home, 'dsh-browser')
   const sourceLink = join(home, 'profiles', 'web', '.dsh-browser-source')
   const token = join(home, 'ext-bridge-token')
   const installedProfiles = profiles(home)
   const web = installedProfiles.find(profile => profile.name === 'web')
-  const otherProfiles = installedProfiles.filter(profile => profile.name !== 'web' && profile.references.length > 0)
+  // The desktop profile is uninstalled like the web profile when the app's CLI is there to
+  // do it and every reference is a dependency that CLI can remove. Otherwise it counts as
+  // one more profile that still uses the bridge.
+  const desktopProfile = installedProfiles.find(profile => profile.name === 'desktop' && profile.references.length > 0)
+  const bundled = desktopProfile ? desktopCli(desktopApp) : undefined
+  const desktopNames = desktopProfile
+    ? BRIDGES.filter(name => Object.hasOwn(dependencies(desktopProfile.manifest), name)) : []
+  const desktop = desktopProfile && bundled && desktopNames.length === desktopProfile.references.length
+    ? { ...desktopProfile, ...bundled } : undefined
+  const desktopKept = desktopProfile && !desktop ? desktopProfile : undefined
+  const otherProfiles = installedProfiles.filter(profile => profile.name !== 'web' && profile !== desktopProfile
+    && profile.references.length > 0).concat(desktopKept ?? [])
   const extensionStat = regular(extension, 'directory')
   const info = extensionStat ? json(join(extension, 'install-info.json')) : undefined
   if (info && (info.schemaVersion !== 1 || !['managed', 'checkout'].includes(info.mode))) {
@@ -131,7 +164,7 @@ function inspect(home) {
     if (ownedManaged) targets.push(managed)
   }
   return {
-    home, managed, info, web, targets,
+    home, managed, info, web, targets, desktop, desktopKept,
   }
 }
 
@@ -163,8 +196,53 @@ function describe(plan) {
   pair(`卸载目标：${plan.home}`, `Uninstall target: ${plan.home}`)
   pair(`移除 web profile 桥插件：${plan.web?.references.join(', ') || '已移除'}`,
     `Remove web profile bridges: ${plan.web?.references.join(', ') || 'already removed'}`)
+  if (plan.desktop) {
+    pair(`通过 ${plan.desktop.cli} 移除 desktop profile 桥插件：${plan.desktop.references.join(', ')}`,
+      `Remove desktop profile bridges through ${plan.desktop.cli}: ${plan.desktop.references.join(', ')}`)
+  }
+  noteKeptDesktop(plan)
   for (const path of plan.targets) {
     if (stat(path)) pair(`删除：${path}`, `Delete: ${path}`)
+  }
+}
+
+function noteKeptDesktop(plan) {
+  if (!plan.desktopKept) return
+  pair(`desktop profile 仍引用桥插件（${plan.desktopKept.references.join(', ')}），但没有找到 DeepSeek Harness 应用自带的 CLI，无法移除；`
+    + '因此保留源码、token 和桥状态文件。请用 --desktop-app 或 DSH_DESKTOP_APP 指定应用路径后重新运行。',
+  `The desktop profile still references the bridge (${plan.desktopKept.references.join(', ')}), and the CLI bundled in the `
+    + 'DeepSeek Harness app was not found to remove it; the source, token and bridge state files are kept. '
+    + 'Pass --desktop-app or set DSH_DESKTOP_APP to the app and run this again.')
+}
+
+function executable(path) {
+  try {
+    accessSync(path, constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+// Removes the bridge from the desktop profile with the app's own CLI. Its version override
+// (allow-version) is never used. A failure stops the uninstall before any file is deleted.
+function removeDesktopBridge(plan) {
+  const { cli, dir } = plan.desktop
+  const names = () => BRIDGES.filter(name => Object.hasOwn(dependencies(json(join(dir, 'package.json'))), name))
+  for (const name of names()) {
+    const args = ['plugin', '--profile', 'desktop', 'remove', name]
+    const [command, commandArgs] = process.platform !== 'win32' && !executable(cli) ? ['/bin/sh', [cli, ...args]] : [cli, args]
+    const result = spawnSync(command, commandArgs, {
+      env: { ...process.env, DSH_HOME: plan.home }, stdio: ['ignore', 'inherit', 'inherit'],
+    })
+    if (result.error || result.status !== 0) {
+      const outcome = result.error ? result.error.message : `exit code ${result.status ?? result.signal}`
+      fail(`从 desktop profile 移除插件失败，停止清理文件。命令：${command} ${commandArgs.join(' ')}（${outcome}）`,
+        `Plugin removal from the desktop profile failed; file cleanup stopped. Command: ${command} ${commandArgs.join(' ')} (${outcome})`)
+    }
+  }
+  if (names().length) {
+    fail('desktop profile 中的桥插件依赖仍然存在，停止清理文件。', 'Bridge dependencies remain in the desktop profile; file cleanup stopped.')
   }
 }
 
@@ -212,21 +290,24 @@ async function main() {
   }
   const { values } = parseArgs({ options: {
     home: { type: 'string' }, 'runtime-root': { type: 'string' },
-    'dry-run': { type: 'boolean' }, help: { type: 'boolean' },
+    'desktop-app': { type: 'string' }, 'dry-run': { type: 'boolean' }, help: { type: 'boolean' },
   } })
   if (values.help) {
-    console.log(`Usage: uninstall [--home <path>] [--dry-run] [--runtime-root <checkout>]
+    console.log(`Usage: uninstall [--home <path>] [--dry-run] [--runtime-root <checkout>] [--desktop-app <path>]
 
   --home <path>             DSH directory (defaults to DSH_HOME or ~/.dsh)
   --dry-run                 List the files and plugins to remove
-  --runtime-root <checkout> Use DSH dependencies from this checkout`)
+  --runtime-root <checkout> Use DSH dependencies from this checkout
+  --desktop-app <path>      DeepSeek Harness desktop app whose bundled CLI removes the plugin from
+                            the desktop profile (defaults to DSH_DESKTOP_APP, then /Applications
+                            and ~/Applications on macOS; "none" leaves the desktop profile alone)`)
     return
   }
   let home = values.home ?? process.env.DSH_HOME ?? join(homedir(), '.dsh')
   home = absolute(home)
   if (stat(home)) home = realpathSync(home)
   regular(home, 'directory')
-  const plan = inspect(home)
+  const plan = inspect(home, values['desktop-app'] ?? (process.env.DSH_DESKTOP_APP || undefined))
   if (values['dry-run']) {
     describe(plan)
     return
@@ -235,10 +316,12 @@ async function main() {
   pair('正在卸载 dsh-browser…', 'Uninstalling dsh-browser…')
   const execute = async () => {
     if (runtime) await removeBridge(plan, runtime)
+    if (plan.desktop) removeDesktopBridge(plan)
     cleanup(plan)
   }
   if (runtime) await runtime.withFileLock(join(plan.web.dir, 'package.json'), execute)
   else await execute()
+  noteKeptDesktop(plan)
   const kept = KEPT_HOME_DATA.map(name => join(home, name)).filter(path => stat(path))
   if (kept.length) {
     pair(`已保留审计日志与会话工作区，可手动删除：${kept.join(', ')}`,
@@ -248,6 +331,9 @@ async function main() {
     'Remove dsh Browser Assistant from your browser to finish uninstalling.')
   console.log('Chrome: chrome://extensions · Edge: edge://extensions · Firefox: about:addons')
   pair('如果 DSH 正在运行，请重启 DSH。', 'If DSH is running, restart it.')
+  if (plan.desktop) {
+    pair('如果 DeepSeek Harness 桌面应用正在运行，请退出并重新打开。', 'If the DeepSeek Harness desktop app is running, quit and reopen it.')
+  }
 }
 
 await main()

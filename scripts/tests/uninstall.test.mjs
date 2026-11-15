@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import {
-  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
+  chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -362,6 +362,93 @@ test('incomplete bootstrap with no profile needs no DSH runtime', () => {
   assert.equal(result.status, 0, result.stderr)
   assert.equal(existsSync(join(home, 'dsh-browser')), false)
   assert.equal(existsSync(join(home, 'profiles')), false)
+})
+
+/**
+ * A stand-in for the DeepSeek Harness desktop app: only the bundled CLI launcher, which logs
+ * its arguments and removes the named dependency from the desktop profile the way the real
+ * `plugin --profile desktop remove` does, or fails with exit code 4.
+ */
+function desktopApp(fixture, { fails = false } = {}) {
+  const app = join(fixture.base, 'DeepSeek Harness.app')
+  const bin = join(app, 'Contents', 'Resources', 'runtime', 'cli', 'bin')
+  const log = join(fixture.base, 'desktop-cli.log')
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(join(bin, 'cli.mjs'), `import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+const args = process.argv.slice(2)
+appendFileSync(${JSON.stringify(log)}, args.join(' ') + '\\n')
+if (${fails}) { console.error('dsh: removal failed'); process.exit(4) }
+const file = join(process.env.DSH_HOME, 'profiles', 'desktop', 'package.json')
+const manifest = JSON.parse(readFileSync(file, 'utf8'))
+delete manifest.dependencies[args[4]]
+manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter(name => name !== args[4])
+writeFileSync(file, JSON.stringify(manifest, null, 2) + '\\n')
+`)
+  writeFileSync(join(bin, 'dsh'), `#!/bin/sh\nexec "${process.execPath}" "$(dirname "$0")/cli.mjs" "$@"\n`)
+  chmodSync(join(bin, 'dsh'), 0o755)
+  const calls = () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : []
+  return { app, calls }
+}
+
+const noShell = process.platform === 'win32' ? 'the stand-in CLI is a shell script' : false
+
+test('desktop profile: the bridge is removed through the app CLI, then the files are deleted', { skip: noShell }, async () => {
+  const fixture = await installation('desktop', { mode: 'managed' })
+  await addBridge(fixture, 'desktop', current)
+  await addBridge(fixture, 'desktop', legacy)
+  const desktop = desktopApp(fixture)
+  const manifestPath = join(fixture.home, 'profiles', 'desktop', 'package.json')
+
+  const before = readFileSync(manifestPath, 'utf8')
+  const dry = uninstall(fixture, ['--dry-run', '--desktop-app', desktop.app])
+  assert.equal(dry.status, 0, dry.stderr)
+  assert.match(dry.stdout, /Remove desktop profile bridges through .*cli\/bin\/dsh: @natgurlain\/dsh-bridge-browser, @deepseek-ai\/dsh-bridge-browser/u)
+  assert.equal(readFileSync(manifestPath, 'utf8'), before)
+  assert.deepEqual(desktop.calls(), [])
+
+  const result = uninstall(fixture, [], { env: { DSH_DESKTOP_APP: desktop.app } })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.deepEqual(desktop.calls(), [
+    `plugin --profile desktop remove ${current}`, `plugin --profile desktop remove ${legacy}`,
+  ])
+  const manifest = readJson(manifestPath)
+  assert.equal(manifest.dependencies?.[current], undefined)
+  assert.equal(manifest.dependencies?.[legacy], undefined)
+  assert.equal(readJson(join(fixture.profile, 'package.json')).dependencies?.[current], undefined)
+  assert.equal(existsSync(fixture.source), false)
+  assert.equal(existsSync(fixture.extension), false)
+  assert.equal(existsSync(join(fixture.home, 'ext-bridge-token')), false)
+  assert.match(result.stdout, /If the DeepSeek Harness desktop app is running, quit and reopen it/u)
+  preserved(fixture)
+})
+
+test('desktop profile: a failing app CLI stops before deleting any installation files', { skip: noShell }, async () => {
+  const fixture = await installation('desktop-failure', { mode: 'managed' })
+  await addBridge(fixture, 'desktop', current)
+  const desktop = desktopApp(fixture, { fails: true })
+  const result = uninstall(fixture, ['--desktop-app', desktop.app])
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /Plugin removal from the desktop profile failed; file cleanup stopped\. Command: .*plugin --profile desktop remove @natgurlain\/dsh-bridge-browser \(exit code 4\)/u)
+  assert.equal(desktop.calls().some(call => call.includes('allow-version')), false)
+  assert.ok(readJson(join(fixture.home, 'profiles', 'desktop', 'package.json')).dependencies[current])
+  assert.equal(existsSync(fixture.source), true)
+  assert.equal(existsSync(fixture.extension), true)
+  assert.equal(existsSync(join(fixture.home, 'ext-bridge-token')), true)
+})
+
+test('desktop profile without the app: its bridge and the shared files are retained', async () => {
+  const fixture = await installation('desktop-no-app', { mode: 'managed' })
+  await addBridge(fixture, 'desktop', current)
+  const before = readFileSync(join(fixture.home, 'profiles', 'desktop', 'package.json'), 'utf8')
+  const result = uninstall(fixture, ['--desktop-app', 'none'])
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assert.match(result.stdout, /The desktop profile still references the bridge/u)
+  assert.equal(readFileSync(join(fixture.home, 'profiles', 'desktop', 'package.json'), 'utf8'), before)
+  assert.equal(existsSync(fixture.source), true)
+  assert.equal(readFileSync(join(fixture.home, 'ext-bridge-token'), 'utf8'), 'test-bridge-token\n')
+  assert.equal(existsSync(fixture.extension), false)
+  preserved(fixture)
 })
 
 test('platform entry script forwards arguments and runs the actual uninstaller', async () => {

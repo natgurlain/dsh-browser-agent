@@ -135,7 +135,13 @@ Requirements: Node.js `>=24.9.0`, Corepack/pnpm, and Chrome 125+ or Firefox 140+
 
 ### Install or update
 
-Run the [quick install commands](#quick-install) to install. The installer opens `chrome://extensions`; load `~/.dsh/browser-extension` as an unpacked extension the first time, or click **Reload** after an update. Restart dsh if it is already running.
+Run the [quick install commands](#quick-install) to install. It is one command on macOS and Linux; the installer does the rest:
+
+- **DeepSeek Harness desktop app.** When the app is installed (`/Applications` or `~/Applications` on macOS; `DSH_DESKTOP_APP=<path>` for another location, `DSH_DESKTOP_APP=none` to skip it), the bridge is registered with the app's own `desktop` profile through the CLI bundled in the app, in addition to the `web` profile. Quit and reopen the app afterwards. If the app's DSH version is outside the range the plugin supports, the installer says so, registers the `web` profile only, and asks you to update the app and run it again; it never overrides the version check.
+- **Node.js and pnpm.** When `node` on PATH is missing or older than 24.9.0, the installer uses one that is already installed: the app's bundled Node, then a suitable version from asdf, nvm, fnm, volta or mise. When `pnpm` on PATH does not run, it uses the app's bundled pnpm, then Corepack, then `npx`. Nothing is installed for you; if no suitable Node exists, the installer prints the command for the tools it found.
+- **Browser.** It opens the extensions page of the Chromium browser you have (Chrome, Chromium, Brave, Edge, Vivaldi or Arc; your default browser if it is one of them) and names that browser in its instructions. Load `~/.dsh/browser-extension` as an unpacked extension the first time, or click **Reload** after an update.
+
+The summary at the end lists where the bridge was registered and what was skipped. `install.ps1` on Windows registers the `web` profile only and looks for Chrome or Chromium only. Restart dsh if it is already running.
 
 To update, open **Settings → Updates** in the side panel. The check compares the running version with the latest GitHub release and offers a command that installs exactly that release with the installer already on disk, for example:
 
@@ -150,7 +156,8 @@ Installer options:
 | `--release latest` or `--release vX.Y.Z` | `DSH_BROWSER_VERSION` | Download that tagged release and verify it against its `SHA256SUMS`. This is the default when the installer is not run from a checkout. |
 | `--unverified-branch <name>` | `DSH_BROWSER_UNVERIFIED_BRANCH` | Development only: install a branch archive. A branch has no checksum, so nothing is verified. |
 | | `DSH_BROWSER_GITHUB_TOKEN` | Token for a private repository. It is sent to `api.github.com` only and never printed. Without it the installer falls back to an authenticated `gh`. |
-| | `DSH_BROWSER_NO_LAUNCH=1` | Do not open Chrome or touch the clipboard. |
+| | `DSH_BROWSER_NO_LAUNCH=1` | Do not open the browser or touch the clipboard. |
+| | `DSH_DESKTOP_APP=<path>` or `none` | Where the DeepSeek Harness desktop app is, or `none` to leave it alone (`install.sh` and the uninstaller). |
 
 To install from a source checkout instead (nothing is downloaded; this is also the way to install while the repository is private):
 
@@ -180,6 +187,8 @@ On Windows:
 
 From a checkout, run `bash scripts/uninstall.sh` or `.\scripts\uninstall.ps1`.
 
+The uninstaller also removes the bridge from the desktop app's `desktop` profile, through the CLI bundled in the app (`--desktop-app <path>` or `DSH_DESKTOP_APP` when the app is not in `/Applications` or `~/Applications`). If the app cannot be found, that registration and the files it shares stay in place and the uninstaller says so.
+
 ### Firefox source build
 
 Firefox uses a separate MV3 manifest, event-page background, and sidebar. Build it from a checkout, then open `about:debugging#/runtime/this-firefox`, choose **Load Temporary Add-on**, and select `extensions/dsh-browser/dist-firefox/manifest.json`:
@@ -192,6 +201,8 @@ pnpm --filter dsh-browser-extension run build:firefox
 The bridge address is still auto-discovered. Firefox add-ons are not installed by the installer, so copy the bridge token from `~/.dsh/ext-bridge-token` into the extension settings (the dsh startup log reports that file's path). Signed distribution can package the same `dist-firefox/` output.
 
 ### Start and use
+
+With the DeepSeek Harness desktop app, open the app (restart it after installing). `pnpm start` and `dsh web` below start the separate `web` profile, which has none of the models configured in the app.
 
 Start the managed installation with:
 
