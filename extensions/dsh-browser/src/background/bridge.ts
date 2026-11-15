@@ -189,11 +189,24 @@ export class BridgeClient {
   /**
    * Connect (or reconnect) to the bridge. Idempotent: calling again with the
    * same url/token restarts the loop from attempt 0.
+   *
+   * A restart reports `stopped` first, which listeners take as the end of
+   * this connection (the panel drops its conversation). The exception is a
+   * client that is only waiting to retry this very address and token: it
+   * retries now and stays `reconnecting`, because nothing ended.
    * @param url - bridge WebSocket URL (e.g. ws://127.0.0.1:3080/ext/bridge).
    * @param token - shared token from settings; empty falls back to the
    *   provisioned `bridge-token` file, re-read on every attempt.
    */
   start(url: string, token: string): void {
+    if (this.running && this.state === 'reconnecting' && this.ws === null
+      && url === this.url && token === this.token) {
+      // The superseded loop sees the new generation when its wait ends.
+      this.attempt = 0
+      this.generation += 1
+      void this.loop(this.generation)
+      return
+    }
     // A new start is a new verdict: the stop below must not report the old one.
     this.failure = undefined
     this.replaced = false

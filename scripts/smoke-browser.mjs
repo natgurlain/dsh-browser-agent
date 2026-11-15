@@ -1356,7 +1356,47 @@ try {
   await stopButton.waitFor()
   await waitFor(() => pendingRequests > beforeReconnect, 'second pending provider request')
   await composer.fill('Keep this draft across reconnect.')
+  // The extension's half-minute keepalive alarm re-probes the address of a
+  // bridge that is down, and gives the connection up when that probe and the
+  // discovery pass after it find nothing. That is a different scenario from
+  // the short outage tested here, so the outage is kept clear of the alarm.
+  const keepaliveDue = await worker.evaluate(async () => (await chrome.alarms.get('bridge-keepalive'))?.scheduledTime)
+  if (keepaliveDue !== undefined && keepaliveDue - Date.now() < 5_000) {
+    await delay(Math.max(0, keepaliveDue - Date.now()) + 500)
+  }
   await panel.evaluate(() => { messages.length = 0 })
+  // What a failure of this step needs: the statuses and events the extension
+  // broadcast since the outage began, what the panel shows, and what the Host
+  // holds for the session the panel was on.
+  const reconnectStep = async (label, wait) => {
+    try {
+      return await wait()
+    } catch (error) {
+      const evidence = await Promise.all([
+        panel.evaluate(() => messages.map(message => (
+          message.type === 'status'
+            ? `status:${message.state}${message.failure === undefined ? '' : `(${message.failure})`}:discovery=${message.discovery}`
+            : message.type === 'event'
+              ? `event:${message.frame?.frame?.method}:${message.frame?.frame?.payload?.sessionId ?? ''}`
+              : message.type
+        ))),
+        chat.locator('.composer-model > button').textContent(),
+        stopButton.count(),
+        hostRpc('session', 'state', { sessionId: conversation.sessionId }),
+        hostRpc('session', 'projections', { sessionId: conversation.sessionId }),
+        worker.evaluate(async () => (await chrome.alarms.get('bridge-keepalive'))?.scheduledTime),
+      ].map(part => Promise.resolve(part).catch(cause => `unavailable: ${cause.message}`)))
+      throw new Error(`${error.message}\n--- reconnect evidence (${label}) ---\n${JSON.stringify({
+        expectedSession: conversation.sessionId,
+        panelMessagesSinceOutage: evidence[0],
+        modelChip: evidence[1],
+        stopButtons: evidence[2],
+        hostState: evidence[3],
+        hostModelSelection: evidence[4]?.values?.modelSelection ?? evidence[4],
+        nextKeepaliveInMs: typeof evidence[5] === 'number' ? evidence[5] - Date.now() : evidence[5],
+      }, null, 2)}`, { cause: error })
+    }
+  }
   bridgeOnline = false
   for (const socket of bridgeSockets) socket.destroy()
   await waitFor(() => panel.evaluate(() => messages.some(message => (
@@ -1369,12 +1409,19 @@ try {
     sessionId: conversation.sessionId, provider: 'connection-check', model: 'connection-check-next',
   })
   bridgeOnline = true
-  await waitFor(() => panel.evaluate(() => messages.some(message => (
+  await reconnectStep('bridge reconnection', () => waitFor(() => panel.evaluate(() => messages.some(message => (
     message.type === 'status' && message.state === 'connected'
-  ))), 'bridge reconnection')
-  await waitFor(async () => await stopButton.count() === 0, 'restored idle state after reconnect')
-  await waitFor(async () => (await chat.locator('.composer-model > button').textContent()).includes('connection-check-next'),
-    'restored model after reconnect')
+  ))), 'bridge reconnection'))
+  // A reconnect to the same bridge is not the end of the connection: the panel
+  // must never be told `stopped`, which makes it drop its conversation.
+  await reconnectStep('connection kept', async () => assert.equal(await panel.evaluate(() => messages.some(message => (
+    message.type === 'status' && message.state === 'stopped'
+  ))), false, 'the reconnect was reported to the panel as a stopped connection'))
+  await reconnectStep('restored idle state', () => waitFor(async () => await stopButton.count() === 0,
+    'restored idle state after reconnect'))
+  await reconnectStep('restored model', () => waitFor(
+    async () => (await chat.locator('.composer-model > button').textContent()).includes('connection-check-next'),
+    'restored model after reconnect'))
   assert.equal(await composer.inputValue(), 'Keep this draft across reconnect.')
   await hostRpc('session', 'selectModel', {
     sessionId: conversation.sessionId, provider: 'connection-check', model: 'connection-check',
