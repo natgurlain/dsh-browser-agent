@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to release (e.g. v0.1.4)'
+        description: 'Existing tag to release (e.g. v0.1.5)'
         required: true
       draft:
         description: 'Create the GitHub Release as a draft'
@@ -49,14 +49,23 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm run test
       - name: Build and package release assets
-        run: node scripts/package-release.mjs --tag "$TAG" --out release
+        run: node scripts/package-release.mjs --tag "$TAG" --out release --notes release-notes.md
       - name: Verify checksums
         working-directory: release
         run: sha256sum -c SHA256SUMS
+      # The installers' release path against a local stand-in for GitHub Releases, and the
+      # version/tag consistency checks. After packaging, which built the extension.
+      - run: pnpm run test:scripts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-assets
           path: release/
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: release-notes.md
           if-no-files-found: error
           retention-days: 1
 
@@ -75,18 +84,24 @@ jobs:
         with:
           name: release-assets
           path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: notes
       - name: Verify checksums
         working-directory: release
-        run: sha256sum -c SHA256SUMS
+        run: |
+          sha256sum -c SHA256SUMS
+          # Every published file must be listed: the installers refuse an unlisted one.
+          for file in *; do
+            [ "$file" = SHA256SUMS ] || grep -q "  $file\$" SHA256SUMS || { echo "::error::$file is not in SHA256SUMS"; exit 1; }
+          done
       - name: Attest build provenance
         # Artifact attestations need a public repo (or GitHub Enterprise Cloud).
         if: github.event.repository.visibility == 'public'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: |
-            release/*.zip
-            release/*.tgz
-            release/SHA256SUMS
+          subject-path: release/*
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -98,7 +113,7 @@ jobs:
             gh release upload "$TAG" release/*
             exit 0
           fi
-          flags=(--verify-tag --title "$TAG" --generate-notes)
+          flags=(--verify-tag --title "$TAG" --notes-file notes/release-notes.md)
           if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
           if [[ "$DRAFT" == "true" ]]; then flags+=(--draft); fi
           gh release create "$TAG" release/* "${flags[@]}"
