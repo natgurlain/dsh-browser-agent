@@ -9,6 +9,7 @@
 import { useState } from 'react'
 import type { UiLocale } from '../i18n.ts'
 import { useSidePort } from './side-port.ts'
+import { PANEL_COPY, type PanelCopy } from './strings.ts'
 
 const PORT_NAME = 'dsh-watchers'
 
@@ -42,22 +43,18 @@ export function usePageWatchers(): { watchers: WatcherView[]; cancel: (id: strin
   return { watchers, cancel: (id) => { post({ type: 'watchers.cancel', id }) } }
 }
 
-function remaining(expiresAt: number, locale: UiLocale): string {
+function remaining(expiresAt: number, copy: PanelCopy['watchers']): string {
   const minutes = Math.max(0, Math.round((expiresAt - Date.now()) / 60_000))
-  if (minutes >= 60) {
-    const hours = Math.round(minutes / 6) / 10
-    return locale === 'zh' ? `剩余 ${String(hours)} 小时` : `${String(hours)} h left`
-  }
-  return locale === 'zh' ? `剩余 ${String(minutes)} 分钟` : `${String(minutes)} min left`
+  return minutes >= 60 ? copy.hoursLeft(Math.round(minutes / 6) / 10) : copy.minutesLeft(minutes)
 }
 
 export function WatchersCard({ locale }: { locale: UiLocale }): React.JSX.Element | null {
   const { watchers, cancel } = usePageWatchers()
   if (watchers.length === 0) return null
-  const zh = locale === 'zh'
+  const copy = PANEL_COPY[locale].watchers
   return (
-    <section className="watchers-card" aria-label={zh ? '页面监视' : 'Page watchers'} data-testid="watchers-card">
-      <strong>{zh ? `正在监视 ${String(watchers.length)} 个页面` : `Watching ${String(watchers.length)} page${watchers.length === 1 ? '' : 's'}`}</strong>
+    <section className="watchers-card" aria-label={copy.label} data-testid="watchers-card">
+      <strong>{copy.title(watchers.length)}</strong>
       <ul>
         {watchers.map((watcher) => (
           <li key={watcher.id} data-watch-id={watcher.id}>
@@ -65,14 +62,14 @@ export function WatchersCard({ locale }: { locale: UiLocale }): React.JSX.Elemen
               <span className="watcher-condition">{watcher.condition}</span>
               <small>{watcher.url}</small>
               <small>
-                {zh ? '触发后：' : 'Then: '}{watcher.prompt}
-                {' · '}{remaining(watcher.expiresAt, locale)}
+                {copy.then}{watcher.prompt}
+                {' · '}{remaining(watcher.expiresAt, copy)}
                 {' · '}{`${String(watcher.fires)}/${String(watcher.maxFires)}`}
-                {watcher.lastMiss !== undefined && (zh ? ` · 上次未送达（${watcher.lastMiss}）` : ` · last wake missed (${watcher.lastMiss})`)}
+                {watcher.lastMiss !== undefined && copy.lastMiss(watcher.lastMiss)}
               </small>
             </span>
             <button type="button" className="secondary" onClick={() => cancel(watcher.id)}>
-              {zh ? '取消' : 'Cancel'}
+              {copy.cancel}
             </button>
           </li>
         ))}

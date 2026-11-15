@@ -10,6 +10,7 @@ import type { UiLocale } from '../i18n.ts'
 import type { TaintRecord } from '../security/taint.ts'
 import { NO_SESSION_KEY, taintKey } from '../security/taint.ts'
 import { useSidePort } from './side-port.ts'
+import { PANEL_COPY } from './strings.ts'
 
 const PORT_NAME = 'dsh-policy'
 
@@ -36,16 +37,13 @@ export function TaintBanner({ sessionId, locale }: { sessionId: string | null; l
   const key = taintKey(sessionId ?? undefined)
   const record = records[key]
   if (record === undefined) return null
-  const sources = record.sources.length === 0 ? (locale === 'zh' ? '未知来源' : 'an unknown origin') : record.sources.join(', ')
+  const copy = PANEL_COPY[locale].taint
+  const sources = record.sources.length === 0 ? copy.unknownSource : record.sources.join(', ')
   return (
     <div className="taint-banner" role="status" data-testid="taint-banner">
-      <span>
-        {locale === 'zh'
-          ? `本会话已读取不受信任的网页内容（${sources}）。跨站输入、剪贴板写入、文件写入和带数据的跳转需要您批准；命令行与文件写入工具已停用。`
-          : `This session has read untrusted page content (${sources}). Cross-site typing, clipboard and file writes, and data-carrying navigation need your approval; shell and file-writing tools are off.`}
-      </span>
+      <span>{copy.body(sources)}</span>
       <button type="button" className="secondary" onClick={() => clear(key === NO_SESSION_KEY ? null : key)}>
-        {locale === 'zh' ? '清除' : 'Clear'}
+        {copy.clear}
       </button>
     </div>
   )
