@@ -1139,7 +1139,7 @@ async function selectAction(args: Record<string, unknown>, ctx: ActionContext): 
   return { ...result, pageContent: result.pageContent === undefined ? selected : `${selected}\n\n${result.pageContent}` }
 }
 
-/** Rows returned inline per page when the caller does not save to a file. */
+/** browser_extract: structured rows from the page (extract.ts), as text. */
 function extractAction(args: Record<string, unknown>): ActionResult {
   let extracted
   try {

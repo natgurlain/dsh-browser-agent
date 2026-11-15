@@ -171,16 +171,3 @@ export function composedParent(el: Element): Element | null {
   const root = el.getRootNode()
   return root instanceof ShadowRoot ? root.host : null
 }
-
-/**
- * Whether an element contains another across shadow boundaries.
- * @param ancestor - candidate container.
- * @param node - candidate descendant.
- * @returns true when `node` is inside `ancestor`'s composed subtree.
- */
-export function containsDeep(ancestor: Element, node: Element): boolean {
-  for (let current: Element | null = node; current !== null; current = composedParent(current)) {
-    if (current === ancestor) return true
-  }
-  return false
-}

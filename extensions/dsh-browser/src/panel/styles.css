@@ -907,52 +907,6 @@ textarea:focus-visible {
   content: "";
 }
 
-.tool-activity {
-  display: flex;
-  width: min(100%, 410px);
-  min-width: 0;
-  align-items: center;
-  gap: 9px;
-  padding: 8px 9px;
-  border: 1px solid #dfe5f5;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.7);
-}
-
-.tool-activity.running {
-  border-color: #ccd6ff;
-  background: var(--blue-wash);
-}
-
-.tool-icon {
-  display: grid;
-  width: 26px;
-  height: 26px;
-  flex: 0 0 auto;
-  place-items: center;
-  border-radius: 8px;
-  background: var(--blue-soft);
-  color: var(--blue);
-}
-
-.tool-icon svg {
-  width: 15px;
-  height: 15px;
-  fill: none;
-  stroke: currentColor;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 1.55;
-}
-
-.tool-copy {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 1px;
-}
-
 .tool-label {
   color: var(--faint);
   font-size: calc(9.5px * var(--ui-scale));
@@ -960,25 +914,6 @@ textarea:focus-visible {
   letter-spacing: 0.08em;
   line-height: 1.25;
   text-transform: uppercase;
-}
-
-.tool-summary {
-  overflow: hidden;
-  color: #45506a;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: calc(10.5px * var(--ui-scale));
-  line-height: 1.45;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tool-state {
-  min-width: 26px;
-  flex: 0 0 auto;
-  color: var(--faint);
-  font-size: calc(9.5px * var(--ui-scale));
-  font-weight: 650;
-  text-align: right;
 }
 
 .spinner {
@@ -3257,10 +3192,6 @@ textarea:focus-visible {
 
   .row.user .body {
     max-width: 90%;
-  }
-
-  .tool-state {
-    display: none;
   }
 }
 

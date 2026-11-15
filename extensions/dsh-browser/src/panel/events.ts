@@ -205,20 +205,6 @@ export function rowFromEvent(event: SessionEventView): Row | null {
   }
 }
 
-/** 工具调用的友好展示名：带 index 参数时附上（如「点击元素 #7」）。 */
-export function toolSummary(name: string, argsJson: unknown, locale: UiLocale = getUiLocale()): string {
-  let summary = PANEL_COPY[locale].tool.labels[name] ?? name
-  try {
-    const args = JSON.parse(String(argsJson ?? '{}')) as unknown
-    if (typeof args === 'object' && args !== null && 'index' in args) {
-      summary += ` #${String((args as { index?: unknown }).index)}`
-    }
-  } catch {
-    // 模型参数不可解析：只显示工具名。
-  }
-  return summary
-}
-
 /** Argument names whose values the timeline never shows (only their length). */
 const MASKED_ARGS = new Set(['text', 'promptText', 'password', 'secret', 'token', 'value', 'values'])
 const MAX_PREVIEW = 600
@@ -415,7 +401,7 @@ export function applyStepAudit(rows: Row[], audit: Map<string, StepAudit>): Row[
   return changed ? next : rows
 }
 
-/** live 合并：工具调用并入同一时间线行（每步一条），其他行直接追加。 */
+/** live 追加：用户与助手消息行（工具调用走 appendToolStep，并入时间线）。 */
 export function appendLiveRow(
   rows: Row[],
   kind: Row['kind'],
@@ -423,20 +409,7 @@ export function appendLiveRow(
   seq: number,
   images?: ImageAttachmentRef[],
 ): Row[] {
-  if (kind === 'tool') {
-    return appendToolStep(rows, { callId: `live-${seq}`, name: text, label: text, status: 'running' }, seq)
-  }
   return [...rows, { seq, kind, text, ...(images === undefined || images.length === 0 ? {} : { images }) }]
-}
-
-/** 标记最后一行工具调用已完成（并入，不新增行）。 */
-export function completeLastTool(rows: Row[], seq: number): Row[] {
-  const last = rows[rows.length - 1]
-  if (last?.kind === 'tool') {
-    const steps = (last.steps ?? []).map((step) => step.status === 'running' ? { ...step, status: 'ok' as const } : step)
-    return [...rows.slice(0, -1), { ...last, seq, status: 'complete', steps }]
-  }
-  return rows
 }
 
 /**

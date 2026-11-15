@@ -5,7 +5,6 @@ import {
   appendToolStep,
   applyStepAudit,
   auditByCall,
-  completeLastTool,
   completeToolStep,
   mergeHistoryRows,
   resultFromEvent,
@@ -14,7 +13,6 @@ import {
   resolvedQuestionFromFrame,
   rowFromEvent,
   textFromBlocks,
-  toolSummary,
   type SessionEventView,
 } from '../src/panel/events.ts'
 
@@ -90,39 +88,12 @@ describe('rowFromEvent', () => {
   })
 })
 
-describe('toolSummary', () => {
-  it('appends the inventory index when present', () => {
-    expect(toolSummary('browser_click', '{"index":7}', 'zh')).toBe('点击元素 #7')
-    expect(toolSummary('browser_snapshot', '{"delta":true}', 'zh')).toBe('读取页面')
-    expect(toolSummary('browser_navigate', 'not-json', 'zh')).toBe('打开页面')
-    expect(toolSummary('browser_open_tab', '{"url":"https://example.com"}', 'zh')).toBe('打开新标签页')
-    expect(toolSummary('browser_list_tabs', '{}', 'zh')).toBe('列出标签页')
-    expect(toolSummary('browser_follow_tab', '{"tabId":17}', 'zh')).toBe('跟随标签页')
-    expect(toolSummary('browser_close_tab', '{"tabId":18}', 'zh')).toBe('关闭标签页')
-    expect(toolSummary('custom_tool', '{}', 'zh')).toBe('custom_tool')
-    expect(toolSummary('browser_click', '{"index":7}', 'en')).toBe('Click element #7')
-    expect(toolSummary('browser_open_tab', '{"url":"https://example.com"}', 'en')).toBe('Open new tab')
-    expect(toolSummary('browser_list_tabs', '{}', 'en')).toBe('List open tabs')
-    expect(toolSummary('browser_follow_tab', '{"tabId":17}', 'en')).toBe('Follow tab')
-    expect(toolSummary('browser_close_tab', '{"tabId":18}', 'en')).toBe('Close tab')
-  })
-})
-
-describe('appendLiveRow / completeLastTool', () => {
-  it('keeps consecutive tool calls in one timeline row, one step each', () => {
+describe('appendLiveRow', () => {
+  it('appends user and assistant rows in order', () => {
     let rows: ReturnType<typeof appendLiveRow> = []
     rows = appendLiveRow(rows, 'user', '帮我操作页面', 1)
-    rows = appendLiveRow(rows, 'tool', '读取页面', 2)
-    rows = appendLiveRow(rows, 'tool', '点击元素 #7', 3)
-    rows = appendLiveRow(rows, 'tool', '填写内容 #9', 4)
-    rows = completeLastTool(rows, 5)
-    expect(rows.map((r) => r.kind)).toEqual(['user', 'tool'])
-    expect(rows[1]).toMatchObject({ status: 'complete' })
-    expect(rows[1]!.steps!.map((step) => [step.label, step.status])).toEqual([
-      ['读取页面', 'ok'], ['点击元素 #7', 'ok'], ['填写内容 #9', 'ok'],
-    ])
-    rows = appendLiveRow(rows, 'assistant', '完成', 6)
-    expect(rows.map((r) => r.kind)).toEqual(['user', 'tool', 'assistant'])
+    rows = appendLiveRow(rows, 'assistant', '完成', 2)
+    expect(rows.map((r) => [r.kind, r.text])).toEqual([['user', '帮我操作页面'], ['assistant', '完成']])
   })
 })
 

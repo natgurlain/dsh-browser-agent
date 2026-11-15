@@ -21,7 +21,6 @@ export interface PanelCopy {
     alwaysAllowReads: string
     trustSession: string
     devToolsTitle: string
-    trustDevTools: string
     readFootnote: string
     actionFootnote: string
     devToolsFootnote: string
@@ -30,8 +29,6 @@ export interface PanelCopy {
     /** Label of the developer-tools session trust button. */
     trustDevToolsOrigin: (origin: string) => string
     codeLabel: (characters: number) => string
-    showCode: string
-    hideCode: string
     typedTextLabel: string
     maskedText: (characters: number) => string
     reveal: string
@@ -58,11 +55,7 @@ export interface PanelCopy {
   tool: {
     running: string
     complete: string
-    inProgress: string
-    completed: string
-    done: string
     labels: Record<string, string>
-    overflow: (shown: string[], total: number) => string
   }
   tabHandoff: {
     eyebrow: string
@@ -507,15 +500,12 @@ const EN: PanelCopy = {
     alwaysAllowReads: 'Always allow reads',
     trustSession: 'Trust this domain for this session',
     devToolsTitle: 'Allow developer tools?',
-    trustDevTools: 'Trust developer tools for this session',
     readFootnote: 'Esc to deny · You can disable automatic reading in Settings at any time',
     actionFootnote: 'Esc to deny · Temporary trust ends when the side panel closes · Text for sensitive fields starts masked',
     devToolsFootnote: 'Developer tools expose page internals and captured traffic. Trust covers this conversation on this site for 30 minutes, ends when the tab leaves the site or the side panel closes, and never covers JavaScript or unredacted traffic. Chrome blocks its own DevTools while this runs.',
     trustEval: (origin) => `Trust JavaScript on ${origin} for this conversation (30 min)`,
     trustDevToolsOrigin: (origin) => `Trust developer tools on ${origin} for this conversation (30 min)`,
     codeLabel: (characters) => `JavaScript to run (${characters} characters)`,
-    showCode: 'Show code',
-    hideCode: 'Hide code',
     typedTextLabel: 'Text to type',
     maskedText: (characters) => `Masked: ${characters} characters for a sensitive or uninspected field`,
     reveal: 'Reveal',
@@ -542,9 +532,6 @@ const EN: PanelCopy = {
   tool: {
     running: 'Working on page',
     complete: 'Page action',
-    inProgress: 'In progress',
-    completed: 'Completed',
-    done: 'Done',
     labels: {
       browser_snapshot: 'Read page',
       browser_click: 'Click element',
@@ -589,7 +576,6 @@ const EN: PanelCopy = {
       browser_workflow_list: 'List workflows',
       browser_workflow_run: 'Run workflow',
     },
-    overflow: (shown, total) => `${shown.join(' → ')} → ${total - shown.length} more`,
   },
   tabHandoff: {
     eyebrow: 'Page handoff',
@@ -1042,15 +1028,12 @@ const ZH: PanelCopy = {
     alwaysAllowReads: '始终允许读取',
     trustSession: '本次会话信任此域',
     devToolsTitle: '允许使用开发者工具？',
-    trustDevTools: '本次会话信任开发者工具',
     readFootnote: 'Esc 拒绝 · 可随时在设置中关闭自动读取',
     actionFootnote: 'Esc 拒绝 · 关闭侧栏后临时信任失效 · 敏感字段的输入内容默认遮盖',
     devToolsFootnote: '开发者工具会暴露页面内部结构与抓包内容。信任仅覆盖本对话在此站点上的调用，30 分钟后、标签页离开该站点或侧栏关闭时失效，且从不覆盖 JavaScript 执行与不脱敏的抓包内容。附加期间 Chrome 自身无法在该标签页打开开发者工具。',
     trustEval: (origin) => `本对话中信任在 ${origin} 上执行 JavaScript（30 分钟）`,
     trustDevToolsOrigin: (origin) => `本对话中信任 ${origin} 上的开发者工具（30 分钟）`,
     codeLabel: (characters) => `将执行的 JavaScript（${characters} 个字符）`,
-    showCode: '显示代码',
-    hideCode: '隐藏代码',
     typedTextLabel: '将输入的文本',
     maskedText: (characters) => `已遮盖：${characters} 个字符（敏感字段或未能检查的字段）`,
     reveal: '显示',
@@ -1077,9 +1060,6 @@ const ZH: PanelCopy = {
   tool: {
     running: '正在操作页面',
     complete: '页面操作',
-    inProgress: '进行中',
-    completed: '已完成',
-    done: '完成',
     labels: {
       browser_snapshot: '读取页面',
       browser_click: '点击元素',
@@ -1124,7 +1104,6 @@ const ZH: PanelCopy = {
       browser_workflow_list: '列出工作流',
       browser_workflow_run: '运行工作流',
     },
-    overflow: (shown, total) => `${shown.join(' → ')} 等${total}个工具`,
   },
   tabHandoff: {
     eyebrow: '页面交接',
