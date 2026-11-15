@@ -158,6 +158,7 @@ DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release
 | | `DSH_BROWSER_GITHUB_TOKEN` | 私有仓库使用的 token。只会发送到 `api.github.com`，不会被打印。未设置时安装器会改用已登录的 `gh`。 |
 | | `DSH_BROWSER_NO_LAUNCH=1` | 不打开浏览器，也不改动剪贴板。 |
 | | `DSH_DESKTOP_APP=<路径>` 或 `none` | DeepSeek Harness 桌面应用的位置；`none` 表示不处理桌面应用（适用于 `install.sh` 和卸载器）。 |
+| `--lang en` 或 `--lang zh` | `DSH_BROWSER_LANG` | 安装器和卸载器的输出语言。每次运行只输出一种语言：默认英文，系统语言为中文时输出中文。 |
 
 如需从源码 checkout 安装（不下载任何文件；仓库私有期间也用这种方式安装）：
 

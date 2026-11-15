@@ -9,8 +9,11 @@
 #                                            (default: the latest) and verifies it against its SHA256SUMS
 #                                            before unpacking or running any of it
 #   install.sh --unverified-branch <name>    development only: a branch archive, with no checksum at all
+#   install.sh --lang en|zh                  language of the output (every form above takes it)
 # DSH_BROWSER_VERSION and DSH_BROWSER_UNVERIFIED_BRANCH are the environment forms of the two
-# options. DSH_BROWSER_GITHUB_TOKEN (or an authenticated gh) is needed while the repository is
+# download options, DSH_BROWSER_LANG that of --lang. Without either, the output is Chinese
+# when the locale is Chinese and English otherwise; one language is printed per run.
+# DSH_BROWSER_GITHUB_TOKEN (or an authenticated gh) is needed while the repository is
 # private. DSH_BROWSER_NO_LAUNCH=1 keeps the installer from opening the browser or touching
 # the clipboard.
 #
@@ -54,10 +57,64 @@ RELEASE_MODE="public"
 RELEASE_STATUS=""
 RELEASE_EFFECTIVE_URL=""
 
+# One language per run. DSH_BROWSER_LANG=en|zh decides; otherwise Chinese when the locale
+# is Chinese (the first of LC_ALL, LC_MESSAGES and LANG that is set; on macOS, when none
+# names a language, the first entry of the system language list), English for everything
+# else. Every message is written as a pair, Chinese first and English second, and exactly
+# one of the two is printed.
+RELEASE_LANG="en"
+
+release_detect_lang() {
+  local locale=""
+  case "${DSH_BROWSER_LANG:-}" in
+    [zZ][hH]*)
+      RELEASE_LANG="zh"
+      return 0
+      ;;
+    [eE][nN]*) return 0 ;;
+  esac
+  locale="${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}"
+  case "$locale" in
+    [zZ][hH]*) RELEASE_LANG="zh" ;;
+    "" | C | POSIX | C.* | POSIX.*)
+      if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
+        # Prints a parenthesised list, one quoted language tag per line.
+        locale="$(defaults read -g AppleLanguages 2>/dev/null | sed -n '2{s/[", ]//g;p;}')" || locale=""
+        case "$locale" in [zZ][hH]*) RELEASE_LANG="zh" ;; esac
+      fi
+      ;;
+  esac
+  return 0
+}
+release_detect_lang
+
+# release_say <Chinese> <English>: prints the one that matches the run's language.
+release_say() {
+  if [ "$RELEASE_LANG" = "zh" ]; then
+    printf '%s\n' "$1"
+  else
+    printf '%s\n' "$2"
+  fi
+}
+
 release_fail() {
-  printf '\nError: %s\n' "$2" >&2
-  printf '错误：%s\n' "$1" >&2
+  if [ "$RELEASE_LANG" = "zh" ]; then
+    printf '\n错误：%s\n' "$1" >&2
+  else
+    printf '\nError: %s\n' "$2" >&2
+  fi
   exit 1
+}
+
+# release_set_lang <en|zh>: the --lang option. Exported so that a second stage and
+# uninstall.mjs use the same language.
+release_set_lang() {
+  case "$1" in
+    [zZ][hH]) RELEASE_LANG="zh" ;;
+    [eE][nN]) RELEASE_LANG="en" ;;
+    *) release_fail "--lang 只接受 en 或 zh：$1" "--lang accepts en or zh: $1" ;;
+  esac
+  export DSH_BROWSER_LANG="$RELEASE_LANG"
 }
 
 release_check_base() {
@@ -289,27 +346,23 @@ release_fetch() {
     release_verify "$directory" "$name"
   done
   rm -f -- "$directory/.release.json" "$directory/.release-assets"
-  printf 'Verified: %d file(s) of %s match SHA256SUMS.\n' "$#" "$RELEASE_TAG"
-  printf '   已校验：%s 的 %d 个文件与 SHA256SUMS 一致。\n' "$RELEASE_TAG" "$#"
+  release_say "已校验：$RELEASE_TAG 的 $# 个文件与 SHA256SUMS 一致。" "Verified: $# file(s) of $RELEASE_TAG match SHA256SUMS."
 }
 # <<< release-fetch
 
-# Messages are bilingual: English first, Chinese on the indented line below.
-# Callers pass the Chinese text first and the English text second.
+# Every message exists in Chinese and in English, and a run prints one of them (see
+# RELEASE_LANG above). Callers pass the Chinese text first and the English text second.
 print_step() {
-  printf '\n[%s/4] %s\n' "$1" "$3"
-  printf '      %s\n' "$2"
+  printf '\n[%s/4] ' "$1"
+  release_say "$2" "$3"
 }
 
 print_pair() {
-  printf '%s\n' "$2"
-  printf '   %s\n' "$1"
+  release_say "$1" "$2"
 }
 
 fail_pair() {
-  printf '\nError: %s\n' "$2" >&2
-  printf '错误：%s\n' "$1" >&2
-  exit 1
+  release_fail "$1" "$2"
 }
 
 # Runs a command in the checkout with its output hidden. When it fails, the end
@@ -342,10 +395,12 @@ run_logged() {
   fi
   printf '\n' >&2
   tail -n 40 "$log" >&2
-  printf '\nFull output: %s\n' "$log" >&2
-  printf '完整输出：%s\n' "$log" >&2
-  printf '\nError: %s (exit code %s).\n' "$en" "$status" >&2
-  printf '错误：%s（退出码 %s）。\n' "$zh" "$status" >&2
+  {
+    printf '\n'
+    print_pair "完整输出：$log" "Full output: $log"
+    printf '\n'
+    print_pair "错误：${zh}（退出码 ${status}）。" "Error: $en (exit code $status)."
+  } >&2
   return "$status"
 }
 
@@ -534,14 +589,15 @@ desktop_profile_has() {
 desktop_report_failure() {
   local status="$1" log="$2"
   shift 2
+  local command
+  command="$(printf '%q' "$DESKTOP_CLI")$(printf ' %q' "$@")"
   {
-    printf '   app:       %s\n' "$DESKTOP_APP"
-    printf '   command:   %q' "$DESKTOP_CLI"
-    printf ' %q' "$@"
-    printf '\n   cwd:       %s\n' "$ROOT"
-    printf '   DSH home:  %s\n' "$DSH_HOME_DIR"
-    printf '   exit code: %s\n' "$status"
-    printf '   output (last 20 lines):\n'
+    print_pair "   应用：$DESKTOP_APP" "   app:       $DESKTOP_APP"
+    print_pair "   命令：$command" "   command:   $command"
+    print_pair "   工作目录：$ROOT" "   cwd:       $ROOT"
+    print_pair "   DSH 目录：$DSH_HOME_DIR" "   DSH home:  $DSH_HOME_DIR"
+    print_pair "   退出码：$status" "   exit code: $status"
+    print_pair "   输出（最后 20 行）：" "   output (last 20 lines):"
     tail -n 20 "$log" | sed 's/^/      /'
   } >&2
 }
@@ -620,6 +676,7 @@ NODE_INDEX=0
 NODE_FROM_APP=0
 NODE_BASE_PATH="$PATH"
 NODE_APP_LABEL="the DeepSeek Harness app"
+if [ "$RELEASE_LANG" = "zh" ]; then NODE_APP_LABEL="DeepSeek Harness 应用"; fi
 
 node_version_of() {
   "$1" -e 'process.stdout.write(process.versions.node)' 2>/dev/null </dev/null
@@ -635,12 +692,13 @@ node_version_key() {
 
 # add_node_candidates <label> <node path>...: keeps the newest suitable one of the paths.
 add_node_candidates() {
-  local label="$1" bin version key best="" best_key="" best_version=""
+  local label="$1" bin version key best="" best_key="" best_version="" unusable="did not run"
+  if [ "$RELEASE_LANG" = "zh" ]; then unusable="无法运行"; fi
   shift
   for bin in "$@"; do
     [ -e "$bin" ] || continue
     version="$(node_version_of "$bin")" || version=""
-    NODE_TRIED="${NODE_TRIED}   $bin (${label}): ${version:-did not run}"$'\n'
+    NODE_TRIED="${NODE_TRIED}   $bin (${label}): ${version:-$unusable}"$'\n'
     key="$(node_version_key "$version")" || continue
     if [ -z "$best_key" ] || [ "$key" \> "$best_key" ]; then
       best="$bin"
@@ -671,7 +729,7 @@ collect_node_candidates() {
 
 # Switches to the next collected Node; fails when there is none left.
 activate_next_node() {
-  local line label version bin zh_label
+  local line label version bin
   NODE_INDEX=$((NODE_INDEX + 1))
   line="$(printf '%s' "$NODE_CANDIDATES" | sed -n "${NODE_INDEX}p")"
   [ -n "$line" ] || return 1
@@ -682,13 +740,9 @@ activate_next_node() {
   PATH="$(dirname "$bin"):$NODE_BASE_PATH"
   export PATH
   hash -r 2>/dev/null || true
-  zh_label="$label"
   NODE_FROM_APP=0
-  if [ "$label" = "$NODE_APP_LABEL" ]; then
-    NODE_FROM_APP=1
-    zh_label="DeepSeek Harness 应用"
-  fi
-  print_pair "PATH 上没有可用的 Node.js，改用 $zh_label 提供的 Node.js ${version}（仅本次安装）：$bin" "No usable Node.js on PATH; using Node.js $version from $label (for this install only): $bin"
+  if [ "$label" = "$NODE_APP_LABEL" ]; then NODE_FROM_APP=1; fi
+  print_pair "PATH 上没有可用的 Node.js，改用 $label 提供的 Node.js ${version}（仅本次安装）：$bin" "No usable Node.js on PATH; using Node.js $version from $label (for this install only): $bin"
   return 0
 }
 
@@ -725,7 +779,7 @@ print_node_install_hints() {
 }
 
 resolve_node() {
-  local current="" found=0
+  local current="" found=0 where=""
   if command -v node >/dev/null 2>&1; then
     found=1
     current="$(node_version_of node)" || current=""
@@ -734,17 +788,18 @@ resolve_node() {
   collect_node_candidates
   if activate_next_node; then return 0; fi
   {
+    printf '\n'
     if [ "$found" -eq 1 ]; then
-      printf '\nError: Node.js 24.9.0 or newer is required; node on PATH is %s (%s).\n' "${current:-not runnable}" "$(command -v node)"
-      printf '错误：需要 Node.js 24.9.0 或更新版本；PATH 上的 node 是 %s（%s）。\n' "${current:-无法运行}" "$(command -v node)"
+      where="$(command -v node)"
+      print_pair "错误：需要 Node.js 24.9.0 或更新版本；PATH 上的 node 是 ${current:-无法运行}（${where}）。" "Error: Node.js 24.9.0 or newer is required; node on PATH is ${current:-not runnable} ($where)."
     else
-      printf '\nError: Node.js was not found; version 24.9.0 or newer is required.\n'
-      printf '错误：未找到 Node.js；需要 24.9.0 或更新版本。\n'
+      print_pair "错误：未找到 Node.js；需要 24.9.0 或更新版本。" "Error: Node.js was not found; version 24.9.0 or newer is required."
     fi
     if [ -n "$NODE_TRIED" ]; then
-      printf 'Also checked, none usable:\n   同时检查了以下位置，均不可用：\n%s' "$NODE_TRIED"
+      print_pair "同时检查了以下位置，均不可用：" "Also checked, none usable:"
+      printf '%s' "$NODE_TRIED"
     fi
-    printf 'Install it with one of these, then run this installer again:\n   请用下面任一命令安装，然后重新运行本安装脚本：\n'
+    print_pair "请用下面任一命令安装，然后重新运行本安装脚本：" "Install it with one of these, then run this installer again:"
     print_node_install_hints
   } >&2
   exit 1
@@ -1001,6 +1056,7 @@ bootstrap_remote_install() {
   local archive
   local source_dir
   local source_label
+  local source_label_zh
   local temp_base="${TMPDIR:-/tmp}"
 
   require_command curl "未找到 curl；请先安装 curl。" "curl was not found; install curl first."
@@ -1037,6 +1093,7 @@ bootstrap_remote_install() {
         "Downloading branch $branch failed. The existing installation was not changed." ;;
     esac
     source_label="branch $branch (unverified)"
+    source_label_zh="$branch 分支，未校验"
   else
     print_pair \
       "正在从 $RELEASE_REPOSITORY 下载发布版本 ${wanted:-latest} 并校验……" \
@@ -1045,6 +1102,7 @@ bootstrap_remote_install() {
     release_fetch "$BOOTSTRAP_TMP/download" "$wanted" "dsh-browser-source-{tag}.tar.gz"
     archive="$BOOTSTRAP_TMP/download/dsh-browser-source-$RELEASE_TAG.tar.gz"
     source_label="release $RELEASE_TAG (SHA256SUMS verified)"
+    source_label_zh="发布版本 ${RELEASE_TAG}，已通过 SHA256SUMS 校验"
   fi
 
   tar -xzf "$archive" -C "$source_dir" --strip-components=1 || fail_pair \
@@ -1068,14 +1126,31 @@ bootstrap_remote_install() {
 
   cleanup_bootstrap
   trap - EXIT HUP INT TERM
-  print_pair "安装文件已同步到 ${MANAGED_ROOT}（${source_label}）。" "Installation files are ready in $MANAGED_ROOT ($source_label)."
+  print_pair "安装文件已同步到 ${MANAGED_ROOT}（${source_label_zh}）。" "Installation files are ready in $MANAGED_ROOT ($source_label)."
   # The second stage must install what was just unpacked, not download again.
   DSH_BROWSER_BOOTSTRAPPED=1 exec /bin/bash "$MANAGED_ROOT/scripts/install.sh"
 }
 
 print_usage() {
+  if [ "$RELEASE_LANG" = "zh" ]; then
+    cat <<'USAGE'
+用法：install.sh [--release latest|vX.Y.Z] [--unverified-branch <name>] [--lang en|zh]
+
+  （不带选项，在 checkout 中）     安装当前 checkout，不下载任何文件
+  （不带选项，单独运行）           等同于 --release latest
+  --release latest|vX.Y.Z          下载该发布版本，按其 SHA256SUMS 校验每个文件后再安装
+                                   （环境变量：DSH_BROWSER_VERSION）
+  --unverified-branch <name>       仅用于开发：安装分支归档，分支归档没有校验值
+                                   （环境变量：DSH_BROWSER_UNVERIFIED_BRANCH）
+  --lang en|zh                     输出语言（环境变量：DSH_BROWSER_LANG）；默认在中文
+                                   环境下为中文，其他环境为英文
+
+私有仓库：设置 DSH_BROWSER_GITHUB_TOKEN，或先用 gh 登录，或在 checkout 中安装。
+USAGE
+    return 0
+  fi
   cat <<'USAGE'
-Usage: install.sh [--release latest|vX.Y.Z] [--unverified-branch <name>]
+Usage: install.sh [--release latest|vX.Y.Z] [--unverified-branch <name>] [--lang en|zh]
 
   (no option, inside a checkout)   install this checkout; nothing is downloaded
   (no option, standalone)          same as --release latest
@@ -1083,6 +1158,8 @@ Usage: install.sh [--release latest|vX.Y.Z] [--unverified-branch <name>]
                                    its SHA256SUMS, then install it (env: DSH_BROWSER_VERSION)
   --unverified-branch <name>       development only: install a branch archive, which has no
                                    checksum (env: DSH_BROWSER_UNVERIFIED_BRANCH)
+  --lang en|zh                     language of the output (env: DSH_BROWSER_LANG); default:
+                                   Chinese when the locale is Chinese, English otherwise
 
 Private repository: set DSH_BROWSER_GITHUB_TOKEN, or log in with gh, or install from a checkout.
 USAGE
@@ -1092,10 +1169,18 @@ REQUESTED_RELEASE="${DSH_BROWSER_VERSION:-}"
 REQUESTED_BRANCH="${DSH_BROWSER_UNVERIFIED_BRANCH:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --release | --unverified-branch)
+    --release | --unverified-branch | --lang)
       [ "$#" -ge 2 ] || fail_pair "$1 需要一个值。" "$1 needs a value."
-      if [ "$1" = "--release" ]; then REQUESTED_RELEASE="$2"; else REQUESTED_BRANCH="$2"; fi
+      case "$1" in
+        --release) REQUESTED_RELEASE="$2" ;;
+        --unverified-branch) REQUESTED_BRANCH="$2" ;;
+        *) release_set_lang "$2" ;;
+      esac
       shift 2
+      ;;
+    --lang=*)
+      release_set_lang "${1#--lang=}"
+      shift
       ;;
     --release=*)
       REQUESTED_RELEASE="${1#--release=}"
@@ -1260,19 +1345,19 @@ else
     print_pair "请在 $BROWSER_NAME 扩展管理页（${BROWSER_URL}）完成以下操作：" "Complete these steps on the $BROWSER_NAME Extensions page ($BROWSER_URL):"
   fi
   printf '\n'
-  print_pair "开启“开发者模式”" "1. Enable “Developer mode”"
-  print_pair "点击“加载已解压的扩展程序”" "2. Click “Load unpacked”"
+  print_pair "1. 开启“开发者模式”" "1. Enable “Developer mode”"
+  print_pair "2. 点击“加载已解压的扩展程序”" "2. Click “Load unpacked”"
   if is_macos; then
     if [ "$CLIPBOARD_READY" -eq 1 ]; then
-      print_pair "按 Cmd+Shift+G，粘贴以下路径（已复制到剪贴板）：" "3. Press Cmd+Shift+G and paste this path (already copied):"
+      print_pair "3. 按 Cmd+Shift+G，粘贴以下路径（已复制到剪贴板）：" "3. Press Cmd+Shift+G and paste this path (already copied):"
     else
-      print_pair "按 Cmd+Shift+G，粘贴以下路径：" "3. Press Cmd+Shift+G and paste this path:"
+      print_pair "3. 按 Cmd+Shift+G，粘贴以下路径：" "3. Press Cmd+Shift+G and paste this path:"
     fi
   else
     if [ "$CLIPBOARD_READY" -eq 1 ]; then
-      print_pair "粘贴以下路径（已复制到剪贴板）：" "3. Paste this path (already copied):"
+      print_pair "3. 粘贴以下路径（已复制到剪贴板）：" "3. Paste this path (already copied):"
     else
-      print_pair "复制并粘贴以下路径：" "3. Copy and paste this path:"
+      print_pair "3. 复制并粘贴以下路径：" "3. Copy and paste this path:"
     fi
   fi
   printf '   %s\n' "$DIST_DIR"
@@ -1281,28 +1366,28 @@ fi
 # ---- Summary: where the bridge was registered, then how to start DSH ----------------------
 printf '\n'
 print_pair "DSH 注册结果：" "DSH targets:"
-print_pair "web profile：已注册" "• web profile: registered"
+print_pair "• web profile：已注册" "• web profile: registered"
 case "$DESKTOP_STATUS" in
   registered)
-    print_pair "DeepSeek Harness 桌面应用：已注册（${DESKTOP_APP}）" "• DeepSeek Harness desktop app: registered ($DESKTOP_APP)"
+    print_pair "• DeepSeek Harness 桌面应用：已注册（${DESKTOP_APP}）" "• DeepSeek Harness desktop app: registered ($DESKTOP_APP)"
     ;;
   rejected)
-    print_pair "DeepSeek Harness 桌面应用：未注册。警告：应用的 DSH 版本是 ${DESKTOP_APP_VERSION}，本插件支持 ${DESKTOP_PLUGIN_RANGE}。请更新 DeepSeek Harness 应用，然后重新运行本安装脚本。" "• DeepSeek Harness desktop app: NOT registered. WARNING: the app has DSH $DESKTOP_APP_VERSION and this plugin supports $DESKTOP_PLUGIN_RANGE. Update the DeepSeek Harness app, then run this installer again."
+    print_pair "• DeepSeek Harness 桌面应用：未注册。警告：应用的 DSH 版本是 ${DESKTOP_APP_VERSION}，本插件支持 ${DESKTOP_PLUGIN_RANGE}。请更新 DeepSeek Harness 应用，然后重新运行本安装脚本。" "• DeepSeek Harness desktop app: NOT registered. WARNING: the app has DSH $DESKTOP_APP_VERSION and this plugin supports $DESKTOP_PLUGIN_RANGE. Update the DeepSeek Harness app, then run this installer again."
     ;;
   failed)
-    print_pair "DeepSeek Harness 桌面应用：未注册。警告：应用自带的 CLI 执行失败，命令、退出码和输出见上文第 2 步。" "• DeepSeek Harness desktop app: NOT registered. WARNING: its bundled CLI failed; the command, exit code and output are under step 2 above."
+    print_pair "• DeepSeek Harness 桌面应用：未注册。警告：应用自带的 CLI 执行失败，命令、退出码和输出见上文第 2 步。" "• DeepSeek Harness desktop app: NOT registered. WARNING: its bundled CLI failed; the command, exit code and output are under step 2 above."
     ;;
   no-profile)
-    print_pair "DeepSeek Harness 桌面应用：已跳过，$DSH_HOME_DIR/profiles/desktop 不存在。请先打开一次应用，再重新运行本安装脚本。" "• DeepSeek Harness desktop app: skipped, $DSH_HOME_DIR/profiles/desktop does not exist. Open the app once, then run this installer again."
+    print_pair "• DeepSeek Harness 桌面应用：已跳过，$DSH_HOME_DIR/profiles/desktop 不存在。请先打开一次应用，再重新运行本安装脚本。" "• DeepSeek Harness desktop app: skipped, $DSH_HOME_DIR/profiles/desktop does not exist. Open the app once, then run this installer again."
     ;;
   no-cli)
-    print_pair "DeepSeek Harness 桌面应用：已跳过，在 $DESKTOP_APP 中没有找到自带的 CLI。" "• DeepSeek Harness desktop app: skipped, no bundled CLI was found in $DESKTOP_APP."
+    print_pair "• DeepSeek Harness 桌面应用：已跳过，在 $DESKTOP_APP 中没有找到自带的 CLI。" "• DeepSeek Harness desktop app: skipped, no bundled CLI was found in $DESKTOP_APP."
     ;;
   *)
     if is_macos; then
-      print_pair "DeepSeek Harness 桌面应用：已跳过，未在 /Applications 或 ~/Applications 找到（可用 DSH_DESKTOP_APP 指定路径）。" "• DeepSeek Harness desktop app: skipped, not found in /Applications or ~/Applications (set DSH_DESKTOP_APP to its path if it is elsewhere)."
+      print_pair "• DeepSeek Harness 桌面应用：已跳过，未在 /Applications 或 ~/Applications 找到（可用 DSH_DESKTOP_APP 指定路径）。" "• DeepSeek Harness desktop app: skipped, not found in /Applications or ~/Applications (set DSH_DESKTOP_APP to its path if it is elsewhere)."
     else
-      print_pair "DeepSeek Harness 桌面应用：已跳过，仅在 macOS 上自动检测（可用 DSH_DESKTOP_APP 指定路径）。" "• DeepSeek Harness desktop app: skipped, it is detected on macOS only (set DSH_DESKTOP_APP to its path to use one here)."
+      print_pair "• DeepSeek Harness 桌面应用：已跳过，仅在 macOS 上自动检测（可用 DSH_DESKTOP_APP 指定路径）。" "• DeepSeek Harness desktop app: skipped, it is detected on macOS only (set DSH_DESKTOP_APP to its path to use one here)."
     fi
     ;;
 esac
@@ -1311,23 +1396,23 @@ printf '\n'
 print_pair "加载完成后：" "After loading the extension:"
 if [ "$DESKTOP_STATUS" = "registered" ]; then
   if [ "$DESKTOP_RUNNING" -eq 1 ]; then
-    print_pair "打开 DeepSeek Harness（它正在运行：请先退出再重新打开）" "• Open DeepSeek Harness (it is running now: quit it and open it again)"
+    print_pair "• 打开 DeepSeek Harness（它正在运行：请先退出再重新打开）" "• Open DeepSeek Harness (it is running now: quit it and open it again)"
   else
-    print_pair "打开 DeepSeek Harness（如果它正在运行，请重启）" "• Open DeepSeek Harness (restart it if it was running)"
+    print_pair "• 打开 DeepSeek Harness（如果它正在运行，请重启）" "• Open DeepSeek Harness (restart it if it was running)"
   fi
 fi
-print_pair "点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "• Click the DeepSeek whale icon in the toolbar to open the side panel"
-print_pair "扩展会自动发现本机 dsh，无需填写地址或 token（已放入扩展目录）" "• The extension discovers local dsh automatically; no address or token is required (it was placed in the extension directory)"
+print_pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "• Click the DeepSeek whale icon in the toolbar to open the side panel"
+print_pair "• 扩展会自动发现本机 dsh，无需填写地址或 token（已放入扩展目录）" "• The extension discovers local dsh automatically; no address or token is required (it was placed in the extension directory)"
 if [ "$DESKTOP_STATUS" = "registered" ]; then
-  print_pair "没有桌面应用时的替代方式（独立的 web profile，不包含桌面应用里配置的模型）：" "• Alternative without the desktop app (the separate web profile, which has none of the models configured in the app):"
+  print_pair "• 没有桌面应用时的替代方式（独立的 web profile，不包含桌面应用里配置的模型）：" "• Alternative without the desktop app (the separate web profile, which has none of the models configured in the app):"
   printf '    cd %q && pnpm start\n' "$ROOT"
   printf '    npx @deepseek-ai/dsh@0.2.2-rc.2 web\n'
 else
-  printf '• Start the pinned version: cd %q && pnpm start\n' "$ROOT"
-  printf '   启动固定版本：cd %q && pnpm start\n' "$ROOT"
-  print_pair "或直接启动固定版本：npx @deepseek-ai/dsh@0.2.2-rc.2 web" "• Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.2-rc.2 web"
+  QUOTED_ROOT="$(printf '%q' "$ROOT")"
+  print_pair "• 启动固定版本：cd $QUOTED_ROOT && pnpm start" "• Start the pinned version: cd $QUOTED_ROOT && pnpm start"
+  print_pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.2.2-rc.2 web" "• Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.2-rc.2 web"
   if [ "$DESKTOP_STATUS" != "absent" ]; then
-    print_pair "注意：这样启动的是独立的 web profile，不包含 DeepSeek Harness 桌面应用里配置的模型。" "  Note: this starts the separate web profile, which has none of the models configured in the DeepSeek Harness desktop app."
+    print_pair "  注意：这样启动的是独立的 web profile，不包含 DeepSeek Harness 桌面应用里配置的模型。" "  Note: this starts the separate web profile, which has none of the models configured in the DeepSeek Harness desktop app."
   fi
 fi
 printf '\n'

@@ -4,9 +4,11 @@
 # next to it. On its own (piped in, for example) it downloads uninstall.mjs from a tagged
 # release and runs it only after its SHA-256 matched that release's SHA256SUMS.
 #
-#   uninstall.sh [--release latest|vX.Y.Z] [uninstall.mjs options…]
+#   uninstall.sh [--release latest|vX.Y.Z] [--lang en|zh] [uninstall.mjs options…]
 #
 # DSH_BROWSER_VERSION is the environment form of --release; the default is the latest release.
+# DSH_BROWSER_LANG is the environment form of --lang; the default is Chinese when the locale
+# is Chinese and English otherwise. One language is printed per run.
 set -euo pipefail
 
 download_dir=""
@@ -36,10 +38,64 @@ RELEASE_MODE="public"
 RELEASE_STATUS=""
 RELEASE_EFFECTIVE_URL=""
 
+# One language per run. DSH_BROWSER_LANG=en|zh decides; otherwise Chinese when the locale
+# is Chinese (the first of LC_ALL, LC_MESSAGES and LANG that is set; on macOS, when none
+# names a language, the first entry of the system language list), English for everything
+# else. Every message is written as a pair, Chinese first and English second, and exactly
+# one of the two is printed.
+RELEASE_LANG="en"
+
+release_detect_lang() {
+  local locale=""
+  case "${DSH_BROWSER_LANG:-}" in
+    [zZ][hH]*)
+      RELEASE_LANG="zh"
+      return 0
+      ;;
+    [eE][nN]*) return 0 ;;
+  esac
+  locale="${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}"
+  case "$locale" in
+    [zZ][hH]*) RELEASE_LANG="zh" ;;
+    "" | C | POSIX | C.* | POSIX.*)
+      if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
+        # Prints a parenthesised list, one quoted language tag per line.
+        locale="$(defaults read -g AppleLanguages 2>/dev/null | sed -n '2{s/[", ]//g;p;}')" || locale=""
+        case "$locale" in [zZ][hH]*) RELEASE_LANG="zh" ;; esac
+      fi
+      ;;
+  esac
+  return 0
+}
+release_detect_lang
+
+# release_say <Chinese> <English>: prints the one that matches the run's language.
+release_say() {
+  if [ "$RELEASE_LANG" = "zh" ]; then
+    printf '%s\n' "$1"
+  else
+    printf '%s\n' "$2"
+  fi
+}
+
 release_fail() {
-  printf '\nError: %s\n' "$2" >&2
-  printf '错误：%s\n' "$1" >&2
+  if [ "$RELEASE_LANG" = "zh" ]; then
+    printf '\n错误：%s\n' "$1" >&2
+  else
+    printf '\nError: %s\n' "$2" >&2
+  fi
   exit 1
+}
+
+# release_set_lang <en|zh>: the --lang option. Exported so that a second stage and
+# uninstall.mjs use the same language.
+release_set_lang() {
+  case "$1" in
+    [zZ][hH]) RELEASE_LANG="zh" ;;
+    [eE][nN]) RELEASE_LANG="en" ;;
+    *) release_fail "--lang 只接受 en 或 zh：$1" "--lang accepts en or zh: $1" ;;
+  esac
+  export DSH_BROWSER_LANG="$RELEASE_LANG"
 }
 
 release_check_base() {
@@ -271,8 +327,7 @@ release_fetch() {
     release_verify "$directory" "$name"
   done
   rm -f -- "$directory/.release.json" "$directory/.release-assets"
-  printf 'Verified: %d file(s) of %s match SHA256SUMS.\n' "$#" "$RELEASE_TAG"
-  printf '   已校验：%s 的 %d 个文件与 SHA256SUMS 一致。\n' "$RELEASE_TAG" "$#"
+  release_say "已校验：$RELEASE_TAG 的 $# 个文件与 SHA256SUMS 一致。" "Verified: $# file(s) of $RELEASE_TAG match SHA256SUMS."
 }
 # <<< release-fetch
 
@@ -290,6 +345,16 @@ main() {
         wanted="${1#--release=}"
         shift
         ;;
+      # Not forwarded: release_set_lang exports DSH_BROWSER_LANG, which uninstall.mjs reads.
+      --lang)
+        [ "$#" -ge 2 ] || release_fail "--lang 需要一个值。" "--lang needs a value."
+        release_set_lang "$2"
+        shift 2
+        ;;
+      --lang=*)
+        release_set_lang "${1#--lang=}"
+        shift
+        ;;
       *)
         forwarded+=("$1")
         shift
@@ -302,7 +367,7 @@ main() {
   esac
 
   if ! command -v node >/dev/null; then
-    printf '%s\n' 'Node.js 24.9.0 or newer is required. / 需要 Node.js 24.9.0 或更新版本。' >&2
+    release_say "需要 Node.js 24.9.0 或更新版本。" "Node.js 24.9.0 or newer is required." >&2
     return 1
   fi
   if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then

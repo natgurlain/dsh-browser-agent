@@ -158,6 +158,7 @@ Installer options:
 | | `DSH_BROWSER_GITHUB_TOKEN` | Token for a private repository. It is sent to `api.github.com` only and never printed. Without it the installer falls back to an authenticated `gh`. |
 | | `DSH_BROWSER_NO_LAUNCH=1` | Do not open the browser or touch the clipboard. |
 | | `DSH_DESKTOP_APP=<path>` or `none` | Where the DeepSeek Harness desktop app is, or `none` to leave it alone (`install.sh` and the uninstaller). |
+| `--lang en` or `--lang zh` | `DSH_BROWSER_LANG` | Language of the installer and uninstaller output. One language is printed per run: English by default, Chinese when the system locale is Chinese. |
 
 To install from a source checkout instead (nothing is downloaded; this is also the way to install while the repository is private):
 

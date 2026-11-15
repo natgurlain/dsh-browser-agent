@@ -13,7 +13,10 @@ Where the files come from (same rules as install.sh):
                                             (default: the latest) and verifies it against its SHA256SUMS
                                             before unpacking or running any of it
   install.ps1 --unverified-branch <name>    development only: a branch archive, with no checksum at all
-DSH_BROWSER_VERSION and DSH_BROWSER_UNVERIFIED_BRANCH are the environment forms of the two options.
+  install.ps1 --lang en|zh                  language of the output (every form above takes it)
+DSH_BROWSER_VERSION and DSH_BROWSER_UNVERIFIED_BRANCH are the environment forms of the two download
+options, DSH_BROWSER_LANG that of --lang. Without either, the output is Chinese when the Windows
+display language is Chinese and English otherwise; one language is printed per run.
 DSH_BROWSER_GITHUB_TOKEN (or an authenticated gh) is needed while the repository is private.
 DSH_BROWSER_NO_LAUNCH=1 keeps the installer from opening Chrome or touching the clipboard.
 
@@ -28,8 +31,8 @@ $ErrorActionPreference = 'Stop'
 # Invoke-WebRequest is an order of magnitude slower in Windows PowerShell while it draws a progress bar.
 $ProgressPreference = 'SilentlyContinue'
 
-# Windows PowerShell picks the console codepage, which turns the Chinese half of every
-# message into question marks on a non-Chinese install.
+# Windows PowerShell picks the console codepage, which can turn Chinese text (a Chinese run,
+# or a path with Chinese characters) into question marks.
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
 
 $DshHomeDir = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
@@ -51,7 +54,7 @@ $InstallArguments = @($args)
 # resolves the release (the latest one when -Tag is empty), downloads SHA256SUMS and the
 # named assets into <dir>, checks every asset's SHA-256 against SHA256SUMS and returns the
 # resolved tag. Any failure (download error, missing SHA256SUMS, missing or duplicated line,
-# digest mismatch) throws after recording a bilingual message in $script:ReleaseFailure.
+# digest mismatch) throws after recording its message (Chinese, English) in $script:ReleaseFailure.
 # Callers must not read, unpack or run anything in <dir> before it returns. "{tag}" in an
 # asset name is replaced by the resolved tag.
 #
@@ -64,10 +67,38 @@ $ReleaseApiUrl = if ($env:DSH_BROWSER_GITHUB_API_URL) { $env:DSH_BROWSER_GITHUB_
 $ReleaseTagPattern = '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
 $script:ReleaseFailure = $null
 
+# One language per run. DSH_BROWSER_LANG=en|zh decides; otherwise Chinese when the Windows
+# display language is Chinese, and English for everything else. Every message is written as
+# a pair, Chinese first and English second, and exactly one of the two is printed.
+$ReleaseLang = 'en'
+$ReleaseLangWanted = ([string]$env:DSH_BROWSER_LANG).ToLowerInvariant()
+if ($ReleaseLangWanted.StartsWith('zh')) {
+  $ReleaseLang = 'zh'
+} elseif (-not $ReleaseLangWanted.StartsWith('en')) {
+  try { if ((Get-UICulture).Name -like 'zh*') { $ReleaseLang = 'zh' } } catch { }
+}
+
+function Get-ReleaseText {
+  <# The Chinese or the English text, whichever matches the run's language. #>
+  param([string]$Zh, [string]$En)
+  if ($ReleaseLang -eq 'zh') { return $Zh }
+  return $En
+}
+
+function Set-ReleaseLang {
+  <# The --lang option: $true when the value is en or zh. Child processes inherit the choice. #>
+  param([string]$Value)
+  $wanted = $Value.ToLowerInvariant()
+  if ($wanted -ne 'en' -and $wanted -ne 'zh') { return $false }
+  $script:ReleaseLang = $wanted
+  $env:DSH_BROWSER_LANG = $wanted
+  return $true
+}
+
 function Stop-Release {
   param([string]$Zh, [string]$En)
   $script:ReleaseFailure = @($Zh, $En)
-  throw "dsh-browser release: $En"
+  throw "dsh-browser release: $(Get-ReleaseText $Zh $En)"
 }
 
 function Assert-ReleaseBase {
@@ -273,32 +304,29 @@ function Get-VerifiedRelease {
     }
   }
 
-  Write-Host ("Verified: {0} file(s) of {1} match SHA256SUMS." -f $Assets.Count, $Tag)
-  Write-Host ("   已校验：{0} 的 {1} 个文件与 SHA256SUMS 一致。" -f $Tag, $Assets.Count)
+  Write-Host (Get-ReleaseText ("已校验：{0} 的 {1} 个文件与 SHA256SUMS 一致。" -f $Tag, $Assets.Count) `
+      ("Verified: {0} file(s) of {1} match SHA256SUMS." -f $Assets.Count, $Tag))
   return $Tag
 }
 # <<< release-fetch
 
-# Messages are bilingual: English first, Chinese on the indented line below.
-# Callers pass the Chinese text first and the English text second.
+# Every message exists in Chinese and in English, and a run prints one of them (see
+# $ReleaseLang above). Callers pass the Chinese text first and the English text second.
 function Write-Step {
   param([int]$Number, [string]$Zh, [string]$En)
   Write-Host ''
-  Write-Host ("[{0}/4] {1}" -f $Number, $En)
-  Write-Host ("      {0}" -f $Zh)
+  Write-Host ("[{0}/4] {1}" -f $Number, (Get-ReleaseText $Zh $En))
 }
 
 function Write-Pair {
   param([string]$Zh, [string]$En)
-  Write-Host $En
-  Write-Host ("   {0}" -f $Zh)
+  Write-Host (Get-ReleaseText $Zh $En)
 }
 
 function Stop-Install {
   param([string]$Zh, [string]$En)
   Write-Host ''
-  [Console]::Error.WriteLine("Error: $En")
-  [Console]::Error.WriteLine("错误：$Zh")
+  [Console]::Error.WriteLine((Get-ReleaseText "错误：$Zh" "Error: $En"))
   exit 1
 }
 
@@ -615,6 +643,7 @@ function Install-RemoteWorkspace {
 
   $failure = $null
   $sourceLabel = ''
+  $sourceLabelZh = ''
   try {
     if ($Branch) {
       if ($Branch -notmatch '^[A-Za-z0-9._/-]+$' -or $Branch.Contains('..')) {
@@ -633,6 +662,7 @@ function Install-RemoteWorkspace {
         Stop-Release "下载 $Branch 分支失败。现有安装未被修改。" "Downloading branch $Branch failed. The existing installation was not changed."
       }
       $sourceLabel = "branch $Branch (unverified)"
+      $sourceLabelZh = "${Branch} 分支，未校验"
     } else {
       $shown = if ($Wanted) { $Wanted } else { 'latest' }
       Write-Pair "正在从 $ReleaseRepository 下载发布版本 $shown 并校验……" "Downloading release $shown of $ReleaseRepository and verifying it…"
@@ -641,6 +671,7 @@ function Install-RemoteWorkspace {
           Select-Object -Last 1)
       $archive = Join-Path $download "dsh-browser-source-$tag.zip"
       $sourceLabel = "release $tag (SHA256SUMS verified)"
+      $sourceLabelZh = "发布版本 ${tag}，已通过 SHA256SUMS 校验"
     }
 
     Expand-Archive -LiteralPath $archive -DestinationPath $expanded -Force
@@ -669,7 +700,7 @@ function Install-RemoteWorkspace {
   }
   if ($failure) { Stop-Install $failure[0] $failure[1] }
 
-  Write-Pair "安装文件已同步到 $ManagedRoot（$sourceLabel）。" "Installation files are ready in $ManagedRoot ($sourceLabel)."
+  Write-Pair "安装文件已同步到 ${ManagedRoot}（${sourceLabelZh}）。" "Installation files are ready in $ManagedRoot ($sourceLabel)."
 
   # Hand over to the version that was just downloaded, the way the Unix installer re-execs.
   # -ExecutionPolicy Bypass keeps a restricted machine from rejecting the freshly written file.
@@ -685,8 +716,25 @@ function Install-RemoteWorkspace {
 }
 
 function Write-Usage {
+  if ($ReleaseLang -eq 'zh') {
+    Write-Host @'
+用法：install.ps1 [--release latest|vX.Y.Z] [--unverified-branch <name>] [--lang en|zh]
+
+  （不带选项，在 checkout 中）     安装当前 checkout，不下载任何文件
+  （不带选项，单独运行）           等同于 --release latest
+  --release latest|vX.Y.Z          下载该发布版本，按其 SHA256SUMS 校验每个文件后再安装
+                                   （环境变量：DSH_BROWSER_VERSION）
+  --unverified-branch <name>       仅用于开发：安装分支归档，分支归档没有校验值
+                                   （环境变量：DSH_BROWSER_UNVERIFIED_BRANCH）
+  --lang en|zh                     输出语言（环境变量：DSH_BROWSER_LANG）；默认在 Windows
+                                   显示语言为中文时为中文，其他情况为英文
+
+私有仓库：设置 DSH_BROWSER_GITHUB_TOKEN，或先用 gh 登录，或在 checkout 中安装。
+'@
+    return
+  }
   Write-Host @'
-Usage: install.ps1 [--release latest|vX.Y.Z] [--unverified-branch <name>]
+Usage: install.ps1 [--release latest|vX.Y.Z] [--unverified-branch <name>] [--lang en|zh]
 
   (no option, inside a checkout)   install this checkout; nothing is downloaded
   (no option, standalone)          same as --release latest
@@ -694,6 +742,9 @@ Usage: install.ps1 [--release latest|vX.Y.Z] [--unverified-branch <name>]
                                    its SHA256SUMS, then install it (env: DSH_BROWSER_VERSION)
   --unverified-branch <name>       development only: install a branch archive, which has no
                                    checksum (env: DSH_BROWSER_UNVERIFIED_BRANCH)
+  --lang en|zh                     language of the output (env: DSH_BROWSER_LANG); default:
+                                   Chinese when the Windows display language is Chinese,
+                                   English otherwise
 
 Private repository: set DSH_BROWSER_GITHUB_TOKEN, or log in with gh, or install from a checkout.
 '@
@@ -707,13 +758,21 @@ $RequestedRelease = [string]$env:DSH_BROWSER_VERSION
 $RequestedBranch = [string]$env:DSH_BROWSER_UNVERIFIED_BRANCH
 for ($index = 0; $index -lt $InstallArguments.Count; $index++) {
   $argument = [string]$InstallArguments[$index]
-  if ($argument -eq '--release' -or $argument -eq '--unverified-branch') {
+  if ($argument -eq '--release' -or $argument -eq '--unverified-branch' -or $argument -eq '--lang') {
     if ($index + 1 -ge $InstallArguments.Count) { Stop-Install "$argument 需要一个值。" "$argument needs a value." }
     $index++
+    $value = [string]$InstallArguments[$index]
     if ($argument -eq '--release') {
-      $RequestedRelease = [string]$InstallArguments[$index]
-    } else {
-      $RequestedBranch = [string]$InstallArguments[$index]
+      $RequestedRelease = $value
+    } elseif ($argument -eq '--unverified-branch') {
+      $RequestedBranch = $value
+    } elseif (-not (Set-ReleaseLang $value)) {
+      Stop-Install "--lang 只接受 en 或 zh：$value" "--lang accepts en or zh: $value"
+    }
+  } elseif ($argument.StartsWith('--lang=')) {
+    $value = $argument.Substring('--lang='.Length)
+    if (-not (Set-ReleaseLang $value)) {
+      Stop-Install "--lang 只接受 en 或 zh：$value" "--lang accepts en or zh: $value"
     }
   } elseif ($argument.StartsWith('--release=')) {
     $RequestedRelease = $argument.Substring('--release='.Length)
@@ -875,12 +934,12 @@ if ($IsUpdate) {
     Write-Pair "请在 Chrome 扩展管理页完成以下操作：" "Complete these steps on the Chrome Extensions page:"
   }
   Write-Host ''
-  Write-Pair '开启右上角的“开发者模式”' '1. Enable “Developer mode” in the upper-right corner'
-  Write-Pair '点击“加载已解压的扩展程序”' '2. Click “Load unpacked”'
+  Write-Pair '1. 开启右上角的“开发者模式”' '1. Enable “Developer mode” in the upper-right corner'
+  Write-Pair '2. 点击“加载已解压的扩展程序”' '2. Click “Load unpacked”'
   if ($ClipboardReady) {
-    Write-Pair "在路径栏粘贴以下路径（已复制到剪贴板）：" "3. Paste this path into the folder picker's address bar (already copied):"
+    Write-Pair "3. 在路径栏粘贴以下路径（已复制到剪贴板）：" "3. Paste this path into the folder picker's address bar (already copied):"
   } else {
-    Write-Pair "在路径栏复制并粘贴以下路径：" "3. Copy and paste this path into the folder picker's address bar:"
+    Write-Pair "3. 在路径栏复制并粘贴以下路径：" "3. Copy and paste this path into the folder picker's address bar:"
   }
   Write-Host ("   {0}" -f $DistDir)
 }
@@ -889,17 +948,16 @@ if ($IsUpdate) {
 # not look for the DeepSeek Harness desktop app, its bundled CLI, Node or pnpm.
 Write-Host ''
 Write-Pair "DSH 注册结果：" "DSH targets:"
-Write-Pair "web profile：已注册" "• web profile: registered"
-Write-Pair "DeepSeek Harness 桌面应用：已跳过，Windows 安装脚本暂不注册桌面应用。" "• DeepSeek Harness desktop app: skipped, the Windows installer does not register the desktop app yet."
+Write-Pair "• web profile：已注册" "• web profile: registered"
+Write-Pair "• DeepSeek Harness 桌面应用：已跳过，Windows 安装脚本暂不注册桌面应用。" "• DeepSeek Harness desktop app: skipped, the Windows installer does not register the desktop app yet."
 
 Write-Host ''
 Write-Pair "加载完成后：" "After loading the extension:"
-Write-Pair "点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "• Click the DeepSeek whale icon in the toolbar to open the side panel"
-Write-Pair "扩展会自动发现本机 dsh，无需填写地址或 token（已放入扩展目录）" "• The extension discovers local dsh automatically; no address or token is required (it was placed in the extension directory)"
+Write-Pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "• Click the DeepSeek whale icon in the toolbar to open the side panel"
+Write-Pair "• 扩展会自动发现本机 dsh，无需填写地址或 token（已放入扩展目录）" "• The extension discovers local dsh automatically; no address or token is required (it was placed in the extension directory)"
 $QuotedRoot = "'" + $Root.Replace("'", "''") + "'"
-Write-Host ("• Start the pinned version: cd {0}; pnpm start" -f $QuotedRoot)
-Write-Host ("   启动固定版本：cd {0}; pnpm start" -f $QuotedRoot)
-Write-Pair "或直接启动固定版本：npx @deepseek-ai/dsh@0.2.2-rc.2 web" "• Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.2-rc.2 web"
-Write-Pair "注意：这样启动的是独立的 web profile，不包含 DeepSeek Harness 桌面应用里配置的模型。" "  Note: this starts the separate web profile, which has none of the models configured in the DeepSeek Harness desktop app."
+Write-Pair ("• 启动固定版本：cd {0}; pnpm start" -f $QuotedRoot) ("• Start the pinned version: cd {0}; pnpm start" -f $QuotedRoot)
+Write-Pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.2.2-rc.2 web" "• Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.2-rc.2 web"
+Write-Pair "  注意：这样启动的是独立的 web profile，不包含 DeepSeek Harness 桌面应用里配置的模型。" "  Note: this starts the separate web profile, which has none of the models configured in the DeepSeek Harness desktop app."
 Write-Host ''
 Write-Pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/natgurlain/dsh-browser-agent" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/natgurlain/dsh-browser-agent"

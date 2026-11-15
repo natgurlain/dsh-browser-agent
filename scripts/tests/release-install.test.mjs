@@ -43,6 +43,8 @@ function sandbox(t) {
     // The version-manager variables would let the installer find this machine's own Node installs.
     if (/^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|DSH_BROWSER_(?!NO_LAUNCH).*|DSH_INSTALL_BROWSER|ASDF_DATA_DIR|NVM_DIR|FNM_DIR|VOLTA_HOME|MISE_DATA_DIR|XDG_DATA_HOME)$/.test(name)) delete env[name]
   }
+  // One language per run: English here, whatever the locale of the machine running the tests.
+  env.DSH_BROWSER_LANG = 'en'
   return { base, home, dshHome, temporary, env, managed: join(dshHome, 'dsh-browser'), ran: join(base, 'payload-ran') }
 }
 
@@ -692,6 +694,220 @@ test('uninstall.sh: the downloaded uninstall.mjs runs only after it verified; --
   assert.match(tampered.stderr, /SHA-256 mismatch for uninstall\.mjs/)
   assert.equal(ranLines(box).length, 2, 'the tampered uninstaller did not run')
   assert.deepEqual(readdirSync(box.temporary), [])
+})
+
+// ---- One language per run ------------------------------------------------------------------
+// Han characters, CJK punctuation and the full-width forms the Chinese messages use.
+const CJK = /[⺀-鿿豈-﫿︰-﹏＀-￯]/u
+// Sentences only the English messages contain.
+const ENGLISH_ONLY = ['Installing from this local checkout', 'Build the browser bridge', 'Register with DSH',
+  'Registered with the web profile', 'Registering with the DeepSeek Harness desktop app', 'Build the browser extension',
+  'Prepare the extension and open', 'Complete these steps', 'Enable “Developer mode”', 'Click “Load unpacked”',
+  'DSH targets:', 'web profile: registered', 'desktop app: registered', 'After loading the extension',
+  'Open DeepSeek Harness', 'Click the DeepSeek whale icon', 'discovers local dsh automatically',
+  'Alternative without the desktop app', 'Star on GitHub']
+const ENGLISH_FAILURES = ['Error:', 'WARNING', 'Full output:', 'exit code', 'Verified:', 'is required', 'was not found']
+// The locale decides only when DSH_BROWSER_LANG is not set.
+const LOCALE = { DSH_BROWSER_LANG: '', LC_ALL: '', LC_MESSAGES: '', LANG: '' }
+// Fails the first build step with exit code 3.
+const FAILING_PNPM = '[ "$1" = --version ] && exit 0\necho "ERR_PNPM_OUTDATED_LOCKFILE" >&2\nexit 3'
+
+/** The fullest run there is: desktop app present, every step succeeds. */
+function fullInstall(t, env = {}) {
+  const box = sandbox(t)
+  const desktop = desktopApp(box)
+  return stubCheckout(box, { pnpm: WORKING_PNPM }, { complete: true, env: { ...desktop.env, ...env } })
+}
+
+function assertNoEnglish(output) {
+  for (const sentence of [...ENGLISH_ONLY, ...ENGLISH_FAILURES]) {
+    assert.equal(output.includes(sentence), false, `${sentence}\n${output}`)
+  }
+}
+
+test('language: an English run of the full install prints no Chinese at all', { skip }, async (t) => {
+  const result = await fullInstall(t)
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  const output = result.stdout + result.stderr
+  assert.doesNotMatch(output, CJK)
+  for (const sentence of ENGLISH_ONLY) assert.equal(output.includes(sentence), true, `${sentence}\n${output}`)
+  assert.match(result.stdout, /^1\. Enable “Developer mode”$/m)
+  assert.match(result.stdout, /^• web profile: registered$/m)
+  // Three spaces used to indent the second language; now only the extension path has them.
+  const indented = result.stdout.split('\n').filter(line => /^ {3}\S/.test(line))
+  assert.equal(indented.length, 1, result.stdout)
+  assert.match(indented[0], /^ {3}\/.*\/\.dsh\/browser-extension$/)
+})
+
+test('language: DSH_BROWSER_LANG=zh prints the same run in Chinese only', { skip }, async (t) => {
+  const english = await fullInstall(t)
+  const result = await fullInstall(t, { DSH_BROWSER_LANG: 'zh' })
+  assert.equal(result.status, 0, result.stdout + result.stderr)
+  assertNoEnglish(result.stdout + result.stderr)
+  const lines = result.stdout.split('\n')
+  for (const line of ['[1/4] 构建浏览器桥', '[2/4] 注册到 DSH（web profile 与桌面应用）', '已注册到 web profile。',
+    '[3/4] 构建浏览器扩展', '1. 开启“开发者模式”', '2. 点击“加载已解压的扩展程序”', 'DSH 注册结果：', '• web profile：已注册',
+    '加载完成后：', '• 打开 DeepSeek Harness（如果它正在运行，请重启）', '• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏']) {
+    assert.equal(lines.includes(line), true, `${line}\n${result.stdout}`)
+  }
+  assert.match(result.stdout, /^• DeepSeek Harness 桌面应用：已注册（.*DeepSeek Harness\.app）$/m)
+  // Every message is one line in both runs, with the same indent, bullet or number.
+  const shape = text => text.split('\n').map(line => /^(\s*(?:• |\d\. |\[\d\/4\] )?)/.exec(line)[1])
+  assert.deepEqual(shape(result.stdout), shape(english.stdout))
+  assert.doesNotMatch(result.stdout, /• •|\d\. \d\. /)
+})
+
+test('language: the locale selects it when DSH_BROWSER_LANG is not set, and the override wins', { skip }, async (t) => {
+  // A failing first step, so each run is short and shows the error path as well.
+  const firstStep = async (env) => {
+    const result = await stubCheckout(sandbox(t), { pnpm: FAILING_PNPM }, { env: { ...LOCALE, ...env } })
+    assert.equal(result.status, 3, result.stdout + result.stderr)
+    return result
+  }
+  for (const env of [{ LANG: 'zh_CN.UTF-8' }, { LANG: 'ZH_tw' }, { LC_MESSAGES: 'zh_CN.UTF-8', LANG: 'en_US.UTF-8' },
+    { LC_ALL: 'zh_HK.UTF-8', LC_MESSAGES: 'en_US.UTF-8', LANG: 'en_US.UTF-8' },
+    { DSH_BROWSER_LANG: 'zh', LANG: 'en_US.UTF-8' }, { DSH_BROWSER_LANG: 'ZH', LC_ALL: 'C' }]) {
+    const result = await firstStep(env)
+    assert.match(result.stdout, /^\[1\/4\] 构建浏览器桥$/m, JSON.stringify(env))
+    assert.match(result.stderr, /^完整输出：.*dsh-browser-install\.\w+$/m)
+    assert.match(result.stderr, /^错误：依赖安装失败（退出码 3）。$/m)
+    assertNoEnglish(result.stdout + result.stderr)
+  }
+  for (const env of [{ LANG: 'en_US.UTF-8' }, { LANG: 'fr_FR.UTF-8' }, { LC_ALL: 'en_GB.UTF-8', LANG: 'zh_CN.UTF-8' },
+    { LC_MESSAGES: 'de_DE.UTF-8', LANG: 'zh_CN.UTF-8' }, { DSH_BROWSER_LANG: 'en', LANG: 'zh_CN.UTF-8', LC_ALL: 'zh_CN.UTF-8' },
+    // On macOS an unset or C locale falls back to the system language list, which a test cannot stage.
+    ...(process.platform === 'darwin' ? [] : [{}, { LC_ALL: 'C', LANG: 'zh_CN.UTF-8' }, { LANG: 'POSIX' }])]) {
+    const result = await firstStep(env)
+    assert.match(result.stdout, /^\[1\/4\] Build the browser bridge$/m, JSON.stringify(env))
+    assert.match(result.stderr, /^Full output: .*dsh-browser-install\.\w+$/m)
+    assert.match(result.stderr, /^Error: Installing dependencies failed \(exit code 3\)\.$/m)
+    assert.doesNotMatch(result.stdout + result.stderr, CJK, JSON.stringify(env))
+  }
+})
+
+test('language: stops and warnings are in one language too', { skip }, async (t) => {
+  const oldNode = env => stubCheckout(sandbox(t), { node: OLD_NODE, pnpm: RECORDING, asdf: 'exit 0' }, { env })
+  const english = await oldNode({})
+  assert.equal(english.status, 1, english.stdout + english.stderr)
+  assert.doesNotMatch(english.stdout + english.stderr, CJK)
+  const chinese = await oldNode({ DSH_BROWSER_LANG: 'zh' })
+  assert.equal(chinese.status, 1, chinese.stdout + chinese.stderr)
+  assert.match(chinese.stderr, /^错误：需要 Node\.js 24\.9\.0 或更新版本；PATH 上的 node 是 18\.19\.0（.*\/bin\/node）。$/m)
+  assert.match(chinese.stderr, /^请用下面任一命令安装，然后重新运行本安装脚本：$/m)
+  assert.match(chinese.stderr, /asdf: {3}asdf plugin add nodejs/)
+  assertNoEnglish(chinese.stdout + chinese.stderr)
+
+  const desktopRun = (cli, env = {}) => {
+    const box = sandbox(t)
+    const desktop = desktopApp(box, { cli })
+    return stubCheckout(box, { pnpm: WORKING_PNPM }, { complete: true, env: { ...desktop.env, ...env } })
+  }
+  const failed = await desktopRun('fail', { DSH_BROWSER_LANG: 'zh' })
+  assert.equal(failed.status, 1, failed.stdout + failed.stderr)
+  assert.match(failed.stderr, /^警告：注册到 DeepSeek Harness 桌面应用失败。安装会继续完成其余步骤。$/m)
+  assert.match(failed.stderr, /^ {3}退出码：5$/m)
+  assert.match(failed.stdout, /^• DeepSeek Harness 桌面应用：未注册。警告：/m)
+  assertNoEnglish(failed.stdout + failed.stderr)
+  for (const cli of ['fail', 'reject']) {
+    const warned = await desktopRun(cli)
+    assert.match(warned.stderr, /^WARNING: /m)
+    assert.match(warned.stderr, /^ {3}exit code: [15]$/m)
+    assert.doesNotMatch(warned.stdout + warned.stderr, CJK)
+  }
+})
+
+test('language: --lang selects it, reaches the usage text, and accepts only en and zh', { skip }, async (t) => {
+  const box = sandbox(t)
+  const usage = (args, env = {}) => run('bash', [installer, ...args], { env: { ...box.env, ...env }, cwd: box.base })
+  const chinese = await usage(['--lang', 'zh', '--help'])
+  assert.equal(chinese.status, 0, chinese.stderr)
+  assert.match(chinese.stdout, /^用法：install\.sh /)
+  assert.doesNotMatch(chinese.stdout, /Usage|download that tagged release/)
+  for (const result of [await usage(['--help']), await usage(['--lang=en', '--help'], { DSH_BROWSER_LANG: 'zh' })]) {
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /^Usage: install\.sh .*\[--lang en\|zh\]/)
+    assert.doesNotMatch(result.stdout, CJK)
+  }
+  const unknown = await usage(['--lang', 'fr'])
+  assert.equal(unknown.status, 1)
+  assert.match(unknown.stderr, /^Error: --lang accepts en or zh: fr$/m)
+  assert.doesNotMatch(unknown.stdout + unknown.stderr, CJK)
+  const missing = await usage(['--lang'], { DSH_BROWSER_LANG: 'zh' })
+  assert.equal(missing.status, 1)
+  assert.match(missing.stderr, /^错误：--lang 需要一个值。$/m)
+})
+
+test('language: on macOS without a locale, the first system language decides, and failing to read it means English', { skip }, async (t) => {
+  // A stand-in for macOS: uname says Darwin and `defaults read -g AppleLanguages` prints the given list.
+  const usage = (defaults, env = {}) => {
+    const box = sandbox(t)
+    const bin = join(box.base, 'bin')
+    executable(join(bin, 'uname'), '#!/bin/sh\necho Darwin\n')
+    executable(join(bin, 'defaults'), `#!/bin/sh\n[ "$*" = "read -g AppleLanguages" ] || exit 64\n${defaults}\n`)
+    return run('bash', [installer, '--help'], {
+      env: { ...box.env, ...LOCALE, PATH: `${bin}${delimiter}${process.env.PATH}`, ...env }, cwd: box.base,
+    })
+  }
+  const list = (...tags) => `printf '(\\n${tags.map(tag => `    "${tag}"`).join(',\\n')}\\n)\\n'`
+  for (const [defaults, env] of [[list('zh-Hans-CN', 'en-CN')], [list('zh-Hant-TW')], [list('zh-Hans-CN'), { LC_ALL: 'C' }],
+    [list('zh-Hans-CN'), { LANG: 'C.UTF-8' }]]) {
+    const result = await usage(defaults, env)
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /^用法：install\.sh /, defaults)
+  }
+  for (const [defaults, env] of [[list('en-US', 'zh-Hans-US')], [list('ja-JP')], ['exit 1'], ['echo "(" ; exit 1'], ['exit 0'],
+    [list('zh-Hans-CN'), { LANG: 'en_US.UTF-8' }], [list('zh-Hans-CN'), { DSH_BROWSER_LANG: 'en' }]]) {
+    const result = await usage(defaults, env)
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /^Usage: install\.sh /, defaults)
+    assert.equal(result.stderr, '')
+  }
+})
+
+test('language: the release download of install.sh and uninstall.sh follows it', { skip }, async (t) => {
+  const box = sandbox(t)
+  const server = await serve(t, { releases: { 'v9.9.9': stubRelease(box.base, 'v9.9.9') }, latest: 'v9.9.9' })
+  const english = await pipedInstall(box, server)
+  assert.equal(english.status, 0, english.stdout + english.stderr)
+  assert.doesNotMatch(english.stdout + english.stderr, CJK)
+  const chinese = await pipedInstall(box, server, ['--lang', 'zh'])
+  assert.equal(chinese.status, 0, chinese.stdout + chinese.stderr)
+  assert.match(chinese.stdout, /^已校验：v9\.9\.9 的 1 个文件与 SHA256SUMS 一致。$/m)
+  assert.match(chinese.stdout, /^安装文件已同步到 .*dsh-browser（发布版本 v9\.9\.9，已通过 SHA256SUMS 校验）。$/m)
+  assertNoEnglish(chinese.stdout + chinese.stderr)
+  assert.doesNotMatch(chinese.stdout, /Downloading release|Installation files are ready/)
+  // The marker file is data, not a message: it reads the same in both languages.
+  assert.equal(readFileSync(join(box.managed, '.managed-by-install-sh'), 'utf8'), 'release v9.9.9 (SHA256SUMS verified)\n')
+
+  // uninstall.sh keeps --lang to itself; the uninstall.mjs it runs gets the choice from the environment.
+  const removedEnglish = await pipedUninstall(box, server, ['--dry-run'])
+  assert.equal(removedEnglish.status, 0, removedEnglish.stdout + removedEnglish.stderr)
+  assert.match(removedEnglish.stdout, /^Verified: 1 file\(s\) of v9\.9\.9 match SHA256SUMS\.$/m)
+  assert.doesNotMatch(removedEnglish.stdout + removedEnglish.stderr, CJK)
+  for (const args of [['--lang', 'zh', '--dry-run'], ['--dry-run', '--lang=zh']]) {
+    const removed = await pipedUninstall(box, server, args)
+    assert.equal(removed.status, 0, removed.stdout + removed.stderr)
+    assert.match(removed.stdout, /^已校验：v9\.9\.9 的 1 个文件与 SHA256SUMS 一致。$/m)
+    assertNoEnglish(removed.stdout + removed.stderr)
+  }
+  assert.deepEqual(ranLines(box).filter(line => line.startsWith('uninstall ')), Array(3).fill('uninstall v9.9.9 --dry-run'))
+  const unknown = await pipedUninstall(box, server, ['--lang', 'de'])
+  assert.equal(unknown.status, 1)
+  assert.match(unknown.stderr, /^Error: --lang accepts en or zh: de$/m)
+
+  const tamperedBox = sandbox(t)
+  const release = stubRelease(tamperedBox.base, 'v9.9.8')
+  appendFileSync(join(release, assetNames('v9.9.8').sourceTar), 'tampered')
+  const tampered = await serve(t, { releases: { 'v9.9.8': release }, latest: 'v9.9.8' })
+  const refusedEnglish = await pipedInstall(tamperedBox, tampered)
+  assert.equal(refusedEnglish.status, 1)
+  assert.match(refusedEnglish.stderr, /^Error: SHA-256 mismatch for /m)
+  assert.doesNotMatch(refusedEnglish.stdout + refusedEnglish.stderr, CJK)
+  const refusedChinese = await pipedInstall(tamperedBox, tampered, [], { DSH_BROWSER_LANG: 'zh' })
+  assert.equal(refusedChinese.status, 1)
+  assert.match(refusedChinese.stderr, /^错误：dsh-browser-source-v9\.9\.8\.tar\.gz 的 SHA-256 与 SHA256SUMS 不符/m)
+  assertNoEnglish(refusedChinese.stdout + refusedChinese.stderr)
+  assert.deepEqual(ranLines(tamperedBox), [])
 })
 
 function sha256(path) {
