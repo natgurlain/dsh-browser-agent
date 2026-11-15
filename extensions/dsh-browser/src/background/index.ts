@@ -2323,7 +2323,9 @@ function routeToolCall(call: ToolCall): void {
   const sharePageContent = unrestrictedAccess ? 'auto' : settings.sharePageContent
   const policy = auditedPolicy(activeCall, policyRuntime.hook(call.id, call.sessionId, unrestrictedAccess))
   // browser_run: an approved program stands in for this step's ordinary card only (run-program.ts).
-  const programCover = programGrants.claim(call)
+  // The step must run on the tab the program was approved on.
+  const programTarget = tabAffinity.resolveTarget(call.sessionId)
+  const programCover = programGrants.claim(call, programTarget.kind === 'target' ? programTarget.tab.tabId : undefined)
   // A fleet worker's cards show under its parent's session; its allowlist is enforced here too (fleet.ts).
   const approvalSession = fleets.approvalSession(call.sessionId)
   const fleetRefusal = fleets.refusal(call)

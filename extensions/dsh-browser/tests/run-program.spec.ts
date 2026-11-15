@@ -112,6 +112,43 @@ describe('ProgramGrants', () => {
   })
 })
 
+describe('program grant pinning (review finding 9)', () => {
+  const program = [
+    { tool: 'browser_click', args: { index: 3 } },
+    { tool: 'browser_navigate', args: { url: 'https://shop.example/cart' } },
+    { tool: 'browser_click', args: { index: 4 } },
+    { tool: 'browser_click', args: { selector: '#pay' } },
+  ]
+  const claim = (grants: ProgramGrants, step: number, tabId: number | undefined) =>
+    grants.claim({ name: program[step]!.tool, args: program[step]!.args, sessionId: 's1', program: { id: 'p', step } }, tabId)
+
+  it('a step on another tab revokes the grant', () => {
+    const grants = new ProgramGrants()
+    grants.approve('p', 's1', program, ['https://shop.example'], 7)
+    expect(claim(grants, 0, 8)).toBeUndefined()
+    expect(claim(grants, 0, 7)).toBeUndefined()
+    expect(grants.size).toBe(0)
+  })
+
+  it('after a navigation, index-targeted steps ask; selector steps ride the card', () => {
+    const grants = new ProgramGrants()
+    grants.approve('p', 's1', program, ['https://shop.example'], 7)
+    expect(claim(grants, 0, 7)!.covers(action(['https://shop.example']))).toBe(true)
+    expect(claim(grants, 1, 7)!.covers(action(['https://shop.example']))).toBe(true)
+    expect(claim(grants, 2, 7)!.covers(action(['https://shop.example']))).toBe(false)
+    expect(claim(grants, 3, 7)!.covers(action(['https://shop.example']))).toBe(true)
+  })
+
+  it('approveProgram pins the grant to the approved tab', async () => {
+    const grants = new ProgramGrants()
+    await approveProgram({ id: 'p', name: 'browser_run', args: { steps: program }, sessionId: 's1' }, {
+      grants, resolveTab: async () => ({ id: 7, url: frames[0]!.url, windowId: 1 }), listFrames: async () => frames,
+      authorize: async () => 'approved' as const, signal: new AbortController().signal,
+    })
+    expect(claim(grants, 0, 9)).toBeUndefined()
+  })
+})
+
 describe('approveProgram', () => {
   const deps = (overrides: Partial<Parameters<typeof approveProgram>[1]> = {}) => ({
     grants: new ProgramGrants(),

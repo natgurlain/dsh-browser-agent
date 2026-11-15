@@ -15,7 +15,11 @@
  * - the card is an ordinary action card: not forced by site policy, taint, or
  *   strict mode, not per-call-only, not developer tools, no risky URL, no
  *   browser permission request;
- * - every origin on the card was named on the program card.
+ * - every origin on the card was named on the program card;
+ * - the step runs on the tab the program was approved on;
+ * - once the program has navigated, the step targets its element by selector
+ *   (or locator), never by a raw snapshot index from a page the card never
+ *   showed.
  *
  * Anything else asks as usual. Reads follow the normal read rules. A step that
  * does not match its program revokes the program's grant.
@@ -142,8 +146,15 @@ export function programApprovalPrompt(steps: ProgramStepInput[], frames: TabFram
   }
 }
 
+/** Steps after which the page the program card showed is gone. */
+const NAVIGATION_STEP_TOOLS: ReadonlySet<string> = new Set(['browser_navigate', 'browser_back', 'browser_forward', 'browser_reload'])
+
 interface ProgramGrant {
   sessionId: string | undefined
+  /** The tab the program was approved on; steps elsewhere revoke the grant. */
+  tabId?: number
+  /** A navigation step already ran: later index-targeted steps ask. */
+  navigated: boolean
   digests: string[]
   origins: Set<string>
   next: number
@@ -175,10 +186,12 @@ export class ProgramGrants {
   }
 
   /** Record an approved program under its approval call's id. */
-  approve(id: string, sessionId: string | undefined, steps: ProgramStepInput[], origins: string[]): void {
+  approve(id: string, sessionId: string | undefined, steps: ProgramStepInput[], origins: string[], tabId?: number): void {
     this.sweep()
     this.grants.set(id, {
       sessionId,
+      ...(tabId === undefined ? {} : { tabId }),
+      navigated: false,
       digests: steps.map((step) => stepDigest(step.tool, step.args)),
       origins: new Set(origins),
       next: 0,
@@ -190,13 +203,14 @@ export class ProgramGrants {
    * Claim the program step a call says it is. Undefined (and the grant
    * revoked) when it is not the next approved step of that session's program.
    */
-  claim(call: Pick<ToolCall, 'name' | 'args' | 'sessionId' | 'program'>): ProgramCover | undefined {
+  claim(call: Pick<ToolCall, 'name' | 'args' | 'sessionId' | 'program'>, tabId?: number): ProgramCover | undefined {
     const ref = call.program
     if (ref === undefined) return undefined
     const grant = this.grants.get(ref.id)
     if (grant === undefined) return undefined
     const valid = grant.expiresAt > this.now()
       && grant.sessionId === call.sessionId
+      && (grant.tabId === undefined || grant.tabId === tabId)
       && ref.step === grant.next
       && grant.digests[ref.step] === stepDigest(call.name, call.args)
     if (!valid) {
@@ -206,8 +220,11 @@ export class ProgramGrants {
     grant.next += 1
     if (grant.next >= grant.digests.length) this.grants.delete(ref.id)
     const origins = grant.origins
+    // An index names an element of a snapshot; after a navigation that is a page the card never showed.
+    const indexAfterNavigation = grant.navigated && typeof call.args.index === 'number' && typeof call.args.selector !== 'string'
+    if (NAVIGATION_STEP_TOOLS.has(call.name)) grant.navigated = true
     return {
-      covers: (prompt) => ordinaryActionCard(prompt) && prompt.origins.length > 0 && prompt.origins.every((origin) => origins.has(origin)),
+      covers: (prompt) => !indexAfterNavigation && ordinaryActionCard(prompt) && prompt.origins.length > 0 && prompt.origins.every((origin) => origins.has(origin)),
     }
   }
 
@@ -299,6 +316,6 @@ export async function approveProgram(call: ToolCall, deps: ProgramApprovalDeps):
   if (refreshed.binding !== prompt.binding) {
     return { ok: false, error: { code: 'action-failed', message: 'The page changed while the program card was open. Call browser_snapshot again before retrying.' } }
   }
-  deps.grants.approve(call.id, call.sessionId, steps, prompt.origins)
+  deps.grants.approve(call.id, call.sessionId, steps, prompt.origins, tab.id)
   return { ok: true, result: { text: `Program of ${String(steps.length)} steps approved.`, programId: call.id } }
 }
