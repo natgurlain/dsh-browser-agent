@@ -152,7 +152,7 @@ const nodeHmac: BridgeHmac = (key, message) => createHmac('sha256', key).update(
 /** Largest message an unauthenticated socket may send (a `hello` is < 1 KiB). */
 export const PRE_AUTH_MAX_PAYLOAD = 64 * 1024
 
-/** Sockets allowed to sit in the handshake at once; the oldest is evicted as busy. */
+/** Sockets allowed to sit in the handshake at once; beyond that the oldest is terminated. */
 export const MAX_PENDING_SOCKETS = 16
 
 /** Authenticated connections kept at once; the least recently active is evicted beyond it. */

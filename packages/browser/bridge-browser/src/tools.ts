@@ -86,15 +86,6 @@ const TRUSTED_PARAMETER = {
   description: 'true forces real browser input (Chrome only, attaches the debugger); false forces the synthetic path; omit to let the browser choose.',
 }
 
-/** Dialog, pointer, download, and PDF tools; grouped so registries stay easy to merge. */
-export const RELIABILITY_TOOL_NAMES = [
-  'browser_dialog',
-  'browser_hover',
-  'browser_drag',
-  'browser_downloads',
-  'browser_pdf_text',
-] as const
-
 /** The keys the extension accepts as wire action names (tool name == action name). */
 export const BROWSER_TOOL_NAMES = [
   'browser_snapshot',
@@ -118,7 +109,11 @@ export const BROWSER_TOOL_NAMES = [
   'browser_select',
   'browser_extract',
   // Reliability tools (dialogs, pointer, downloads, PDF text).
-  ...RELIABILITY_TOOL_NAMES,
+  'browser_dialog',
+  'browser_hover',
+  'browser_drag',
+  'browser_downloads',
+  'browser_pdf_text',
 ] as const
 
 /**

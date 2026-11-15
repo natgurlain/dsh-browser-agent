@@ -518,13 +518,6 @@ export function describeDriverRequest(request: DriverRequest): string {
   ].join('\n')
 }
 
-/** Export file of a set of drivers. */
-export interface SiteDriverExport {
-  format: 'dsh-site-drivers/v1'
-  exportedAt: string
-  drivers: SiteDriver[]
-}
-
 /** Parse an import file: every driver re-validated (origin binding included). */
 export function parseSiteDriverImport(value: unknown): SiteDriver[] {
   if (!isRecord(value) || value.format !== 'dsh-site-drivers/v1' || !Array.isArray(value.drivers)) {

@@ -308,7 +308,7 @@ describe('tool routing', () => {
     expect((await b.rpc(BRIDGE_AUDIT_RECORD_METHOD, { callId: frame.id, decision: 'allowed' })).ok).toBe(true)
     expect(audit.annotated).toHaveBeenCalledExactlyOnceWith(frame.id, { decision: 'allowed' })
     await a.rpc(BRIDGE_AUDIT_RECORD_METHOD, { event: 'kill-switch' })
-    expect(audit.killSwitch).toHaveBeenCalledWith([], expect.stringMatching(/aaaa/u))
+    expect(audit.killSwitch).toHaveBeenCalledWith(expect.stringMatching(/aaaa/u))
     b.send({ t: 'tool.result', id: frame.id, ok: true, result: { text: 'ok' } })
     await expect(call).resolves.toEqual({ text: 'ok' })
   })

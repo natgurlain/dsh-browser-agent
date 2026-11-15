@@ -113,7 +113,6 @@ export interface McpHttpServerOptions {
 interface McpSession {
   id: string
   caller: McpCaller
-  protocolVersion: string
   lastSeen: number
   /** In-flight `tools/call` requests by JSON-RPC id, for `notifications/cancelled`. */
   inflight: Map<string, AbortController>
@@ -345,7 +344,6 @@ export class McpHttpServer {
     const session: McpSession = {
       id: randomUUID(),
       caller,
-      protocolVersion,
       lastSeen: this.now(),
       inflight: new Map(),
     }

@@ -112,17 +112,6 @@ const PLACEHOLDER = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/gu
 const FORBIDDEN_ARGS = new Set(['index', 'selector', 'frame'])
 const MAX_STRING = 4_000
 
-/**
- * Normalize a display name into a kebab-case workflow name.
- * @param raw - user-supplied name.
- * @returns a name matching the DSH skill-name grammar.
- */
-export function workflowSlug(raw: string): string {
-  const slug = raw.normalize('NFKD').toLowerCase().replace(/[^a-z0-9]+/gu, '-').replace(/^-+|-+$/gu, '').slice(0, 48).replace(/-+$/u, '')
-  if (slug === '') throw new WorkflowError('the workflow name needs at least one letter or digit.')
-  return slug
-}
-
 /** Skill name registered for a workflow. */
 export function workflowSkillName(name: string): string {
   return `browser-workflow-${name}`

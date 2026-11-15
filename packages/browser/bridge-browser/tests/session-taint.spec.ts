@@ -17,7 +17,7 @@ import type { BrowserHostApi } from '../src/host-api.ts'
 type Guard = (exec: { name: string; agent?: { id: unknown } }) => string | undefined
 type ResultListener = (exec: { name: string; agent?: { id: unknown } }, result: { isError: boolean }) => void
 
-function fakeContext(withGuard = true) {
+function fakeContext() {
   const guards: Guard[] = []
   const listeners = new Map<string, Array<(...args: unknown[]) => unknown>>()
   const ctx = {
@@ -25,9 +25,7 @@ function fakeContext(withGuard = true) {
       listeners.set(name, [...listeners.get(name) ?? [], listener])
       return () => { listeners.set(name, (listeners.get(name) ?? []).filter((entry) => entry !== listener)) }
     },
-    tools: withGuard
-      ? { guard: (guard: Guard) => { guards.push(guard); return () => { guards.splice(guards.indexOf(guard), 1) } } }
-      : {},
+    tools: { guard: (guard: Guard) => { guards.push(guard); return () => { guards.splice(guards.indexOf(guard), 1) } } },
   }
   const result: ResultListener = (exec, value) => { for (const listener of listeners.get('tools/result') ?? []) listener(exec, value) }
   const check = async (exec: { name: string; agent?: { id: unknown } }): Promise<string | undefined> => {
@@ -48,11 +46,11 @@ const agent = (id: string) => ({ id })
 
 describe('session taint (Host side)', () => {
   it('classifies results and allowed tools', () => {
-    expect(resultTaintsSession('browser_get_text', false)).toBe(true)
+    expect(resultTaintsSession('browser_get_text')).toBe(true)
     // Errors can quote the page (dialog text): they taint too.
-    expect(resultTaintsSession('browser_get_text', true)).toBe(true)
-    expect(resultTaintsSession('browser_follow_tab', false)).toBe(false)
-    expect(resultTaintsSession('bash', false)).toBe(false)
+    expect(resultTaintsSession('browser_get_text')).toBe(true)
+    expect(resultTaintsSession('browser_follow_tab')).toBe(false)
+    expect(resultTaintsSession('bash')).toBe(false)
     for (const name of ['read', 'grep', 'glob', 'browser_click', 'ask_user_question']) expect(toolAllowedWhileTainted(name)).toBe(true)
     for (const name of ['bash', 'pwsh', 'write', 'edit', 'apply_patch', 'str_replace_editor', 'web_fetch', 'web_search', 'agent', 'schedule_create', 'terminal_send', 'mcp__x__y']) {
       expect(toolAllowedWhileTainted(name)).toBe(false)
@@ -83,15 +81,6 @@ describe('session taint (Host side)', () => {
     expect(await check({ name: 'bash', agent: agent('s1') })).toBeUndefined()
     dispose()
     expect(guards).toHaveLength(0)
-  })
-
-  it('falls back to a pre-execute denial when the registry has no guard()', async () => {
-    const registry = new SessionTaintRegistry()
-    registry.mark('s1', 'browser_get_text')
-    const { ctx, check } = fakeContext(false)
-    installSessionTaint(ctx, registry)
-    expect(await check({ name: 'bash', agent: agent('s1') })).toBeDefined()
-    expect(await check({ name: 'todo_write', agent: agent('s1') })).toBeUndefined()
   })
 
   it('serves the clear RPC at the bridge, scoped to sessions the bridge may own', async () => {

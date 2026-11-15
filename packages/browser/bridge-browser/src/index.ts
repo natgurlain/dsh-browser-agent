@@ -39,13 +39,15 @@ import { registerPdfTool } from './pdf-tools.ts'
 import { registerBrowserDevTools } from './devtools-tools.ts'
 import { registerRunProgramTool } from './run-program.ts'
 import { FleetChildren, registerFanoutTool, type FleetSubagents } from './fanout.ts'
-import { BRIDGE_WATCH_FIRE_METHOD, fileWatchRecords, handleWatchFire, registerWatchTools, WakeLimiter, type WatchRecordStore } from './watchers.ts'
+import { fileWatchRecords, handleWatchFire, registerWatchTools, WakeLimiter, type WatchRecordStore } from './watchers.ts'
 import {
   BEACON_PORTS,
   BRIDGE_CONFIG_PATH,
   BRIDGE_PATH,
+  BRIDGE_WATCH_FIRE_METHOD,
   bridgeConfigPayload,
   DEFAULT_SNAPSHOT_MAX_CHARS,
+  DEVLOOP_CAPTURE_TOOL,
   DEVTOOLS_CAPS_VERSION,
   MIN_SNAPSHOT_MAX_CHARS,
   PINNED_CHROME_EXTENSION_ID,
@@ -70,7 +72,6 @@ import { createMcpToolHost, type ToolRegistryLike } from './mcp-tools.ts'
 import { registerBrowserDelegateTool, registerBrowserPreset, registerBrowserSkills } from './browser-agent.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { DEVLOOP_CAPTURE_TIMEOUT_MS, DevLoop, withDevLoopMethods } from './dev-loop.ts'
-import { DEVLOOP_CAPTURE_TOOL } from './protocol.ts'
 import { mountLearning, type LearningMount } from './learning/index.ts'
 import { errorMessage } from './host-api.ts'
 

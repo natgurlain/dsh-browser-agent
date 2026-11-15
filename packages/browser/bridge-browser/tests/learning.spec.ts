@@ -7,7 +7,6 @@ import {
   substitute,
   validateWorkflow,
   workflowSkillContent,
-  workflowSlug,
   WORKFLOW_FORMAT,
 } from '../src/learning/workflow.ts'
 import {
@@ -101,7 +100,6 @@ describe('workflow format', () => {
     expect(params).toEqual({ contact: 'Ada', pin: '0000' })
     expect(substitute({ text: 'Hi {{contact}}', list: ['{{ pin }}'] }, params)).toEqual({ text: 'Hi Ada', list: ['0000'] })
     expect(() => resolveParams(workflow, { pin: '1', extra: 'x' })).toThrow(/unknown parameter/)
-    expect(workflowSlug('My CRM: add contact!')).toBe('my-crm-add-contact')
   })
 })
 

@@ -52,7 +52,6 @@ import {
   BRIDGE_DEVLOOP_CANDIDATES_METHOD,
   BRIDGE_DEVLOOP_LINK_METHOD,
   BRIDGE_DEVLOOP_UNLINK_METHOD,
-  DEVLOOP_CAPTURE_TOOL,
   devLoopOrigin,
   isLoopbackDevOrigin,
   wrapUntrustedPageText,
@@ -308,6 +307,3 @@ export function withDevLoopMethods(api: BrowserHostApi, devLoop: DevLoop): Brows
     respond: (rpcId, result, signal) => api.respond(rpcId, result, signal),
   }
 }
-
-/** The reserved capture action name (re-exported for the plugin). */
-export { DEVLOOP_CAPTURE_TOOL }

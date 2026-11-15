@@ -289,12 +289,13 @@ describe('ToolCallAuditor', () => {
     const log = new AuditLog(temp())
     const auditor = new ToolCallAuditor(log)
     auditor.dispatched({ id: 'x', name: 'browser_click', args: {}, sessionId: 'a' })
-    auditor.killSwitch([])
+    auditor.killSwitch()
     auditor.settled('x', { ok: false, error: { code: 'bridge-closed', message: 'cancelled' } })
-    auditor.killSwitch(['b'])
+    // Nothing in flight: the kill switch lands in the unscoped log.
+    auditor.killSwitch()
     expect(((await log.read('a')).entries as Array<{ kind: string }>).map((entry) => entry.kind))
       .toEqual(['tool-call', 'kill-switch', 'result'])
-    expect(((await log.read('b')).entries as Array<{ kind: string }>).map((entry) => entry.kind)).toEqual(['kill-switch'])
+    expect(((await log.read(undefined)).entries as Array<{ kind: string }>).map((entry) => entry.kind)).toEqual(['kill-switch'])
   })
 
   it('reports write failures without throwing into the tool call', async () => {

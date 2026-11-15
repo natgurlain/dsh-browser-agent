@@ -36,10 +36,7 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 
-import { BRIDGE_WATCH_FIRE_METHOD, wrapUntrustedPageText } from './protocol.ts'
-
-/** Extension → bridge RPC: a watcher's condition was met. */
-export { BRIDGE_WATCH_FIRE_METHOD }
+import { wrapUntrustedPageText } from './protocol.ts'
 /** Longest a watcher may live. */
 export const MAX_WATCH_MINUTES = 24 * 60
 /** Matched page text kept in a wake message. */

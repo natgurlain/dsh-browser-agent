@@ -626,7 +626,8 @@ export interface BridgeAuditObserver {
   dispatched(call: DispatchedCall): void
   annotated(id: string, annotation: AuditAnnotation): void
   settled(id: string, outcome: { ok: true; result: unknown } | { ok: false; error: { code: string; message: string } }): void
-  killSwitch(sessionIds: readonly (string | undefined)[], connection?: string): void
+  /** The kill switch: one entry in every session with calls in flight on `connection` (any, when undefined), else in the unscoped log. */
+  killSwitch(connection?: string): void
 }
 
 interface TrackedCall {
@@ -739,8 +740,8 @@ export class ToolCallAuditor implements BridgeAuditObserver {
     })
   }
 
-  killSwitch(sessionIds: readonly (string | undefined)[], connection?: string): void {
-    const targets = new Set<string | undefined>(sessionIds)
+  killSwitch(connection?: string): void {
+    const targets = new Set<string | undefined>()
     for (const call of this.calls.values()) {
       if (connection === undefined || call.connection === undefined || call.connection === connection) targets.add(call.sessionId)
     }

@@ -44,7 +44,7 @@ export function handleAuditRpc(method: string, payload: unknown, context: AuditR
 function record(payload: unknown, context: AuditRpcContext): AuditRpcAnswer {
   if (!isRecord(payload)) return badRequest('payload must be an object')
   if (payload.event === 'kill-switch') {
-    context.audit?.killSwitch([], context.connection)
+    context.audit?.killSwitch(context.connection)
     context.onKillSwitch?.(context.connection)
     return { ok: true, result: { recorded: context.audit !== undefined } }
   }
