@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
-import { BEACON_PORTS, PINNED_CHROME_EXTENSION_ID } from '../src/protocol.ts'
+import { BEACON_PORTS, BRIDGE_PATH, PINNED_CHROME_EXTENSION_ID } from '../src/protocol.ts'
 import { apply as applyPlugin, Config, trustedForwardedPorts } from '../src/index.ts'
 
 /** A configured token that passes the strength rule. */
@@ -30,6 +30,9 @@ vi.mock('../src/discovery-beacon.ts', async importOriginal => ({
   ...(await importOriginal<typeof import('../src/discovery-beacon.ts')>()),
   startDiscoveryBeacon: beaconMock.start,
 }))
+
+/** Disposers the stub's `ctx.effect` collected; run after each test so no bridge outlives it. */
+const disposers: Array<() => unknown> = []
 
 /** Minimal context stub: apply only needs the services at registration time. */
 function stubContext(): Context {
@@ -57,7 +60,9 @@ function stubContext(): Context {
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     effect: (fn: () => unknown, label?: string) => {
       void label
-      return fn() as () => void
+      const disposer = fn()
+      if (typeof disposer === 'function') disposers.push(disposer as () => unknown)
+      return disposer as () => void
     },
   } as unknown as Context
 }
@@ -67,6 +72,7 @@ beforeEach(() => {
   beaconMock.start.mockClear()
 })
 afterEach(async () => {
+  for (const dispose of disposers.splice(0).reverse()) await dispose()
   vi.unstubAllEnvs()
   for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true })
 })
@@ -155,8 +161,20 @@ describe('config', () => {
 })
 
 describe('apply', () => {
+  /** A private dsh home per test: apply reads and writes the ledger, watchers and token there, never the developer's. */
+  let home: string
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), 'dsh-bridge-home-'))
+    dirs.push(home)
+    vi.stubEnv('DSH_HOME', home)
+  })
+
   it('registers the bridge with a fixed token (no generation)', async () => {
-    await apply(stubContext(), { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
+    const ctx = stubContext()
+    const registerUpgrade = vi.spyOn(ctx.webServer, 'registerUpgrade')
+    await apply(ctx, { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
+    expect(registerUpgrade).toHaveBeenCalledWith(expect.objectContaining({ path: BRIDGE_PATH }))
+    await expect(stat(join(home, 'ext-bridge-token'))).rejects.toThrow()
   })
 
   it.each([undefined, {}, { wireStream: {} }])('rejects unsupported Gateway capabilities: %j', async (gateway) => {
@@ -190,16 +208,12 @@ describe('apply', () => {
   })
 
   it('generates and persists a token when none is configured', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'dsh-bridge-home-'))
-    dirs.push(home)
-    vi.stubEnv('DSH_HOME', home)
     await apply(stubContext(), VALID)
+    expect((await readFile(join(home, 'ext-bridge-token'), 'utf8')).trim()).toMatch(/^[0-9a-f]{64}$/u)
+    if (process.platform !== 'win32') expect((await stat(join(home, 'ext-bridge-token'))).mode & 0o777).toBe(0o600)
   })
 
   it('copies the persisted token into an installed extension so Chrome needs no pasting', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'dsh-bridge-home-'))
-    dirs.push(home)
-    vi.stubEnv('DSH_HOME', home)
     await mkdir(join(home, 'browser-extension'), { recursive: true })
     await writeFile(join(home, 'browser-extension', 'install-info.json'), '{}\n')
     await apply(stubContext(), VALID)
@@ -210,9 +224,6 @@ describe('apply', () => {
   })
 
   it('never copies a token pinned in the plugin config into the installed extension', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'dsh-bridge-home-'))
-    dirs.push(home)
-    vi.stubEnv('DSH_HOME', home)
     await mkdir(join(home, 'browser-extension'), { recursive: true })
     await writeFile(join(home, 'browser-extension', 'install-info.json'), '{}\n')
     await apply(stubContext(), { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
@@ -220,9 +231,6 @@ describe('apply', () => {
   })
 
   it('warns when a pinned token differs from the installed extension copy instead of failing silently', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'dsh-bridge-home-'))
-    dirs.push(home)
-    vi.stubEnv('DSH_HOME', home)
     await mkdir(join(home, 'browser-extension'), { recursive: true })
     await writeFile(join(home, 'browser-extension', 'install-info.json'), '{}\n')
     await writeFile(join(home, 'browser-extension', 'bridge-token'), 'an-older-installer-token-0123456789abcdef\n', { mode: 0o600 })
