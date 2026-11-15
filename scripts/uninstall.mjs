@@ -138,6 +138,8 @@ async function loadRuntime(plan, runtimeRoot) {
     const manifest = join(plan.web.dir, 'node_modules', name, 'package.json')
     if (!stat(manifest)) return []
     const root = resolve(dirname(realpathSync(manifest)), '../../..')
+    // A linked checkout is recognized by the root package name; installer-legacy.test.mjs
+    // pins that name, so renaming the root package fails a test instead of breaking this.
     return json(join(root, 'package.json'))?.name === 'dsh-browser' ? [root] : []
   })
   const roots = runtimeRoot ? [absolute(runtimeRoot)]

@@ -32,6 +32,12 @@ test('install.ps1 removes every legacy bridge name uninstall knows, including fr
   assert.match(source, /Where-Object \{ \$LegacyPlugins -notcontains \$_ \}/u)
 })
 
+test('uninstall finds linked checkouts by the root package name, so that name is pinned', () => {
+  const name = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).name
+  assert.equal(name, 'dsh-browser')
+  assert.match(read('uninstall.mjs'), /\?\.name === 'dsh-browser' \? \[root\] : \[\]/u)
+})
+
 test('updates keep the installed bridge-token copy instead of deleting and re-creating it', () => {
   assert.match(read('install.sh'), /rsync -a --delete-after --exclude '\/bridge-token' "\$EXT\/dist\/"/u)
   assert.match(read('install.ps1'), /-Destination \$DistDir -ExcludeName @\('bridge-token'\)/u)
