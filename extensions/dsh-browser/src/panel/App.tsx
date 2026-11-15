@@ -100,6 +100,7 @@ import {
 } from './composer.ts'
 import { isNearScrollBottom } from './scroll.ts'
 import { SettingToggle } from './SettingToggle.tsx'
+import { EntryAdd, EntryList, SettingRow, SettingsGroup, SettingsKitCopyContext, SettingsSection } from './SettingsKit.tsx'
 import { downloadText, requestOptionalPermission } from './browser-helpers.ts'
 import {
   isExperimentalPreset,
@@ -927,6 +928,11 @@ export function App(): React.JSX.Element {
   const [tabAffinity, setTabAffinity] = useState<TabAffinityState | null>(null)
   const [tabAffinityReturnPending, setTabAffinityReturnPending] = useState(false)
   const [trustedOriginInput, setTrustedOriginInput] = useState('')
+  // What the settings form held when it was last loaded or saved; the form is
+  // "dirty" (and the Save bar shows) while it differs from this.
+  const [settingsBaseline, setSettingsBaseline] = useState<PanelSettings | null>(null)
+  const [relayBaseline, setRelayBaseline] = useState<string | null>(null)
+  const [settingsSaveError, setSettingsSaveError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [showSessionPicker, setShowSessionPicker] = useState(false)
   const [loadingSessions, setLoadingSessions] = useState(false)
@@ -1124,7 +1130,7 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     void chrome.storage.local.get('dshSettings').then((stored) => {
       const raw = stored.dshSettings as Partial<PanelSettings> | undefined
-      setSettings({
+      const seeded: PanelSettings = {
         bridgeUrl: raw?.bridgeUrl ?? '',
         token: raw?.token ?? '',
         sharePageContent: raw?.sharePageContent ?? 'auto',
@@ -1142,7 +1148,9 @@ export function App(): React.JSX.Element {
         settingsVersion: raw?.settingsVersion ?? 1,
         showAgentOverlay: raw?.showAgentOverlay ?? true,
         allowPageWatchers: raw?.allowPageWatchers ?? false,
-      })
+      }
+      setSettings(seeded)
+      setSettingsBaseline(seeded)
     })
   }, [])
 
@@ -1156,7 +1164,11 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     const enabled = devToolsStatus?.enabled === true
     if (devToolsWasEnabled.current && !enabled) {
-      setSettings((current) => current === null || !current.allowDevTools ? current : { ...current, allowDevTools: false })
+      // Not a user edit: move the baseline too, so it does not read as unsaved.
+      const untick = (current: PanelSettings | null): PanelSettings | null => (
+        current === null || !current.allowDevTools ? current : { ...current, allowDevTools: false })
+      setSettings(untick)
+      setSettingsBaseline(untick)
     }
     devToolsWasEnabled.current = enabled
   }, [devToolsStatus])
@@ -2408,14 +2420,37 @@ export function App(): React.JSX.Element {
 
   async function saveSettings(): Promise<void> {
     if (settings === null) return
+    setSettingsSaveError(null)
     try {
       const relaySaved = await saveRelayProfiles()
       if (!relaySaved) return
       await api.updateSettings(settings)
+      setSettingsBaseline(settings)
+      setRelayBaseline(JSON.stringify(relayProfiles))
       setShowSettings(false)
       await refreshSessionModels(sessionRef.current)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      const message = cause instanceof Error ? cause.message : String(cause)
+      setError(message)
+      // The chat view's error line is not visible from Settings.
+      setSettingsSaveError(message)
+    }
+  }
+
+  // Relay edits are part of the same Save; removing a saved profile is not
+  // (removeRelayProfile applies at once and moves the baseline with it).
+  const settingsDirty = (settings !== null && settingsBaseline !== null
+    && JSON.stringify(settings) !== JSON.stringify(settingsBaseline))
+    || (relayBaseline !== null && JSON.stringify(relayProfiles) !== relayBaseline)
+
+  /** Drop unsaved edits: the form returns to what was last loaded or saved. */
+  function discardSettings(): void {
+    setSettingsSaveError(null)
+    if (settingsBaseline !== null) setSettings(settingsBaseline)
+    setTrustedOriginInput('')
+    if (relayBaseline !== null && JSON.stringify(relayProfiles) !== relayBaseline) {
+      setRelayProfiles(JSON.parse(relayBaseline) as RelayProfileDraft[])
+      setRelayNotice(null)
     }
   }
 
@@ -2475,11 +2510,17 @@ export function App(): React.JSX.Element {
             ].filter((part) => part !== '').join(', ')).join('\n'),
             setDefault: defaults.provider === key,
           }))
-        if (!cancelled) setRelayProfiles(drafts)
+        if (!cancelled) {
+          setRelayProfiles(drafts)
+          setRelayBaseline(JSON.stringify(drafts))
+        }
       } catch {
         // The namespace may not exist yet; an empty list still allows creating profiles.
       }
-      if (!cancelled) setRelayLoaded(true)
+      if (!cancelled) {
+        setRelayLoaded(true)
+        setRelayBaseline((current) => current ?? '[]')
+      }
     })()
     return () => { cancelled = true }
   }, [api, showSettings, relayLoaded])
@@ -2507,6 +2548,10 @@ export function App(): React.JSX.Element {
     setRelayProfiles((current) => current.filter((_, at) => at !== index))
     setRelayNotice(null)
     if (profile === undefined || profile.key === '') return
+    // A saved profile is deleted right away, so it leaves the baseline as well.
+    setRelayBaseline((current) => current === null
+      ? current
+      : JSON.stringify((JSON.parse(current) as RelayProfileDraft[]).filter((candidate) => candidate.key !== profile.key)))
     try {
       await api.rpc('settings.mutate', {
         ns: 'llm-pi-ai',
@@ -2656,6 +2701,7 @@ export function App(): React.JSX.Element {
       await api.respondToApproval(request.id, decision)
       if (decision === 'always-allow-reads') {
         setSettings((current) => current === null ? current : { ...current, sharePageContent: 'auto' })
+        setSettingsBaseline((current) => current === null ? current : { ...current, sharePageContent: 'auto' })
       }
       updateApprovalQueue((current) => current.filter((entry) => entry.id !== request.id))
     } catch (cause) {
@@ -2817,348 +2863,444 @@ export function App(): React.JSX.Element {
     )
 
   if (showSettings) {
+    // One layout for the whole view: named sections (SettingsSection) hold
+    // cards (SettingsGroup) of rows (SettingRow / SettingToggle). A new
+    // setting is one more row in the group it belongs to.
+    const patch = (next: Partial<PanelSettings>): void => {
+      setSettings((current) => current === null ? current : { ...current, ...next })
+    }
+    const trustedOriginValid = normalizeWebOrigin(trustedOriginInput) !== null
     return (
-      <><div className="settings">
+      <><SettingsKitCopyContext.Provider value={{ learnMore: copy.settings.learnMore }}><div className="settings">
         <div className="settings-heading">
           <button className="icon-button" onClick={() => setShowSettings(false)} aria-label={copy.settings.back}><BackIcon /></button>
-          <div>
-            <span className="eyebrow">{copy.settings.eyebrow}</span>
-            <h1>{copy.settings.title}</h1>
-          </div>
+          <h1>{copy.settings.title}</h1>
         </div>
-        <UpdateCard copy={copy.update} />
-        <div className="settings-panel">
-          <label>
-            <span>{copy.settings.language}</span>
-            <small>{copy.settings.languageHelp}</small>
-            <select
-              value={localePreference}
-              onChange={(event) => changeUiLocale(event.target.value as UiLocalePreference)}
-            >
-              <option value="auto">{copy.settings.languageAuto}</option>
-              <option value="en">{copy.settings.languageEnglish}</option>
-              <option value="zh">{copy.settings.languageChinese}</option>
-            </select>
-          </label>
-          <label>
-            <span>{copy.settings.theme}</span>
-            <small>{copy.settings.themeHelp}</small>
-            <select
-              className="theme-select"
-              value={themePreference}
-              onChange={(event) => changeTheme(event.target.value as ThemePreference)}
-            >
-              <option value="auto">{copy.settings.themeAuto}</option>
-              <option value="light">{copy.settings.themeLight}</option>
-              <option value="dark">{copy.settings.themeDark}</option>
-            </select>
-          </label>
-        </div>
-        <div className="settings-panel">
-          <label>
-            <span>{copy.settings.bridgeAddress}</span>
-            <small>{copy.settings.bridgeHelp}</small>
-            <input
-              value={settings?.bridgeUrl ?? ''}
-              onChange={(e) => setSettings((prev) => prev === null ? prev : { ...prev, bridgeUrl: e.target.value })}
-              placeholder={copy.settings.bridgePlaceholder}
-            />
-          </label>
-          <div className="bridge-detection">
-            <div className="bridge-detection-actions">
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => { void runDetection() }}
+        <div className="settings-scroll">
+          <SettingsSection id="connection" title={copy.settings.sections.connection.title} help={copy.settings.sections.connection.help}>
+            <SettingsGroup label={copy.settings.sections.connection.title}>
+              <SettingRow label={copy.settings.bridgeAddress} help={copy.settings.bridgeHelp}>
+                {(id) => (
+                  <>
+                    <input
+                      id={id}
+                      value={settings?.bridgeUrl ?? ''}
+                      spellCheck={false}
+                      onChange={(e) => patch({ bridgeUrl: e.target.value })}
+                      placeholder={copy.settings.bridgePlaceholder}
+                    />
+                    <div className="bridge-detection">
+                      <div className="bridge-detection-actions">
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => { void runDetection() }}
+                        >
+                          {detecting ? copy.settings.detectCancel : copy.settings.detect}
+                        </button>
+                        <small>
+                          {detectProgress === null
+                            ? copy.settings.detectHelp
+                            : copy.settings.detectProgress(detectProgress.done, detectProgress.total)}
+                        </small>
+                      </div>
+                      {detectError === null ? null : <p className="field-error settings-error">{detectError}</p>}
+                      {detected.length > 0 ? (
+                        <ul className="device-list">
+                          {detected.map((instance) => {
+                            const current = bridgeAddress === instance.wsUrl
+                            return (
+                              <li key={instance.wsUrl}>
+                                <button
+                                  type="button"
+                                  className={current ? 'device-row current' : 'device-row'}
+                                  title={copy.settings.detectPick}
+                                  onClick={() => patch({ bridgeUrl: instance.wsUrl })}
+                                >
+                                  <span className="device-address">{instance.wsUrl}</span>
+                                  <span className="device-meta">
+                                    {instance.sources.map((source) => copy.settings.detectSource[source]).join(' · ')}
+                                    {instance.pid === undefined ? '' : ` · PID ${instance.pid}`}
+                                    {current ? ` · ${copy.settings.detectCurrent}` : ''}
+                                  </span>
+                                </button>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      ) : detectAttempted && !detecting ? (
+                        <p className="field-error settings-error">{copy.settings.detectEmpty}</p>
+                      ) : null}
+                    </div>
+                  </>
+                )}
+              </SettingRow>
+              <SettingRow label={copy.settings.token} help={copy.settings.tokenHelp}>
+                {(id) => (
+                  <input
+                    id={id}
+                    type="password"
+                    value={settings?.token ?? ''}
+                    onChange={(e) => patch({ token: e.target.value })}
+                    placeholder={copy.settings.tokenPlaceholder}
+                  />
+                )}
+              </SettingRow>
+              <div className="setting-row connection-row">
+                <div className="connection-state" role="status">
+                  <span className={`dot ${state}`} aria-hidden="true" />
+                  <span className="connection-state-copy">
+                    {bridgeAddress === null || state !== 'connected'
+                      ? <small>{statusText}</small>
+                      : <small className="device-connected">{copy.settings.detectConnected(bridgeAddress)}</small>}
+                    {standing === null
+                      ? null
+                      : <small data-testid="standing-work">{copy.settings.staysConnected(standing)}</small>}
+                  </span>
+                </div>
+                {!settingsDirty && (
+                  <button type="button" className="secondary" onClick={() => { void saveSettings() }}>{copy.settings.reconnect}</button>
+                )}
+              </div>
+            </SettingsGroup>
+          </SettingsSection>
+
+          <SettingsSection id="appearance" title={copy.settings.sections.appearance.title} help={copy.settings.sections.appearance.help}>
+            <SettingsGroup label={copy.settings.sections.appearance.title}>
+              <SettingRow label={copy.settings.language} help={copy.settings.languageHelp}
+                control={(id) => (
+                  <select
+                    id={id}
+                    value={localePreference}
+                    onChange={(event) => changeUiLocale(event.target.value as UiLocalePreference)}
+                  >
+                    <option value="auto">{copy.settings.languageAuto}</option>
+                    <option value="en">{copy.settings.languageEnglish}</option>
+                    <option value="zh">{copy.settings.languageChinese}</option>
+                  </select>
+                )} />
+              <SettingRow label={copy.settings.theme} help={copy.settings.themeHelp}
+                control={(id) => (
+                  <select
+                    id={id}
+                    className="theme-select"
+                    value={themePreference}
+                    onChange={(event) => changeTheme(event.target.value as ThemePreference)}
+                  >
+                    <option value="auto">{copy.settings.themeAuto}</option>
+                    <option value="light">{copy.settings.themeLight}</option>
+                    <option value="dark">{copy.settings.themeDark}</option>
+                  </select>
+                )} />
+              <div className="setting-row">
+                <div className="setting-row-main">
+                  <div className="setting-row-copy">
+                    <span className="setting-label">{copy.textSize.title}</span>
+                    <p className="setting-help">{copy.settings.textSizeHelp}</p>
+                  </div>
+                  <div className="setting-row-control settings-text-size" role="group" aria-label={copy.textSize.title}>
+                    <button type="button" className="secondary icon" disabled={uiScaleAtLimit(uiScale, -1)}
+                      onClick={() => changeUiScale(stepUiScale(uiScaleRef.current, -1))}
+                      aria-label={copy.textSize.smaller} title={copy.textSize.smaller}>
+                      <MinusIcon />
+                    </button>
+                    <span className="settings-text-size-value" role="status"
+                      aria-label={copy.textSize.value(formatUiScale(uiScale))}>{formatUiScale(uiScale)}</span>
+                    <button type="button" className="secondary icon" disabled={uiScaleAtLimit(uiScale, 1)}
+                      onClick={() => changeUiScale(stepUiScale(uiScaleRef.current, 1))}
+                      aria-label={copy.textSize.larger} title={copy.textSize.larger}>
+                      <PlusIcon />
+                    </button>
+                    <button type="button" className="secondary" disabled={uiScale === DEFAULT_UI_SCALE}
+                      onClick={() => changeUiScale(DEFAULT_UI_SCALE)}>{copy.textSize.reset}</button>
+                  </div>
+                </div>
+              </div>
+            </SettingsGroup>
+          </SettingsSection>
+
+          <SettingsSection id="permissions" title={copy.settings.sections.permissions.title} help={copy.settings.sections.permissions.help}>
+            <SettingsGroup title={copy.settings.groups.access} className="preference-toggles">
+              <SettingRow label={copy.settings.pageSharing} help={copy.settings.pageSharingHelp}
+                control={(id) => (
+                  <select
+                    id={id}
+                    value={settings?.sharePageContent ?? 'auto'}
+                    disabled={settings?.unrestrictedBrowserAccess ?? false}
+                    onChange={(e) => patch({ sharePageContent: e.target.value as PanelSettings['sharePageContent'] })}
+                  >
+                    <option value="auto">{copy.settings.sharingAuto}</option>
+                    <option value="ask">{copy.settings.sharingAsk}</option>
+                    <option value="off">{copy.settings.sharingOff}</option>
+                  </select>
+                )} />
+              <SettingToggle
+                title={copy.settings.unrestrictedBrowserAccess}
+                help={copy.settings.unrestrictedBrowserAccessHelp}
+                more={<p>{copy.settings.unrestrictedBrowserAccessMore}</p>}
+                checked={settings?.unrestrictedBrowserAccess ?? false}
+                onChange={(checked) => patch({ unrestrictedBrowserAccess: checked })}
+              />
+            </SettingsGroup>
+            {settings !== null && (
+              <SitePolicySettings
+                locale={locale}
+                value={{ siteRules: settings.siteRules, siteDefaultsEnabled: settings.siteDefaultsEnabled, strictSites: settings.strictSites }}
+                onChange={(next) => patch(next)}
               >
-                {detecting ? copy.settings.detectCancel : copy.settings.detect}
-              </button>
-              <small>
-                {detectProgress === null
-                  ? copy.settings.detectHelp
-                  : copy.settings.detectProgress(detectProgress.done, detectProgress.total)}
-              </small>
-            </div>
-            {detectError === null ? null : <small className="settings-error">{detectError}</small>}
-            {detected.length > 0 ? (
-              <ul className="device-list">
-                {detected.map((instance) => {
-                  const current = bridgeAddress === instance.wsUrl
-                  return (
-                    <li key={instance.wsUrl}>
-                      <button
-                        type="button"
-                        className={current ? 'device-row current' : 'device-row'}
-                        title={copy.settings.detectPick}
-                        onClick={() => setSettings((prev) => prev === null ? prev : { ...prev, bridgeUrl: instance.wsUrl })}
-                      >
-                        <span className="device-address">{instance.wsUrl}</span>
-                        <span className="device-meta">
-                          {instance.sources.map((source) => copy.settings.detectSource[source]).join(' · ')}
-                          {instance.pid === undefined ? '' : ` · PID ${instance.pid}`}
-                          {current ? ` · ${copy.settings.detectCurrent}` : ''}
-                        </span>
+                <SettingRow className="trusted-origins" label={copy.settings.trustedOrigins}
+                  help={copy.settings.trustedOriginsHelp} more={<p>{copy.settings.trustedOriginsMore}</p>}>
+                  {(id) => (
+                    <>
+                      <EntryAdd
+                        id={id}
+                        label={copy.settings.trustedOriginInput}
+                        value={trustedOriginInput}
+                        placeholder="https://example.com"
+                        valid={trustedOriginValid}
+                        error={copy.settings.invalidOrigin}
+                        addLabel={copy.settings.add}
+                        onChange={setTrustedOriginInput}
+                        onAdd={addTrustedOrigin}
+                      />
+                      <EntryList
+                        entries={(settings.trustedActionOrigins).map((origin) => ({ key: origin, value: origin }))}
+                        empty={copy.settings.noTrustedOrigins}
+                        removeLabel={(entry) => copy.settings.removeOrigin(entry.value)}
+                        onRemove={(entry) => removeTrustedOrigin(entry.key)}
+                      />
+                    </>
+                  )}
+                </SettingRow>
+              </SitePolicySettings>
+            )}
+            <SettingsGroup title={copy.settings.groups.debugger}>
+              <SettingToggle
+                title={copy.settings.allowDevTools}
+                help={copy.settings.allowDevToolsHelp}
+                more={<p>{copy.settings.allowDevToolsMore}</p>}
+                disabled={devToolsStatus !== null && !devToolsStatus.supported}
+                checked={settings?.allowDevTools ?? false}
+                onChange={(checked) => patch({ allowDevTools: checked })}
+                after={(
+                  <>
+                    {/* The state belongs to this switch, so it reads as its detail
+                        line rather than as a setting of its own. */}
+                    <p className={`devtools-status${hasDevToolsError(devToolsStatus) ? ' is-error' : ''}`} role="status">
+                      {devToolsStatusText(devToolsStatus, copy)}
+                    </p>
+                    {devToolsStatus?.attached === true && (
+                      <button type="button" className="secondary" onClick={() => { void api.detachDevTools().catch(() => {}) }}>
+                        {copy.settings.devToolsDetach}
                       </button>
-                    </li>
-                  )
-                })}
-              </ul>
-            ) : detectAttempted && !detecting ? (
-              <small className="settings-error">{copy.settings.detectEmpty}</small>
-            ) : null}
-            {bridgeAddress === null || state !== 'connected'
-              ? null
-              : <small className="device-connected">{copy.settings.detectConnected(bridgeAddress)}</small>}
-            {standing === null
-              ? null
-              : <small className="device-connected" data-testid="standing-work">{copy.settings.staysConnected(standing)}</small>}
-          </div>
-          <label>
-            <span>Token</span>
-            <small>{copy.settings.tokenHelp}</small>
-            <input
-              type="password"
-              value={settings?.token ?? ''}
-              onChange={(e) => setSettings((prev) => prev === null ? prev : { ...prev, token: e.target.value })}
-              placeholder={copy.settings.tokenPlaceholder}
+                    )}
+                  </>
+                )}
+              />
+              {devToolsStatus?.supported !== false && (
+                <SettingToggle
+                  title={copy.settings.catchPageDialogs}
+                  help={copy.settings.catchPageDialogsHelp}
+                  more={<p>{copy.settings.catchPageDialogsMore}</p>}
+                  checked={settings?.catchPageDialogs ?? false}
+                  onChange={(checked) => patch({ catchPageDialogs: checked })}
+                />
+              )}
+            </SettingsGroup>
+          </SettingsSection>
+
+          <SettingsSection id="behaviour" title={copy.settings.sections.behaviour.title} help={copy.settings.sections.behaviour.help}>
+            <SettingsGroup label={copy.settings.sections.behaviour.title}>
+              <SettingToggle
+                title={copy.settings.approvalNotifications}
+                help={copy.settings.approvalNotificationsHelp}
+                more={<p>{copy.settings.approvalNotificationsMore}</p>}
+                checked={settings?.approvalNotifications ?? true}
+                onChange={(checked) => patch({ approvalNotifications: checked })}
+              />
+              <SettingRow label={copy.settings.approvalTimeout} help={copy.settings.approvalTimeoutHelp}
+                more={<p>{copy.settings.approvalTimeoutMore}</p>}
+                control={(id) => (
+                  <input
+                    id={id}
+                    className="number-input"
+                    type="number"
+                    min={1}
+                    max={14}
+                    step={1}
+                    value={settings?.approvalTimeoutMinutes ?? 10}
+                    onChange={(event) => patch({ approvalTimeoutMinutes: Number(event.target.value) })}
+                  />
+                )} />
+              <SettingToggle
+                title={copy.settings.autoResumeSession}
+                help={copy.settings.autoResumeSessionHelp}
+                checked={settings?.autoResumeSession ?? true}
+                onChange={(checked) => patch({ autoResumeSession: checked })}
+              />
+              <SettingToggle
+                title={copy.settings.showAgentOverlay}
+                help={copy.settings.showAgentOverlayHelp}
+                checked={settings?.showAgentOverlay ?? true}
+                onChange={(checked) => patch({ showAgentOverlay: checked })}
+              />
+            </SettingsGroup>
+          </SettingsSection>
+
+          <SettingsSection id="automation" defaultOpen={false} title={copy.settings.sections.automation.title} help={copy.settings.sections.automation.help}>
+            <SettingsGroup label={copy.settings.allowPageWatchers}>
+              <SettingToggle
+                title={copy.settings.allowPageWatchers}
+                help={copy.settings.allowPageWatchersHelp}
+                more={<p>{copy.settings.allowPageWatchersMore}</p>}
+                checked={settings?.allowPageWatchers ?? false}
+                onChange={(checked) => patch({ allowPageWatchers: checked })}
+              />
+            </SettingsGroup>
+            <DevLoopSettings
+              api={api}
+              locale={locale}
+              note={copy.settings.appliesImmediately}
+              activeTab={async () => (await chrome.tabs.query({ active: true, currentWindow: true }))[0]}
             />
-          </label>
-          <label>
-            <span>{copy.settings.pageSharing}</span>
-            <small>{copy.settings.pageSharingHelp}</small>
-            <select
-              value={settings?.sharePageContent ?? 'auto'}
-              disabled={settings?.unrestrictedBrowserAccess ?? false}
-              onChange={(e) => setSettings((prev) => prev === null ? prev : { ...prev, sharePageContent: e.target.value as PanelSettings['sharePageContent'] })}
-            >
-              <option value="auto">{copy.settings.sharingAuto}</option>
-              <option value="ask">{copy.settings.sharingAsk}</option>
-              <option value="off">{copy.settings.sharingOff}</option>
-            </select>
-          </label>
+            <LearningSettings locale={locale} note={copy.settings.appliesImmediately}
+              {...(sessionRef.current === null ? {} : { sessionId: sessionRef.current })} />
+          </SettingsSection>
+
+          <SettingsSection id="models" defaultOpen={false} title={copy.settings.sections.models.title} help={copy.settings.sections.models.help}>
+            <section className="settings-group relay-config" aria-label={copy.settings.relaySection}>
+              <p className="settings-note">{copy.settings.relayHelp}</p>
+              {relayProfiles.length === 0 && <p className="entry-empty">{copy.settings.relayEmpty}</p>}
+              {relayProfiles.map((profile, index) => (
+                <div className="settings-panel relay-profile" key={profile.key === '' ? `new-${index}` : profile.key}>
+                  <SettingRow label={copy.settings.relayName}>
+                    {(id) => (
+                      <input
+                        id={id}
+                        value={profile.name}
+                        onChange={(event) => updateRelayProfile(index, { name: event.target.value })}
+                        placeholder={copy.settings.relayNamePlaceholder}
+                      />
+                    )}
+                  </SettingRow>
+                  <SettingRow label={copy.settings.relayProtocol}>
+                    {(id) => (
+                      <select
+                        id={id}
+                        value={profile.protocol}
+                        onChange={(event) => updateRelayProfile(index, {
+                          protocol: event.target.value as RelayProfileDraft['protocol'],
+                        })}
+                      >
+                        <option value="openai-completions">{copy.settings.relayProtocolOpenai}</option>
+                        <option value="openai-codex-responses">{copy.settings.relayProtocolCodex}</option>
+                        <option value="anthropic-messages">{copy.settings.relayProtocolClaude}</option>
+                      </select>
+                    )}
+                  </SettingRow>
+                  <SettingRow label={copy.settings.relayBaseUrl}>
+                    {(id) => (
+                      <input
+                        id={id}
+                        value={profile.baseUrl}
+                        spellCheck={false}
+                        onChange={(event) => updateRelayProfile(index, { baseUrl: event.target.value })}
+                        placeholder="https://api.example.com/v1"
+                      />
+                    )}
+                  </SettingRow>
+                  <SettingRow label={copy.settings.relayToken}>
+                    {(id) => (
+                      <input
+                        id={id}
+                        type="password"
+                        value={profile.token}
+                        onChange={(event) => updateRelayProfile(index, { token: event.target.value })}
+                        placeholder={copy.settings.relayTokenPlaceholder(profile.tokenConfigured)}
+                      />
+                    )}
+                  </SettingRow>
+                  <SettingRow className="relay-models" label={copy.settings.relayModels} help={copy.settings.relayModelsHelp}
+                    control={(
+                      <button type="button" className="secondary relay-fetch" disabled={profile.baseUrl.trim() === '' || relayBusy}
+                        onClick={() => { void fetchRelayModels(index) }}>
+                        {copy.settings.relayFetchModels}
+                      </button>
+                    )}>
+                    {(id) => (
+                      <textarea
+                        id={id}
+                        rows={3}
+                        spellCheck={false}
+                        value={profile.modelsText}
+                        onChange={(event) => updateRelayProfile(index, { modelsText: event.target.value })}
+                        placeholder={copy.settings.relayModelsPlaceholder}
+                      />
+                    )}
+                  </SettingRow>
+                  <SettingToggle
+                    title={copy.settings.relaySetDefault}
+                    help={copy.settings.relaySetDefaultHelp}
+                    checked={profile.setDefault}
+                    onChange={(checked) => setRelayProfiles((current) => current.map((candidate, at) => at === index
+                      ? { ...candidate, setDefault: checked }
+                      : candidate))}
+                  />
+                  <div className="setting-row relay-profile-actions">
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={profile.name.trim() === '' || profile.baseUrl.trim() === ''}
+                      onClick={() => { void testRelayConnection(index) }}
+                    >
+                      {copy.settings.relayTest}
+                    </button>
+                    <button type="button" className="danger" onClick={() => { void removeRelayProfile(index) }}>
+                      {copy.settings.relayRemove}
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {relayNotice !== null && <p className="settings-note relay-notice" role="status">{relayNotice}</p>}
+              <div>
+                <button type="button" className="secondary" onClick={addRelayProfile}>{copy.settings.relayAdd}</button>
+              </div>
+            </section>
+          </SettingsSection>
+
+          <SettingsSection id="about" title={copy.settings.sections.about.title} help={copy.settings.sections.about.help}>
+            <UpdateCard copy={copy.update} />
+            <SettingsGroup label={copy.audit.section}>
+              <SettingRow className="audit-export" label={copy.audit.section} help={copy.audit.help} more={<p>{copy.audit.more}</p>}>
+                <button type="button" className="secondary" disabled={auditExport.busy || state !== 'connected'}
+                  onClick={() => { void exportAuditLog() }}>
+                  {auditExport.busy ? copy.audit.exporting : copy.audit.exportButton}
+                </button>
+                {auditExport.message !== undefined && (
+                  <p className={`audit-export-status${auditExport.error === true ? ' field-error' : ''}`} role="status">{auditExport.message}</p>
+                )}
+              </SettingRow>
+              <div className="setting-row">
+                <span className="setting-label">{copy.settings.pageSnapshots}</span>
+                <p className="setting-help">{copy.settings.snapshotHint(caps?.snapshotMaxChars ?? DEFAULT_SNAPSHOT_MAX_CHARS)}</p>
+              </div>
+            </SettingsGroup>
+            <UninstallCard copy={copy.uninstall} />
+          </SettingsSection>
         </div>
-        <div className="settings-panel preference-toggles">
-          <SettingToggle
-            title={copy.settings.unrestrictedBrowserAccess}
-            help={copy.settings.unrestrictedBrowserAccessHelp}
-            checked={settings?.unrestrictedBrowserAccess ?? false}
-            onChange={(checked) => setSettings((current) => current === null ? current : { ...current, unrestrictedBrowserAccess: checked })}
-          />
-          <div className="setting-toggle-row">
-            <SettingToggle
-              title={copy.settings.allowDevTools}
-              help={copy.settings.allowDevToolsHelp}
-              disabled={devToolsStatus !== null && !devToolsStatus.supported}
-              checked={settings?.allowDevTools ?? false}
-              onChange={(checked) => setSettings((current) => current === null ? current : { ...current, allowDevTools: checked })}
-            >
-              {/* The state belongs to this switch, so it reads as its detail
-                  line rather than as a setting of its own. */}
-              <small className={`devtools-status${hasDevToolsError(devToolsStatus) ? ' is-error' : ''}`}>
-                {devToolsStatusText(devToolsStatus, copy)}
-              </small>
-            </SettingToggle>
-            {devToolsStatus?.attached === true && (
-              <button className="secondary" onClick={() => { void api.detachDevTools().catch(() => {}) }}>
-                {copy.settings.devToolsDetach}
-              </button>
+        {(settingsDirty || settingsSaveError !== null) && (
+          <div className="settings-savebar" role="region" aria-label={copy.settings.unsavedChanges}>
+            {settingsSaveError !== null && <p className="field-error" role="alert">{settingsSaveError}</p>}
+            {settingsDirty && (
+              <div className="settings-actions">
+                <span className="settings-savebar-label">{copy.settings.unsavedChanges}</span>
+                <button type="button" className="secondary" onClick={discardSettings}>{copy.settings.discard}</button>
+                <button type="button" className="primary" onClick={() => { void saveSettings() }}>{copy.settings.save}</button>
+              </div>
             )}
           </div>
-          {devToolsStatus?.supported !== false && (
-            <SettingToggle
-              title={copy.settings.catchPageDialogs}
-              help={copy.settings.catchPageDialogsHelp}
-              checked={settings?.catchPageDialogs ?? false}
-              onChange={(checked) => setSettings((current) => current === null ? current : { ...current, catchPageDialogs: checked })}
-            />
-          )}
-          <SettingToggle
-            title={copy.settings.approvalNotifications}
-            help={copy.settings.approvalNotificationsHelp}
-            checked={settings?.approvalNotifications ?? true}
-            onChange={(checked) => setSettings((current) => current === null ? current : { ...current, approvalNotifications: checked })}
-          />
-          <label>
-            <span>{copy.settings.approvalTimeout}</span>
-            <small>{copy.settings.approvalTimeoutHelp}</small>
-            <input
-              type="number"
-              min={1}
-              max={14}
-              step={1}
-              value={settings?.approvalTimeoutMinutes ?? 10}
-              onChange={(event) => setSettings((current) => current === null
-                ? current
-                : { ...current, approvalTimeoutMinutes: Number(event.target.value) })}
-            />
-          </label>
-          <SettingToggle
-            title={copy.settings.autoResumeSession}
-            help={copy.settings.autoResumeSessionHelp}
-            checked={settings?.autoResumeSession ?? true}
-            onChange={(checked) => setSettings((current) => current === null ? current : { ...current, autoResumeSession: checked })}
-          />
-          <SettingToggle
-            title={copy.settings.showAgentOverlay}
-            help={copy.settings.showAgentOverlayHelp}
-            checked={settings?.showAgentOverlay ?? true}
-            onChange={(checked) => setSettings((current) => current === null ? current : { ...current, showAgentOverlay: checked })}
-          />
-          <SettingToggle
-            title={copy.settings.allowPageWatchers}
-            help={copy.settings.allowPageWatchersHelp}
-            checked={settings?.allowPageWatchers ?? false}
-            onChange={(checked) => setSettings((current) => current === null ? current : { ...current, allowPageWatchers: checked })}
-          />
-        </div>
-        <section className="audit-export" aria-labelledby="audit-title">
-          <span id="audit-title" className="audit-export-copy">
-            <strong>{copy.audit.section}</strong>
-            <small>{copy.audit.help}</small>
-          </span>
-          <button type="button" className="secondary" disabled={auditExport.busy || state !== 'connected'}
-            onClick={() => { void exportAuditLog() }}>
-            {auditExport.busy ? copy.audit.exporting : copy.audit.exportButton}
-          </button>
-          {auditExport.message !== undefined && (
-            <p className={`audit-export-status${auditExport.error === true ? ' error' : ''}`} role="status">{auditExport.message}</p>
-          )}
-        </section>
-        <section className="relay-config" aria-labelledby="relay-title">
-          <div className="relay-heading">
-            <span id="relay-title">
-              <strong>{copy.settings.relaySection}</strong>
-              <small>{copy.settings.relayHelp}</small>
-            </span>
-            <button className="secondary" onClick={addRelayProfile}>{copy.settings.relayAdd}</button>
-          </div>
-          {relayProfiles.length === 0 && <p>{copy.settings.relayEmpty}</p>}
-          {relayProfiles.map((profile, index) => (
-            <div className="relay-profile" key={profile.key === '' ? `new-${index}` : profile.key}>
-              <label>
-                <span>{copy.settings.relayName}</span>
-                <input
-                  value={profile.name}
-                  onChange={(event) => updateRelayProfile(index, { name: event.target.value })}
-                  placeholder={copy.settings.relayNamePlaceholder}
-                />
-              </label>
-              <label>
-                <span>{copy.settings.relayProtocol}</span>
-                <select
-                  value={profile.protocol}
-                  onChange={(event) => updateRelayProfile(index, {
-                    protocol: event.target.value as RelayProfileDraft['protocol'],
-                  })}
-                >
-                  <option value="openai-completions">{copy.settings.relayProtocolOpenai}</option>
-                  <option value="openai-codex-responses">{copy.settings.relayProtocolCodex}</option>
-                  <option value="anthropic-messages">{copy.settings.relayProtocolClaude}</option>
-                </select>
-              </label>
-              <label>
-                <span>{copy.settings.relayBaseUrl}</span>
-                <input
-                  value={profile.baseUrl}
-                  onChange={(event) => updateRelayProfile(index, { baseUrl: event.target.value })}
-                  placeholder="https://api.example.com/v1"
-                />
-              </label>
-              <label>
-                <span>{copy.settings.relayToken}</span>
-                <input
-                  type="password"
-                  value={profile.token}
-                  onChange={(event) => updateRelayProfile(index, { token: event.target.value })}
-                  placeholder={copy.settings.relayTokenPlaceholder(profile.tokenConfigured)}
-                />
-              </label>
-              <div className="relay-models">
-                <div className="relay-label-row">
-                  <span>{copy.settings.relayModels}</span>
-                  <button className="relay-fetch" disabled={profile.baseUrl.trim() === '' || relayBusy}
-                    onClick={() => { void fetchRelayModels(index) }}>
-                    {copy.settings.relayFetchModels}
-                  </button>
-                </div>
-                <small>{copy.settings.relayModelsHelp}</small>
-                <textarea
-                  rows={3}
-                  aria-label={copy.settings.relayModels}
-                  value={profile.modelsText}
-                  onChange={(event) => updateRelayProfile(index, { modelsText: event.target.value })}
-                  placeholder={copy.settings.relayModelsPlaceholder}
-                />
-              </div>
-              <SettingToggle
-                title={copy.settings.relaySetDefault}
-                help={copy.settings.relaySetDefaultHelp}
-                checked={profile.setDefault}
-                onChange={(checked) => setRelayProfiles((current) => current.map((candidate, at) => at === index
-                  ? { ...candidate, setDefault: checked }
-                  : candidate))}
-              />
-              <div className="relay-profile-actions">
-                <button
-                  disabled={profile.name.trim() === '' || profile.baseUrl.trim() === ''}
-                  onClick={() => { void testRelayConnection(index) }}
-                >
-                  {copy.settings.relayTest}
-                </button>
-                <button className="secondary" onClick={() => { void removeRelayProfile(index) }}>
-                  {copy.settings.relayRemove}
-                </button>
-              </div>
-            </div>
-          ))}
-          {relayNotice !== null && <p className="hint">{relayNotice}</p>}
-        </section>
-        <section className="trusted-origins" aria-labelledby="trusted-origins-title">
-          <div>
-            <span id="trusted-origins-title">{copy.settings.trustedOrigins}</span>
-            <small>{copy.settings.trustedOriginsHelp}</small>
-          </div>
-          <div className="trusted-origin-add">
-            <input
-              aria-label={copy.settings.trustedOriginInput}
-              value={trustedOriginInput}
-              onChange={(event) => setTrustedOriginInput(event.target.value)}
-              onKeyDown={(event) => { if (event.key === 'Enter') addTrustedOrigin() }}
-              placeholder="https://example.com / https://*.example.com"
-            />
-            <button disabled={normalizeWebOrigin(trustedOriginInput) === null} onClick={addTrustedOrigin}>{copy.settings.add}</button>
-          </div>
-          {trustedOriginInput.trim() !== '' && normalizeWebOrigin(trustedOriginInput) === null && (
-            <p className="origin-error">{copy.settings.invalidOrigin}</p>
-          )}
-          {settings?.trustedActionOrigins.length === 0 && <p>{copy.settings.noTrustedOrigins}</p>}
-          {settings?.trustedActionOrigins.map((origin) => (
-            <div className="trusted-origin" key={origin}>
-              <code>{origin}</code>
-              <button onClick={() => removeTrustedOrigin(origin)} aria-label={copy.settings.removeOrigin(origin)}>{copy.settings.remove}</button>
-            </div>
-          ))}
-        </section>
-        {settings !== null && (
-          <SitePolicySettings
-            locale={locale}
-            value={{ siteRules: settings.siteRules, siteDefaultsEnabled: settings.siteDefaultsEnabled, strictSites: settings.strictSites }}
-            onChange={(next) => setSettings((current) => current === null ? current : { ...current, ...next })}
-          />
         )}
-        <DevLoopSettings
-          api={api}
-          locale={locale}
-          activeTab={async () => (await chrome.tabs.query({ active: true, currentWindow: true }))[0]}
-        />
-        <LearningSettings locale={locale} {...(sessionRef.current === null ? {} : { sessionId: sessionRef.current })} />
-        <div className="settings-actions">
-          <button className="primary" onClick={saveSettings}>{copy.settings.save}</button>
-          <button className="secondary" onClick={() => setShowSettings(false)}>{copy.settings.cancel}</button>
-        </div>
-        <p className="hint">{copy.settings.snapshotHint(caps?.snapshotMaxChars ?? DEFAULT_SNAPSHOT_MAX_CHARS)}</p>
-        <UninstallCard copy={copy.uninstall} />
-      </div>{approvalDialog}</>
+      </div></SettingsKitCopyContext.Provider>{approvalDialog}</>
     )
   }
 

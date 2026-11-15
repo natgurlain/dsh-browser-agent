@@ -44,9 +44,9 @@ describe('panel copy', () => {
 
   it('does not list denied steps among the captured failures: they are never captured', () => {
     // Denied, timed-out and cancelled steps are dropped by classifyFailure (privacy).
-    expect(PANEL_COPY.en.learning.fixturesHelp).not.toMatch(/\(denied/u)
-    expect(PANEL_COPY.en.learning.fixturesHelp).toMatch(/Denied, timed-out and cancelled steps .* never captured/u)
-    expect(PANEL_COPY.zh.learning.fixturesHelp).not.toMatch(/（被拒绝/u)
-    expect(PANEL_COPY.zh.learning.fixturesHelp).toContain('被拒绝、超时和取消的步骤')
+    expect(PANEL_COPY.en.learning.fixturesMore).not.toMatch(/\(denied/u)
+    expect(PANEL_COPY.en.learning.fixturesMore).toMatch(/Denied, timed-out and cancelled steps .* never captured/u)
+    expect(PANEL_COPY.zh.learning.fixturesMore).not.toMatch(/（被拒绝/u)
+    expect(PANEL_COPY.zh.learning.fixturesMore).toContain('被拒绝、超时和取消的步骤')
   })
 })

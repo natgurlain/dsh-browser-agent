@@ -22,7 +22,7 @@ export function UninstallCard({ copy }: { copy: PanelCopy['uninstall'] }): React
         <p>{copy.runCommand}</p>
         {command !== null && <pre className="uninstall-command" tabIndex={0}>{command}</pre>}
         <div className="update-actions">
-          <button type="button" className="update-check" disabled={command === null}
+          <button type="button" className="danger" disabled={command === null}
             onClick={() => {
               if (command === null) return
               setCopyState('idle')

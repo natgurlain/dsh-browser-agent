@@ -120,7 +120,7 @@ describe('panel theme setting', () => {
       'Light',
       'Dark',
     ])
-    const selects = [...document.querySelectorAll('.settings-panel')[0]!.querySelectorAll('select')]
+    const selects = [...select.closest('.settings-panel')!.querySelectorAll('select')]
     expect(selects).toHaveLength(2)
     expect(selects[1]).toBe(select)
   })

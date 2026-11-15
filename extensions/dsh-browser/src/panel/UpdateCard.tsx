@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Callout } from './SettingsKit.tsx'
 import type { PanelCopy } from './strings.ts'
 import {
   checkForExtensionUpdate,
@@ -100,42 +101,40 @@ export function UpdateCard({ copy }: { copy: PanelCopy['update'] }): React.JSX.E
   const copyLabel = installInfo?.mode === 'checkout' ? copy.copyCheckoutCommand : copy.copyManagedCommand
 
   return (
-    <section className={`update-card update-${checkState.status}`} aria-labelledby="update-card-title">
-      <div className="update-heading">
-        <div>
-          <span className="eyebrow">{copy.eyebrow}</span>
-          <h2 id="update-card-title">{copy.title}</h2>
-        </div>
-        <div className="update-meta">
+    <section className={`settings-group update-card update-${checkState.status}`} aria-labelledby="update-card-title">
+      <div className="settings-group-head">
+        <h3 id="update-card-title">{copy.title}</h3>
+        <span className="update-meta">
           <span className={`install-pill install-${installMode}`}>{installLabel}</span>
           <span className="version-pill">v{currentVersion}</span>
-        </div>
-      </div>
-      <div className="update-status" role="status" aria-live="polite" aria-busy={checkState.status === 'checking'}>
-        <span className="update-beacon" aria-hidden="true" />
-        <span>
-          <strong>{statusTitle}</strong>
-          <small>{statusBody}</small>
         </span>
       </div>
-      {checkState.status === 'available' && (
-        <div className="update-reload-reminder">
-          <span className="update-reload-glyph" aria-hidden="true">↻</span>
-          <strong>{copy.reloadReminder}</strong>
+      <div className="settings-panel">
+        <div className="setting-row">
+          <div className="update-status" role="status" aria-live="polite" aria-busy={checkState.status === 'checking'}>
+            <span className="update-beacon" aria-hidden="true" />
+            <span>
+              <strong>{statusTitle}</strong>
+              <small>{statusBody}</small>
+            </span>
+          </div>
+          {checkState.status === 'available' && (
+            <Callout tone="info"><p>{copy.reloadReminder}</p></Callout>
+          )}
+          <div className="update-actions">
+            <button type="button" className="secondary update-check" disabled={checkState.status === 'checking'}
+              onClick={() => { void check() }}>
+              {checkState.status === 'checking' ? copy.checking : copy.check}
+            </button>
+            {checkState.status === 'available' && updateCommandAvailable && (
+              <button type="button" className="primary update-copy" onClick={() => { void copyCommand() }}>
+                {copyState === 'copied' ? copy.copied : copyLabel}
+              </button>
+            )}
+          </div>
+          {copyState === 'error' && <p className="field-error update-copy-error">{copy.copyError}</p>}
         </div>
-      )}
-      <div className="update-actions">
-        <button type="button" className="update-check" disabled={checkState.status === 'checking'}
-          onClick={() => { void check() }}>
-          {checkState.status === 'checking' ? copy.checking : copy.check}
-        </button>
-        {checkState.status === 'available' && updateCommandAvailable && (
-          <button type="button" className="update-copy" onClick={() => { void copyCommand() }}>
-            {copyState === 'copied' ? copy.copied : copyLabel}
-          </button>
-        )}
       </div>
-      {copyState === 'error' && <small className="update-copy-error">{copy.copyError}</small>}
     </section>
   )
 }
