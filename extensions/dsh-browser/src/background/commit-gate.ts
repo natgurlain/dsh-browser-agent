@@ -1,5 +1,5 @@
 /**
- * Strict mode: a commit-point gate on outgoing writes (Phase 2.3).
+ * Strict mode: a commit-point gate on outgoing writes.
  *
  * When strict mode covers a tab (a strict site pattern matches its page, or
  * the user turned strict mode on for the agent session), the tab's debugger

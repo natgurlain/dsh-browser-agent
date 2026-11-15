@@ -222,7 +222,7 @@ export class ProgramGrants {
     }
   }
 
-  /** Drop every grant (kill switch, bridge loss). */
+  /** Drop every grant (the kill switch). */
   clear(): void {
     this.grants.clear()
   }

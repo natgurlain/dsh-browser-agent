@@ -3609,7 +3609,10 @@ if (import.meta.env.EXT_TARGET === 'firefox') {
 }
 
 // Alarms survive some extension/service-worker restarts. Remove any stale
-// schedule left by an older eager-connection build; onConnect re-arms it.
+// schedule left by an older eager-connection build; onConnect re-arms it, and
+// so does the runtime lease (onActive, and the restore path once
+// runtimeRestored has read storage). This unconditional disarm runs before
+// either can: the restore path awaits storage first.
 disarmBridgeKeepalive()
 
 // `settingsReady` intentionally has no bridge-start continuation: opening a

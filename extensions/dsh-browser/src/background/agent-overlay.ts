@@ -61,11 +61,6 @@ function targetLabel(call: ToolCall): string | undefined {
   return typeof source.index === 'number' ? `#${source.index}` : undefined
 }
 
-function withoutFrame(args: Record<string, unknown>): Record<string, unknown> {
-  const { frame: _frame, ...rest } = args
-  return rest
-}
-
 async function bounded(work: Promise<unknown>, ms: number): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
@@ -99,7 +94,7 @@ export class AgentOverlayController implements ActionOverlay {
       op: 'point',
       kind,
       // Only addressing fields travel: typed text, file paths, and option values stay out.
-      args: addressingArgs(call.name, withoutFrame(call.args)),
+      args: addressingArgs(call.name, call.args),
       ...(label === undefined ? {} : { label }),
       copy: this.copy(),
     }
@@ -147,15 +142,6 @@ export class AgentOverlayController implements ActionOverlay {
       this.takenOver.add(tabId)
       this.post(tabId, 'takeover', true)
     }
-  }
-
-  /** Re-send everything (locale or setting changed). */
-  refresh(tabIds: ReadonlySet<number>): void {
-    const previous = new Set(this.controlled)
-    this.controlled.clear()
-    for (const tabId of previous) if (!tabIds.has(tabId)) this.post(tabId, 'control', false)
-    this.syncControl(tabIds)
-    for (const tabId of this.takenOver) this.post(tabId, 'takeover', true)
   }
 
   /** State for a document that just loaded in `tabId` (top frame only). */

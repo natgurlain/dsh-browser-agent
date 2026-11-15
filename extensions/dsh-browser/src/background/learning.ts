@@ -1,19 +1,19 @@
 /**
- * Phase 3 learning features, extension side. All default OFF behind
+ * Learning features, extension side. All default OFF behind
  * `dshLearningSettings`; with a feature off this module records nothing.
  *
- * - Workflows (3.8): records successful agent steps with a robust locator per
+ * - Workflows: records successful agent steps with a robust locator per
  *   element, for "Save as workflow"; values typed into sensitive fields are
  *   dropped on the spot. Saving, replay and scheduling happen on the bridge.
- * - Site drivers (3.6): for origins the user enabled, learns a proposal from
+ * - Site drivers: for origins the user enabled, learns a proposal from
  *   the same-origin XHR/fetch request behind an agent action (developer-tools
  *   network capture), shows it to the user, stores approved drivers, and runs
  *   them with a forced, per-call approval card showing the exact request.
- * - Watch me (3.7): records the user's own trusted input on the current tab,
+ * - Watch me: records the user's own trusted input on the current tab,
  *   detects a repetition over rows and offers "Do the remaining N like this":
  *   one card approves the whole program, which then runs step by step through
  *   the bridge; each step is pre-approved only for its exact tool + args, once.
- * - Failure flywheel (3.9): a failed step leaves a local fixture (MHTML when
+ * - Failure flywheel: a failed step leaves a local fixture (MHTML when
  *   the page has no sensitive field and the optional permission is granted,
  *   else a sanitized DOM) in the session workspace via the bridge.
  *
@@ -551,12 +551,6 @@ export class LearningRuntime {
     } catch {
       // Not every request can become a driver (credential in the URL, other origin).
     }
-  }
-
-  /** Add a proposal directly (panel-provided capture, tests). */
-  addProposal(proposal: SiteDriverProposal): void {
-    this.proposals.push(proposal)
-    this.broadcast()
   }
 
   async saveDriver(index: number, edits: { name?: string; description?: string } = {}): Promise<SiteDriver> {

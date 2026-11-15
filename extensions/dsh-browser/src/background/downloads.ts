@@ -33,10 +33,6 @@ export interface DownloadsApi {
     addListener(listener: (delta: chrome.downloads.DownloadDelta) => void): void
     removeListener(listener: (delta: chrome.downloads.DownloadDelta) => void): void
   }
-  onCreated?: {
-    addListener(listener: (item: chrome.downloads.DownloadItem) => void): void
-    removeListener(listener: (item: chrome.downloads.DownloadItem) => void): void
-  }
 }
 
 /** Failure with a stable code for tool answers. */

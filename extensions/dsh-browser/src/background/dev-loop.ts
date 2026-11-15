@@ -1,5 +1,5 @@
 /**
- * Browser side of the closed dev loop (Phase 3.5; bridge: dev-loop.ts).
+ * Browser side of the closed dev loop (bridge side: the bridge package dev-loop.ts).
  *
  * The user links a localhost tab to one of their DSH coding sessions from the
  * side panel (an explicit action, recorded here and on the bridge). While

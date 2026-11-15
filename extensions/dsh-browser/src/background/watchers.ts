@@ -65,6 +65,7 @@ export interface PageWatcher {
   expiresAt: number
   maxFires: number
   fires: number
+  /** Last fire or missed wake attempt (cooldown clock). */
   lastFiredAt?: number
   /** Set when a wake could not be delivered (session not running, rate limit). */
   lastMiss?: string

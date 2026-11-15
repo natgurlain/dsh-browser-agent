@@ -172,7 +172,7 @@ export function matchSitePattern(pattern: string, url: URL): boolean {
   } catch {
     path = url.pathname.toLowerCase()
   }
-  if (pathPattern.includes('*')) return globRegExp(pathPattern, '.', true).test(path)
+  if (pathPattern.includes('*')) return globRegExp(pathPattern, true).test(path)
   return path === pathPattern || path.startsWith(`${pathPattern}/`)
 }
 
@@ -182,12 +182,12 @@ function hostMatches(pattern: string, host: string): boolean {
       const base = pattern.slice(2)
       return host === base || host.endsWith(`.${base}`)
     }
-    return globRegExp(pattern, '.', false).test(host)
+    return globRegExp(pattern, false).test(host)
   }
   return host === pattern || host.endsWith(`.${pattern}`)
 }
 
-function globRegExp(pattern: string, _any: string, prefix: boolean): RegExp {
+function globRegExp(pattern: string, prefix: boolean): RegExp {
   const source = pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')
   return new RegExp(`^${source}${prefix ? '(?:/.*)?' : ''}$`)
 }

@@ -1200,9 +1200,8 @@ async function dispatchOnceArmed(
     : undefined
   let response: unknown
   let dialogDuringAction: OpenDialog | undefined
-  const stateChanging = STATE_CHANGING_PAGE_TOOLS.has(call.name)
   try {
-    if (stateChanging) commitAction?.()
+    if (stateChangingAction) commitAction?.()
     const guarded = await guardPage(dialogs, tabId, frame, sendAction(
       tabId,
       call,
@@ -1220,7 +1219,7 @@ async function dispatchOnceArmed(
     response = guarded.value
     dialogDuringAction = guarded.dialog
   } catch (error: unknown) {
-    if (stateChanging && contentScriptReceiverMissing(error)) rollbackActionCommit?.()
+    if (stateChangingAction && contentScriptReceiverMissing(error)) rollbackActionCommit?.()
     navigationWait?.cancel()
     tabWatch?.stop()
     endPendingWatch()

@@ -26,7 +26,7 @@ export const POLICY_PORT_NAME = 'dsh-policy'
 export const TAINT_STORAGE_KEY = 'dshSessionTaint'
 /** Sessions the user put in strict mode (same storage area as taint: the browser session). */
 export const STRICT_SESSIONS_STORAGE_KEY = 'dshStrictSessions'
-/** Bridge RPC that clears the Host-side taint guard for one session. */
+/** Bridge RPCs that clear and mark the Host-side taint guard of one session. */
 export { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 
 /** The settings fields the policy layer reads. */
