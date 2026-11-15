@@ -8,7 +8,7 @@ export interface PanelCopy {
   /** Status shown when the startup pass found no local dsh at all. */
   statusNotFound: string
   /** Specific refusals reported by the bridge (shown instead of the transport state). */
-  bridgeFailure: Record<'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy' | 'no-token', string>
+  bridgeFailure: Record<'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy' | 'no-token' | 'token-unreadable', string>
   /** One-step pairing with the DSH host (PairingCard). */
   pairing: {
     title: string
@@ -31,7 +31,7 @@ export interface PanelCopy {
     againConfirm: string
     cancel: string
     /** One message per `PairingFailure` of the background. */
-    failure: Record<'wrong-code' | 'expired' | 'busy' | 'paused' | 'unreachable' | 'unsupported' | 'version-mismatch' | 'untrusted' | 'cancelled' | 'has-token', string>
+    failure: Record<'wrong-code' | 'expired' | 'replaced' | 'busy' | 'paused' | 'unreachable' | 'unsupported' | 'version-mismatch' | 'untrusted' | 'cancelled' | 'has-token' | 'auto-limit', string>
   }
   approval: {
     eyebrow: string
@@ -555,6 +555,7 @@ const EN: PanelCopy = {
     'origin-rejected': 'DSH refused this extension: check that DSH is running, or pair again in Settings',
     busy: 'Bridge busy, retrying…',
     'no-token': 'Not paired with DSH yet',
+    'token-unreadable': 'The installed bridge token could not be read; retrying',
   },
   pairing: {
     title: 'Pair with DSH',
@@ -575,6 +576,8 @@ const EN: PanelCopy = {
     failure: {
       'wrong-code': 'The code entered in DSH was not this one. A code works for one try: ask again for a new code.',
       expired: 'No code was entered in time. Open DSH, then ask again.',
+      replaced: 'Another request took this one\'s place: something else on this computer is asking to pair. Ask again, and in DSH enter only the code shown here.',
+      'auto-limit': 'Pairing was asked several times without success. Check that DSH is open, then ask again.',
       busy: 'DSH is receiving too many pairing requests. Wait a minute, then ask again.',
       paused: 'Pairing is paused in DSH. Resume it there (Settings → General → Pair a browser, or /browser-pair resume), then ask again.',
       unreachable: 'No DSH was found on this computer. Start DSH, then ask again.',
@@ -1167,6 +1170,7 @@ const ZH: PanelCopy = {
     'origin-rejected': 'DSH 拒绝了此扩展：请确认 DSH 正在运行，或在设置中重新配对',
     busy: '桥接繁忙，正在重试…',
     'no-token': '尚未与 DSH 配对',
+    'token-unreadable': '无法读取已安装的桥接令牌，正在重试',
   },
   pairing: {
     title: '与 DSH 配对',
@@ -1187,6 +1191,8 @@ const ZH: PanelCopy = {
     failure: {
       'wrong-code': '在 DSH 中输入的不是这个配对码。一个配对码只能尝试一次：请重新请求以获取新的配对码。',
       expired: '未在有效时间内输入配对码。请打开 DSH 后重新请求。',
+      replaced: '另一个请求占用了此请求的位置：本机上有其他程序在请求配对。请重新请求，并且只在 DSH 中输入这里显示的配对码。',
+      'auto-limit': '已多次自动请求配对但未成功。请确认 DSH 已打开，然后重新请求。',
       busy: 'DSH 收到的配对请求过多。请等待一分钟后重新请求。',
       paused: 'DSH 中的配对已暂停。请在那里恢复（设置 → 通用 → 配对浏览器，或 /browser-pair resume），然后重新请求。',
       unreachable: '未在本机找到 DSH。请启动 DSH 后重新请求。',

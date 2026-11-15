@@ -111,6 +111,8 @@ export async function runPairingSmoke({ chromium, builtExtension, directory, run
     const prompt = app.locator('[data-testid="dsh-pairing-prompt"]')
     await prompt.waitFor({ timeout: 45_000 })
     assert.match(await prompt.textContent(), /A browser wants to connect/u)
+    // The card says who is asking: this build is not the published extension, and is labelled so.
+    assert.equal((await prompt.locator('[data-testid="dsh-pairing-requester"]').first().textContent()).startsWith(`Unknown extension ${extensionId} — not the published DSH extension`), true)
     assert.equal((await prompt.textContent()).includes(secondCode), false, 'the DSH app never shows a code')
     // A fresh DSH profile opens with a one-time preview notice whose backdrop covers the page.
     await app.getByRole('button', { name: 'Continue', exact: true }).click({ timeout: 5_000 }).catch(() => {})
@@ -126,8 +128,9 @@ export async function runPairingSmoke({ chromium, builtExtension, directory, run
     await waitFor(async () => {
       const text = await prompt.locator('[data-testid="dsh-pairing-status"]').textContent().catch(() => '')
       // Any other answer is a failure worth reading, not a reason to keep waiting.
-      if (text !== '' && text !== null && !text.startsWith('Paired.')) throw new Error(`the DSH app answered: ${text}`)
-      return text?.startsWith('Paired.')
+      if (text !== '' && text !== null && !text.startsWith('Paired with')) throw new Error(`the DSH app answered: ${text}`)
+      // The notice names the extension that was paired.
+      return text?.startsWith(`Paired with ${extensionId}.`)
     }, 'the paired notice in the DSH app', 30_000)
     await waitFor(async () => await label() === 'Connected', 'the paired store build to connect', 30_000)
     assert.equal(await card.count(), 0, 'the pairing card leaves once the panel is connected')
@@ -138,7 +141,7 @@ export async function runPairingSmoke({ chromium, builtExtension, directory, run
     const after = (await ownerPairing({ action: 'status' })).body
     assert.equal(after.waiting, 0)
     assert.equal(after.paired.origin, `chrome-extension://${extensionId}`)
-    assert.deepEqual(after.pairedIds, [extensionId])
+    assert.deepEqual(after.pairedOrigins, [`chrome-extension://${extensionId}`])
     const record = await waitFor(async () => {
       try { return JSON.parse(await readFile(join(home, 'browser-paired-extensions.json'), 'utf8')) } catch { return undefined }
     }, 'the paired-extension record')
@@ -146,7 +149,10 @@ export async function runPairingSmoke({ chromium, builtExtension, directory, run
     // The token reached the extension's settings through the exchange, not through a file.
     const stored = await worker.evaluate(async () => (await chrome.storage.local.get('dshSettings')).dshSettings?.token ?? '')
     assert.equal(stored, token)
-    results.push('a store-style build (no manifest key, no token file) asks to pair by itself and shows a code; a wrong code entered on the host stores nothing; the code typed into the DSH web app\'s own card connects it, with no token copied and no code shown by the host')
+    // Unpair from the host: the panel's live connection is closed and the extension is refused.
+    assert.equal((await ownerPairing({ action: 'unpair', origin: `chrome-extension://${extensionId}` })).status, 200)
+    await waitFor(async () => (await label()).startsWith('DSH refused this extension'), 'the unpaired store build to be cut off', 30_000)
+    results.push('a store-style build (no manifest key, no token file) asks to pair by itself and shows a code; a wrong code entered on the host stores nothing; the DSH web app\'s card names the extension as unknown, takes the typed code and connects it, with no token copied and no code shown by the host; unpairing closes its live connection')
     return [shot]
   } finally {
     await context.close().catch(() => {})

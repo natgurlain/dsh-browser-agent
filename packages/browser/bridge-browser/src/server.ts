@@ -170,11 +170,16 @@ export function isLoopbackAddress(address: string | undefined): boolean {
  * Origin-less local clients prove themselves with the token alone.
  * @param origin - the upgrade request's Origin header.
  * @param chromeExtensionIds - allowed Chrome extension IDs.
+ * @param revokedOrigins - Firefox origins the user unpaired (refused although Firefox origins are otherwise accepted).
  * @returns true when the handshake may proceed.
  */
-export function isAllowedBridgeOrigin(origin: string | undefined, chromeExtensionIds: ReadonlySet<string>): boolean {
+export function isAllowedBridgeOrigin(
+  origin: string | undefined,
+  chromeExtensionIds: ReadonlySet<string>,
+  revokedOrigins: ReadonlySet<string> = new Set(),
+): boolean {
   if (origin === undefined || origin === '') return true
-  if (origin.startsWith('moz-extension://')) return true
+  if (origin.startsWith('moz-extension://')) return !revokedOrigins.has(origin)
   const chrome = /^chrome-extension:\/\/([a-p]{32})$/u.exec(origin)
   return chrome !== null && chromeExtensionIds.has(chrome[1]!)
 }
@@ -251,8 +256,10 @@ export class BridgeToolError extends Error {
 
 /** Dependencies the bridge needs from the host. */
 export interface BridgeServerDeps {
-  /** Shared secret both sides prove knowledge of during the handshake. */
+  /** Shared secret both sides prove knowledge of during the handshake. Replaceable at run time ({@link BridgeServer.resetToken}). */
   token: string
+  /** Firefox extension origins the user unpaired: refused at the Origin check. */
+  revokedOrigins?: readonly string[]
   /**
    * Chrome extension IDs whose `chrome-extension://` Origin may connect.
    * Defaults to {@link PINNED_CHROME_EXTENSION_ID}.
@@ -401,6 +408,8 @@ interface ReadyConnection {
   ws: WebSocket
   /** Remote address captured at upgrade time (loopback gate for privileged methods). */
   remoteAddress: string | undefined
+  /** The Origin header the socket was accepted with (undefined for a non-browser client). */
+  origin: string | undefined
   /** Capabilities the extension advertised in its `hello`. */
   clientCaps: BridgeCaps
   /** Per-connection frame integrity (sealing and verification). */
@@ -459,9 +468,15 @@ export class BridgeServer {
   private readonly pendingSockets = new Set<WebSocket>()
   /** Allowed Chrome extension IDs: configured ones, plus every ID that paired since. */
   private readonly chromeExtensionIds: Set<string>
+  /** Firefox extension origins the user unpaired. */
+  private readonly revokedOrigins: Set<string>
+  /** The token in force (the configured one until {@link resetToken}). */
+  private token: string
 
   constructor(private readonly deps: BridgeServerDeps) {
     this.chromeExtensionIds = new Set(deps.allowedChromeExtensionIds ?? [PINNED_CHROME_EXTENSION_ID])
+    this.revokedOrigins = new Set(deps.revokedOrigins ?? [])
+    this.token = deps.token
     const { hostApprovals: _hostApprovals, client: _client, standing: _standing, standingUpdates: _standingUpdates, ...caps } = deps.caps
     this.serverCaps = deps.requestHostApproval === undefined
       ? caps
@@ -762,7 +777,7 @@ export class BridgeServer {
   ): void {
     // A Chrome extension that is not on the allowlist may do one thing only:
     // ask to pair. Web pages (http/https Origins) are refused outright.
-    const pairOnly = !isAllowedBridgeOrigin(origin, this.chromeExtensionIds)
+    const pairOnly = !isAllowedBridgeOrigin(origin, this.chromeExtensionIds, this.revokedOrigins)
     if (pairOnly && !(isPairingOrigin(origin) && this.deps.pairing !== undefined)) {
       ws.close(BRIDGE_CLOSE_CODES.originRejected, 'origin not allowed')
       return
@@ -882,7 +897,7 @@ export class BridgeServer {
           ws.close(BRIDGE_CLOSE_CODES.authFailed, 'authentication failed: endpoint mismatch')
           return
         }
-        const expected = bridgeProof(this.deps.token, 'client', serverNonce, frame.nonce, frame.endpoint, { client: frame.caps }, nodeHmac)
+        const expected = bridgeProof(this.token, 'client', serverNonce, frame.nonce, frame.endpoint, { client: frame.caps }, nodeHmac)
         if (frame.nonce === serverNonce || !verifyToken(expected, frame.mac)) {
           ws.close(BRIDGE_CLOSE_CODES.authFailed, 'authentication failed')
           return
@@ -891,10 +906,10 @@ export class BridgeServer {
         helloTimer = undefined
         leavePending()
         if (limited) setSocketMaxPayload(ws, this.wss.options.maxPayload ?? 100 * 1024 * 1024)
-        channel = BridgeFrameChannel.derive(this.deps.token, 'server', serverNonce, frame.nonce, frame.endpoint, nodeHmac)
+        channel = BridgeFrameChannel.derive(this.token, 'server', serverNonce, frame.nonce, frame.endpoint, nodeHmac)
         const serverCaps = this.capsFor(bridgeClientKey(frame.caps.client))
-        ready = this.promote(ws, remoteAddress, frame.caps, channel, serverCaps,
-          bridgeProof(this.deps.token, 'server', frame.nonce, serverNonce, frame.endpoint, { client: frame.caps, server: serverCaps }, nodeHmac))
+        ready = this.promote(ws, remoteAddress, origin, frame.caps, channel, serverCaps,
+          bridgeProof(this.token, 'server', frame.nonce, serverNonce, frame.endpoint, { client: frame.caps, server: serverCaps }, nodeHmac))
         return
       }
       const frame = channel?.open(text)
@@ -986,7 +1001,7 @@ export class BridgeServer {
       }
       let sealed: { box: string; mac: string }
       try {
-        sealed = sealPairingToken(keys, this.deps.token)
+        sealed = sealPairingToken(keys, this.token)
       } catch {
         // A token too long to carry: pairing cannot deliver it (paste it instead).
         ws.close(BRIDGE_CLOSE_CODES.pairingFailed, 'pairing failed: this bridge token cannot be delivered by pairing')
@@ -994,6 +1009,8 @@ export class BridgeServer {
       }
       const chromeExtensionId = chromeExtensionIdOfOrigin(origin)
       if (chromeExtensionId !== undefined) this.chromeExtensionIds.add(chromeExtensionId)
+      // A Firefox origin the user had unpaired is paired again.
+      this.revokedOrigins.delete(origin)
       try {
         this.deps.onPaired?.({ origin, ...(chromeExtensionId === undefined ? {} : { chromeExtensionId }) })
       } catch { /* observer only */ }
@@ -1005,19 +1022,47 @@ export class BridgeServer {
     }
     return desk.enqueue({ origin, name: request.name }, attempt, (reason) => {
       if (reason === 'paused') ws.close(BRIDGE_CLOSE_CODES.pairingPaused, 'pairing is paused on the host')
-      else ws.close(BRIDGE_CLOSE_CODES.pairingClosed, reason === 'expired' ? 'the pairing request expired' : 'a newer pairing request took this one\'s place')
+      else if (reason === 'replaced') ws.close(BRIDGE_CLOSE_CODES.pairingReplaced, 'another pairing request took this one\'s place')
+      else ws.close(BRIDGE_CLOSE_CODES.pairingClosed, 'the pairing request expired')
     })
   }
 
   /**
-   * Take a Chrome extension ID off the allowlist (the user unpaired it). Its
-   * next handshake is refused at the Origin check; a connection it already
-   * has stays until it ends, and it still holds the token (rotate the token
-   * to cut it off completely).
-   * @returns whether the ID was allowed.
+   * The user unpaired an extension: refuse its Origin from now on and close
+   * every connection it has. A Chrome extension ID leaves the allowlist
+   * (unless `keepAllowed`: the plugin config allows it too, and unpairing
+   * undoes pairing, not configuration); a Firefox origin joins the refusal
+   * list. The extension still holds the token: {@link resetToken} takes that away.
+   * @returns how many live connections were closed.
    */
-  revokeChromeExtensionId(id: string): boolean {
-    return this.chromeExtensionIds.delete(id)
+  revokeOrigin(origin: string, options: { keepAllowed?: boolean } = {}): number {
+    const chromeExtensionId = chromeExtensionIdOfOrigin(origin)
+    if (chromeExtensionId !== undefined) {
+      if (options.keepAllowed !== true) this.chromeExtensionIds.delete(chromeExtensionId)
+    } else {
+      this.revokedOrigins.add(origin)
+    }
+    let closed = 0
+    for (const conn of [...this.connections.values()]) {
+      if (conn.origin !== origin) continue
+      this.dropConnection(conn, 'the extension was unpaired', BRIDGE_CLOSE_CODES.originRejected)
+      closed += 1
+    }
+    return closed
+  }
+
+  /**
+   * Replace the token. Every connection is closed (each was authenticated
+   * with the old one), and from here on only the new token passes the handshake.
+   * @param token - the new token.
+   * @returns how many live connections were closed.
+   */
+  resetToken(token: string): number {
+    if (token === '') throw new Error('bridge token is empty')
+    this.token = token
+    const live = [...this.connections.values()]
+    for (const conn of live) this.dropConnection(conn, 'the bridge token was reset', BRIDGE_CLOSE_CODES.authFailed)
+    return live.length
   }
 
   /** The dialed endpoint is this socket, or a configured loopback forward to it. */
@@ -1034,6 +1079,7 @@ export class BridgeServer {
   private promote(
     ws: WebSocket,
     remoteAddress: string | undefined,
+    origin: string | undefined,
     clientCaps: BridgeCaps,
     channel: BridgeFrameChannel,
     serverCaps: BridgeCaps,
@@ -1081,6 +1127,7 @@ export class BridgeServer {
       serial: ++this.connectionSerial,
       ws,
       remoteAddress,
+      origin,
       clientCaps,
       channel,
       abort,
@@ -1425,7 +1472,7 @@ export class BridgeServer {
   }
 
   /** Close one connection and settle only its own in-flight calls. */
-  private dropConnection(conn: ReadyConnection, reason: string): void {
+  private dropConnection(conn: ReadyConnection, reason: string, closeCode: number = BRIDGE_CLOSE_CODES.replaced): void {
     if (this.connections.get(conn.key) === conn) {
       this.connections.delete(conn.key)
       try { this.deps.onDisconnect?.(conn.key) } catch { /* observer only */ }
@@ -1433,7 +1480,7 @@ export class BridgeServer {
     clearInterval(conn.ping)
     conn.abort.abort()
     if (conn.ws.readyState === WebSocket.OPEN || conn.ws.readyState === WebSocket.CONNECTING) {
-      conn.ws.close(BRIDGE_CLOSE_CODES.replaced, 'replaced')
+      conn.ws.close(closeCode, closeCode === BRIDGE_CLOSE_CODES.replaced ? 'replaced' : reason)
     }
     for (const [id, pending] of [...this.pendingTools]) {
       if (pending.conn !== conn) continue

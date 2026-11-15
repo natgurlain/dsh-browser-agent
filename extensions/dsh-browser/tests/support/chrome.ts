@@ -23,13 +23,18 @@ export function panelPort(name = 'dsh-panel', sender?: chrome.runtime.MessageSen
   const onDisconnect = chromeEvent<[]>()
   const postMessage = vi.fn()
   const disconnect = vi.fn()
+  // The panel port is accepted only from the extension's own pages: by default this is the side panel.
+  const runtime = (globalThis as { chrome?: { runtime?: { id?: string; getURL?: (path: string) => string } } }).chrome?.runtime
+  const page = sender ?? (name === 'dsh-panel' && typeof runtime?.getURL === 'function'
+    ? { ...(runtime.id === undefined ? {} : { id: runtime.id }), url: runtime.getURL('panel/index.html') }
+    : undefined)
   const port = {
     name,
     postMessage,
     disconnect,
     onMessage,
     onDisconnect,
-    ...(sender === undefined ? {} : { sender }),
+    ...(page === undefined ? {} : { sender: page }),
   } as unknown as chrome.runtime.Port
   return { onDisconnect, onMessage, port, postMessage, disconnect }
 }

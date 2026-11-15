@@ -56,7 +56,9 @@ export const PAIRING_ANSWER_TIMEOUT_MS = 125_000
 /**
  * Why pairing did not produce a token:
  * - `wrong-code`: a code was entered in DSH, and it was not this request's;
- * - `expired`: no code was entered in time, or a newer request took this one's place;
+ * - `expired`: no code was entered in time;
+ * - `replaced`: another request took this one's place in the bridge's queue
+ *   (something else on the computer is asking to pair);
  * - `busy`: the bridge is receiving too many requests, or does not pair;
  * - `paused`: pairing is paused in DSH;
  * - `unreachable`: nothing answered at the address, or DSH went away;
@@ -67,10 +69,12 @@ export const PAIRING_ANSWER_TIMEOUT_MS = 125_000
  *   was altered on the way;
  * - `cancelled`: the panel withdrew the request;
  * - `has-token`: this install already holds a token and the user did not ask
- *   to pair again (reported by the background, never by the exchange).
+ *   to pair again (reported by the background, never by the exchange);
+ * - `auto-limit`: the panel asked by itself too often in one sitting; the
+ *   next request needs the user's click (reported by the background).
  */
 export type PairingFailure =
-  | 'wrong-code' | 'expired' | 'busy' | 'paused' | 'unreachable' | 'unsupported' | 'version-mismatch' | 'untrusted' | 'cancelled' | 'has-token'
+  | 'wrong-code' | 'expired' | 'replaced' | 'busy' | 'paused' | 'unreachable' | 'unsupported' | 'version-mismatch' | 'untrusted' | 'cancelled' | 'has-token' | 'auto-limit'
 
 /** Outcome of one pairing request. */
 export type PairingResult = { ok: true; token: string } | { ok: false; reason: PairingFailure }
@@ -221,6 +225,9 @@ export function pairWithBridge(url: string, options: PairingOptions): Promise<Pa
         case BRIDGE_CLOSE_CODES.pairingPaused:
           finish({ ok: false, reason: 'paused' })
           return
+        case BRIDGE_CLOSE_CODES.pairingReplaced:
+          finish({ ok: false, reason: 'replaced' })
+          return
         case BRIDGE_CLOSE_CODES.pairingClosed:
           finish({ ok: false, reason: stage === 'confirmed' ? 'untrusted' : pendingCloseReason(event.reason) })
           return
@@ -248,7 +255,7 @@ export function pairWithBridge(url: string, options: PairingOptions): Promise<Pa
 /**
  * Why the bridge closed a request it had not attempted: it does not pair
  * (`unsupported`), it is receiving too many requests (`busy`), or the request
- * timed out or was replaced by a newer one (`expired`). The reason text only
+ * timed out (`expired`). The reason text only
  * picks the message shown; nothing is trusted on its strength.
  */
 function pendingCloseReason(reason: string): PairingFailure {

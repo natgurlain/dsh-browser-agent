@@ -14,6 +14,7 @@ import {
   createPairingShare,
   derivePairingKeys,
   normalizePairingCode,
+  openPairingToken,
   pairingClientConfirmation,
   pairingShareFor,
   sealPairingToken,
@@ -83,7 +84,7 @@ describe('pairing against a real bridge', () => {
     expect(code).toMatch(/^[A-HJ-NP-Z2-9]{3}-[A-HJ-NP-Z2-9]{3}$/u)
     await waitFor(() => h.desk.status().waiting === 1)
     // The host knows a browser waits and what it says it is; it holds no code.
-    expect(h.desk.status()).toMatchObject({ waiting: 1, hints: ['Brave'] })
+    expect(h.desk.status()).toMatchObject({ waiting: 1, requests: [{ origin: STORE_ORIGIN, name: 'Brave', official: false }] })
 
     expect(await h.desk.enter(code.toLowerCase())).toBe('paired')
     const result = await asking.result
@@ -329,6 +330,8 @@ describe('pairing client', () => {
     expect(await run(async (socket) => { await requested(socket); socket.close(BRIDGE_CLOSE_CODES.pairingClosed, 'too many pairing requests; try again in a minute') })).toEqual({ ok: false, reason: 'busy' })
     expect(await run(async (socket) => { await requested(socket); socket.close(BRIDGE_CLOSE_CODES.pairingClosed, 'the pairing request expired') })).toEqual({ ok: false, reason: 'expired' })
     expect(await run(async (socket) => { await requested(socket); socket.close(BRIDGE_CLOSE_CODES.pairingPaused) })).toEqual({ ok: false, reason: 'paused' })
+    // Pushed out of the bridge's queue by another request.
+    expect(await run(async (socket) => { await requested(socket); socket.close(BRIDGE_CLOSE_CODES.pairingReplaced) })).toEqual({ ok: false, reason: 'replaced' })
     // The request did not describe the socket (something sits in between).
     expect(await run(async (socket) => { await requested(socket); socket.close(BRIDGE_CLOSE_CODES.pairingFailed) })).toEqual({ ok: false, reason: 'untrusted' })
     expect(await run(async (socket) => { await requested(socket); socket.close(1006) })).toEqual({ ok: false, reason: 'unreachable' })
@@ -395,6 +398,14 @@ describe('pairing client', () => {
     // The constant the bridge suite checks against an independent node-crypto derivation.
     expect(pairingClientConfirmation(client)).toBe('cce5bb508133bd5b892ca32c9ea16a8bbd8ca80ac28fd7b1183b6fda888efc42')
     expect(verifyPairingClientConfirmation(server, pairingClientConfirmation(client))).toBe(true)
+    // The bridge's pair.ok for the same vector: the encrypted token and its confirmation.
+    const token = 'vector-bridge-token-0123456789abcdef0123456789abcdef'
+    expect(sealPairingToken(server, token)).toEqual({
+      box: '3b40cda4453c5c14915391de5c777cfe741e0d49633b979855ab0e61ec5a093bd4b6f7618e77fbcfac805e954b9a22a5a7b21456',
+      mac: 'f4559ead079fe6aaf2fcd9b5dc5bebf3b787924f69a69c2210461a10ceae547f',
+    })
+    expect(openPairingToken(client, '3b40cda4453c5c14915391de5c777cfe741e0d49633b979855ab0e61ec5a093bd4b6f7618e77fbcfac805e954b9a22a5a7b21456',
+      'f4559ead079fe6aaf2fcd9b5dc5bebf3b787924f69a69c2210461a10ceae547f')).toBe(token)
     // Another code: another key.
     const other = { ...context, code: 'ABCDEG' }
     const wrong = derivePairingKeys(other, a, pairingShareFor(other, a), serverShare, 'client')!

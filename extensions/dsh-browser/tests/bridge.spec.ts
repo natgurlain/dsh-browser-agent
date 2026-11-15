@@ -8,7 +8,7 @@ import {
   computeBridgeProof,
   createBridgeNonce,
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import { BridgeClient, INSTALLED_TOKEN_PATH, loadInstalledToken, type BridgeState } from '../src/background/bridge.ts'
+import { BridgeClient, INSTALLED_TOKEN_PATH, InstalledTokenUnreadableError, loadInstalledToken, type BridgeState } from '../src/background/bridge.ts'
 import { challengeUntilHello, completeHandshake, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
 import { FakeWebSocket } from './support/fake-websocket.ts'
 
@@ -354,15 +354,53 @@ describe('loadInstalledToken', () => {
     expect(fetchMock).toHaveBeenCalledWith(`chrome-extension://id/${INSTALLED_TOKEN_PATH}`, { cache: 'no-store' })
   })
 
-  it('treats a missing, unreadable, or malformed file as no token', async () => {
+  it('reports "no token file" only when the file is known to be missing', async () => {
     vi.stubGlobal('chrome', { runtime: { getURL: (path: string) => `chrome-extension://id/${path}` } })
     vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 404 })))
     await expect(loadInstalledToken()).resolves.toBe('')
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch') }))
-    await expect(loadInstalledToken()).resolves.toBe('')
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('two words', { status: 200 })))
+    // Chrome rejects the fetch of a packaged file that does not exist; the manifest still reads.
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.endsWith('/manifest.json')) return new Response('{}', { status: 200 })
+      throw new TypeError('Failed to fetch')
+    }))
     await expect(loadInstalledToken()).resolves.toBe('')
     vi.stubGlobal('chrome', undefined)
     await expect(loadInstalledToken()).resolves.toBe('')
+  })
+
+  it('regression (review 2, L6): a file that is there but yields no token is "unreadable", never "no token"', async () => {
+    vi.stubGlobal('chrome', { runtime: { getURL: (path: string) => `chrome-extension://id/${path}` } })
+    // Caught mid-rewrite (empty), malformed, a server error, or nothing readable at all.
+    for (const answer of [
+      async () => new Response('', { status: 200 }),
+      async () => new Response('two words', { status: 200 }),
+      async () => new Response(null, { status: 500 }),
+      async () => { throw new TypeError('Failed to fetch') },
+    ]) {
+      vi.stubGlobal('fetch', vi.fn(answer))
+      await expect(loadInstalledToken()).rejects.toBeInstanceOf(InstalledTokenUnreadableError)
+    }
+  })
+
+  it('an unreadable token file keeps the client retrying with its own status, and dials nothing', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const states: BridgeState[] = []
+    let readable = false
+    const client = new BridgeClient({ onStateChange: (state) => { states.push(state) }, onFrame: () => {}, onHelloOk: () => {} },
+      async () => true, () => true, {}, async () => {
+        if (!readable) throw new InstalledTokenUnreadableError()
+        return TEST_BRIDGE_TOKEN
+      })
+    client.start('ws://127.0.0.1:3080/ext/bridge', '')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(client.failure).toBe('token-unreadable')
+    expect(states.at(-1)).toBe('reconnecting')
+    expect(FakeWebSocket.instances).toHaveLength(0)
+    // The next attempt reads the file again, at the ordinary cadence.
+    readable = true
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    client.stop()
   })
 })

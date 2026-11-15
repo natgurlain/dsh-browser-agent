@@ -40,16 +40,19 @@ window.__ModuleLoader__.load({
         'pairing.title': 'Pair a browser',
         'pairing.wants': 'A browser wants to connect',
         'pairing.prompt': 'Enter the code it shows',
-        'pairing.hint': 'It says it is {0}.',
+        'pairing.official': 'DSH Browser Agent (official)',
+        'pairing.unknown': 'Unknown extension {0} — not the published DSH extension',
+        'pairing.unknownWarning': 'Enter a code for an unknown extension only if you installed it yourself and trust it: it will be able to drive DSH.',
+        'pairing.says': 'says it is {0}',
         'pairing.only': 'Enter a code only when you opened the DSH browser extension yourself and it shows the code.',
         'pairing.placeholder': 'ABC-DEF',
         'pairing.connect': 'Connect',
         'pairing.checking': 'Checking…',
         'pairing.waiting': 'Browsers waiting for a code: {0}. Enter the code your browser shows.',
         'pairing.idle': 'Open the DSH browser extension: its panel shows a six-character code. Enter that code here.',
-        'pairing.result.paired': 'Paired. The browser connects by itself now.',
+        'pairing.result.paired': 'Paired with {0}. The browser connects by itself now.',
         'pairing.result.unconfirmed': 'The code matched, but the browser did not confirm. If its panel does not connect, ask again from the browser.',
-        'pairing.result.no-match': 'No waiting browser shows that code. The browser now shows a new code: enter that one.',
+        'pairing.result.no-match': 'No waiting browser shows that code. A code works for one try: in the browser, choose Ask again and enter the new code.',
         'pairing.result.none-waiting': 'No browser is waiting. Open the DSH browser extension first.',
         'pairing.result.invalid': 'A pairing code has 6 letters and digits, like ABC-DEF.',
         'pairing.result.paused': 'Pairing is paused. Resume it first.',
@@ -61,7 +64,13 @@ window.__ModuleLoader__.load({
         'pairing.resume': 'Resume pairing',
         'pairing.paired': 'Paired extensions',
         'pairing.unpair': 'Unpair',
-        'pairing.unpairNote': 'Unpairing stops that extension from connecting. It still holds the bridge token: if the browser is no longer yours, also reset the token (delete ~/.dsh/ext-bridge-token and restart DSH; other paired browsers then pair again).',
+        'pairing.unpairNote': 'Unpairing disconnects that extension and refuses it from now on. It still holds the bridge token: if the browser is no longer yours, also reset the token.',
+        'pairing.reset': 'Reset bridge token',
+        'pairing.resetConfirm': 'Reset now',
+        'pairing.resetCancel': 'Cancel',
+        'pairing.resetWarning': 'This replaces the bridge token and disconnects every browser. The installed developer extension picks the new token up by itself; paired browsers pair again.',
+        'pairing.resetDone': 'The bridge token was replaced. Every browser was disconnected.',
+        'pairing.resetPinned': 'The bridge token is pinned in the plugin config; change it there to revoke it.',
       },
       zh: {
         'bridgeAddress.title': '浏览器桥地址',
@@ -73,16 +82,19 @@ window.__ModuleLoader__.load({
         'pairing.title': '配对浏览器',
         'pairing.wants': '有浏览器请求连接',
         'pairing.prompt': '请输入它显示的配对码',
-        'pairing.hint': '它自称是 {0}。',
+        'pairing.official': 'DSH Browser Agent（官方）',
+        'pairing.unknown': '未知扩展 {0} — 不是已发布的 DSH 扩展',
+        'pairing.unknownWarning': '仅当该扩展是你自己安装并且信任的，才为未知扩展输入配对码：它将能够操作 DSH。',
+        'pairing.says': '自称是 {0}',
         'pairing.only': '仅当你自己打开了 DSH 浏览器扩展并且它显示了配对码时，才在这里输入。',
         'pairing.placeholder': 'ABC-DEF',
         'pairing.connect': '连接',
         'pairing.checking': '正在检查…',
         'pairing.waiting': '正在等待配对码的浏览器：{0} 个。请输入你的浏览器显示的配对码。',
         'pairing.idle': '打开 DSH 浏览器扩展：它的侧边栏会显示一个 6 位配对码。在这里输入该配对码。',
-        'pairing.result.paired': '配对成功，浏览器会自动连接。',
+        'pairing.result.paired': '已与 {0} 配对，浏览器会自动连接。',
         'pairing.result.unconfirmed': '配对码正确，但浏览器没有确认。如果它的侧边栏没有连接，请在浏览器中重新请求。',
-        'pairing.result.no-match': '没有等待中的浏览器显示这个配对码。浏览器现在会显示新的配对码，请输入新的。',
+        'pairing.result.no-match': '没有等待中的浏览器显示这个配对码。一个配对码只能尝试一次：请在浏览器中选择「重新请求」，然后输入新的配对码。',
         'pairing.result.none-waiting': '没有浏览器在等待。请先打开 DSH 浏览器扩展。',
         'pairing.result.invalid': '配对码由 6 位字母和数字组成，例如 ABC-DEF。',
         'pairing.result.paused': '配对已暂停，请先恢复。',
@@ -94,7 +106,13 @@ window.__ModuleLoader__.load({
         'pairing.resume': '恢复配对',
         'pairing.paired': '已配对的扩展',
         'pairing.unpair': '取消配对',
-        'pairing.unpairNote': '取消配对后，该扩展将无法连接。但它仍持有桥接令牌：如果该浏览器已不属于你，还需重置令牌（删除 ~/.dsh/ext-bridge-token 并重启 DSH；其他已配对的浏览器需重新配对）。',
+        'pairing.unpairNote': '取消配对会断开该扩展并从此拒绝它。但它仍持有桥接令牌：如果该浏览器已不属于你，还需重置令牌。',
+        'pairing.reset': '重置桥接令牌',
+        'pairing.resetConfirm': '立即重置',
+        'pairing.resetCancel': '取消',
+        'pairing.resetWarning': '这会更换桥接令牌并断开所有浏览器。已安装的开发者扩展会自动使用新令牌；已配对的浏览器需重新配对。',
+        'pairing.resetDone': '桥接令牌已更换，所有浏览器已断开。',
+        'pairing.resetPinned': '桥接令牌固定在插件配置中；如需吊销，请在配置中修改。',
       },
     }
 
@@ -145,6 +163,8 @@ window.__ModuleLoader__.load({
         // A fixed-height line: messages come and go without moving the input or the buttons.
         '.dshBridgePairStatus{min-height:36px;margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}',
         '.dshBridgePairPaired{display:flex;align-items:center;gap:8px;min-width:0}',
+        '.dshBridgePairWho{margin:0;color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px;overflow-wrap:anywhere}',
+        '.dshBridgePairWarn{margin:0;color:var(--dsw-alias-label-danger,var(--dsw-alias-label-primary));font-size:12px;font-weight:600;line-height:18px;overflow-wrap:anywhere}',
         '.dshBridgePairId{flex:1;min-width:0;color:var(--dsw-alias-label-primary);font:400 12px/18px ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
         '.dshBridgePairPrompt{position:fixed;right:16px;bottom:16px;z-index:2147483000;display:flex;flex-direction:column;gap:8px;width:min(360px,calc(100vw - 32px));padding:14px 16px;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;background:var(--dsw-alias-bg-base,Canvas);box-shadow:0 8px 28px rgba(0,0,0,.18)}',
       ].join('')
@@ -253,15 +273,32 @@ window.__ModuleLoader__.load({
       return typeof t === 'function' ? t : key => dictionaries.en[key] ?? key
     }
 
+    const EXTENSION_ORIGIN = /^(?:chrome-extension:\/\/[a-p]{32}|moz-extension:\/\/[0-9a-f-]{36})$/
+
+    /** The part of an extension origin a person can compare: the ID or the UUID. */
+    function extensionId(origin) {
+      return origin.replace(/^(?:chrome|moz)-extension:\/\//, '')
+    }
+
     /** Only what this page expects of a status answer; anything else reads as "nothing known". */
     function readStatus(body) {
       if (body === null || typeof body !== 'object' || body.ok !== true) return null
+      const requests = Array.isArray(body.requests)
+        ? body.requests.filter(request => request !== null && typeof request === 'object' && EXTENSION_ORIGIN.test(request.origin))
+          .map(request => ({
+            origin: request.origin,
+            name: typeof request.name === 'string' && /^[A-Za-z]{1,16}$/.test(request.name) ? request.name : '',
+            official: request.official === true,
+          }))
+        : []
       return {
         paused: body.paused === true,
         pauseReason: body.pauseReason === 'failures' ? 'failures' : 'user',
-        waiting: Number.isInteger(body.waiting) && body.waiting > 0 ? body.waiting : 0,
-        hints: Array.isArray(body.hints) ? body.hints.filter(hint => typeof hint === 'string' && /^[A-Za-z]{1,16}$/.test(hint)) : [],
-        pairedIds: Array.isArray(body.pairedIds) ? body.pairedIds.filter(id => typeof id === 'string' && /^[a-p]{32}$/.test(id)) : [],
+        waiting: requests.length,
+        requests,
+        pairedOrigins: Array.isArray(body.pairedOrigins) ? body.pairedOrigins.filter(origin => EXTENSION_ORIGIN.test(origin)) : [],
+        canResetToken: body.canResetToken === true,
+        lastPaired: EXTENSION_ORIGIN.test(body.paired?.origin) ? body.paired.origin : null,
       }
     }
 
@@ -316,9 +353,12 @@ window.__ModuleLoader__.load({
           if (next !== null) setDesk(next)
           if (payload.action === 'enter') {
             const result = next !== null && typeof body.result === 'string' ? body.result : 'failed'
-            setNotice({ key: `pairing.result.${result}`, good: result === 'paired' })
+            // A success names who was paired, so a wrong one can be unpaired on the spot.
+            setNotice({ key: `pairing.result.${result}`, origin: result === 'paired' || result === 'unconfirmed' ? next.lastPaired : null })
             return result
           }
+          if (payload.action === 'unpair') setNotice(null)
+          if (payload.action === 'reset-token') setNotice(next !== null ? { key: 'pairing.resetDone', origin: null } : null)
         } catch {
           if (payload.action === 'enter') setNotice({ key: 'pairing.result.failed', good: false })
         } finally {
@@ -341,6 +381,7 @@ window.__ModuleLoader__.load({
         if (result !== 'invalid') setCode('')
       }
       const known = state.notice !== null && Object.hasOwn(dictionaries.en, state.notice.key)
+      const pairedOrigin = known && typeof state.notice.origin === 'string' ? state.notice.origin : null
       return React.createElement(
         React.Fragment,
         null,
@@ -368,7 +409,30 @@ window.__ModuleLoader__.load({
           ),
         ),
         React.createElement('p', { className: 'dshBridgePairStatus', role: 'status', 'data-testid': 'dsh-pairing-status' },
-          known ? t(state.notice.key) : ''),
+          known ? fill(t(state.notice.key), pairedOrigin === null ? '' : extensionId(pairedOrigin)) : '',
+          pairedOrigin === null ? null : ' ',
+          pairedOrigin === null ? null : React.createElement(
+            'button',
+            { type: 'button', className: 'dshBridgeAddressCopy', 'data-testid': 'dsh-pairing-undo', disabled: state.busy, onClick: () => { void state.act({ action: 'unpair', origin: pairedOrigin }) } },
+            t('pairing.unpair'),
+          )),
+      )
+    }
+
+    /** Who is asking, per waiting request: the published extension, or an unknown one (in warning style). */
+    function PairingRequesters({ t, requests }) {
+      return React.createElement(
+        React.Fragment,
+        null,
+        requests.map((request, index) => React.createElement(
+          'p',
+          { key: `${request.origin}#${String(index)}`, className: request.official ? 'dshBridgePairWho' : 'dshBridgePairWarn', 'data-testid': 'dsh-pairing-requester' },
+          request.official ? t('pairing.official') : fill(t('pairing.unknown'), extensionId(request.origin)),
+          request.name === '' ? '' : ` (${fill(t('pairing.says'), request.name)})`,
+        )),
+        requests.some(request => !request.official)
+          ? React.createElement('p', { className: 'dshBridgeAddressHelp' }, t('pairing.unknownWarning'))
+          : null,
       )
     }
 
@@ -377,14 +441,16 @@ window.__ModuleLoader__.load({
       const tr = translator(t)
       const state = usePairingDesk()
       const waiting = state.desk !== null && !state.desk.paused && state.desk.waiting > 0
+      // While the answer to a code is on screen the card keeps the lines it had, so nothing moves under the pointer.
+      const lastRequests = React.useRef([])
+      if (waiting) lastRequests.current = state.desk.requests
       if (!waiting && state.notice === null) return null
-      const hint = state.desk !== null && state.desk.hints.length === 1 ? state.desk.hints[0] : null
       return React.createElement(
         'div',
         { className: 'dshBridgePairPrompt', role: 'dialog', 'aria-label': tr('pairing.wants'), 'data-testid': 'dsh-pairing-prompt' },
         React.createElement('div', { className: 'dshBridgeAddressTitle' }, tr('pairing.wants')),
-        React.createElement('p', { className: 'dshBridgeAddressHelp' },
-          `${tr('pairing.prompt')}.${hint === null ? '' : ` ${fill(tr('pairing.hint'), hint)}`}`),
+        React.createElement(PairingRequesters, { t: tr, requests: lastRequests.current }),
+        React.createElement('p', { className: 'dshBridgeAddressHelp' }, `${tr('pairing.prompt')}.`),
         React.createElement(PairingEntry, { t: tr, state }),
         React.createElement('p', { className: 'dshBridgeAddressHelp' }, tr('pairing.only')),
       )
@@ -394,6 +460,7 @@ window.__ModuleLoader__.load({
     function PairBrowserRow({ t }) {
       const tr = translator(t)
       const state = usePairingDesk()
+      const [confirmReset, setConfirmReset] = React.useState(false)
       const desk = state.desk
       if (desk === null) return null
       return React.createElement(
@@ -404,6 +471,7 @@ window.__ModuleLoader__.load({
           desk.paused
             ? tr(desk.pauseReason === 'failures' ? 'pairing.paused.failures' : 'pairing.paused.user')
             : desk.waiting > 0 ? fill(tr('pairing.waiting'), String(desk.waiting)) : tr('pairing.idle')),
+        desk.paused ? null : React.createElement(PairingRequesters, { t: tr, requests: desk.requests }),
         desk.paused ? null : React.createElement(PairingEntry, { t: tr, state }),
         React.createElement(
           'div',
@@ -414,18 +482,41 @@ window.__ModuleLoader__.load({
             desk.paused ? tr('pairing.resume') : tr('pairing.pause'),
           ),
         ),
-        desk.pairedIds.length === 0 ? null : React.createElement(
+        desk.pairedOrigins.length === 0 ? null : React.createElement(
           React.Fragment,
           null,
           React.createElement('div', { className: 'dshBridgeAddressTitle' }, tr('pairing.paired')),
-          desk.pairedIds.map(id => React.createElement(
+          desk.pairedOrigins.map(origin => React.createElement(
             'div',
-            { key: id, className: 'dshBridgePairPaired' },
-            React.createElement('code', { className: 'dshBridgePairId', title: id }, id),
-            React.createElement('button', { type: 'button', className: 'dshBridgeAddressCopy', disabled: state.busy, onClick: () => { void state.act({ action: 'unpair', id }) } }, tr('pairing.unpair')),
+            { key: origin, className: 'dshBridgePairPaired' },
+            React.createElement('code', { className: 'dshBridgePairId', title: origin }, origin),
+            React.createElement('button', { type: 'button', className: 'dshBridgeAddressCopy', disabled: state.busy, onClick: () => { void state.act({ action: 'unpair', origin }) } }, tr('pairing.unpair')),
           )),
           React.createElement('p', { className: 'dshBridgeAddressHelp' }, tr('pairing.unpairNote')),
         ),
+        // Revoking the token itself: two clicks, because it disconnects every browser.
+        !desk.canResetToken
+          ? React.createElement('p', { className: 'dshBridgeAddressHelp' }, tr('pairing.resetPinned'))
+          : confirmReset
+            ? React.createElement(
+              React.Fragment,
+              null,
+              React.createElement('p', { className: 'dshBridgePairWarn', role: 'alert' }, tr('pairing.resetWarning')),
+              React.createElement(
+                'div',
+                { className: 'dshBridgeAddressBody' },
+                React.createElement('button', { type: 'button', className: 'dshBridgeAddressCopy', onClick: () => { setConfirmReset(false) } }, tr('pairing.resetCancel')),
+                React.createElement('button', { type: 'button', className: 'dshBridgeAddressCopy', disabled: state.busy, onClick: () => { setConfirmReset(false); void state.act({ action: 'reset-token' }) } }, tr('pairing.resetConfirm')),
+              ),
+            )
+            : React.createElement(
+              'div',
+              { className: 'dshBridgeAddressBody' },
+              React.createElement('button', { type: 'button', className: 'dshBridgeAddressCopy', disabled: state.busy, onClick: () => { setConfirmReset(true) } }, tr('pairing.reset')),
+            ),
+        desk.paused && state.notice !== null && Object.hasOwn(dictionaries.en, state.notice.key)
+          ? React.createElement('p', { className: 'dshBridgePairStatus', role: 'status' }, tr(state.notice.key))
+          : null,
       )
     }
 

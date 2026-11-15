@@ -3,7 +3,7 @@ import type { PanelCopy } from './strings.ts'
 
 /** What the card needs from the panel API. */
 export interface PairingApi {
-  pair(onCode: (code: string) => void, options?: { again?: boolean }): Promise<void>
+  pair(onCode: (code: string) => void, options?: { again?: boolean; auto?: boolean }): Promise<void>
   cancelPairing(): Promise<void>
 }
 
@@ -50,15 +50,26 @@ export function PairingCard({ api, copy, mode, needed = false, autoStart = false
   const run = useRef(0)
   const again = mode === 'again'
 
-  const ask = (): void => {
+  // Whether this card already asked again by itself after being replaced.
+  const reasked = useRef(false)
+
+  const ask = (auto = false): void => {
     const current = ++run.current
     setView({ kind: 'asking' })
-    void api.pair((code) => { if (run.current === current) setView({ kind: 'code', code }) }, again ? { again: true } : {}).then(() => {
+    void api.pair((code) => { if (run.current === current) setView({ kind: 'code', code }) }, { ...(again ? { again: true } : {}), ...(auto ? { auto: true } : {}) }).then(() => {
       if (run.current !== current) return
       setView({ kind: 'paired' })
       onPaired?.()
     }, (cause: unknown) => {
-      if (run.current === current) setView({ kind: 'failed', text: pairingFailureText(cause, copy) })
+      if (run.current !== current) return
+      // Pushed out of the bridge's queue by another request: ask again, once, without a click.
+      // A second time needs the button: something keeps taking this browser's place.
+      if ((cause as { code?: unknown } | null)?.code === 'replaced' && !again && !reasked.current) {
+        reasked.current = true
+        ask(true)
+        return
+      }
+      setView({ kind: 'failed', text: pairingFailureText(cause, copy) })
     })
   }
 
@@ -66,7 +77,7 @@ export function PairingCard({ api, copy, mode, needed = false, autoStart = false
   // step is then to read the code, not to find a button. Leaving the card
   // withdraws a request that is still waiting.
   useEffect(() => {
-    if (autoStart && !again) ask()
+    if (autoStart && !again) ask(true)
     return () => {
       run.current += 1
       void api.cancelPairing().catch(() => {})
@@ -91,7 +102,7 @@ export function PairingCard({ api, copy, mode, needed = false, autoStart = false
           <p className="pairing-warning" role="alert">{copy.againWarning}</p>
           <div className="pairing-actions">
             <button type="button" className="secondary" onClick={() => setView({ kind: 'idle' })}>{copy.cancel}</button>
-            <button type="button" className="primary" onClick={ask}>{copy.againConfirm}</button>
+            <button type="button" className="primary" onClick={() => { ask() }}>{copy.againConfirm}</button>
           </div>
         </>
       ) : (
@@ -102,7 +113,7 @@ export function PairingCard({ api, copy, mode, needed = false, autoStart = false
           </span>
           {view.kind === 'paired' ? null : (
             <button type="button" className={again ? 'secondary pairing-start' : 'primary pairing-start'}
-              onClick={again ? () => setView({ kind: 'confirm-again' }) : ask}>
+              onClick={again ? () => setView({ kind: 'confirm-again' }) : () => { ask() }}>
               {again ? copy.again : view.kind === 'failed' ? copy.retry : copy.start}
             </button>
           )}

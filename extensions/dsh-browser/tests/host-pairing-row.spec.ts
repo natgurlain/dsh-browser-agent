@@ -41,13 +41,22 @@ function loadClient(): { slots: Registered[]; dictionaries: Record<'en' | 'zh', 
 
 const json = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
 const STORE_ID = 'abcdefghijklmnopabcdefghijklmnop'
+const STORE_ORIGIN = `chrome-extension://${STORE_ID}`
+const OFFICIAL_ORIGIN = 'chrome-extension://klmdgljhcjbbpjcplbanjeclilghnaoh'
+const FIREFOX_ORIGIN = 'moz-extension://0f8fad5b-d9cb-469f-a165-70867728950e'
+type Requester = { origin: string; name: string; official: boolean }
+const official: Requester = { origin: OFFICIAL_ORIGIN, name: 'Brave', official: true }
+const unknown: Requester = { origin: STORE_ORIGIN, name: 'Chrome', official: false }
 
 describe('DSH app: pairing a browser', () => {
   let root: Root
   let fetchMock: ReturnType<typeof vi.fn<(input: string, init: RequestInit) => Promise<Response>>>
   let en: Record<string, string>
   /** The host's desk; the fake route serves it and applies the actions. The code a waiting browser holds is `holds`. */
-  let host: { paused: boolean; pauseReason?: string; waiting: number; hints: string[]; failures: number; pairedIds: string[]; holds: string }
+  let host: {
+    paused: boolean; pauseReason?: string; requests: Requester[]; failures: number; pairedOrigins: string[]; canResetToken: boolean
+    paired?: { origin: string; name: string; at: number }; holds: string; resets: number
+  }
 
   async function render(id: string): Promise<void> {
     const { slots, dictionaries } = loadClient()
@@ -75,23 +84,27 @@ describe('DSH app: pairing a browser', () => {
     vi.useFakeTimers()
     document.body.innerHTML = '<div id="root"></div>'
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
-    host = { paused: false, waiting: 0, hints: [], failures: 0, pairedIds: [], holds: 'ABCDEF' }
+    host = { paused: false, requests: [], failures: 0, pairedOrigins: [], canResetToken: true, holds: 'ABCDEF', resets: 0 }
     fetchMock = vi.fn(async (_input: string, init: RequestInit) => {
-      const body = JSON.parse(String(init.body)) as { action: string; code?: string; id?: string }
-      const view = (): object => { const { holds: _holds, ...rest } = host; return rest }
+      const body = JSON.parse(String(init.body)) as { action: string; code?: string; origin?: string }
+      const view = (): object => { const { holds: _holds, resets: _resets, ...rest } = host; return { ...rest, waiting: host.requests.length } }
       if (body.action === 'status') return json({ ok: true, ...view() })
-      if (body.action === 'pause') { host.paused = true; host.pauseReason = 'user'; host.waiting = 0; return json({ ok: true, ...view() }) }
+      if (body.action === 'pause') { host.paused = true; host.pauseReason = 'user'; host.requests = []; return json({ ok: true, ...view() }) }
       if (body.action === 'resume') { host.paused = false; delete host.pauseReason; return json({ ok: true, ...view() }) }
-      if (body.action === 'unpair') { host.pairedIds = host.pairedIds.filter(id => id !== body.id); return json({ ok: true, ...view() }) }
+      if (body.action === 'unpair') { host.pairedOrigins = host.pairedOrigins.filter(origin => origin !== body.origin); return json({ ok: true, ...view() }) }
+      if (body.action === 'reset-token') { host.resets += 1; return json({ ok: true, ...view() }) }
       const typed = String(body.code).replace(/[\s-]/gu, '').toUpperCase()
       let result = 'paired'
       if (!/^[A-HJ-NP-Z2-9]{6}$/u.test(typed)) result = 'invalid'
-      else if (host.waiting === 0) result = 'none-waiting'
+      else if (host.requests.length === 0) result = 'none-waiting'
       else {
         if (typed !== host.holds) result = 'no-match'
-        else host.pairedIds = [...host.pairedIds, STORE_ID]
-        host.waiting = 0
-        host.hints = []
+        else {
+          const winner = host.requests[0]!
+          host.pairedOrigins = [...host.pairedOrigins, winner.origin]
+          host.paired = { origin: winner.origin, name: winner.name, at: Date.now() }
+        }
+        host.requests = []
       }
       return json({ ok: true, result, ...view() })
     })
@@ -122,12 +135,15 @@ describe('DSH app: pairing a browser', () => {
     expect(fetchMock.mock.calls[0]![0]).toBe('api/bridge-browser.pairing')
     expect(fetchMock.mock.calls[0]![1]).toMatchObject({ method: 'POST', headers: { 'content-type': 'application/json' } })
 
-    host.waiting = 1
-    host.hints = ['Brave']
+    host.requests = [official]
     await tick()
     const prompt = document.querySelector('[data-testid="dsh-pairing-prompt"]')!
     expect(prompt.textContent).toContain('A browser wants to connect')
-    expect(prompt.textContent).toContain('Enter the code it shows. It says it is Brave.')
+    // Who is asking: the published extension, by the ID the browser reported.
+    const requester = prompt.querySelector('[data-testid="dsh-pairing-requester"]')!
+    expect(requester.textContent).toBe('DSH Browser Agent (official) (says it is Brave)')
+    expect(requester.className).toBe('dshBridgePairWho')
+    expect(prompt.textContent).not.toContain(en['pairing.unknownWarning'])
     expect(prompt.textContent).toContain(en['pairing.only'])
     // There is nothing to approve by a click, and no code on this page: one input, one submit.
     expect([...prompt.querySelectorAll('button')].map(candidate => candidate.textContent)).toEqual(['Connect'])
@@ -138,15 +154,38 @@ describe('DSH app: pairing a browser', () => {
     await type('abc-def')
     await submit()
     expect(sent().at(-1)).toEqual({ action: 'enter', code: 'abc-def' })
-    expect(status()).toBe(en['pairing.result.paired'])
+    // The notice names who was paired, and offers to undo it.
+    expect(status()).toContain('Paired with klmdgljhcjbbpjcplbanjeclilghnaoh.')
     expect(input().value).toBe('')
-    // The confirmation leaves by itself, and the card with it.
-    await tick(10_000)
+    expect(host.pairedOrigins).toEqual([OFFICIAL_ORIGIN])
+    await act(async () => { document.querySelector<HTMLButtonElement>('[data-testid="dsh-pairing-undo"]')!.click() })
+    expect(sent().at(-1)).toEqual({ action: 'unpair', origin: OFFICIAL_ORIGIN })
+    expect(host.pairedOrigins).toEqual([])
+    // With nothing waiting and no notice the card leaves.
+    await tick()
     expect(document.querySelector('[data-testid="dsh-pairing-prompt"]')).toBeNull()
   })
 
+  it('regression (review 2, M2): labels an extension that is not the published one as unknown, in warning style', async () => {
+    host.requests = [unknown, { origin: FIREFOX_ORIGIN, name: 'Firefox', official: false }]
+    await render('bridge-browser-pairing-prompt')
+    await tick(0)
+    const requesters = [...document.querySelectorAll('[data-testid="dsh-pairing-requester"]')]
+    expect(requesters.map(node => node.textContent)).toEqual([
+      `Unknown extension ${STORE_ID} — not the published DSH extension (says it is Chrome)`,
+      'Unknown extension 0f8fad5b-d9cb-469f-a165-70867728950e — not the published DSH extension (says it is Firefox)',
+    ])
+    for (const node of requesters) expect(node.className).toBe('dshBridgePairWarn')
+    expect(document.body.textContent).toContain(en['pairing.unknownWarning'])
+    // Pairing it anyway is possible, and the notice says exactly which extension got in.
+    await type('ABC-DEF')
+    await submit()
+    expect(status()).toContain(`Paired with ${STORE_ID}.`)
+    expect(document.querySelector('[data-testid="dsh-pairing-undo"]')).not.toBeNull()
+  })
+
   it('says a wrong code found nobody, clears it, and keeps the layout where it was', async () => {
-    host.waiting = 1
+    host.requests = [official]
     await render('bridge-browser-pairing-prompt')
     await tick(0)
     const before = [...document.querySelector('[data-testid="dsh-pairing-prompt"]')!.children].map(child => child.tagName)
@@ -154,12 +193,13 @@ describe('DSH app: pairing a browser', () => {
     await submit()
     expect(status()).toBe(en['pairing.result.no-match'])
     expect(input().value).toBe('')
-    expect(host.pairedIds).toEqual([])
+    expect(host.pairedOrigins).toEqual([])
+    expect(en['pairing.result.no-match']).toMatch(/choose Ask again/u)
     // Same elements in the same order: the message fills a line that was already there.
     expect([...document.querySelector('[data-testid="dsh-pairing-prompt"]')!.children].map(child => child.tagName)).toEqual(before)
 
     // Input that cannot be a code stays for correction.
-    host.waiting = 1
+    host.requests = [official]
     await tick()
     await type('12')
     await submit()
@@ -167,18 +207,18 @@ describe('DSH app: pairing a browser', () => {
     expect(input().value).toBe('12')
   })
 
-  it('renders hints only from plain names and shows none when requesters disagree', async () => {
-    host.waiting = 1
-    host.hints = ['<img src=x onerror=alert(1)>']
+  it('shows only well-formed origins and plain names, whatever the host answer contains', async () => {
+    host.requests = [
+      { origin: '<img src=x onerror=alert(1)>', name: 'Brave', official: true },
+      { origin: STORE_ORIGIN, name: '<b>Chrome</b>', official: false },
+    ]
     await render('bridge-browser-pairing-prompt')
     await tick(0)
     const prompt = document.querySelector('[data-testid="dsh-pairing-prompt"]')!
-    expect(prompt.querySelector('img')).toBeNull()
-    expect(prompt.textContent).not.toContain('says it is')
-    host.waiting = 2
-    host.hints = ['Brave', 'Chrome']
-    await tick()
-    expect(prompt.textContent).not.toContain('says it is')
+    expect(prompt.querySelector('img, b')).toBeNull()
+    expect([...prompt.querySelectorAll('[data-testid="dsh-pairing-requester"]')].map(node => node.textContent)).toEqual([
+      `Unknown extension ${STORE_ID} — not the published DSH extension`,
+    ])
   })
 
   it('stays quiet and looks again later when dsh refuses the request, and stops for good without a pairing route', async () => {
@@ -204,7 +244,7 @@ describe('DSH app: pairing a browser', () => {
   })
 
   it('offers the same input in the General-settings row, with pause, resume and unpair', async () => {
-    host.pairedIds = [STORE_ID]
+    host.pairedOrigins = [STORE_ORIGIN, FIREFOX_ORIGIN]
     await render('bridge-browser-pairing')
     await tick(0)
     const summary = (): string => document.querySelector('[data-testid="dsh-pairing-summary"]')?.textContent ?? ''
@@ -213,9 +253,10 @@ describe('DSH app: pairing a browser', () => {
     await submit()
     expect(status()).toBe(en['pairing.result.none-waiting'])
 
-    host.waiting = 2
+    host.requests = [official, unknown]
     await tick()
     expect(summary()).toBe('Browsers waiting for a code: 2. Enter the code your browser shows.')
+    expect(document.querySelectorAll('[data-testid="dsh-pairing-requester"]')).toHaveLength(2)
 
     await act(async () => { button(en['pairing.pause']!).click() })
     expect(sent().at(-1)).toEqual({ action: 'pause' })
@@ -229,12 +270,33 @@ describe('DSH app: pairing a browser', () => {
     expect(sent().at(-1)).toEqual({ action: 'resume' })
     expect(input()).not.toBeNull()
 
-    // Paired extensions, and what unpairing does and does not do.
-    expect(document.body.textContent).toContain(STORE_ID)
+    // Paired extensions (Chrome and Firefox), and what unpairing does and does not do.
+    expect(document.body.textContent).toContain(STORE_ORIGIN)
+    expect(document.body.textContent).toContain(FIREFOX_ORIGIN)
     expect(document.body.textContent).toContain(en['pairing.unpairNote'])
-    await act(async () => { button(en['pairing.unpair']!).click() })
-    expect(sent().at(-1)).toEqual({ action: 'unpair', id: STORE_ID })
-    expect(document.body.textContent).not.toContain(STORE_ID)
+    await act(async () => { [...document.querySelectorAll<HTMLButtonElement>('.dshBridgePairPaired button')][1]!.click() })
+    expect(sent().at(-1)).toEqual({ action: 'unpair', origin: FIREFOX_ORIGIN })
+    expect(document.body.textContent).not.toContain(FIREFOX_ORIGIN)
+  })
+
+  it('resets the bridge token only after a second, explicit click, and not at all when it is pinned', async () => {
+    await render('bridge-browser-pairing')
+    await tick(0)
+    await act(async () => { button(en['pairing.reset']!).click() })
+    expect(host.resets).toBe(0)
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe(en['pairing.resetWarning'])
+    await act(async () => { button(en['pairing.resetCancel']!).click() })
+    expect(host.resets).toBe(0)
+    await act(async () => { button(en['pairing.reset']!).click() })
+    await act(async () => { button(en['pairing.resetConfirm']!).click() })
+    expect(sent().at(-1)).toEqual({ action: 'reset-token' })
+    expect(host.resets).toBe(1)
+    expect(status()).toBe(en['pairing.resetDone'])
+
+    host.canResetToken = false
+    await tick()
+    expect(button(en['pairing.reset']!)).toBeUndefined()
+    expect(document.body.textContent).toContain(en['pairing.resetPinned'])
   })
 
   it('works without a translator and has every string in English and Chinese', async () => {
@@ -245,7 +307,7 @@ describe('DSH app: pairing a browser', () => {
     for (const result of ['paired', 'unconfirmed', 'no-match', 'none-waiting', 'invalid', 'paused', 'busy', 'failed']) {
       expect(dictionaries.en[`pairing.result.${result}`]).toBeTruthy()
     }
-    host.waiting = 1
+    host.requests = [official]
     const prompt = slots.find(slot => slot.options.id === 'bridge-browser-pairing-prompt')!
     await act(async () => { root.render(React.createElement(prompt.component, {})) })
     await tick(0)

@@ -49,21 +49,45 @@ export const INSTALLED_TOKEN_PATH = 'bridge-token'
 export type BridgeTokenSource = () => Promise<string>
 
 /**
+ * The installer's `bridge-token` file is there but could not be read as a
+ * token (empty, malformed, or the read itself failed). That is not "this
+ * install has no token": the caller retries, and nothing pairs by itself.
+ */
+export class InstalledTokenUnreadableError extends Error {
+  constructor() {
+    super('the installed bridge token could not be read')
+    this.name = 'InstalledTokenUnreadableError'
+  }
+}
+
+/**
  * Read the token the installer (and the dsh plugin on each start) writes into
- * the unpacked extension directory. Absent or malformed files yield `''`.
- * @returns the token, or an empty string when none is provisioned.
+ * the unpacked extension directory.
+ *
+ * "No token file" is reported only when the file is known to be missing: the
+ * fetch answers 404, or it fails while another packaged file (the manifest)
+ * can be fetched. Chrome rejects the fetch of a packaged file that does not
+ * exist instead of answering 404, so a rejection alone cannot tell "missing"
+ * from "unreadable"; the manifest read is what tells them apart.
+ * @returns the token, or an empty string when no token file is provisioned.
+ * @throws InstalledTokenUnreadableError when a file is there but yields no token, or nothing can be read at all.
  */
 export async function loadInstalledToken(): Promise<string> {
+  const runtime = (globalThis as { chrome?: { runtime?: { getURL?: (path: string) => string } } }).chrome?.runtime
+  if (typeof runtime?.getURL !== 'function') return ''
+  let response: Response
   try {
-    const runtime = (globalThis as { chrome?: { runtime?: { getURL?: (path: string) => string } } }).chrome?.runtime
-    if (typeof runtime?.getURL !== 'function') return ''
-    const response = await fetch(runtime.getURL(INSTALLED_TOKEN_PATH), { cache: 'no-store' })
-    if (!response.ok) return ''
-    const token = (await response.text()).trim()
-    return /^[\x21-\x7e]{1,1024}$/u.test(token) ? token : ''
+    response = await fetch(runtime.getURL(INSTALLED_TOKEN_PATH), { cache: 'no-store' })
   } catch {
-    return ''
+    const manifest = await fetch(runtime.getURL('manifest.json'), { cache: 'no-store' }).then(answer => answer.ok, () => false)
+    if (manifest) return ''
+    throw new InstalledTokenUnreadableError()
   }
+  if (response.status === 404) return ''
+  if (!response.ok) throw new InstalledTokenUnreadableError()
+  const token = await response.text().then(text => text.trim(), () => '')
+  if (!/^[\x21-\x7e]{1,1024}$/u.test(token)) throw new InstalledTokenUnreadableError()
+  return token
 }
 
 /** Coarse connection state for the UI. */
@@ -77,9 +101,11 @@ export type BridgeState = 'connecting' | 'connected' | 'reconnecting' | 'stopped
  * - `origin-rejected`: the bridge does not allow this extension's ID;
  * - `busy`: the bridge is refusing unauthenticated sockets for now;
  * - `no-token`: a bridge answers, but this install has no token yet (a store
- *   build before pairing): nothing was dialed.
+ *   build before pairing): nothing was dialed;
+ * - `token-unreadable`: the installer's token file is there but could not be
+ *   read this time: nothing was dialed, and the next attempt reads it again.
  */
-export type BridgeFailure = 'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy' | 'no-token'
+export type BridgeFailure = 'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy' | 'no-token' | 'token-unreadable'
 
 /** Map a bridge close code to a {@link BridgeFailure}. */
 export function failureOfCloseCode(code: number): BridgeFailure | undefined {
@@ -244,8 +270,21 @@ export class BridgeClient {
         continue
       }
 
-      const token = this.token !== '' ? this.token : await this.tokenSource().catch(() => '')
+      let unreadable = false
+      const token = this.token !== '' ? this.token : await this.tokenSource().catch((error: unknown) => {
+        unreadable = error instanceof InstalledTokenUnreadableError
+        return ''
+      })
       if (!this.running || generation !== this.generation) return
+      if (unreadable) {
+        // A token exists but was not readable just now (the plugin may be rewriting the file): try again, never pair.
+        console.warn('dsh bridge: the installed bridge token could not be read; retrying')
+        this.failure = 'token-unreadable'
+        if (!this.retryAllowed()) return
+        this.emitState('reconnecting')
+        await this.waitBeforeRetry()
+        continue
+      }
       if (token === '') {
         // Without a secret the handshake cannot succeed; wait for the installer
         // or the dsh plugin to provision it (or for the user to paste one).
@@ -480,7 +519,7 @@ export class BridgeClient {
   private async waitBeforeRetry(): Promise<void> {
     this.attempt += 1
     // A missing token keeps the ordinary cadence: the installer or a pairing may provide it any moment.
-    const transient = this.failure === undefined || this.failure === 'busy' || this.failure === 'no-token'
+    const transient = this.failure === undefined || this.failure === 'busy' || this.failure === 'no-token' || this.failure === 'token-unreadable'
     const ceiling = transient ? BACKOFF_MAX_MS : REFUSED_RETRY_MS
     const cap = transient
       ? Math.min(ceiling, BACKOFF_BASE_MS * 2 ** Math.max(0, this.attempt - 1))

@@ -265,6 +265,80 @@ describe('background one-step pairing', () => {
     expect((chromeMock.local.dshSettings as { token: string }).token).toBe(BRIDGE_TOKEN)
   })
 
+  it('regression (review 2, L7): starts at most three pairings nobody clicked for per sitting', async () => {
+    const chromeMock = mockChrome()
+    mockFetch()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await loadWorker()
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => { expect(statuses(panel.postMessage).at(-1)).toMatchObject({ failure: 'no-token' }) })
+    const requests = (): number => FakeWebSocket.instances.length
+    for (const id of ['auto-1', 'auto-2', 'auto-3']) {
+      const before = requests()
+      panel.onMessage.emit({ type: 'pair.start', id, auto: true })
+      await vi.waitFor(() => { expect(requests()).toBe(before + 1) })
+      // Something keeps pushing the request out of the bridge's queue.
+      FakeWebSocket.instances.at(-1)!.open()
+      FakeWebSocket.instances.at(-1)!.close(BRIDGE_CLOSE_CODES.pairingReplaced, 'another pairing request took this one\'s place')
+      await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'pair.result', id, ok: false, reason: 'replaced' }) })
+    }
+    // The fourth is refused before any socket opens; a click still works.
+    panel.onMessage.emit({ type: 'pair.start', id: 'auto-4', auto: true })
+    await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'pair.result', id: 'auto-4', ok: false, reason: 'auto-limit' }) })
+    expect(requests()).toBe(3)
+    panel.onMessage.emit({ type: 'pair.start', id: 'clicked' })
+    await vi.waitFor(() => { expect(requests()).toBe(4) })
+    FakeWebSocket.instances.at(-1)!.close(1006)
+    // A new sitting (every panel closed, one opened again) starts the count over.
+    panel.onDisconnect.emit()
+    const reopened = panelPort()
+    chromeMock.onConnect.emit(reopened.port)
+    reopened.onMessage.emit({ type: 'pair.start', id: 'auto-5', auto: true })
+    await vi.waitFor(() => { expect(requests()).toBe(5) })
+  })
+
+  it('regression (review 2, L8): takes the panel port only from the extension\'s own pages', async () => {
+    const chromeMock = mockChrome()
+    mockFetch()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await loadWorker()
+    // A content script (it runs beside an untrusted page) connects with the panel's port name.
+    const content = panelPort('dsh-panel', { id: 'test-extension', url: 'https://evil.example/', tab: { id: 7 } as chrome.tabs.Tab })
+    chromeMock.onConnect.emit(content.port)
+    expect(content.disconnect).toHaveBeenCalledOnce()
+    content.onMessage.emit({ type: 'pair.start', id: 'from-content', again: true })
+    content.onMessage.emit({ type: 'settings', id: 's1', settings: { bridgeUrl: 'ws://203.0.113.9:1', token: 'x'.repeat(40) } })
+    await new Promise((resolve) => { setTimeout(resolve, 30) })
+    expect(content.postMessage).not.toHaveBeenCalled()
+    expect(FakeWebSocket.instances).toHaveLength(0)
+    expect(chromeMock.local.dshSettings).toBeUndefined()
+    // Another extension, or a port without a sender, fares the same.
+    const foreign = panelPort('dsh-panel', { id: 'another-extension', url: 'chrome-extension://test/panel/index.html' })
+    chromeMock.onConnect.emit(foreign.port)
+    expect(foreign.disconnect).toHaveBeenCalledOnce()
+    // The side panel itself is served.
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => { expect(statuses(panel.postMessage).length).toBeGreaterThan(0) })
+    expect(panel.disconnect).not.toHaveBeenCalled()
+  })
+
+  it('regression (review 2, L6): a token file that is there but unreadable never leads to pairing', async () => {
+    const chromeMock = mockChrome()
+    // The file answers, empty (caught mid-rewrite, or damaged).
+    mockFetch({ installedToken: '' })
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await loadWorker()
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => { expect(statuses(panel.postMessage).at(-1)).toMatchObject({ state: 'reconnecting', failure: 'token-unreadable' }) })
+    expect(statuses(panel.postMessage).some(status => status.failure === 'no-token')).toBe(false)
+    panel.onMessage.emit({ type: 'pair.start', id: 'pair-unreadable', auto: true })
+    await vi.waitFor(() => { expect(panel.postMessage).toHaveBeenCalledWith({ type: 'pair.result', id: 'pair-unreadable', ok: false, reason: 'has-token' }) })
+    expect(FakeWebSocket.instances).toHaveLength(0)
+  })
+
   it('withdraws a waiting request when the panel cancels or closes, and a new request replaces the old', async () => {
     const chromeMock = mockChrome()
     mockFetch()

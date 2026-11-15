@@ -54,16 +54,24 @@ export interface PairingCommandRegistry {
 /** What the controls act on. */
 export interface PairingControls {
   desk: PairingDesk
-  /** Chrome extension IDs that paired (the ones the user can unpair). */
-  pairedIds: () => string[]
-  /** Take one paired ID off the allowlist. @returns whether it was paired. */
-  unpair: (id: string) => Promise<boolean>
+  /** Extension origins that paired (the ones the user can unpair). */
+  pairedOrigins: () => string[]
+  /**
+   * Unpair one origin: it is refused from now on and its connections are closed.
+   * @returns whether it was paired.
+   */
+  unpair: (origin: string) => Promise<boolean>
+  /**
+   * Replace the bridge token and close every connection. Absent when the
+   * token is pinned in the plugin config (it cannot be replaced from here).
+   */
+  resetToken?: () => Promise<void>
 }
 
-/** What the control route answers: the desk's state and the paired IDs, never a code. */
+/** What the control route answers: the desk's state and the paired extensions, never a code. */
 export type PairingControlReply =
-  | ({ ok: true; result?: PairingEnterResult; pairedIds: string[] } & PairingDeskStatus)
-  | { ok: false; error: 'bad-request' | 'not-paired' }
+  | ({ ok: true; result?: PairingEnterResult; pairedOrigins: string[]; canResetToken: boolean } & PairingDeskStatus)
+  | { ok: false; error: 'bad-request' | 'not-paired' | 'token-pinned' }
 
 function json(body: PairingControlReply, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -72,22 +80,22 @@ function json(body: PairingControlReply, status = 200): Response {
   })
 }
 
-const view = (controls: PairingControls): { pairedIds: string[] } & PairingDeskStatus =>
-  ({ ...controls.desk.status(), pairedIds: controls.pairedIds() })
+const view = (controls: PairingControls): { pairedOrigins: string[]; canResetToken: boolean } & PairingDeskStatus =>
+  ({ ...controls.desk.status(), pairedOrigins: controls.pairedOrigins(), canResetToken: controls.resetToken !== undefined })
 
 /**
  * Handle one request of the pairing control route. dsh has already
  * authenticated the caller as the host's owner.
  * @param controls - the desk and the paired-extension record.
  * @param request - a POST with a JSON body: `{ action: 'status' | 'pause' | 'resume' }`,
- *   `{ action: 'enter', code }` or `{ action: 'unpair', id }`.
+ *   `{ action: 'enter', code }`, `{ action: 'unpair', origin }` or `{ action: 'reset-token' }`.
  */
 export async function handlePairingControl(controls: PairingControls, request: Request): Promise<Response> {
   // A JSON content type is not a "simple" cross-origin request: a page cannot send it without a preflight.
   if (!/^application\/json\b/iu.test(request.headers.get('content-type') ?? '')) return json({ ok: false, error: 'bad-request' }, 415)
-  let body: { action?: unknown; code?: unknown; id?: unknown } | null
+  let body: { action?: unknown; code?: unknown; origin?: unknown } | null
   try {
-    body = (await request.json()) as { action?: unknown; code?: unknown; id?: unknown } | null
+    body = (await request.json()) as { action?: unknown; code?: unknown; origin?: unknown } | null
   } catch {
     return json({ ok: false, error: 'bad-request' }, 400)
   }
@@ -105,8 +113,13 @@ export async function handlePairingControl(controls: PairingControls, request: R
     controls.desk.resumePairing()
     return json({ ok: true, ...view(controls) })
   }
-  if (action === 'unpair' && typeof body?.id === 'string') {
-    return await controls.unpair(body.id) ? json({ ok: true, ...view(controls) }) : json({ ok: false, error: 'not-paired' }, 404)
+  if (action === 'unpair' && typeof body?.origin === 'string') {
+    return await controls.unpair(body.origin) ? json({ ok: true, ...view(controls) }) : json({ ok: false, error: 'not-paired' }, 404)
+  }
+  if (action === 'reset-token') {
+    if (controls.resetToken === undefined) return json({ ok: false, error: 'token-pinned' }, 409)
+    await controls.resetToken()
+    return json({ ok: true, ...view(controls) })
   }
   return json({ ok: false, error: 'bad-request' }, 400)
 }
@@ -116,7 +129,7 @@ export function describeEnterResult(result: PairingEnterResult): PairingCommandR
   switch (result) {
     case 'paired': return { kind: 'success', text: 'Paired. The browser connects by itself now.' }
     case 'unconfirmed': return { kind: 'success', text: 'The code matched and the browser was sent what it needs, but it did not confirm. If its panel does not connect, ask again from the browser.' }
-    case 'no-match': return { kind: 'error', text: 'No waiting browser shows that code. The browser now shows a new code: enter that one.' }
+    case 'no-match': return { kind: 'error', text: 'No waiting browser shows that code. A code works for one try: in the browser, choose Ask again and enter the new code.' }
     case 'none-waiting': return { kind: 'error', text: 'No browser is waiting. Open the DSH browser extension first; it shows the code to enter here.' }
     case 'invalid': return { kind: 'error', text: 'A pairing code has 6 letters and digits, like ABC-DEF.' }
     case 'paused': return { kind: 'error', text: `Pairing is paused. Run /${PAIRING_COMMAND_NAME} resume to allow it again.` }
@@ -125,7 +138,7 @@ export function describeEnterResult(result: PairingEnterResult): PairingCommandR
 }
 
 /**
- * Run `/browser-pair [<code> | pause | resume | unpair <extension id>]`.
+ * Run `/browser-pair [<code> | pause | resume | unpair <extension> | reset-token]`.
  * @param controls - the desk and the paired-extension record.
  * @param rawInput - everything after the command name.
  */
@@ -137,14 +150,15 @@ export async function runPairingCommand(controls: PairingControls, rawInput: str
     const waiting = status.waiting === 0
       ? 'No browser is waiting. Open the DSH browser extension; it shows a code.'
       : `${String(status.waiting)} browser${status.waiting === 1 ? ' is' : 's are'} waiting. Enter the code your browser shows: /${PAIRING_COMMAND_NAME} <code>.`
-    const paired = controls.pairedIds()
+    const paired = controls.pairedOrigins()
     return {
       kind: 'success',
       text: [
         status.paused
           ? `Pairing is paused${status.pauseReason === 'failures' ? ' after too many wrong codes' : ''}. /${PAIRING_COMMAND_NAME} resume allows it again.`
           : waiting,
-        paired.length === 0 ? 'No extension has been paired.' : `Paired extensions: ${paired.join(', ')} (/${PAIRING_COMMAND_NAME} unpair <id> removes one).`,
+        ...status.requests.map(request => `  ${request.official ? 'DSH Browser Agent (official)' : 'Unknown extension, not the published DSH extension'}: ${request.origin} (says it is ${request.name})`),
+        paired.length === 0 ? 'No extension has been paired.' : `Paired extensions: ${paired.join(', ')} (/${PAIRING_COMMAND_NAME} unpair <extension> removes one).`,
       ].join('\n'),
     }
   }
@@ -157,9 +171,18 @@ export async function runPairingCommand(controls: PairingControls, rawInput: str
     return { kind: 'success', text: 'Pairing is allowed again.' }
   }
   if (verb === 'unpair' && words.length === 2) {
-    return await controls.unpair(words[1]!)
-      ? { kind: 'success', text: 'Unpaired. That extension can no longer connect; it still holds the bridge token, so reset the token (delete ~/.dsh/ext-bridge-token and restart DSH) if the browser is not yours any more.' }
-      : { kind: 'error', text: 'That is not a paired extension ID.' }
+    // A bare Chrome extension ID is accepted for the origin.
+    const origin = /^[a-p]{32}$/u.test(words[1]!) ? `chrome-extension://${words[1]!}` : words[1]!
+    return await controls.unpair(origin)
+      ? { kind: 'success', text: `Unpaired. That extension is refused from now on and its connection was closed. It still holds the bridge token: /${PAIRING_COMMAND_NAME} reset-token replaces it if the browser is not yours any more.` }
+      : { kind: 'error', text: 'That is not a paired extension.' }
+  }
+  if (verb === 'reset-token' && words.length === 1) {
+    if (controls.resetToken === undefined) {
+      return { kind: 'error', text: 'The bridge token is pinned in the plugin config. Change it there (and in every browser that uses it), then restart DSH.' }
+    }
+    await controls.resetToken()
+    return { kind: 'success', text: 'The bridge token was replaced and every browser was disconnected. The installed developer extension picks the new token up by itself; paired browsers pair again.' }
   }
   // Anything else is a code; what cannot be one is answered as such, without echoing the input.
   return describeEnterResult(await controls.desk.enter(words.join('')))

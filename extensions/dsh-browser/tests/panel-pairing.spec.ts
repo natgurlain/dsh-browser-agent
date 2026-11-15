@@ -27,12 +27,13 @@ interface Asked {
   succeed: () => void
   fail: (reason: string) => void
   again: boolean
+  auto: boolean
 }
 
 describe('pairing in the panel', () => {
   let root: Root
   let onStatus: ((state: BridgeState, caps: null, discovery: DiscoveryStatus, address?: string, failure?: BridgeFailure) => void) | undefined
-  let pair: Mock<(onCode: (code: string) => void, options?: { again?: boolean }) => Promise<void>>
+  let pair: Mock<(onCode: (code: string) => void, options?: { again?: boolean; auto?: boolean }) => Promise<void>>
   let cancelPairing: Mock<() => Promise<void>>
   let updateSettings: Mock<(settings: Partial<PanelSettings>) => Promise<void>>
   let storedSettings: Record<string, unknown>
@@ -53,8 +54,8 @@ describe('pairing in the panel', () => {
       },
     })
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline') }))
-    pair = vi.fn((onCode: (code: string) => void, options?: { again?: boolean }) => new Promise<void>((resolve, reject) => {
-      asked.push({ showCode: onCode, succeed: resolve, fail: reason => { reject(new PanelRpcError(reason, 'pairing failed')) }, again: options?.again === true })
+    pair = vi.fn((onCode: (code: string) => void, options?: { again?: boolean; auto?: boolean }) => new Promise<void>((resolve, reject) => {
+      asked.push({ showCode: onCode, succeed: resolve, fail: reason => { reject(new PanelRpcError(reason, 'pairing failed')) }, again: options?.again === true, auto: options?.auto === true })
     }))
     cancelPairing = vi.fn(async () => {})
     updateSettings = vi.fn(async () => {})
@@ -97,6 +98,8 @@ describe('pairing in the panel', () => {
     // No click was needed: opening the panel is the user's whole first step.
     expect(pair).toHaveBeenCalledOnce()
     expect(asked[0]!.again).toBe(false)
+    // Marked as not clicked for: the background counts those.
+    expect(asked[0]!.auto).toBe(true)
     expect(card()?.textContent).toContain(copy.pairing.needed)
     expect(card()?.textContent).toContain(copy.pairing.asking)
     expect(code()).toBeUndefined()
@@ -114,7 +117,7 @@ describe('pairing in the panel', () => {
     expect(code()).toBeUndefined()
   })
 
-  it.each(['origin-rejected', 'token-mismatch', 'version-mismatch', 'busy'] as const)(
+  it.each(['origin-rejected', 'token-mismatch', 'version-mismatch', 'busy', 'token-unreadable'] as const)(
     'regression (review PoC): never starts pairing by itself when a token is held (%s), whatever the bridge on the port says', async (failure) => {
       await unpaired(failure)
       expect(document.querySelector('.connection-label')?.textContent).toBe(copy.bridgeFailure[failure])
@@ -165,11 +168,31 @@ describe('pairing in the panel', () => {
     expect(pair).toHaveBeenCalledOnce()
     await act(async () => { button(copy.pairing.retry)!.click() })
     expect(pair).toHaveBeenCalledTimes(2)
+    expect(asked[1]!.auto).toBe(false)
     await act(async () => { asked[1]!.showCode('ABC-DEF') })
     expect(code()).toBe('ABC-DEF')
     // A late answer to the first request changes nothing.
     await act(async () => { asked[0]!.showCode('ZZZ-ZZZ') })
     expect(code()).toBe('ABC-DEF')
+  })
+
+  it('regression (review 2, M3): asks again by itself once after being replaced, then needs the button and says why', async () => {
+    await unpaired()
+    await act(async () => { asked[0]!.showCode('4F7-K2Q') })
+    await act(async () => { asked[0]!.fail('replaced') })
+    // Once, without a click, with a new code.
+    expect(pair).toHaveBeenCalledTimes(2)
+    expect(asked[1]!.auto).toBe(true)
+    await act(async () => { asked[1]!.showCode('ABC-DEF') })
+    expect(code()).toBe('ABC-DEF')
+    // Replaced again: no third request by itself.
+    await act(async () => { asked[1]!.fail('replaced') })
+    expect(pair).toHaveBeenCalledTimes(2)
+    expect(card()!.querySelector('[role="status"]')!.textContent).toBe(copy.pairing.failure.replaced)
+    expect(copy.pairing.failure.replaced).toMatch(/something else on this computer is asking to pair/u)
+    await act(async () => { button(copy.pairing.retry)!.click() })
+    expect(pair).toHaveBeenCalledTimes(3)
+    expect(asked[2]!.auto).toBe(false)
   })
 
   it('withdraws a waiting request when the card goes away', async () => {
@@ -209,7 +232,7 @@ describe('pairing in the panel', () => {
     for (const locale of ['en', 'zh'] as const) {
       const pairing = PANEL_COPY[locale].pairing
       expect(Object.keys(pairing.failure).sort()).toEqual(
-        ['busy', 'cancelled', 'expired', 'has-token', 'paused', 'unreachable', 'unsupported', 'untrusted', 'version-mismatch', 'wrong-code'])
+        ['auto-limit', 'busy', 'cancelled', 'expired', 'has-token', 'paused', 'replaced', 'unreachable', 'unsupported', 'untrusted', 'version-mismatch', 'wrong-code'])
       expect(pairingFailureText(new PanelRpcError('wrong-code', 'x'), pairing)).toBe(pairing.failure['wrong-code'])
       // Anything unexpected (a dropped port) reads as "not reachable", never as a blank line.
       expect(pairingFailureText(new Error('port closed'), pairing)).toBe(pairing.failure.unreachable)

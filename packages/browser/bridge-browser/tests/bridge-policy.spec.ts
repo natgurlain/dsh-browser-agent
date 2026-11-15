@@ -337,6 +337,16 @@ describe('full-access permission presets', () => {
     expect(isPairingCommand(line)).toBe(true)
   })
 
+  it('does not offer the pairing command in the panel\'s command list', async () => {
+    const { call } = harness({
+      'commands.list': () => ({ ok: true, value: { commands: [{ name: 'plan' }, { name: 'browser-pair' }, { name: 'compact' }], provisional: false } }),
+    })
+    await call('session.create', {})
+    expect(await call('commands.list', { sessionId: 'created' })).toEqual({
+      ok: true, value: { commands: [{ name: 'plan' }, { name: 'compact' }], provisional: false },
+    })
+  })
+
   it('leaves other commands alone', async () => {
     const { call, inner } = harness()
     await call('session.create', {})

@@ -37,9 +37,7 @@ import {
   MAX_FAILED_CONFIRMATIONS,
   MAX_PAIRED_EXTENSION_IDS,
   MAX_PENDING_PAIRINGS,
-  MAX_PENDING_PER_ORIGIN,
   MAX_REQUESTS_PER_MINUTE,
-  MAX_REQUESTS_PER_ORIGIN_PER_MINUTE,
   PAIRING_REQUEST_TTL_MS,
   PairingDesk,
   chromeExtensionIdOfOrigin,
@@ -255,8 +253,17 @@ describe('pairing exchange (pairing.ts)', () => {
     const master = hmac(`${label}|master`, Buffer.concat([Buffer.from(hex(pow(g, a * b)), 'hex'), Buffer.from(transcript)]))
     expect(pairingClientConfirmation(keys)).toBe(hmac(hmac(master, 'confirm|client'), transcript).toString('hex'))
     expect(pairingDoneMac(keys)).toBe(hmac(hmac(master, 'done'), transcript).toString('hex'))
-    // The value the extension suite pins.
+    // The bridge's side of the same vector: the encrypted token and its confirmation.
+    const sealed = sealPairingToken(derivePairingKeys(CONTEXT, b, clientShare, serverShare, 'server')!, VECTOR_TOKEN)
+    const tokenKey = hmac(master, 'token')
+    const stream = Buffer.concat([0, 1].map(block => hmac(tokenKey, Buffer.concat([Buffer.from('stream|'), Buffer.from([0, 0, 0, block])]))))
+    const box = Buffer.from(VECTOR_TOKEN).map((byte, index) => byte ^ stream[index]!)
+    expect(sealed.box).toBe(Buffer.from(box).toString('hex'))
+    expect(sealed.mac).toBe(hmac(hmac(master, 'confirm|server'), `${transcript}|${sealed.box}`).toString('hex'))
+    expect(openPairingToken(keys, sealed.box, sealed.mac)).toBe(VECTOR_TOKEN)
+    // The values the extension suite pins.
     expect(pairingClientConfirmation(keys)).toBe(VECTOR_CLIENT_CONFIRMATION)
+    expect(sealed).toEqual(VECTOR_SEALED)
   })
 
   it('accepts only shares in the prime-order subgroup', () => {
@@ -319,6 +326,12 @@ describe('pairing exchange (pairing.ts)', () => {
 
 /** The fixed vector's client confirmation; the extension suite checks the same constant. */
 const VECTOR_CLIENT_CONFIRMATION = 'cce5bb508133bd5b892ca32c9ea16a8bbd8ca80ac28fd7b1183b6fda888efc42'
+/** The fixed vector's token (longer than one keystream block) and its `pair.ok`. */
+const VECTOR_TOKEN = 'vector-bridge-token-0123456789abcdef0123456789abcdef'
+const VECTOR_SEALED = {
+  box: '3b40cda4453c5c14915391de5c777cfe741e0d49633b979855ab0e61ec5a093bd4b6f7618e77fbcfac805e954b9a22a5a7b21456',
+  mac: 'f4559ead079fe6aaf2fcd9b5dc5bebf3b787924f69a69c2210461a10ceae547f',
+}
 
 describe('pairing desk (pairing-host.ts)', () => {
   /** A waiting request whose attempts and drops the spec observes. */
@@ -334,20 +347,23 @@ describe('pairing desk (pairing-host.ts)', () => {
     const time = clock()
     const log = vi.fn()
     const desk = new PairingDesk(time.now, log)
-    expect(desk.status()).toEqual({ paused: false, waiting: 0, hints: [], failures: 0 })
+    expect(desk.status()).toEqual({ paused: false, waiting: 0, requests: [], failures: 0 })
     expect(await desk.enter('ABC-DEF')).toBe('none-waiting')
 
     const real = waiting(desk, STORE_ORIGIN, 'ABCDEF')
     const other = waiting(desk, OTHER_ORIGIN, 'ZZZZZZ', 'Chrome')
-    // The host knows how many wait and what they say they are; never a code.
-    expect(desk.status()).toEqual({ paused: false, waiting: 2, hints: ['Brave', 'Chrome'], failures: 0 })
+    // The host knows who waits (by Origin) and what they say they are; never a code.
+    expect(desk.status()).toEqual({
+      paused: false, waiting: 2, failures: 0,
+      requests: [{ origin: STORE_ORIGIN, name: 'Brave', official: false }, { origin: OTHER_ORIGIN, name: 'Chrome', official: false }],
+    })
     expect(real.attempt).not.toHaveBeenCalled()
 
     expect(await desk.enter(' abc-def ')).toBe('paired')
     expect(real.attempt).toHaveBeenCalledExactlyOnceWith('ABCDEF')
     // The other request was tried with the same code, failed, and is gone too.
     expect(other.attempt).toHaveBeenCalledExactlyOnceWith('ABCDEF')
-    expect(desk.status()).toEqual({ paused: false, waiting: 0, hints: [], failures: 1, paired: { origin: STORE_ORIGIN, name: 'Brave', at: time.now() } })
+    expect(desk.status()).toEqual({ paused: false, waiting: 0, requests: [], failures: 1, paired: { origin: STORE_ORIGIN, name: 'Brave', at: time.now() } })
     expect(log).toHaveBeenCalledWith(expect.stringContaining(`a request from ${OTHER_ORIGIN} did not hold the entered code`))
     // Replayed: the code finds nothing to pair with.
     expect(await desk.enter('ABC-DEF')).toBe('none-waiting')
@@ -425,7 +441,7 @@ describe('pairing desk (pairing-host.ts)', () => {
     time.advance(FAILURE_WINDOW_MS * 2)
     expect(desk.admit(STORE_ORIGIN)).toBe('paused')
     desk.resumePairing()
-    expect(desk.status()).toEqual({ paused: false, waiting: 0, hints: [], failures: 0 })
+    expect(desk.status()).toEqual({ paused: false, waiting: 0, requests: [], failures: 0 })
     const again = waiting(desk, STORE_ORIGIN, 'ABCDEF')
     expect(await desk.enter('ABC-DEF')).toBe('paired')
     expect(again.attempt).toHaveBeenCalledOnce()
@@ -449,84 +465,114 @@ describe('pairing desk (pairing-host.ts)', () => {
     const request = waiting(desk, STORE_ORIGIN, 'ABCDEF')
     desk.pausePairing('user')
     expect(request.drop).toHaveBeenCalledExactlyOnceWith('paused')
-    expect(desk.status()).toEqual({ paused: true, pauseReason: 'user', waiting: 0, hints: [], failures: 0 })
+    expect(desk.status()).toEqual({ paused: true, pauseReason: 'user', waiting: 0, requests: [], failures: 0 })
     expect(desk.admit(STORE_ORIGIN)).toBe('paused')
   })
 
-  it('keeps one requester from starving the others', () => {
+  it('answers as soon as one request pairs and settles the others in the background', async () => {
+    const desk = new PairingDesk(clock().now)
+    let finishSlow!: (outcome: PairingAttemptOutcome) => void
+    desk.admit(OTHER_ORIGIN)
+    desk.enqueue({ origin: OTHER_ORIGIN, name: 'Chrome' }, () => new Promise((resolve) => { finishSlow = resolve }), () => {})
+    waiting(desk, STORE_ORIGIN, 'ABCDEF')
+    // The slow one (a requester that never confirms, waiting out its timeout) does not hold the answer back.
+    expect(await desk.enter('ABC-DEF')).toBe('paired')
+    expect(desk.status()).toMatchObject({ failures: 0, paired: { origin: STORE_ORIGIN } })
+    // Until it settles no second code is tried; then its failure is counted.
+    expect(await desk.enter('ABC-DEG')).toBe('busy')
+    finishSlow('failed')
+    await vi.waitFor(() => { expect(desk.status().failures).toBe(1) })
+    expect(await desk.enter('ABC-DEG')).toBe('none-waiting')
+  })
+
+  it('labels a waiting request by its Origin: official only for the configured extension IDs', () => {
+    const desk = new PairingDesk(clock().now, () => {}, origin => origin === PINNED_ORIGIN)
+    waiting(desk, PINNED_ORIGIN)
+    waiting(desk, STORE_ORIGIN, undefined, 'Chrome')
+    waiting(desk, FIREFOX_ORIGIN, undefined, 'Firefox')
+    expect(desk.status().requests).toEqual([
+      { origin: PINNED_ORIGIN, name: 'Brave', official: true },
+      { origin: STORE_ORIGIN, name: 'Chrome', official: false },
+      { origin: FIREFOX_ORIGIN, name: 'Firefox', official: false },
+    ])
+  })
+
+  it('regression (review 2, M3): limits are not keyed on the Origin, so forging the genuine Origin does not push the genuine request out', () => {
     const time = clock()
     const log = vi.fn()
     const desk = new PairingDesk(time.now, log)
-    // One Origin: its third request replaces its own oldest, nobody else's.
-    const mine = [waiting(desk, STORE_ORIGIN), waiting(desk, STORE_ORIGIN)]
-    const victim = waiting(desk, OTHER_ORIGIN)
-    expect(MAX_PENDING_PER_ORIGIN).toBe(2)
+    const genuine = waiting(desk, STORE_ORIGIN, 'ABCDEF')
+    // A local process sends request after request under the very same Origin.
+    const forged = Array.from({ length: MAX_PENDING_PAIRINGS - 1 }, () => waiting(desk, STORE_ORIGIN))
+    expect(genuine.drop).not.toHaveBeenCalled()
+    expect(desk.status().waiting).toBe(MAX_PENDING_PAIRINGS)
+    // Only when the whole queue is full does the oldest give way, and it is told why.
     waiting(desk, STORE_ORIGIN)
-    expect(mine[0]!.drop).toHaveBeenCalledExactlyOnceWith('replaced')
-    expect(victim.drop).not.toHaveBeenCalled()
-    expect(desk.status().waiting).toBe(3)
-    // One Origin's rate runs out; another Origin is still admitted.
-    for (let index = 3; index < MAX_REQUESTS_PER_ORIGIN_PER_MINUTE; index += 1) expect(desk.admit(STORE_ORIGIN)).toBeUndefined()
-    expect(desk.admit(STORE_ORIGIN)).toBe('rate')
-    expect(log).toHaveBeenCalledWith(expect.stringContaining(`refused a request from ${STORE_ORIGIN}`))
-    expect(desk.admit(FIREFOX_ORIGIN)).toBeUndefined()
+    expect(genuine.drop).toHaveBeenCalledExactlyOnceWith('replaced')
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('a newer request replaced a waiting one'))
+    for (const request of forged) expect(request.drop).not.toHaveBeenCalled()
+    // The genuine extension asks again and is the newest: now the forger's oldest gives way.
+    const again = waiting(desk, STORE_ORIGIN, 'ABCDEF')
+    expect(forged[0]!.drop).toHaveBeenCalledExactlyOnceWith('replaced')
+    expect(again.drop).not.toHaveBeenCalled()
+    // Many requests under one Origin are not refused for that Origin's sake: only the global rate applies.
+    for (let index = MAX_PENDING_PAIRINGS + 2; index < MAX_REQUESTS_PER_MINUTE; index += 1) expect(desk.admit(STORE_ORIGIN)).toBeUndefined()
+    expect(desk.admit(OTHER_ORIGIN)).toBe('rate')
+    expect(log).toHaveBeenCalledWith(expect.stringContaining(`refused a request from ${OTHER_ORIGIN}`))
     time.advance(60_000)
     expect(desk.admit(STORE_ORIGIN)).toBeUndefined()
-  })
-
-  it('lets a newcomer in when forged origins fill the queue, at the cost of the busiest origin\'s oldest', () => {
-    const time = clock()
-    const desk = new PairingDesk(time.now)
-    const flood = []
-    for (let index = 0; index < MAX_PENDING_PAIRINGS; index += 1) flood.push(waiting(desk, forgedOrigin(index >> 1)))
-    expect(desk.status().waiting).toBe(MAX_PENDING_PAIRINGS)
-    const real = waiting(desk, STORE_ORIGIN, 'ABCDEF')
-    expect(desk.status().waiting).toBe(MAX_PENDING_PAIRINGS)
-    expect(flood[0]!.drop).toHaveBeenCalledExactlyOnceWith('replaced')
-    expect(real.drop).not.toHaveBeenCalled()
-    // The global rate still bounds a flood that forges a new Origin every time.
-    for (let index = MAX_PENDING_PAIRINGS + 1; index < MAX_REQUESTS_PER_MINUTE; index += 1) expect(desk.admit(forgedOrigin(index % 12))).not.toBe('paused')
-    expect(desk.admit('chrome-extension://cccccccccccccccccccccccccccccccc')).toBe('rate')
   })
 
   it('reads the paired-extension record only when it can be trusted, and persists changes privately', async () => {
     const dir = newDir()
     const file = join(dir, 'paired.json')
     const record = await filePairedExtensions(file)
-    expect(record.list()).toEqual([])
-    await record.add(STORE_ID)
-    await record.add('not-an-id')
-    await record.add(STORE_ID)
-    await record.add(OTHER_ID)
-    expect(record.list()).toEqual([STORE_ID, OTHER_ID])
+    expect(record.origins()).toEqual([])
+    await record.add(STORE_ORIGIN)
+    await record.add('not-an-origin')
+    await record.add('moz-extension://not-a-uuid')
+    await record.add(STORE_ORIGIN)
+    await record.add(FIREFOX_ORIGIN)
+    expect(record.origins()).toEqual([STORE_ORIGIN, FIREFOX_ORIGIN])
+    expect(record.chromeIds()).toEqual([STORE_ID])
     if (process.platform !== 'win32') expect((await stat(file)).mode & 0o777).toBe(0o600)
-    expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ version: 1, chromeExtensionIds: [STORE_ID, OTHER_ID] })
-    expect((await filePairedExtensions(file)).list()).toEqual([STORE_ID, OTHER_ID])
+    expect(JSON.parse(await readFile(file, 'utf8'))).toEqual({ version: 2, chromeExtensionIds: [STORE_ID], firefoxOrigins: [FIREFOX_ORIGIN], revokedFirefoxOrigins: [] })
+    expect((await filePairedExtensions(file)).origins()).toEqual([STORE_ORIGIN, FIREFOX_ORIGIN])
 
-    expect(await record.remove(STORE_ID)).toBe(true)
-    expect(await record.remove(STORE_ID)).toBe(false)
-    expect((await filePairedExtensions(file)).list()).toEqual([OTHER_ID])
+    // Unpairing a Chrome extension forgets it; unpairing a Firefox one also records the refusal.
+    expect(await record.remove(STORE_ORIGIN)).toBe(true)
+    expect(await record.remove(STORE_ORIGIN)).toBe(false)
+    expect(await record.remove(FIREFOX_ORIGIN)).toBe(true)
+    const reloaded = await filePairedExtensions(file)
+    expect(reloaded.origins()).toEqual([])
+    expect(reloaded.revokedOrigins()).toEqual([FIREFOX_ORIGIN])
+    // Pairing it again lifts the refusal.
+    await reloaded.add(FIREFOX_ORIGIN)
+    expect((await filePairedExtensions(file)).revokedOrigins()).toEqual([])
+    // The version-1 record (IDs only) still loads.
+    await writeFile(file, JSON.stringify({ version: 1, chromeExtensionIds: [OTHER_ID] }), { mode: 0o600 })
+    expect((await filePairedExtensions(file)).origins()).toEqual([OTHER_ORIGIN])
 
     // A file someone else could have written grants nothing.
     if (process.platform !== 'win32') {
       await chmod(file, 0o666)
       const warn = vi.fn()
-      expect((await filePairedExtensions(file, warn)).list()).toEqual([])
+      expect((await filePairedExtensions(file, warn)).origins()).toEqual([])
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('writable by group or others'))
       const link = join(dir, 'link.json')
       await chmod(file, 0o600)
       await symlink(file, link)
-      expect((await filePairedExtensions(link, warn)).list()).toEqual([])
+      expect((await filePairedExtensions(link, warn)).origins()).toEqual([])
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('symlink'))
     }
     await writeFile(file, '{"chromeExtensionIds":"nope"}', { mode: 0o600 })
-    expect((await filePairedExtensions(file)).list()).toEqual([])
+    expect((await filePairedExtensions(file)).origins()).toEqual([])
     await writeFile(file, 'not json', { mode: 0o600 })
-    expect((await filePairedExtensions(file)).list()).toEqual([])
+    expect((await filePairedExtensions(file)).origins()).toEqual([])
     const full = await filePairedExtensions(join(dir, 'many.json'))
-    const many = Array.from({ length: MAX_PAIRED_EXTENSION_IDS + 3 }, (_, index) => `${'a'.repeat(30)}${String.fromCharCode(97 + (index >> 4))}${String.fromCharCode(97 + (index & 15))}`)
-    for (const id of many) await full.add(id)
-    expect(full.list()).toEqual(many.slice(-MAX_PAIRED_EXTENSION_IDS))
+    const many = Array.from({ length: MAX_PAIRED_EXTENSION_IDS + 3 }, (_, index) => `chrome-extension://${'a'.repeat(30)}${String.fromCharCode(97 + (index >> 4))}${String.fromCharCode(97 + (index & 15))}`)
+    for (const origin of many) await full.add(origin)
+    expect(full.origins()).toEqual(many.slice(-MAX_PAIRED_EXTENSION_IDS))
     expect(chromeExtensionIdOfOrigin(STORE_ORIGIN)).toBe(STORE_ID)
     expect(chromeExtensionIdOfOrigin(FIREFOX_ORIGIN)).toBeUndefined()
   })
@@ -551,7 +597,7 @@ describe('pairing on the bridge socket (server.ts)', () => {
     const asking = await ask(h.url, { origin: STORE_ORIGIN, name: 'Brave' })
     await h.waitingFor()
     // Waiting: the host knows a browser is there and what it says it is. Nothing was sent to it.
-    expect(h.desk.status()).toMatchObject({ waiting: 1, hints: ['Brave'] })
+    expect(h.desk.status()).toMatchObject({ waiting: 1, requests: [{ origin: STORE_ORIGIN, name: 'Brave', official: false }] })
     expect(asking.socket.frames.map(frame => frame.t)).toEqual(['challenge'])
     expect(h.onPaired).not.toHaveBeenCalled()
     const early = await openSocket(h.url, STORE_ORIGIN)
@@ -627,7 +673,7 @@ describe('pairing on the bridge socket (server.ts)', () => {
     expect((await hello.closed).code).toBe(BRIDGE_CLOSE_CODES.originRejected)
   })
 
-  it('offers no offline oracle: an unconfirmed peer is never sent a MAC, and its transcript fits every code', async () => {
+  it('sends an unconfirmed peer one group element and no MAC or box (the structural half of "no offline oracle")', async () => {
     const h = await startPairingBridge()
     // A requester that stops after the bridge's share (it wants something to brute-force at home).
     const socket = await openSocket(h.url, OTHER_ORIGIN)
@@ -641,17 +687,14 @@ describe('pairing on the bridge socket (server.ts)', () => {
     // It never confirms: the step times out, the socket is closed, the attempt counts.
     expect(await entered).toBe('no-match')
     expect((await socket.closed).code).toBe(BRIDGE_CLOSE_CODES.pairingFailed)
-    expect(socket.frames.map(frame => frame.t)).toEqual(['challenge', 'pair.share'])
+    // Everything it was ever sent: the nonce and one element of the group. Nothing is a function of
+    // a code-derived key, so there is no value to check a guessed code against. (That the element
+    // itself tests nothing is the PAKE's property, argued in pairing.ts; it is not something a test can brute-force.)
+    expect(socket.frames.map(frame => Object.keys(frame).sort())).toEqual([['nonce', 't', 'v'], ['share', 't']])
     expect(keyed(socket.frames)).toEqual([])
-    // What it holds: its own secret and the bridge's share. For ANY candidate code there is a bridge
-    // secret that explains that share (the share is in the subgroup every code's generator spans),
-    // so the transcript rules no code out. Shown here for two candidates by the group's structure:
-    const share = (socket.frames[1] as Extract<BridgeFrame, { t: 'pair.share' }>).share
-    for (const candidate of ['ABCDEF', 'ZZZZZZ']) {
-      const generator = pairingShareFor({ ...context, code: candidate }, 1n)
-      expect(isPairingShare(generator)).toBe(true)
-      expect(isPairingShare(share)).toBe(true)
-    }
+    expect(isPairingShare((socket.frames[1] as Extract<BridgeFrame, { t: 'pair.share' }>).share)).toBe(true)
+    // With its own secret and the code it guessed it derives keys, and they are not the bridge's:
+    // the confirmation it could send is refused, as the closed socket shows.
     expect(h.desk.status().failures).toBe(1)
   })
 
@@ -718,18 +761,19 @@ describe('pairing on the bridge socket (server.ts)', () => {
     expect(await asking.outcome).toMatchObject({ ok: false, code: BRIDGE_CLOSE_CODES.pairingPaused })
   })
 
-  it('does not let one flooding requester keep the genuine one out', async () => {
+  it('tells a replaced request so, and the genuine newest request still pairs under a flood', async () => {
     const h = await startPairingBridge()
     const flood = []
-    for (let index = 0; index < MAX_PENDING_PAIRINGS; index += 1) flood.push(await ask(h.url, { origin: forgedOrigin(index >> 1), code: 'QQQQQQ' }))
+    for (let index = 0; index < MAX_PENDING_PAIRINGS; index += 1) flood.push(await ask(h.url, { origin: STORE_ORIGIN, code: 'QQQQQQ' }))
     await h.waitingFor(MAX_PENDING_PAIRINGS)
     const genuine = await ask(h.url, { origin: STORE_ORIGIN })
-    await waitFor(() => flood[0]!.socket.ws.readyState === WebSocket.CLOSED)
-    expect(await flood[0]!.outcome).toMatchObject({ ok: false, code: BRIDGE_CLOSE_CODES.pairingClosed })
+    // The oldest request gives way, with its own close code.
+    expect(await flood[0]!.outcome).toMatchObject({ ok: false, code: BRIDGE_CLOSE_CODES.pairingReplaced })
     expect(await h.desk.enter(genuine.code)).toBe('paired')
     expect((await genuine.outcome).ok).toBe(true)
     // The flood's requests rode on that one code, failed, and paused pairing.
     for (const one of flood.slice(1)) expect((await one.outcome).ok).toBe(false)
+    await waitFor(() => h.desk.status().paused)
     expect(h.desk.status()).toMatchObject({ paused: true, pauseReason: 'failures' })
     expect(h.onPaired).toHaveBeenCalledTimes(1)
   })
@@ -842,25 +886,78 @@ describe('pairing on the bridge socket (server.ts)', () => {
     expect(before.ws.readyState).toBe(WebSocket.OPEN)
   })
 
-  it('pairs a Firefox extension (nothing to allowlist) and unpairs a Chrome one', async () => {
+  it('regression (review 2, M1): unpairing closes the live connection and refuses the extension, Chrome and Firefox alike', async () => {
     const h = await startPairingBridge()
     const firefox = await ask(h.url, { origin: FIREFOX_ORIGIN, name: 'Firefox' })
     await h.waitingFor()
     expect(await h.desk.enter(firefox.code)).toBe('paired')
     expect(await firefox.outcome).toMatchObject({ ok: true, token: TEST_TOKEN })
     expect(h.onPaired).toHaveBeenLastCalledWith({ origin: FIREFOX_ORIGIN })
-
     const chrome = await ask(h.url, { origin: STORE_ORIGIN })
     await h.waitingFor()
     expect(await h.desk.enter(chrome.code)).toBe('paired')
     await chrome.outcome
-    await connectClient(h.url, TEST_CAPS, { origin: STORE_ORIGIN })
-    // Unpaired: its next handshake is refused at the Origin check, token or not.
-    expect(h.bridge.revokeChromeExtensionId(STORE_ID)).toBe(true)
-    expect(h.bridge.revokeChromeExtensionId(STORE_ID)).toBe(false)
-    const hello = await openSocket(h.url, STORE_ORIGIN)
-    await sendHello(hello.ws, TEST_TOKEN, TEST_CAPS)
-    expect((await hello.closed).code).toBe(BRIDGE_CLOSE_CODES.originRejected)
+
+    const chromeClient = await connectClient(h.url, { ...TEST_CAPS, client: { id: 'chrome-install', browser: 'chrome' } }, { origin: STORE_ORIGIN })
+    const firefoxClient = await connectClient(h.url, { ...TEST_CAPS, client: { id: 'firefox-install', browser: 'firefox' } }, { origin: FIREFOX_ORIGIN })
+    // A Firefox extension that pasted the token and never paired, and the installed build: both stay.
+    const manualFirefox = await connectClient(h.url, { ...TEST_CAPS, client: { id: 'manual-firefox', browser: 'firefox' } }, { origin: 'moz-extension://11111111-2222-3333-4444-555555555555' })
+    const pinned = await connectClient(h.url, { ...TEST_CAPS, client: { id: 'pinned-install', browser: 'chrome' } }, { origin: PINNED_ORIGIN })
+    expect(h.bridge.connectionCount()).toBe(4)
+
+    // Unpair the Chrome extension: its connection is closed at once, and it is refused from then on.
+    expect(h.bridge.revokeOrigin(STORE_ORIGIN)).toBe(1)
+    expect((await chromeClient.closed).code).toBe(BRIDGE_CLOSE_CODES.originRejected)
+    const chromeAgain = await openSocket(h.url, STORE_ORIGIN)
+    await sendHello(chromeAgain.ws, TEST_TOKEN, TEST_CAPS)
+    expect((await chromeAgain.closed).code).toBe(BRIDGE_CLOSE_CODES.originRejected)
+
+    // Unpair the Firefox extension: the same, although Firefox origins are otherwise accepted with the token.
+    expect(h.bridge.revokeOrigin(FIREFOX_ORIGIN)).toBe(1)
+    expect((await firefoxClient.closed).code).toBe(BRIDGE_CLOSE_CODES.originRejected)
+    const firefoxAgain = await openSocket(h.url, FIREFOX_ORIGIN)
+    await sendHello(firefoxAgain.ws, TEST_TOKEN, TEST_CAPS)
+    expect((await firefoxAgain.closed).code).toBe(BRIDGE_CLOSE_CODES.originRejected)
+
+    // The others were not touched.
+    expect(h.bridge.connectionCount()).toBe(2)
+    expect((await manualFirefox.rpc('session.list', {})).ok).toBe(true)
+    expect((await pinned.rpc('session.list', {})).ok).toBe(true)
+
+    // Pairing the Firefox extension again lifts its refusal.
+    const repair = await ask(h.url, { origin: FIREFOX_ORIGIN, name: 'Firefox' })
+    await h.waitingFor()
+    expect(await h.desk.enter(repair.code)).toBe('paired')
+    await repair.outcome
+    await connectClient(h.url, { ...TEST_CAPS, client: { id: 'firefox-install', browser: 'firefox' } }, { origin: FIREFOX_ORIGIN })
+  })
+
+  it('keeps a configured extension ID allowed when it is unpaired, but still closes its connection', async () => {
+    const h = await startPairingBridge()
+    const pinned = await connectClient(h.url, TEST_CAPS, { origin: PINNED_ORIGIN })
+    expect(h.bridge.revokeOrigin(PINNED_ORIGIN, { keepAllowed: true })).toBe(1)
+    expect((await pinned.closed).code).toBe(BRIDGE_CLOSE_CODES.originRejected)
+    await connectClient(h.url, TEST_CAPS, { origin: PINNED_ORIGIN })
+  })
+
+  it('resets the token: every connection is closed, the old token fails, the new one works and is what pairing delivers', async () => {
+    const h = await startPairingBridge()
+    const paired = await connectClient(h.url, { ...TEST_CAPS, client: { id: 'paired-install', browser: 'chrome' } }, { origin: PINNED_ORIGIN })
+    const local = await connectClient(h.url, TEST_CAPS)
+    const fresh = 'a-new-bridge-token-0123456789abcdef'
+    expect(() => h.bridge.resetToken('')).toThrow()
+    expect(h.bridge.resetToken(fresh)).toBe(2)
+    expect((await paired.closed).code).toBe(BRIDGE_CLOSE_CODES.authFailed)
+    expect((await local.closed).code).toBe(BRIDGE_CLOSE_CODES.authFailed)
+    expect(h.bridge.connectionCount()).toBe(0)
+    const stale = await openSocket(h.url, PINNED_ORIGIN)
+    await sendHello(stale.ws, TEST_TOKEN, TEST_CAPS)
+    expect((await stale.closed).code).toBe(BRIDGE_CLOSE_CODES.authFailed)
+    await connectClient(h.url, TEST_CAPS, { origin: PINNED_ORIGIN, token: fresh })
+    const asking = await ask(h.url, { origin: STORE_ORIGIN })
+    await h.waitingFor()
+    expect(await h.desk.enter(asking.code)).toBe('paired')
+    expect(await asking.outcome).toMatchObject({ ok: true, token: fresh })
   })
 
   it('survives a throwing pairing observer', async () => {
@@ -878,17 +975,18 @@ describe('host-side pairing controls (pairing-mount.ts)', () => {
     headers: { 'content-type': contentType },
     body: typeof body === 'string' ? body : JSON.stringify(body),
   })
-  function controls(desk = new PairingDesk(clock().now)): PairingControls & { ids: string[] } {
-    const ids = [STORE_ID]
+  function controls(desk = new PairingDesk(clock().now)): PairingControls & { origins: string[]; resetToken: ReturnType<typeof vi.fn<() => Promise<void>>> } {
+    const origins = [STORE_ORIGIN]
     return {
       desk,
-      ids,
-      pairedIds: () => [...ids],
-      unpair: async (id) => {
-        const index = ids.indexOf(id)
-        if (index >= 0) ids.splice(index, 1)
+      origins,
+      pairedOrigins: () => [...origins],
+      unpair: async (origin) => {
+        const index = origins.indexOf(origin)
+        if (index >= 0) origins.splice(index, 1)
         return index >= 0
       },
+      resetToken: vi.fn(async () => {}),
     }
   }
   const holding = (desk: PairingDesk, code: string, origin = STORE_ORIGIN, name = 'Brave') => {
@@ -902,12 +1000,13 @@ describe('host-side pairing controls (pairing-mount.ts)', () => {
     const control = controls()
     const idle = await handlePairingControl(control, post({ action: 'status' }))
     expect(idle.headers.get('cache-control')).toBe('no-store')
-    expect(await idle.json()).toEqual({ ok: true, paused: false, waiting: 0, hints: [], failures: 0, pairedIds: [STORE_ID] })
+    expect(await idle.json()).toEqual({ ok: true, paused: false, waiting: 0, requests: [], failures: 0, pairedOrigins: [STORE_ORIGIN], canResetToken: true })
 
     holding(control.desk, 'ABCDEF')
     const waiting = await (await handlePairingControl(control, post({ action: 'status' }))).json()
-    expect(waiting).toMatchObject({ waiting: 1, hints: ['Brave'] })
-    expect(JSON.stringify(waiting)).not.toMatch(/ABC|origin/u)
+    // Who is asking (by Origin) is shown; the code is not known here at all.
+    expect(waiting).toMatchObject({ waiting: 1, requests: [{ origin: STORE_ORIGIN, name: 'Brave', official: false }] })
+    expect(JSON.stringify(waiting)).not.toMatch(/ABC/u)
 
     const wrong = await (await handlePairingControl(control, post({ action: 'enter', code: 'zzz-zzz' }))).json()
     expect(wrong).toMatchObject({ ok: true, result: 'no-match', waiting: 0, failures: 1 })
@@ -920,8 +1019,18 @@ describe('host-side pairing controls (pairing-mount.ts)', () => {
     expect(await (await handlePairingControl(control, post({ action: 'enter', code: 'abc-def' }))).json()).toMatchObject({ result: 'paused' })
     expect(await (await handlePairingControl(control, post({ action: 'resume' }))).json()).toMatchObject({ paused: false })
 
-    expect(await (await handlePairingControl(control, post({ action: 'unpair', id: STORE_ID }))).json()).toMatchObject({ ok: true, pairedIds: [] })
-    expect((await handlePairingControl(control, post({ action: 'unpair', id: STORE_ID }))).status).toBe(404)
+    expect(await (await handlePairingControl(control, post({ action: 'unpair', origin: STORE_ORIGIN }))).json()).toMatchObject({ ok: true, pairedOrigins: [] })
+    expect((await handlePairingControl(control, post({ action: 'unpair', origin: STORE_ORIGIN }))).status).toBe(404)
+
+    expect(control.resetToken).not.toHaveBeenCalled()
+    expect((await handlePairingControl(control, post({ action: 'reset-token' }))).status).toBe(200)
+    expect(control.resetToken).toHaveBeenCalledOnce()
+    // A token pinned in the plugin config cannot be replaced from here.
+    const { resetToken: _resetToken, ...pinned } = control
+    const refused = await handlePairingControl(pinned, post({ action: 'reset-token' }))
+    expect(refused.status).toBe(409)
+    expect(await refused.json()).toEqual({ ok: false, error: 'token-pinned' })
+    expect(await (await handlePairingControl(pinned, post({ action: 'status' }))).json()).toMatchObject({ canResetToken: false })
   })
 
   it('answers 400/415 to anything else and attempts nothing', async () => {
@@ -941,10 +1050,12 @@ describe('host-side pairing controls (pairing-mount.ts)', () => {
     const control = controls()
     expect(await runPairingCommand(control, '')).toEqual({
       kind: 'success',
-      text: `No browser is waiting. Open the DSH browser extension; it shows a code.\nPaired extensions: ${STORE_ID} (/browser-pair unpair <id> removes one).`,
+      text: `No browser is waiting. Open the DSH browser extension; it shows a code.\nPaired extensions: ${STORE_ORIGIN} (/browser-pair unpair <extension> removes one).`,
     })
     holding(control.desk, 'ABCDEF')
-    expect((await runPairingCommand(control, '  ')).text).toContain('1 browser is waiting. Enter the code your browser shows: /browser-pair <code>.')
+    const listed = (await runPairingCommand(control, '  ')).text
+    expect(listed).toContain('1 browser is waiting. Enter the code your browser shows: /browser-pair <code>.')
+    expect(listed).toContain(`Unknown extension, not the published DSH extension: ${STORE_ORIGIN} (says it is Brave)`)
     expect(await runPairingCommand(control, 'not\u009b[2Ja-code')).toEqual({ kind: 'error', text: 'A pairing code has 6 letters and digits, like ABC-DEF.' })
     expect(await runPairingCommand(control, 'ZZZ-ZZZ')).toMatchObject({ kind: 'error', text: expect.stringContaining('No waiting browser shows that code') })
     expect(await runPairingCommand(control, 'ABC-DEF')).toMatchObject({ kind: 'error', text: expect.stringContaining('No browser is waiting') })
@@ -955,8 +1066,13 @@ describe('host-side pairing controls (pairing-mount.ts)', () => {
     expect((await runPairingCommand(control, '')).text).toContain('Pairing is paused.')
     expect(await runPairingCommand(control, 'ABC-DEF')).toMatchObject({ kind: 'error', text: expect.stringContaining('/browser-pair resume') })
     expect((await runPairingCommand(control, 'Resume')).kind).toBe('success')
+    // By bare ID or by origin.
     expect(await runPairingCommand(control, `unpair ${STORE_ID}`)).toMatchObject({ kind: 'success', text: expect.stringContaining('still holds the bridge token') })
-    expect(await runPairingCommand(control, `unpair ${STORE_ID}`)).toEqual({ kind: 'error', text: 'That is not a paired extension ID.' })
+    expect(await runPairingCommand(control, `unpair ${STORE_ORIGIN}`)).toEqual({ kind: 'error', text: 'That is not a paired extension.' })
+    expect(await runPairingCommand(control, 'reset-token')).toMatchObject({ kind: 'success', text: expect.stringContaining('every browser was disconnected') })
+    expect(control.resetToken).toHaveBeenCalledOnce()
+    const { resetToken: _resetToken, ...pinned } = control
+    expect(await runPairingCommand(pinned, 'reset-token')).toMatchObject({ kind: 'error', text: expect.stringContaining('pinned in the plugin config') })
     expect((await runPairingCommand(control, '')).text).toContain('No extension has been paired.')
   })
 

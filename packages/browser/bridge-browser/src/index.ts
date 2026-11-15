@@ -59,7 +59,7 @@ import { withSessionDeferral } from './session-deferral.ts'
 import { withSessionWorkspace } from './session-workspace.ts'
 import { createSessionPurger } from './session-purge.ts'
 import { createKillSwitchHandler, createSessionForgetter, createSnapshotInjector } from './bridge-hooks.ts'
-import { installedTokenMismatch, resolveToken, syncInstalledExtensionToken } from './token.ts'
+import { generateToken, installedTokenMismatch, resolveToken, syncInstalledExtensionToken, writeTokenFile } from './token.ts'
 import { withBridgePolicy } from './bridge-policy.ts'
 import { installSessionTaint, SessionTaintRegistry, withTaintMethods } from './session-taint.ts'
 import { fileSessionLedger, type SessionLedger } from './session-ledger.ts'
@@ -408,13 +408,17 @@ function mountBridge(
   const killSwitch = createKillSwitchHandler({ devLoop, learning: () => learning, info: (message) => { ctx.logger.info(message) } })
   // One-step pairing for extensions without a token (store builds, Firefox):
   // they show a code, and nothing is released until the user types it into dsh itself.
-  const pairing = new PairingDesk(Date.now, (message) => { ctx.logger.info(`browser bridge: ${message}`) })
+  const pairing = new PairingDesk(
+    Date.now,
+    (message) => { ctx.logger.info(`browser bridge: ${message}`) },
+    // "Official" on the host's card: an extension ID this bridge is configured to accept (the published build's).
+    (origin) => resolved.allowedChromeExtensionIds.some(id => origin === `chrome-extension://${id}`),
+  )
   server = new BridgeServer({
     token: tokenRes.token,
     ...(resolved.pairing ? { pairing } : {}),
-    onPaired: ({ chromeExtensionId }) => {
-      if (chromeExtensionId === undefined) return
-      void paired.add(chromeExtensionId).catch((error: unknown) => {
+    onPaired: ({ origin }) => {
+      void paired.add(origin).catch((error: unknown) => {
         ctx.logger.warn(`browser bridge: could not record the paired extension (it stays allowed until dsh restarts): ${errorMessage(error)}`)
       })
     },
@@ -423,7 +427,8 @@ function mountBridge(
       ledger.external(sessionId) !== undefined || fenced.allowsSession(sessionId, signal, 'own')), devLoop),
     sessionScope: fenced,
     sessionLineage: taint,
-    allowedChromeExtensionIds: [...resolved.allowedChromeExtensionIds, ...paired.list()],
+    allowedChromeExtensionIds: [...resolved.allowedChromeExtensionIds, ...paired.chromeIds()],
+    revokedOrigins: paired.revokedOrigins(),
     forwardedPorts: trustedForwardedPorts(resolved, message => { ctx.logger.warn(message) }),
     toolTimeoutMs: resolved.toolTimeoutMs,
     caps: {
@@ -502,14 +507,29 @@ function mountBridge(
       const commands = optionalService<PairingCommandRegistry>(ctx, 'commands')
       disposers = mountPairingControls({
         desk: pairing,
-        pairedIds: () => paired.list(),
-        unpair: async (id) => {
-          if (!await paired.remove(id)) return false
+        pairedOrigins: () => paired.origins(),
+        unpair: async (origin) => {
+          if (!await paired.remove(origin)) return false
           // An ID the plugin config also allows stays allowed: unpairing undoes pairing, not configuration.
-          if (!resolved.allowedChromeExtensionIds.includes(id)) server.revokeChromeExtensionId(id)
-          ctx.logger.info(`browser bridge: unpaired chrome-extension://${id}`)
+          const closed = server.revokeOrigin(origin, { keepAllowed: resolved.allowedChromeExtensionIds.some(id => origin === `chrome-extension://${id}`) })
+          ctx.logger.info(`browser bridge: unpaired ${origin} (${String(closed)} connection${closed === 1 ? '' : 's'} closed)`)
           return true
         },
+        // A token pinned in the plugin config belongs to the configuration, not to this file.
+        ...(resolved.token !== undefined && resolved.token !== '' ? {} : {
+          resetToken: async () => {
+            const token = generateToken()
+            // File first: if it cannot be written the old token stays in force everywhere.
+            await writeTokenFile(token, tokenRes.file)
+            const closed = server.resetToken(token)
+            ctx.logger.info(`browser bridge: the bridge token was reset (${String(closed)} connection${closed === 1 ? '' : 's'} closed)`)
+            try {
+              await syncInstalledExtensionToken(token)
+            } catch (error: unknown) {
+              ctx.logger.warn(`browser bridge: could not refresh the installed extension token: ${errorMessage(error)}`)
+            }
+          },
+        }),
       }, {
         ...routes === undefined ? {} : { fetch: routes },
         ...commands === undefined ? {} : { commands },

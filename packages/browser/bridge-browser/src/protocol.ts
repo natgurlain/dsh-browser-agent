@@ -189,8 +189,8 @@ export const BRIDGE_CLOSE_CODES = {
   busy: 4005,
   /**
    * A pairing request could not be taken or ended without an attempt: this
-   * bridge does not pair, too many requests are waiting or arriving, a newer
-   * request took its place, or it expired before a code was entered on the host.
+   * bridge does not pair, too many requests are arriving, or it expired
+   * before a code was entered on the host.
    */
   pairingClosed: 4006,
   /**
@@ -201,6 +201,12 @@ export const BRIDGE_CLOSE_CODES = {
   pairingFailed: 4007,
   /** Pairing is paused on the host (by the user, or after too many failed attempts). */
   pairingPaused: 4008,
+  /**
+   * A newer pairing request took this one's place in the bridge's bounded
+   * queue. The extension asks again; it also means something else on the
+   * computer is asking to pair.
+   */
+  pairingReplaced: 4009,
 } as const
 
 /**

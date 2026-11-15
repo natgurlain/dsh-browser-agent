@@ -60,7 +60,7 @@ A store build (Chrome Web Store, Brave, Edge, or Firefox) connects to DSH after 
 What the user does:
 
 1. Open the extension's side panel. It finds the local DSH, shows "This browser is not connected to DSH yet" and a six-character code such as `4F7-K2Q`, with "Enter this code in DeepSeek Harness".
-2. Look at DeepSeek Harness. A card appears over the app: "A browser wants to connect — enter the code it shows", with one input. (The same input is in Settings → General → "Pair a browser".)
+2. Look at DeepSeek Harness. A card appears over the app: "A browser wants to connect", who is asking, and one input for the code. (The same input is in Settings → General → "Pair a browser".)
 3. Type the code and press Enter. The side panel connects by itself.
 
 This is needed once per browser profile. The bridge remembers the extension ID in `~/.dsh/browser-paired-extensions.json`, and the extension keeps the token in its own storage.
@@ -69,6 +69,8 @@ In a terminal-only DSH session, steps 2 and 3 are one command: `/browser-pair 4F
 
 DSH never shows a code. The code exists only in the extension's panel and in what the user types, so enter a code only when you opened the extension yourself and it is showing one.
 
+The card names the extension that is asking. The published build reads "DSH Browser Agent (official)". Any other extension reads "Unknown extension <id> — not the published DSH extension", in warning style: enter a code for it only if you installed that extension yourself and trust it, because a paired extension can drive DSH. After pairing, the card says which extension was paired and has an **Unpair** button next to it. The label goes by the extension ID the browser reports; it tells extensions apart, and it is not what stops a local program (the code is).
+
 ### What protects it
 
 - **The code is the only way in.** The extension picks the code at random and never sends it. Both sides run a password-authenticated key exchange keyed by it. The token is released only to a requester that proves it holds the code the user typed, and the extension stores a token only from a bridge that proves the same.
@@ -76,14 +78,15 @@ DSH never shows a code. The code exists only in the extension's panel and in wha
 - **A fake bridge gets nothing either.** A process that answers on DSH's port cannot make the extension accept a token, because it was never given the code. An extension that already holds a token never starts pairing by itself, whatever the connection error says; pairing again is an explicit action in the extension's Settings, behind a warning.
 - **Only the DSH owner can enter a code.** The input and the command go through DSH's own authenticated channel. A paired browser cannot run `/browser-pair` through the bridge.
 - **The exchange cannot be relayed.** It is bound to the extension's origin as the browser reports it and to the port the extension dialed.
-- **Guesses are counted.** A code is tried once against every waiting request, and each request sees one code only. A wrong guess succeeds with probability 2^-30 (about one in a billion). After 5 failed attempts within 10 minutes pairing pauses until the user resumes it, and DSH says so. At most 8 requests wait at once (2 per extension ID), for 2 minutes each.
+- **Guesses are counted.** A code is tried once against every waiting request, and each request sees one code only. A wrong guess succeeds with probability 2^-30 (about one in a billion). After 5 failed attempts within 10 minutes pairing pauses until the user resumes it, and DSH says so. At most 8 requests wait at once, for 2 minutes each; when more arrive, the oldest gives way, is told so, and the extension asks again once by itself.
 
 ### Pausing, unpairing, revoking
 
 Settings → General → "Pair a browser" also has:
 
 - **Pause pairing / Resume pairing.** While paused, no browser can ask to pair. Pairing also pauses by itself after several wrong codes.
-- **Paired extensions**, each with **Unpair**. Unpairing removes the extension ID from the allowlist, so that extension can no longer connect. It still holds the bridge token. If the browser is no longer yours, also reset the token: delete `~/.dsh/ext-bridge-token` and restart DSH. DSH generates a new token and rewrites the developer install's copy; other paired browsers pair again.
+- **Paired extensions** (Chrome and Firefox), each with **Unpair**. Unpairing closes that extension's connection at once and refuses it from then on. It still holds the bridge token.
+- **Reset bridge token.** Replaces the token and disconnects every browser. Use it when a browser that was paired is no longer yours. The installed developer extension picks the new token up by itself; paired browsers pair again. In a terminal: `/browser-pair reset-token`. A token pinned in the plugin config cannot be reset here; change it in the config.
 
 `pairing: false` in the bridge plugin config switches pairing off entirely.
 

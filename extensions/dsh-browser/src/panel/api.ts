@@ -286,9 +286,10 @@ export interface PanelApi {
    * the token is stored; rejects with a {@link PanelRpcError} whose `code` is
    * the background's `PairingFailure`. An install that already holds a token
    * is refused (`has-token`) unless `again` is set, which the panel does only
-   * after the user confirmed "Pair again…".
+   * after the user confirmed "Pair again…". `auto` marks a request nobody
+   * clicked for; the background allows only a few of those per sitting.
    */
-  pair(onCode: (code: string) => void, options?: { again?: boolean }): Promise<void>
+  pair(onCode: (code: string) => void, options?: { again?: boolean; auto?: boolean }): Promise<void>
   /** Withdraw a pairing request that is still waiting. */
   cancelPairing(): Promise<void>
   /** Scope this panel's selections to its own browser window. */
@@ -821,7 +822,7 @@ export function connectPanel(): PanelApi {
       return new Promise<void>((resolve, reject) => {
         const entry = { resolve, reject, onCode }
         pendingPairs.set(id, entry)
-        void send({ type: 'pair.start', id, ...(options?.again === true ? { again: true } : {}) }).catch((cause: unknown) => {
+        void send({ type: 'pair.start', id, ...(options?.again === true ? { again: true } : {}), ...(options?.auto === true ? { auto: true } : {}) }).catch((cause: unknown) => {
           if (pendingPairs.get(id) !== entry) return
           pendingPairs.delete(id)
           reject(connectionError(cause))

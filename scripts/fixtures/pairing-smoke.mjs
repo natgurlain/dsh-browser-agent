@@ -101,14 +101,19 @@ export async function smokePairing({ WebSocket, protocol, pairing, wsUrl, base, 
   }
   // The public discovery answer says nothing about pairing.
   assert.doesNotMatch(await (await fetch(`${base}/ext/bridge-config`)).text(), /pair/iu)
-  assert.deepEqual(await status(), { ok: true, paused: false, waiting: 0, hints: [], failures: 0, pairedIds: [] })
+  // (The smoke host pins its token in the plugin config, so it cannot be reset from the app.)
+  assert.deepEqual(await status(), { ok: true, paused: false, waiting: 0, requests: [], failures: 0, pairedOrigins: [], canResetToken: false })
+  const pinnedReset = await ownerPairing({ action: 'reset-token' })
+  assert.equal(pinnedReset.status, 409, JSON.stringify(pinnedReset.body))
 
   // A web page can never ask, and neither can a client without an extension Origin.
   assert.equal((await (await ask('https://evil.example')).outcome).closed, BRIDGE_CLOSE_CODES.originRejected)
   assert.equal((await (await ask(undefined)).outcome).closed, 1008)
 
   // The pairing command is the host owner's: through the browser bridge it is refused, in every form.
-  for (const line of ['/browser-pair', '/browser-pair ABC-DEF', '/browser-pair resume']) {
+  const offered = (await rpc('commands.list', { sessionId })).commands.map(command => command.name)
+  assert.equal(offered.includes('browser-pair'), false, 'the panel is not offered a command it may not run')
+  for (const line of ['/browser-pair', '/browser-pair ABC-DEF', '/browser-pair resume', '/browser-pair reset-token']) {
     const refused = await rpc.raw('commands.execute', { sessionId, line })
     assert.equal(refused.ok, false, JSON.stringify(refused))
     assert.equal(refused.error.code, 'forbidden')
@@ -117,7 +122,8 @@ export async function smokePairing({ WebSocket, protocol, pairing, wsUrl, base, 
   // The store build asks and shows its code. The host learns only that a browser waits and what it says it is.
   const first = await ask(STORE_ORIGIN, { name: 'Brave' })
   await waiting(1)
-  assert.deepEqual((await status()).hints, ['Brave'])
+  // Who is asking is shown by Origin: this ID is not one the bridge is configured for.
+  assert.deepEqual((await status()).requests, [{ origin: STORE_ORIGIN, name: 'Brave', official: false }])
   assert.equal(JSON.stringify(await status()).includes(first.code), false)
   assert.deepEqual(first.ws.readyState, WebSocket.OPEN)
   assert.equal(await pairedFile(), undefined, 'nothing is allowed before the code is entered')
@@ -136,6 +142,9 @@ export async function smokePairing({ WebSocket, protocol, pairing, wsUrl, base, 
   const forger = await ask(`chrome-extension://${PINNED_CHROME_EXTENSION_ID}`, { name: 'Chrome', code: 'QQQQQQ' })
   const second = await ask(STORE_ORIGIN, { name: 'Brave' })
   await waiting(2)
+  // The card can only go by the Origin header, which a local process may forge: the forger is labelled
+  // "official". That label cannot protect by itself; the code can, and the forger does not hold it.
+  assert.deepEqual((await status()).requests.map(request => request.official), [true, false])
   assert.equal(await enter(pairing.formatPairingCode(second.code).toLowerCase()), 'paired')
   const paired = await second.outcome
   assert.equal(paired.token, token, `pairing must deliver the bridge token: ${JSON.stringify(paired.frames).slice(0, 400)}`)
@@ -147,7 +156,7 @@ export async function smokePairing({ WebSocket, protocol, pairing, wsUrl, base, 
   assert.deepEqual(keyed(forged.frames), [])
   const after = await status()
   assert.equal(after.paired.origin, STORE_ORIGIN)
-  assert.deepEqual(after.pairedIds, [STORE_ID])
+  assert.deepEqual(after.pairedOrigins, [STORE_ORIGIN])
   // Its ID is remembered across restarts, in a private file.
   const record = await waitFor(pairedFile, 'the paired-extension record', 10_000)
   assert.deepEqual(record.chromeExtensionIds, [STORE_ID])
@@ -163,6 +172,7 @@ export async function smokePairing({ WebSocket, protocol, pairing, wsUrl, base, 
   const listed = await ownerCommand('/browser-pair')
   assert.equal(listed.kind, 'success', JSON.stringify(listed))
   assert.match(listed.text, /1 browser is waiting/u)
+  assert.ok(listed.text.includes(`Unknown extension, not the published DSH extension: ${FIREFOX_ORIGIN} (says it is Firefox)`), listed.text)
   assert.equal(listed.text.includes(third.code), false)
   const byCommand = await ownerCommand(`/browser-pair ${pairing.formatPairingCode(third.code)}`)
   assert.equal(byCommand.kind, 'success', JSON.stringify(byCommand))
@@ -199,8 +209,24 @@ export async function smokePairing({ WebSocket, protocol, pairing, wsUrl, base, 
   }
   assert.equal(await hello(), BRIDGE_CLOSE_CODES.authFailed, 'a paired extension still has to prove the token')
   // Unpaired: refused at the Origin check again, and gone from the record.
-  assert.equal((await ownerPairing({ action: 'unpair', id: STORE_ID })).status, 200)
+  assert.equal((await ownerPairing({ action: 'unpair', origin: STORE_ORIGIN })).status, 200)
   assert.equal(await hello(), BRIDGE_CLOSE_CODES.originRejected, 'an unpaired extension is refused at the Origin check')
   await waitFor(async () => (await pairedFile())?.chromeExtensionIds.length === 0, 'the unpaired record', 10_000)
-  assert.equal((await ownerPairing({ action: 'unpair', id: STORE_ID })).status, 404)
+  assert.equal((await ownerPairing({ action: 'unpair', origin: STORE_ORIGIN })).status, 404)
+  // The paired Firefox extension is listed and can be unpaired too: its origin is refused from then on,
+  // although Firefox origins that never paired are still accepted with the token.
+  assert.deepEqual((await status()).pairedOrigins, [FIREFOX_ORIGIN])
+  assert.equal((await ownerPairing({ action: 'unpair', origin: FIREFOX_ORIGIN })).status, 200)
+  const refusedFirefox = new WebSocket(wsUrl, { handshakeTimeout: 10_000, origin: FIREFOX_ORIGIN })
+  const firefoxFrames = []
+  refusedFirefox.on('message', data => { firefoxFrames.push(JSON.parse(data.toString())) })
+  const firefoxClosed = once(refusedFirefox, 'close')
+  await once(refusedFirefox, 'open')
+  await waitFor(() => firefoxFrames.some(value => value.t === 'challenge'), 'bridge challenge', 10_000)
+  refusedFirefox.send(JSON.stringify({
+    t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce: createBridgeNonce(), mac: createBridgeNonce(), endpoint,
+    caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 },
+  }))
+  assert.equal((await firefoxClosed)[0], BRIDGE_CLOSE_CODES.originRejected, 'an unpaired Firefox extension is refused at the Origin check')
+  assert.deepEqual((await pairedFile()).revokedFirefoxOrigins, [FIREFOX_ORIGIN])
 }

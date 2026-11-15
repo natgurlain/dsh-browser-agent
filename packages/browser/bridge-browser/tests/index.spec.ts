@@ -207,11 +207,32 @@ describe('apply', () => {
     const status = await routes[0]!.fetch(new Request('http://127.0.0.1/api/bridge-browser.pairing', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"action":"status"}',
     }))
-    expect(await status.json()).toEqual({ ok: true, paused: false, waiting: 0, hints: [], failures: 0, pairedIds: [] })
+    // The token is pinned in this configuration, so it cannot be reset from the app.
+    expect(await status.json()).toEqual({ ok: true, paused: false, waiting: 0, requests: [], failures: 0, pairedOrigins: [], canResetToken: false })
     // The unauthenticated web server gets no pairing route.
     expect(register.mock.calls.map(call => (call[0] as { path: string }).path).filter(path => /pair/iu.test(path))).toEqual([])
     for (const dispose of disposers.splice(0).reverse()) await dispose()
     expect(disposeRoute).toHaveBeenCalledOnce()
+  })
+
+  it('regression (review 2, M1): "Reset bridge token" writes a new token privately and is offered only for a generated token', async () => {
+    const { ctx, routes } = pairingContext()
+    // No token in the config: the bridge generates one into the dsh home.
+    await apply(ctx, { ...VALID, sessionWorkspacePath: '' })
+    const post = (body: object): Promise<Response> => routes[0]!.fetch(new Request('http://127.0.0.1/api/bridge-browser.pairing', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }))
+    const file = join(home, 'ext-bridge-token')
+    const before = (await readFile(file, 'utf8')).trim()
+    expect(await (await post({ action: 'status' })).json()).toMatchObject({ canResetToken: true })
+    const reset = await post({ action: 'reset-token' })
+    expect(reset.status).toBe(200)
+    const after = (await readFile(file, 'utf8')).trim()
+    expect(after).toMatch(/^[0-9a-f]{64}$/u)
+    expect(after).not.toBe(before)
+    if (process.platform !== 'win32') expect((await stat(file)).mode & 0o777).toBe(0o600)
+    // Unpairing something that never paired is reported, not silently accepted.
+    expect((await post({ action: 'unpair', origin: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop' })).status).toBe(404)
   })
 
   it('mounts no pairing control when pairing is switched off, and warns when the composition has none', async () => {

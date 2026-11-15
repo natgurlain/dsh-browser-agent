@@ -472,6 +472,10 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
 
     const result = await api.call(call)
     if (!result.ok) return result
+    // The panel's command picker does not offer a command the fence refuses.
+    if (call.method === 'commands.list' && isRecord(result.value) && Array.isArray(result.value.commands)) {
+      return { ...result, value: { ...result.value, commands: result.value.commands.filter(command => !(isRecord(command) && command.name === 'browser-pair')) } }
+    }
     if (call.method === 'credentials.set' && typeof payload.ref === 'string') {
       freshCredentials.add(payload.ref)
       for (const key of [...reroutedWithoutKey]) if (relayTokenRef(key) === payload.ref) reroutedWithoutKey.delete(key)
