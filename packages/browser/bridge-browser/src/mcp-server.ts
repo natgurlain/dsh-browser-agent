@@ -148,9 +148,9 @@ export class McpHttpServer {
   /**
    * Listen on 127.0.0.1 (never another interface).
    * @param port - requested port; 0 picks a free one.
-   * @returns the bound URL of the MCP endpoint.
+   * @returns the bound address, port and URL of the MCP endpoint.
    */
-  async listen(port = 0): Promise<{ port: number; url: string }> {
+  async listen(port = 0): Promise<{ address: string; port: number; url: string }> {
     if (this.server !== undefined) throw new Error('the MCP endpoint is already listening')
     const server = createServer((req, res) => { void this.handle(req, res) })
     server.headersTimeout = 10_000
@@ -163,8 +163,10 @@ export class McpHttpServer {
       })
     })
     this.server = server
-    this.port = (server.address() as AddressInfo).port
-    return { port: this.port, url: `http://127.0.0.1:${String(this.port)}${MCP_PATH}` }
+    const bound = server.address() as AddressInfo
+    this.port = bound.port
+    // Report what the socket is actually bound to, not what was asked for.
+    return { address: bound.address, port: this.port, url: `http://${bound.address}:${String(this.port)}${MCP_PATH}` }
   }
 
   /** Stop listening and abort every in-flight call. */

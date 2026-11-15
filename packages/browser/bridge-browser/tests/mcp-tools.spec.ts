@@ -24,6 +24,45 @@ function registry() {
 
 const caller = { sessionId: 'mcp-1234', requester: 'claude-code' }
 
+/** The MCP allowlist, spelled out so a widened production list fails here. */
+const MCP_EXPECTED_TOOLS = [
+  'browser_back',
+  'browser_click',
+  'browser_clipboard',
+  'browser_close_tab',
+  'browser_console_eval',
+  'browser_console_logs',
+  'browser_devtools_elements',
+  'browser_devtools_get_request',
+  'browser_devtools_list_requests',
+  'browser_devtools_network',
+  'browser_devtools_request_body',
+  'browser_devtools_set_element_attribute',
+  'browser_devtools_set_element_style',
+  'browser_dialog',
+  'browser_downloads',
+  'browser_drag',
+  'browser_extract',
+  'browser_follow_tab',
+  'browser_forward',
+  'browser_get_text',
+  'browser_hover',
+  'browser_list_tabs',
+  'browser_navigate',
+  'browser_open_tab',
+  'browser_pdf_text',
+  'browser_press',
+  'browser_reload',
+  'browser_save_pdf',
+  'browser_screenshot',
+  'browser_scroll',
+  'browser_select',
+  'browser_snapshot',
+  'browser_type',
+  'browser_upload',
+  'browser_wait',
+]
+
 describe('MCP tool host', () => {
   function harness(result: unknown = { text: 'ok' }) {
     const { ctx, tools, definitions } = registry()
@@ -48,6 +87,14 @@ describe('MCP tool host', () => {
     expect(click.description).toBe(definitions.get('browser_click')!.description)
     expect(click.inputSchema).toEqual(definitions.get('browser_click')!.parameters)
     expect(listed.every((tool) => MCP_TOOL_NAMES.has(tool.name))).toBe(true)
+  })
+
+  it('serves an explicit allowlist: no program, watcher, fleet, delegate, workflow or site-driver tools', () => {
+    expect([...MCP_TOOL_NAMES].sort()).toEqual(MCP_EXPECTED_TOOLS)
+    for (const name of ['browser_run', 'browser_watch', 'browser_watches', 'browser_fanout', 'browser_delegate', 'browser_workflow_run', 'browser_workflow_list', 'browser_site_driver']) {
+      expect(MCP_TOOL_NAMES.has(name), name).toBe(false)
+    }
+    expect([...MCP_TOOL_NAMES].some((name) => name.startsWith('browser_site_'))).toBe(false)
   })
 
   it('runs the registered definition under the external session, labelled with the requester', async () => {
@@ -77,11 +124,12 @@ describe('MCP tool host', () => {
     expect(requestTool).not.toHaveBeenCalled()
   })
 
-  it('reports extension failures as tool errors', async () => {
-    const { host, requestTool } = harness()
+  it('reports extension failures as tool errors, and a failed page-quoting call still taints', async () => {
+    const { host, requestTool, taint } = harness()
     requestTool.mockRejectedValueOnce(Object.assign(new Error('The user denied this browser action.'), { code: 'action-failed' }))
     const result = await host.call('browser_press', { key: 'Enter' }, caller, new AbortController().signal)
     expect(result).toEqual({ content: [{ type: 'text', text: 'The user denied this browser action. (action-failed)' }], isError: true })
+    expect(taint).toHaveBeenCalledWith('mcp-1234', 'browser_press')
   })
 
   it('refuses workspace writes for external callers before touching the page', async () => {
