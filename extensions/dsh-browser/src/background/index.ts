@@ -92,7 +92,6 @@ import {
   isTabManagementTool,
   resetInputState,
   resetTabSnapshot,
-  type CallPolicyHook,
   type InputRuntime,
   type ToolAnswer,
   type ToolCall,
@@ -175,6 +174,7 @@ import {
   PageSessionContextTracker,
 } from './session-continuity.ts'
 import { approvalFailureMessage } from './answers.ts'
+import { auditedAuthorize, auditedPolicy, auditNote, noteCallTarget, type AuditedCall } from './audit.ts'
 
 /** User settings persisted in chrome.storage.local. */
 export interface Settings {
@@ -502,7 +502,7 @@ const commitGate = new CommitGate({
     const caller = commitGateCallers.get(tabId)
     // A request held behind an unanswered card would hang the page: bound it.
     const signal = AbortSignal.timeout(120_000)
-    const decision = await authorizeToolCall(prompt, signal, caller?.windowId ?? 0, caller?.sessionId, false, tabId)
+    const decision = await authorizeToolCall(prompt, signal, caller?.windowId ?? 0, { sessionId: caller?.sessionId, unrestrictedAccess: false, tabId })
     // Audit: attach the write decision to the agent call(s) running on this tab.
     for (const call of unsettledToolCalls) {
       if (call.tabId === tabId) (call.commit ??= []).push(decision === 'approved' ? 'allowed' : decision)
@@ -676,22 +676,9 @@ const pageWatchers = new PageWatcherRuntime({
   noteTaint: (sessionId, origin) => { policyRuntime.recordInjection(sessionId, origin) },
 })
 /** Tool calls that are either withdrawable or completing an already-dispatched action. */
-interface ActiveToolCall {
+/** One in-flight agent call; its audit fields live in audit.ts. */
+interface ActiveToolCall extends AuditedCall {
   controller: AbortController
-  tabId?: number
-  /** Approval outcome reported to the audit log. */
-  decision?: string
-  /** Page URL when the call ran, for the audit log. */
-  url?: string
-  /** Time spent held by the user's pause. */
-  heldMs?: number
-  /** Policy-layer outcome for the audit log: blocked, tainted, site-ask, site-trusted. */
-  policy?: string
-  policyReason?: string
-  /** Strict mode (commit gate) covered this call: armed, or refused because it could not intercept. */
-  strict?: 'armed' | 'refused'
-  /** Commit-gate decisions on writes the page made during this call. */
-  commit?: string[]
   /** Tool name, so a revocation can target the developer-tools group only. */
   name: string
   unrestrictedAccess: boolean
@@ -1187,7 +1174,7 @@ function resumeFlowDeps(): ResumeFlowDeps {
           { id: crypto.randomUUID(), name: 'browser_snapshot', args: { delta: true } },
           unrestrictedAccess ? 'auto' : settings.sharePageContent,
           caps === null ? undefined : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars },
-          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId ?? 0, sessionId, unrestrictedAccess),
+          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId ?? 0, { sessionId, unrestrictedAccess }),
           controller.signal,
           target,
           () => tabAffinity.allowsTarget(tabId, sessionId),
@@ -1952,17 +1939,26 @@ function bindOpenedTab(
   return true
 }
 
+interface AuthorizeOptions {
+  /** Session whose panel shows the card (and whose grants apply). */
+  sessionId?: string | undefined
+  /** Access mode the call started under; defaults to the current one. */
+  unrestrictedAccess?: boolean
+  /** Tab the card is about, when it is not the session's tab (commit gate, devtools). */
+  tabId?: number | undefined
+  toolCallId?: string
+  /** Told when a card is actually shown (the audit log tells user approvals from standing rules). */
+  onPrompt?: () => void
+}
+
 async function authorizeToolCall(
   unlabelledPrompt: ApprovalPrompt,
   signal: AbortSignal,
   windowId: number,
-  sessionId?: string,
-  unrestrictedAccess: boolean = unrestrictedAccessEnabled(),
-  tabId?: number,
-  toolCallId?: string,
-  /** Told when a card is actually shown (the audit log tells user approvals from standing rules). */
-  onPrompt?: () => void,
+  options: AuthorizeOptions = {},
 ): Promise<ApprovalAuthorization> {
+  const { sessionId, tabId, toolCallId, onPrompt } = options
+  const unrestrictedAccess = options.unrestrictedAccess ?? unrestrictedAccessEnabled()
   if (signal.aborted) return 'cancelled'
   // An MCP client's card says which client is asking.
   const prompt = externalRequesters.label(unlabelledPrompt, sessionId)
@@ -2051,7 +2047,7 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
       { id: crypto.randomUUID(), name: 'browser_snapshot', args: {} },
       unrestrictedAccess ? 'auto' : settings.sharePageContent,
       budget,
-      (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, sessionId, unrestrictedAccess),
+      (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, { sessionId, unrestrictedAccess }),
       controller.signal,
       target,
       () => target.id !== undefined && tabAffinity.allowsTarget(target.id, sessionId),
@@ -2363,9 +2359,19 @@ function routeToolCall(call: ToolCall): void {
   // Both are read once the persisted fleets are loaded, before any dispatch path runs.
   let approvalSession = call.sessionId
   let fleetRefusal: string | undefined
+  /**
+   * Every card this call raises: audited, cancelled with the call, under its
+   * access mode, shown in `session`'s panel. `label` adds card context.
+   */
+  const authorizeFor = (session: string | undefined, label?: (prompt: ApprovalPrompt) => ApprovalPrompt) => (
+    (prompt: ApprovalPrompt, windowId: number): Promise<ApprovalAuthorization> => auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(
+      label === undefined ? shown : label(shown), controller.signal, windowId, { sessionId: session, unrestrictedAccess, toolCallId: call.id, onPrompt },
+    ))(prompt)
+  )
+  // Tab-bound cards show under the fleet parent's session (approvalSession); lane cards under the call's own.
   const approve = (windowId: number): ((prompt: ApprovalPrompt) => Promise<ApprovalAuthorization>) => coverByProgram(
     programCover,
-    auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(prompt, controller.signal, windowId, approvalSession, unrestrictedAccess, undefined, call.id, onPrompt)),
+    (prompt) => authorizeFor(approvalSession)(prompt, windowId),
     () => { activeCall.decision = 'program-approved' },
   )
   let policyTabOrigin: string | undefined
@@ -2420,10 +2426,7 @@ function routeToolCall(call: ToolCall): void {
           sharePageContent,
           budget,
           // The card says it is a dev-loop read for the linked coding session.
-          auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(
-            { ...prompt, devLoopFor: devLoop.linkOf(call.sessionId)?.label ?? 'a linked coding session' },
-            controller.signal, target.windowId ?? 0, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt,
-          )),
+          (prompt) => authorizeFor(call.sessionId, (shown) => ({ ...shown, devLoopFor: devLoop.linkOf(call.sessionId)?.label ?? 'a linked coding session' }))(prompt, target.windowId ?? 0),
           controller.signal,
           target,
           () => devLoop.allowsTarget(call.sessionId, target.id),
@@ -2432,7 +2435,7 @@ function routeToolCall(call: ToolCall): void {
       }, (text) => text.slice(0, budget?.maxChars ?? DEVLOOP_MAX_CHARS))
     : call.name === 'browser_fanout'
     ? fleets.open(call, {
-        ...fleetDeps(controller.signal, (prompt, windowId) => auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(shown, controller.signal, windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt))(prompt)),
+        ...fleetDeps(controller.signal, authorizeFor(call.sessionId)),
         // Every task URL is judged like a browser_open_tab to it (blocked/managed deny, taint and ask force the card).
         policy: auditedPolicy(activeCall, policyRuntime.evaluator(call.sessionId, unrestrictedAccess)),
       })
@@ -2446,7 +2449,7 @@ function routeToolCall(call: ToolCall): void {
     ? pageWatchers.dispatch(call, {
         resolveTab: (sessionId) => resolveToolTab(sessionId),
         allowsTab: (tabId, sessionId) => tabAffinity.allowsTarget(tabId, sessionId),
-        authorize: (prompt, windowId) => auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(shown, controller.signal, windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt))(prompt),
+        authorize: authorizeFor(call.sessionId),
         signal: controller.signal,
       })
     : call.name === 'browser_run'
@@ -2454,7 +2457,7 @@ function routeToolCall(call: ToolCall): void {
         grants: programGrants,
         resolveTab: () => resolveToolTab(call.sessionId),
         listFrames: listTabFrames,
-        authorize: (prompt, windowId) => auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(shown, controller.signal, windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt))(prompt),
+        authorize: authorizeFor(call.sessionId),
         signal: controller.signal,
       })
     : call.name === 'browser_open_tab'
@@ -2477,7 +2480,7 @@ function routeToolCall(call: ToolCall): void {
       ? target
       : (policyTabOrigin = originFromUrl(target.url ?? ''), withCommitGate(activeCall, target, call.sessionId, () => learning.dispatchSiteDriver(
           call,
-          noteCallTarget(activeCall, target, call.sessionId),
+          noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url)),
           policy,
           approve(target.windowId),
           controller.signal,
@@ -2490,7 +2493,7 @@ function routeToolCall(call: ToolCall): void {
           budget,
           approve(target.windowId),
           controller.signal,
-          noteCallTarget(activeCall, target, call.sessionId),
+          noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url)),
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
           { unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit, policy: learning.wrapPolicy(call, target, policy), overlay: agentOverlay },
         ))))
@@ -2627,49 +2630,6 @@ async function heldDispatch(call: ToolCall, activeCall: ActiveToolCall, dispatch
   }
 }
 
-/**
- * Record the approval outcome of one call for the audit log: `allowed` only
- * when the user approved a card, `auto-allowed` when a standing rule (a trusted
- * site, a session grant) passed it without one.
- */
-function auditedAuthorize(
-  activeCall: ActiveToolCall,
-  authorize: (prompt: ApprovalPrompt, onPrompt: () => void) => Promise<ApprovalAuthorization>,
-): (prompt: ApprovalPrompt) => Promise<ApprovalAuthorization> {
-  return async (prompt) => {
-    let prompted = false
-    const result = await authorize(prompt, () => { prompted = true })
-    activeCall.decision = result === 'approved' ? (prompted ? 'allowed' : 'auto-allowed') : result
-    return result
-  }
-}
-
-function noteCallTarget<T extends { id?: number; url?: string }>(activeCall: ActiveToolCall, target: T, sessionId?: string): T {
-  if (target.url !== undefined) activeCall.url = target.url
-  if (target.id !== undefined) activeCall.tabId ??= target.id
-  if (policyRuntime.strictFor(sessionId, target.url)) activeCall.strict = 'armed'
-  return target
-}
-
-/** Remember what the policy layer (site rules, managed policy, taint) decided, for the audit log. */
-function auditedPolicy(activeCall: ActiveToolCall, hook: CallPolicyHook): CallPolicyHook {
-  return (call, targets) => {
-    const decision = hook(call, targets)
-    if (decision.kind === 'deny') {
-      activeCall.policy = 'blocked'
-      activeCall.policyReason = decision.message
-    } else if (decision.kind === 'force') {
-      // Only a site "ask" rule is "site-ask"; any taint (or an unattributed force) is "tainted".
-      const causes = decision.causes ?? []
-      activeCall.policy = causes.length > 0 && causes.every((cause) => cause === 'site-ask') ? 'site-ask' : 'tainted'
-      activeCall.policyReason = decision.reasons.join(' ')
-    } else if (decision.kind === 'trust') {
-      activeCall.policy = 'site-trusted'
-    }
-    return decision
-  }
-}
-
 async function navigationAfter(call: ToolCall, activeCall: ActiveToolCall): Promise<string | undefined> {
   if (!isNavigationCandidateTool(call.name) || activeCall.tabId === undefined) return undefined
   try {
@@ -2683,19 +2643,7 @@ async function navigationAfter(call: ToolCall, activeCall: ActiveToolCall): Prom
 /** Annotate the bridge's audit entry for this call; sent ahead of its tool.result. */
 function recordAuditNote(call: ToolCall, activeCall: ActiveToolCall, navigatedTo?: string): void {
   if (rpc === null || bridge?.connected !== true) return
-  const decision = activeCall.decision ?? 'not-required'
-  const strict = activeCall.strict
-  void rpc.request(BRIDGE_AUDIT_RECORD_METHOD, {
-    callId: call.id,
-    ...(decision === undefined ? {} : { decision }),
-    ...(activeCall.url === undefined ? {} : { url: activeCall.url }),
-    ...(navigatedTo === undefined ? {} : { navigatedTo }),
-    ...(activeCall.heldMs === undefined ? {} : { heldMs: activeCall.heldMs }),
-    ...(activeCall.policy === undefined ? {} : { policy: activeCall.policy }),
-    ...(activeCall.policyReason === undefined ? {} : { policyReason: activeCall.policyReason.slice(0, 1_000) }),
-    ...(strict === undefined ? {} : { strict }),
-    ...(activeCall.commit === undefined ? {} : { commit: activeCall.commit.slice(0, 20) }),
-  }).catch(() => {})
+  void rpc.request(BRIDGE_AUDIT_RECORD_METHOD, auditNote(call.id, activeCall, navigatedTo)).catch(() => {})
 }
 
 function cancelToolCall(id: string): void {
@@ -2712,7 +2660,7 @@ async function dispatchDevToolsTool(call: ToolCall, activeCall: ActiveToolCall, 
   if (signal.aborted) return devToolsCancelled()
   const target = await resolveToolTab(call.sessionId)
   if ('ok' in target) return target
-  noteCallTarget(activeCall, target, call.sessionId)
+  noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url))
   if (signal.aborted) return devToolsCancelled()
   const frames = await listTabFrames(target.id!, target.url)
   await policyRuntime.ready
@@ -2725,7 +2673,7 @@ async function dispatchDevToolsTool(call: ToolCall, activeCall: ActiveToolCall, 
     ? forcedApprovalPrompt(call, frames, decision.reasons)
     : devToolsApprovalForCall(call, frames)
   const authorization = await auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(
-    shown, signal, target.windowId ?? 0, call.sessionId, undefined, target.id, call.id, onPrompt,
+    shown, signal, target.windowId ?? 0, { sessionId: call.sessionId, tabId: target.id, toolCallId: call.id, onPrompt },
   ))(prompt)
   if (signal.aborted) return devToolsCancelled()
   if (authorization !== 'approved') {
