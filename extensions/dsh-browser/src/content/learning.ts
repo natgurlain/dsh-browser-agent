@@ -217,74 +217,129 @@ function shown(el: Element): boolean {
   return true
 }
 
-/** Controls: their text is a label (checked as the step's name), not what the row says. */
-const CONTROLS = 'button, a[href], input, select, textarea, option, [role="button"], [role="link"], [contenteditable=""], [contenteditable="true"]'
-const ROW_IDENTITY_MAX = 120
-
 /**
- * The repeating container an element sits in: a table row, an ARIA row, a
- * list item, or else the nearest ancestor that has a sibling of the same tag
- * and classes (a row of a grid built from plain elements).
+ * Form controls and buttons: what they show is a label or a value, not what
+ * the row says. Link text is row text: an id or a name is very often a link.
  */
-export function rowContainerOf(el: Element): Element | undefined {
-  const semantic = el.closest('tr, [role="row"], li')
+const FORM_CONTROLS = 'button, input, select, textarea, option, [role="button"], [contenteditable=""], [contenteditable="true"]'
+const ROW_IDENTITY_MAX = 120
+const ROW_CELLS = ':scope > td, :scope > th, :scope > [role="cell"], :scope > [role="gridcell"]'
+
+/** Tag and classes: two elements with the same ones are built alike. */
+function shapeOf(node: Element): string {
+  return `${node.tagName} ${[...node.classList].sort().join(' ')}`
+}
+
+/** Whether an element has a sibling built like it. */
+function hasTwin(node: Element): boolean {
+  const parent = node.parentElement
+  if (parent === null) return false
+  const own = shapeOf(node)
+  return [...parent.children].some((sibling) => sibling !== node && shapeOf(sibling) === own)
+}
+
+/** The next repeating container above `from`: a table row, an ARIA row, a list item, or a repeated plain element. */
+function containerAbove(from: Element): Element | undefined {
+  const start = from.parentElement
+  if (start === null) return undefined
+  const semantic = start.closest('tr, [role="row"], li')
   if (semantic !== null) return semantic
-  const shape = (node: Element): string => `${node.tagName} ${[...node.classList].sort().join(' ')}`
-  for (let node = el.parentElement; node !== null && node !== document.body && node !== document.documentElement; node = node.parentElement) {
-    const parent: Element | null = node.parentElement
-    if (parent === null) return undefined
-    const own = shape(node)
-    if ([...parent.children].some((sibling) => sibling !== node && shape(sibling) === own)) return node
+  for (let node: Element | null = start; node !== null && node !== document.body && node !== document.documentElement; node = node.parentElement) {
+    if (!hasTwin(node)) continue
+    // A cell among cells built alike (`.row > .cell + .cell`): when what holds it repeats too, that is the row.
+    const parent = node.parentElement
+    return parent !== null && parent !== document.body && parent !== document.documentElement && hasTwin(parent) ? parent : node
   }
   return undefined
 }
 
-/** What an element says outside its controls, whitespace collapsed. */
-function plainText(root: Element): string {
+/** The cells of a row container (its table or grid cells, else its children) the user can see. */
+function cellsOf(container: Element): Element[] {
+  const cells = [...container.querySelectorAll(ROW_CELLS)]
+  return (cells.length > 0 ? cells : [...container.children]).slice(0, MAX_CELLS).filter(shown)
+}
+
+/**
+ * The repeating container an element sits in: a table row, an ARIA row, a
+ * list item, or else the nearest repeated plain element (a row of a grid
+ * built from divs). A container that holds nothing but the element's own cell
+ * (a layout table around a button, a cell mistaken for a row) says nothing
+ * about the record, so the search goes on above it.
+ */
+export function rowContainerOf(el: Element): Element | undefined {
+  let from: Element = el
+  for (let level = 0; level < 6; level += 1) {
+    const candidate = containerAbove(from)
+    if (candidate === undefined) return undefined
+    const elsewhere = cellsOf(candidate).some((cell) => !cell.contains(el) && plainText(cell, el) !== '')
+    if (elsewhere || plainText(candidate, el) !== '') return candidate
+    from = candidate
+  }
+  return undefined
+}
+
+/**
+ * What an element says to the user outside its form controls and buttons,
+ * whitespace collapsed: visible text only, and never the step's own element.
+ */
+function plainText(root: Element, own: Element): string {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   const parts: string[] = []
   for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
     const holder = node.parentElement
-    const control = holder?.closest(CONTROLS)
-    if (control !== null && control !== undefined && root.contains(control)) continue
+    if (holder === null || (node.nodeValue ?? '').trim() === '') continue
+    if (own.contains(holder)) continue
+    const control = holder.closest(FORM_CONTROLS)
+    if (control !== null && root.contains(control)) continue
+    // Hidden text (a template, a nonce, a collapsed column) is not what the user approved.
+    if (!shown(holder)) continue
     parts.push(node.nodeValue ?? '')
   }
   return parts.join(' ').replace(/\s+/gu, ' ').trim()
 }
 
 /**
- * Which row an element sits in: a short identity for the approval card and a
- * digest of everything the row says. The identity is built from the cells
+ * Which row an element sits in: a short identity for the approval card, the
+ * first part of it (the cell an id usually sits in), and a digest of
+ * everything the row says. The identity is built from the visible cells
  * other than the element's own: the first with text (an id or a number
- * counts) and the first with words. Sensitive cells are masked, as elsewhere.
+ * counts; so does link text) and the first with words. Sensitive cells are
+ * masked, as elsewhere. A row that says nothing has no digest.
  */
-export function rowIdentityOf(el: Element): { row: string; rowKey: string } {
+export function rowIdentityOf(el: Element): { row: string; first: string; rowKey: string } {
   const container = rowContainerOf(el)
-  if (container === undefined) return { row: '', rowKey: '' }
-  const cells = [...container.querySelectorAll(':scope > td, :scope > th, :scope > [role="cell"], :scope > [role="gridcell"]')]
-  const source = (cells.length > 0 ? cells : [...container.children]).slice(0, MAX_CELLS)
-  const text = (cell: Element): string => isSensitiveField(cell) || cell.querySelector('input[type="password"]') !== null ? '' : clip(plainText(cell), CELL_MAX)
-  const texts = source.map(text)
-  const others = source.map((cell, index) => cell.contains(el) ? '' : texts[index]!).filter((cell) => cell !== '')
-  const first = others[0]
-  const worded = others.find((cell) => /\p{L}/u.test(cell))
-  const named = first === undefined ? [] : worded === undefined || worded === first ? [first] : [first, worded]
+  if (container === undefined) return { row: '', first: '', rowKey: '' }
+  const cells = cellsOf(container)
+  const text = (cell: Element): string => isSensitiveField(cell) || cell.querySelector('input[type="password"]') !== null ? '' : clip(plainText(cell, el), CELL_MAX)
+  const texts = cells.map(text)
+  const others = cells.map((cell, index) => cell.contains(el) ? '' : texts[index]!).filter((cell) => cell !== '')
   // No other cell says anything: what the row itself says around its controls (a list item "Ada [Archive]").
-  const row = named.length > 0 ? named.join(' · ') : plainText(container)
-  return { row: clip(row, ROW_IDENTITY_MAX), rowKey: sha256Hex(texts.join('␟')).slice(0, 32) }
+  const first = others[0] ?? clip(plainText(container, el), CELL_MAX)
+  const worded = others.find((cell) => /\p{L}/u.test(cell))
+  const row = worded === undefined || worded === first ? first : `${first} · ${worded}`
+  return {
+    row: clip(row, ROW_IDENTITY_MAX),
+    first: clip(first, ROW_IDENTITY_MAX),
+    rowKey: texts.every((cell) => cell === '') ? '' : sha256Hex(texts.join('␟')).slice(0, 32),
+  }
 }
 
 /**
  * What an element looks like and which row it sits in, for "do the remaining
  * N": recorded when the offer is built, shown on the card, and compared again
  * inside the action.
+ * @param later - a step after the first of its row. Earlier steps of the row
+ *   may have changed what the row says (a status that flips), so such a step
+ *   is held only to the row's first text cell, with no digest.
  */
-export function stepTargetOf(el: Element): StepTarget {
+export function stepTargetOf(el: Element, later = false): StepTarget {
+  const identity = rowIdentityOf(el)
   return {
     tag: el.tagName.toLowerCase(),
     role: roleOfElement(el),
     name: clip(accessibleName(el), LABEL_MAX),
-    ...rowIdentityOf(el),
+    row: later ? identity.first : identity.row,
+    rowKey: later ? '' : identity.rowKey,
   }
 }
 
@@ -308,7 +363,7 @@ export function probeRowTargets(selectors: readonly (readonly string[])[]): { ro
       }
       if (found.length !== 1 || !shown(found[0]!)) return { rows, targets }
       cells ??= rowCells(found[0]!) ?? []
-      row.push(stepTargetOf(found[0]!))
+      row.push(stepTargetOf(found[0]!, row.length > 0))
     }
     rows.push(cells ?? [])
     targets.push(row)
@@ -331,8 +386,10 @@ export function probeRows(selectors: readonly (readonly string[])[]): string[][]
  */
 export function stepTargetDiffers(el: Element, expected: StepTarget): { differs: string[]; now?: StepTarget } {
   if (!shown(el)) return { differs: ['missing'] }
-  const now = stepTargetOf(el)
-  const fields = expected.rowKey === '' ? (['tag', 'role', 'name', 'row'] as const) : (['tag', 'role', 'name', 'row', 'rowKey'] as const)
+  // No digest was approved: a step after the first of its row (or a row that says nothing), held to the row's first text cell.
+  const later = expected.rowKey === ''
+  const now = stepTargetOf(el, later)
+  const fields = later ? (['tag', 'role', 'name', 'row'] as const) : (['tag', 'role', 'name', 'row', 'rowKey'] as const)
   return { differs: fields.filter((key) => now[key] !== expected[key]), now }
 }
 

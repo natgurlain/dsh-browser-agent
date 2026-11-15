@@ -66,9 +66,11 @@ export interface StepTarget {
    */
   row: string
   /**
-   * A digest of everything the row says outside its controls (every cell's
-   * text; sensitive cells masked). Empty: not compared (no row, or a step
-   * after the first of its row, whose row text earlier steps may have changed).
+   * A digest of everything the row visibly says outside its form controls
+   * and buttons (every cell's text, link text included; sensitive cells
+   * masked). Empty: not compared, and `row` is then only the row's first text
+   * cell (no row, a row that says nothing, or a step after the first of its
+   * row, whose row text earlier steps may have changed).
    */
   rowKey: string
 }
@@ -99,7 +101,8 @@ export function rowsDistinct(targets: ReadonlyArray<ReadonlyArray<StepTarget | u
   const seen = new Set<string>()
   for (const row of targets) {
     const identity = row[0]?.row
-    if (identity === undefined || identity === '' || row.some((target) => target === undefined || target.row === '') || seen.has(identity)) return false
+    // The first step binds the whole row: a row that says nothing (no digest) cannot be bound.
+    if (identity === undefined || identity === '' || row[0]?.rowKey === '' || row.some((target) => target === undefined || target.row === '') || seen.has(identity)) return false
     seen.add(identity)
   }
   return true

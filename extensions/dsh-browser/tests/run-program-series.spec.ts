@@ -29,7 +29,7 @@ import {
   type ProgramStepInput,
 } from '../src/background/run-program.ts'
 import { approvalNotificationClass, hostApprovalReason } from '../src/background/approval-notifications.ts'
-import { stepExpectationFailure } from '../src/background/tools.ts'
+import { dispatchToolCall, stepExpectationFailure } from '../src/background/tools.ts'
 import { canonicalJson } from '../src/security/payload-binding.ts'
 import { MAX_FINISH_STEPS, RUN_BATCH_STEPS, type StepTarget } from '../src/shared/repetition.ts'
 import { setUiLocalePreference } from '../src/i18n.ts'
@@ -647,6 +647,37 @@ describe('what a "do the remaining N" step must still find when it is dispatched
     expect(stepExpectationFailure(click, [{ ...firefox[0]!, url: `${ORIGIN}/people?page=2` }], { target, page: firefoxPage })).toMatchObject({ ok: false })
     // An ordinary demonstrated program has no page binding of its own: only the element check travels.
     expect(stepExpectationFailure(click, [], { target })).toBeUndefined()
+  })
+
+  it('N4: a step is held to its page on every dispatch, the one after a content-script reload included', async () => {
+    // First dispatch: the content script is missing. It is injected, the frames are listed again, and the step goes out a second time.
+    const listed: TabFrame[][] = []
+    let sends = 0
+    const reloaded: TabFrame[] = [{ frameId: 0, parentFrameId: -1, documentId: 'doc-2', url: `${ORIGIN}/people` }]
+    ;(globalThis as { chrome?: unknown }).chrome = {
+      tabs: {
+        sendMessage: vi.fn(async (_tab: number, message: { type: string }) => {
+          if (message.type !== 'DSH_ACTION') return { ok: true, result: {} }
+          sends += 1
+          throw new Error('Could not establish connection. Receiving end does not exist.')
+        }),
+      },
+      scripting: { executeScript: vi.fn(async () => []) },
+      webNavigation: {
+        getAllFrames: vi.fn(async () => {
+          // The page is the approved one until the content script has been re-injected; then it is another document.
+          const now = sends === 0 ? frames : reloaded
+          listed.push(now)
+          return now
+        }),
+      },
+    }
+    const type = { id: 'c', name: 'browser_type', args: { selector: '#a', text: 'x', replace: true } }
+    const answer = await dispatchToolCall(type, 'auto', undefined, async () => 'approved' as const, new AbortController().signal, { id: 7, url: `${ORIGIN}/people` }, () => true, { unrestrictedAccess: true, expect: { target, page } })
+    expect(answer).toEqual({ ok: false, error: { code: 'action-failed', message: 'the page was reloaded or is no longer the one you approved this on. Nothing was done.' } })
+    // The action went out once (and found no receiver); after the reload it was not sent again.
+    expect(sends).toBe(1)
+    expect(listed.at(-1)).toBe(reloaded)
   })
 
   it('F2: only an action that checks the element it resolves may carry an expected element', () => {

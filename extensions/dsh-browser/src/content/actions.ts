@@ -1107,6 +1107,11 @@ async function selectAction(args: Record<string, unknown>, ctx: ActionContext): 
   }
   const el = resolveActionTarget(args, ctx.ids)
   ctx.checkTarget?.(el)
+  // A custom combobox is operated by clicking option elements found later, which nothing has compared with the card:
+  // a step that must act on an approved element runs on a native select only.
+  if (ctx.checkTarget !== undefined && !(el instanceof HTMLSelectElement)) {
+    throw new ActionError('action-failed', 'This list is not a native select, so its options cannot be checked against the approved row. Nothing was done to it.')
+  }
   const label = targetLabel(args, el)
   let outcome
   try {

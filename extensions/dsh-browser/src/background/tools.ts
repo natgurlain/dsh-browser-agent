@@ -2153,6 +2153,12 @@ export async function dispatchToolCall(
     }
   }
   if (tabManagement.expect !== undefined) {
+    // A series step: the page is read again right before the action is sent, not as it was when the call arrived or its card was answered.
+    if (tabManagement.expect.page !== undefined) {
+      executionFrames = await listTabFrames(tab.id, tab.url)
+      if (isCancelled(call, signal)) return cancelled()
+      if (targetStillAllowed?.() === false) return targetChanged()
+    }
     const refusal = stepExpectationFailure(call, executionFrames, tabManagement.expect)
     if (refusal !== undefined) return refusal
     stepExpectations.set(call, tabManagement.expect.target)
@@ -2196,6 +2202,9 @@ export async function dispatchToolCall(
       if (targetStillAllowed?.() === false) return targetChanged()
       const refreshedTargetError = validateElementTarget(call, tab.id, refreshedFrames)
       if (refreshedTargetError !== undefined) return refreshedTargetError
+      // A "do the remaining N" step is held to its page on this second dispatch too: the content script was reloaded in between.
+      const refreshedRefusal = tabManagement.expect === undefined ? undefined : stepExpectationFailure(call, refreshedFrames, tabManagement.expect)
+      if (refreshedRefusal !== undefined) return refreshedRefusal
       if (approval !== undefined) {
         const refreshedApproval = promptFor(refreshedFrames, approvalContext)
         if (refreshedApproval === undefined
