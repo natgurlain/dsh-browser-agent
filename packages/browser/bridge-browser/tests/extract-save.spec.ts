@@ -1,23 +1,14 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
+import { describe, expect, it, vi } from 'vitest'
 import type { BridgeServer } from '../src/server.ts'
 import { normalizeSavePath, saveExtract, serializeRows } from '../src/extract-save.ts'
 import type { WorkspaceWriteTarget } from '../src/workspace-write.ts'
 import { registerBrowserTools } from '../src/tools.ts'
+import { fakeContext } from './support/fake-ctx.ts'
+import { tempDirs } from './support/tmp.ts'
 
-const dirs: string[] = []
-function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-extract-'))
-  dirs.push(dir)
-  return dir
-}
-
-afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
-})
+const tempDir = tempDirs('dsh-extract-')
 
 describe('extract saving', () => {
   it('accepts only workspace-relative paths and infers the format', () => {
@@ -105,17 +96,8 @@ describe('extract saving', () => {
 
 describe('browser_extract tool', () => {
   function harness(result: unknown, workspacePath = '', mode: string | null = 'workspace-write') {
-    const registered = new Map<string, { execute: (args: unknown, exec: unknown) => Promise<unknown> }>()
     const sandboxPolicy = { resolve: vi.fn(() => ({ mode, workspaceRoot: '/ignored' })) }
-    const ctx = {
-      get: (name: string) => name === 'sandboxPolicy' && mode !== null ? sandboxPolicy : undefined,
-      tools: {
-        register: vi.fn((definition: { name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }) => {
-          registered.set(definition.name, definition)
-          return () => {}
-        }),
-      },
-    } as unknown as Context
+    const { ctx, registered } = fakeContext({ get: (name: string) => name === 'sandboxPolicy' && mode !== null ? sandboxPolicy : undefined })
     const requestTool = vi.fn(async () => result)
     registerBrowserTools(ctx, { requestTool } as unknown as BridgeServer, {
       toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60, workspacePath,

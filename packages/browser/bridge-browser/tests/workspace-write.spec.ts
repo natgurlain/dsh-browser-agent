@@ -1,20 +1,11 @@
 import { spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { WorkspaceWriteError, workspacePathComponents, workspaceWriteTarget, writeWorkspaceFile } from '../src/workspace-write.ts'
+import { tempDirs } from './support/tmp.ts'
 
-const dirs: string[] = []
-function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-wswrite-'))
-  dirs.push(dir)
-  return dir
-}
-
-afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
-})
+const tempDir = tempDirs('dsh-wswrite-')
 
 const policyCtx = (mode: unknown, throws = false) => ({
   get: (name: string) => name === 'sandboxPolicy'

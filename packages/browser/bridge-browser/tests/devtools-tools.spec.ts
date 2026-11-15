@@ -1,25 +1,13 @@
-import { describe, expect, it, vi } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
+import { describe, expect, it } from 'vitest'
 import { DEVTOOLS_TOOL_NAMES } from '../src/protocol.ts'
 import { defineDevTools, registerBrowserDevTools } from '../src/devtools-tools.ts'
 import { createBrowserToolCall } from '../src/tools.ts'
-
-interface Registered {
-  name: string
-  definition: Record<string, unknown>
-}
+import { fakeBridge } from './support/fake-bridge.ts'
+import { fakeContext } from './support/fake-ctx.ts'
 
 function makeHarness() {
-  const registered: Registered[] = []
-  const ctx = {
-    tools: {
-      register: vi.fn((definition: { name: string }) => {
-        registered.push({ name: definition.name, definition: definition as Record<string, unknown> })
-        return () => {}
-      }),
-    },
-  } as unknown as Context
-  const requestTool = vi.fn(async (_name: string, _args: Record<string, unknown>, _signal: AbortSignal, _timeoutMs?: number): Promise<unknown> => ({ text: 'ok' }))
+  const { ctx, entries: registered } = fakeContext()
+  const { requestTool } = fakeBridge()
   const call = async (exec: { signal: AbortSignal }, name: string, args: Record<string, unknown>): Promise<{ text: string }> =>
     await requestTool(name, args, exec.signal, 1_000) as { text: string }
   return { ctx, call, requestTool, registered }

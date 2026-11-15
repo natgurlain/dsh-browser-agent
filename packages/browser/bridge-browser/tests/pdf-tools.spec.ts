@@ -1,39 +1,29 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
+import { describe, expect, it, vi } from 'vitest'
 import type { BridgeServer } from '../src/server.ts'
 import { registerPdfTool, safePdfName } from '../src/pdf-tools.ts'
+import { fakeContext } from './support/fake-ctx.ts'
+import { tempDirs } from './support/tmp.ts'
 
 const PDF = Buffer.from('%PDF-1.7\n%test\n').toString('base64')
-const roots: string[] = []
+const tempDir = tempDirs('dsh-pdf-')
 
 function harness(result: unknown, mode: string | null = 'workspace-write') {
-  const registered: Record<string, unknown>[] = []
   const sandboxPolicy = { resolve: vi.fn(() => ({ mode })) }
-  const ctx = {
-    tools: { register: vi.fn((definition: Record<string, unknown>) => { registered.push(definition); return () => {} }) },
-    get: (name: string) => (name === 'sandboxPolicy' && mode !== null ? sandboxPolicy : undefined),
-  } as unknown as Context
+  const { ctx, definitions: registered } = fakeContext({ get: (name: string) => (name === 'sandboxPolicy' && mode !== null ? sandboxPolicy : undefined) })
   const requestTool = vi.fn(async () => result)
-  const root = mkdtempSync(join(tmpdir(), 'dsh-pdf-'))
-  roots.push(root)
+  const root = tempDir()
   const workspace = join(root, 'workspace')
   registerPdfTool(ctx, { requestTool } as unknown as BridgeServer, { toolTimeoutMs: 1_000, workspacePath: workspace })
   const execute = registered[0]!.execute as (args: unknown, exec: unknown) => Promise<{ text: string; path: string; bytes: number }>
   return { execute, requestTool, workspace, sandboxPolicy }
 }
 
-afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
-})
-
 describe('browser_save_pdf', () => {
   it('writes the rendered PDF into the session workspace through the shared writer', async () => {
     const { execute, requestTool, workspace } = harness({ pdf: { data: PDF, title: 'Quarterly: report?', url: 'https://example.com/q' } })
-    const cwd = mkdtempSync(join(tmpdir(), 'dsh-pdf-cwd-'))
-    roots.push(cwd)
+    const cwd = tempDir()
     const exec = { signal: new AbortController().signal, agent: { id: 'session-1', session: { header: { cwd } } } }
     const result = await execute({ landscape: true }, exec)
     expect(requestTool).toHaveBeenCalledWith('browser_save_pdf', { landscape: true }, exec.signal, 1_000, 'session-1')

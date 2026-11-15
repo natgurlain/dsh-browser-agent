@@ -1,7 +1,6 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   AUDIT_GENESIS_HASH,
   AUDIT_KEY_FILE,
@@ -15,16 +14,10 @@ import {
   redactAuditUrl,
   verifyAuditChain,
 } from '../src/audit-log.ts'
+import { tempDirs } from './support/tmp.ts'
 
-const dirs: string[] = []
-const temp = (): string => {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-audit-'))
-  dirs.push(dir)
-  return join(dir, 'browser-audit')
-}
-afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
-})
+const tempDir = tempDirs('dsh-audit-')
+const temp = (): string => join(tempDir(), 'browser-audit')
 
 describe('audit log chain', () => {
   it('appends hash-chained entries per session into private files', async () => {

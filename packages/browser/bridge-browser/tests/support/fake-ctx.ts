@@ -29,10 +29,13 @@ export function fakeContext(options: FakeContextOptions = {}) {
   const registered = new Map<string, FakeToolDefinition>()
   /** Every definition ever registered, in order. */
   const definitions: FakeToolDefinition[] = []
+  /** The same, as `{ name, definition }` pairs. */
+  const entries: Array<{ name: string; definition: Record<string, unknown> }> = []
   const guards: Array<(execution: never) => unknown> = []
   const register = vi.fn((definition: FakeToolDefinition) => {
     registered.set(definition.name, definition)
     definitions.push(definition)
+    entries.push({ name: definition.name, definition })
     return () => { if (registered.get(definition.name) === definition) registered.delete(definition.name) }
   })
   const guard = vi.fn((check: (execution: never) => unknown) => {
@@ -48,7 +51,7 @@ export function fakeContext(options: FakeContextOptions = {}) {
     logger,
     ...options.extra,
   } as unknown as Context
-  return { ctx, registered, definitions, register, guards, logger }
+  return { ctx, registered, definitions, entries, register, guards, logger }
 }
 
 /** `{ mode }` sandbox policy for `ctx.get('sandboxPolicy')`. */

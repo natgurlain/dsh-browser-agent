@@ -1,26 +1,15 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
-import type { BridgeServer } from '../src/server.ts'
+import { describe, expect, it } from 'vitest'
 import { BROWSER_TOOL_NAMES, registerBrowserTools } from '../src/tools.ts'
+import { DESCRIPTION_BUDGET, fakeBridge } from './support/fake-bridge.ts'
+import { fakeContext } from './support/fake-ctx.ts'
 
 describe('registerBrowserTools', () => {
   function makeHarness() {
-    const registered: { name: string; definition: Record<string, unknown> }[] = []
-    const ctx = {
-      tools: {
-        register: vi.fn((definition: { name: string }) => {
-          registered.push({ name: definition.name, definition: definition as Record<string, unknown> })
-          return () => {}
-        }),
-      },
-    } as unknown as Context
-    const requestTool = vi.fn(async (_name: string, _args: Record<string, unknown>, _signal: AbortSignal, _timeoutMs?: number): Promise<unknown> => {
-      return { text: 'ok' }
-    })
-    const bridge = { requestTool } as unknown as BridgeServer
+    const { ctx, entries: registered } = fakeContext()
+    const { bridge, requestTool } = fakeBridge()
     return { ctx, bridge, requestTool, registered }
   }
 
@@ -204,7 +193,7 @@ describe('registerBrowserTools', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const descriptionChars = registered.reduce((sum, { definition }) => sum + String(definition.description).length, 0)
-    expect(descriptionChars / registered.length).toBeLessThan(170)
+    expect(descriptionChars / registered.length).toBeLessThan(DESCRIPTION_BUDGET)
     expect(descriptionChars).toBeLessThan(3_100)
   })
 

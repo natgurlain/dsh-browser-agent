@@ -1,8 +1,6 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, mkdirSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
+import { describe, expect, it, vi } from 'vitest'
 import {
   describeStep,
   resolveParams,
@@ -33,16 +31,10 @@ import {
   validateSiteDriver,
 } from '../src/learning/site-drivers.ts'
 import { mountLearning, parseProgram, LEARNING_METHODS } from '../src/learning/index.ts'
+import { fakeContext } from './support/fake-ctx.ts'
+import { tempDirs } from './support/tmp.ts'
 
-const dirs: string[] = []
-function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-learning-'))
-  dirs.push(dir)
-  return dir
-}
-afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
-})
+const tempDir = tempDirs('dsh-learning-')
 
 const baseWorkflow = (): Record<string, unknown> => ({
   format: WORKFLOW_FORMAT,
@@ -459,18 +451,7 @@ describe('site drivers', () => {
 
 describe('learning mount', () => {
   function fakeCtx(root: string) {
-    const registered = new Map<string, { execute: (args: unknown, exec: unknown) => Promise<unknown> }>()
-    const ctx = {
-      tools: {
-        register: (tool: { name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }) => {
-          registered.set(tool.name, tool)
-          return () => { registered.delete(tool.name) }
-        },
-      },
-      agents: { get: () => undefined },
-      logger: { warn: vi.fn(), info: vi.fn() },
-      get: (name: string) => name === 'sandboxPolicy' ? { resolve: () => ({ mode: 'workspace-write' }) } : undefined,
-    } as unknown as Context
+    const { ctx, registered } = fakeContext({ get: (name) => name === 'sandboxPolicy' ? { resolve: () => ({ mode: 'workspace-write' }) } : undefined })
     return { ctx, registered, root }
   }
 

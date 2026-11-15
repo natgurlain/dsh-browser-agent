@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
 import { BridgeToolError } from '../src/server.ts'
 import {
   defineRunProgramTool,
@@ -11,7 +10,6 @@ import {
   runProgram,
   statusOf,
 } from '../src/run-program.ts'
-import { registerBrowserTools } from '../src/tools.ts'
 
 type Handler = (name: string, args: Record<string, unknown>, program?: { id: string; step: number }) => unknown
 
@@ -155,16 +153,6 @@ describe('runProgram', () => {
 })
 
 describe('browser_run tool definition', () => {
-  it('keeps the description inside the shared per-tool description budget', () => {
-    const registered: { description: string }[] = []
-    const ctx = { tools: { register: (definition: { description: string }) => { registered.push(definition); return () => {} } } } as unknown as Context
-    registerBrowserTools(ctx, { requestTool: vi.fn() } as never, { toolTimeoutMs: 1000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
-    const run = defineRunProgramTool({ requestTool: vi.fn() } as never, { toolTimeoutMs: 1000 })
-    expect(String(run.description).length).toBeLessThan(170)
-    const all = [...registered.map((entry) => entry.description), String(run.description)]
-    expect(all.reduce((sum, text) => sum + text.length, 0) / all.length).toBeLessThan(170)
-  })
-
   it('validates and executes through the bridge for the calling session', async () => {
     const { bridge, calls } = fakeBridge((name) => name === 'browser_run' ? { programId: 'p' } : ok('done'))
     const run = defineRunProgramTool(bridge, { toolTimeoutMs: 1000 })

@@ -17,6 +17,8 @@ import {
   type FanoutDeps,
   type FleetSubagents,
 } from '../src/fanout.ts'
+import { DESCRIPTION_BUDGET, fakeBridge } from './support/fake-bridge.ts'
+import { fakeContext } from './support/fake-ctx.ts'
 
 const signal = new AbortController().signal
 const tasks = [
@@ -201,21 +203,23 @@ describe('fleet registration', () => {
     expect(guards[0]!({ name: 'bash', agent: { id: 'parent' } })).toBeUndefined()
   })
 
-  it('needs an agent and keeps every Phase 3 tool inside the description budget', async () => {
-    const h = harness()
-    const tool = defineFanoutTool(h.deps, { toolTimeoutMs: 1000, provider: 'spawn' })
+  it('needs an agent', async () => {
+    const tool = defineFanoutTool(harness().deps, { toolTimeoutMs: 1000, provider: 'spawn' })
     await expect((tool.execute as (a: unknown, e: unknown) => Promise<unknown>)({ tasks }, { signal })).rejects.toThrow(/needs an agent/)
-    const registered: { description: string }[] = []
-    const ctx = { tools: { register: (definition: { description: string }) => { registered.push(definition); return () => {} } } } as unknown as Context
-    registerBrowserTools(ctx, { requestTool: vi.fn() } as never, { toolTimeoutMs: 1000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+  })
+
+  it('keeps every Phase 3 tool (fanout, run, watch, watches) inside the shared description budget', () => {
+    const { ctx, definitions } = fakeContext()
+    const { bridge } = fakeBridge()
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const added = [
-      tool,
-      defineRunProgramTool({ requestTool: vi.fn() } as never, { toolTimeoutMs: 1000 }),
-      ...defineWatchTools({ requestTool: vi.fn() } as never, memoryWatchRecords(), { toolTimeoutMs: 1000 }),
+      defineFanoutTool(harness().deps, { toolTimeoutMs: 1000, provider: 'spawn' }),
+      defineRunProgramTool(bridge, { toolTimeoutMs: 1000 }),
+      ...defineWatchTools(bridge, memoryWatchRecords(), { toolTimeoutMs: 1000 }),
     ]
-    for (const entry of added) expect(String(entry.description).length).toBeLessThan(170)
-    const all = [...registered.map((entry) => entry.description), ...added.map((entry) => String(entry.description))]
-    expect(all.reduce((sum, text) => sum + text.length, 0) / all.length).toBeLessThan(170)
+    for (const entry of added) expect(String(entry.description).length, entry.name).toBeLessThan(DESCRIPTION_BUDGET)
+    const all = [...definitions.map((entry) => String(entry.description)), ...added.map((entry) => String(entry.description))]
+    expect(all.reduce((sum, text) => sum + text.length, 0) / all.length).toBeLessThan(DESCRIPTION_BUDGET)
   })
 
   it('tells read-only workers they cannot act', () => {

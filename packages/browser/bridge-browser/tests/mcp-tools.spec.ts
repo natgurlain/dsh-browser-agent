@@ -2,7 +2,6 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeServer } from '../src/server.ts'
 import { registerBrowserTools } from '../src/tools.ts'
 import { registerPdfTool } from '../src/pdf-tools.ts'
@@ -11,19 +10,11 @@ import { createMcpToolHost, MCP_TOOL_NAMES, type ToolRegistryLike } from '../src
 import { openExternalSession, resolveMcpToken } from '../src/mcp-mount.ts'
 import { memorySessionLedger } from '../src/session-ledger.ts'
 import { sessionIdOfExec, withExternalCaller } from '../src/external-caller.ts'
+import { fakeContext } from './support/fake-ctx.ts'
 
 /** A real-enough tool registry: the plugin's definitions, keyed by name. */
 function registry() {
-  const definitions = new Map<string, Record<string, unknown>>()
-  const ctx = {
-    tools: {
-      register: (definition: { name: string }) => {
-        definitions.set(definition.name, definition as unknown as Record<string, unknown>)
-        return () => { definitions.delete(definition.name) }
-      },
-    },
-    get: (name: string) => name === 'sandboxPolicy' ? { resolve: () => ({ mode: 'workspace-write' }) } : undefined,
-  } as unknown as Context
+  const { ctx, registered: definitions } = fakeContext({ get: (name: string) => name === 'sandboxPolicy' ? { resolve: () => ({ mode: 'workspace-write' }) } : undefined })
   const tools: ToolRegistryLike = {
     schemas: () => [...definitions.values()].map((d) => ({ name: d.name as string, description: d.description as string, parameters: d.parameters })),
     get: (name) => definitions.get(name) as ReturnType<ToolRegistryLike['get']>,

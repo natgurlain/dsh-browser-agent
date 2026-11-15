@@ -1,11 +1,7 @@
-import { mkdtempSync, rmSync, statSync, writeFileSync, chmodSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { statSync, writeFileSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
-import { registerBrowserTools } from '../src/tools.ts'
-import { defineRunProgramTool } from '../src/run-program.ts'
 import {
   createWatchWakeMessage,
   defineWatchTools,
@@ -17,6 +13,9 @@ import {
   WakeLimiter,
   type WatchFireDeps,
 } from '../src/watchers.ts'
+import { tempDirs } from './support/tmp.ts'
+
+const tempDir = tempDirs('watch-records-')
 
 const fire = (extra: Record<string, unknown> = {}) => ({
   watchId: 'w1', sessionId: 's1', prompt: 'Tell me the new price', condition: 'text "Sold out" appeared',
@@ -160,8 +159,8 @@ describe('handleWatchFire', () => {
 
 describe('watcher records file', () => {
   it('persists 0600 and reloads across restarts', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'watch-records-'))
-    try {
+    const dir = tempDir()
+    {
       const file = join(dir, 'w.json')
       const first = await fileWatchRecords(file, () => {})
       await first.add('w1', { sessionId: 's1', expiresAt: Date.now() + 60_000 })
@@ -187,8 +186,6 @@ describe('watcher records file', () => {
       writeFileSync(file, JSON.stringify({ evil: { sessionId: 'x', expiresAt: Date.now() + 60_000 } }))
       chmodSync(file, 0o666)
       expect((await fileWatchRecords(file, () => {})).get('evil')).toBeUndefined()
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
     }
   })
 })
@@ -222,18 +219,5 @@ describe('watcher tools', () => {
     expect(records.get('wA')).toMatchObject({ sessionId: 'sess-a' })
     await run({ signal, agent: { id: 'sess-a' }, callId: 'tc' })
     expect(records.get('wA')).toBeUndefined()
-  })
-
-  it('keeps every new tool inside the shared description budget', () => {
-    const registered: { description: string }[] = []
-    const ctx = { tools: { register: (definition: { description: string }) => { registered.push(definition); return () => {} } } } as unknown as Context
-    registerBrowserTools(ctx, { requestTool: vi.fn() } as never, { toolTimeoutMs: 1000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
-    const added = [
-      defineRunProgramTool({ requestTool: vi.fn() } as never, { toolTimeoutMs: 1000 }),
-      ...defineWatchTools({ requestTool: vi.fn() } as never, memoryWatchRecords(), { toolTimeoutMs: 1000 }),
-    ]
-    for (const tool of added) expect(String(tool.description).length).toBeLessThan(170)
-    const all = [...registered.map((entry) => entry.description), ...added.map((tool) => String(tool.description))]
-    expect(all.reduce((sum, text) => sum + text.length, 0) / all.length).toBeLessThan(170)
   })
 })

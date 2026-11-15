@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, stat } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { chmod, mkdir, readdir, symlink, writeFile } from 'node:fs/promises'
+import { tempDirs } from './support/tmp.ts'
 import {
   configuredTokenProblem,
   generateToken,
@@ -13,6 +13,9 @@ import {
   verifyToken,
   writeTokenFile,
 } from '../src/token.ts'
+
+const tokenDir = tempDirs('dsh-bridge-token-')
+const extDir = tempDirs('dsh-ext-')
 
 const STRONG = 'Zq7-kP2x_Lm9vB4nRw6Yc1Hd5Je0uTa8sF3g'
 
@@ -43,7 +46,7 @@ describe('token', () => {
   // Windows has no POSIX permission bits: chmod 0600 leaves the file at 0666,
   // so the file-mode half of this contract is verifiable only on POSIX hosts.
   it.skipIf(process.platform === 'win32')('persists tokens with 0600 permissions and round-trips', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dsh-bridge-token-'))
+    const dir = tokenDir()
     const file = join(dir, 'token')
     const token = generateToken()
     await writeTokenFile(token, file)
@@ -55,7 +58,7 @@ describe('token', () => {
   })
 
   it('generates and persists a fresh token when nothing is configured', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dsh-bridge-token-'))
+    const dir = tokenDir()
     const file = join(dir, 'token')
     const resolved = await resolveToken(undefined, file)
     expect(resolved.generated).toBe(true)
@@ -64,7 +67,7 @@ describe('token', () => {
   })
 
   it('prefers the configured token without touching the file', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dsh-bridge-token-'))
+    const dir = tokenDir()
     const file = join(dir, 'token')
     const resolved = await resolveToken(STRONG, file)
     expect(resolved).toEqual({ token: STRONG, file, generated: false })
@@ -81,7 +84,7 @@ describe('token', () => {
   })
 
   it('refuses weak configured tokens with an error naming the config key', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dsh-bridge-token-'))
+    const dir = tokenDir()
     for (const weak of [
       'fixed-token', 'a'.repeat(64), 'ab'.repeat(32), 'password'.repeat(4), `${STRONG} `,
       // N6: Shannon entropy alone passes these.
@@ -97,7 +100,7 @@ describe('token', () => {
   })
 
   it.skipIf(process.platform === 'win32')('refuses to write a token through a symlink', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dsh-bridge-token-'))
+    const dir = tokenDir()
     const victim = join(dir, 'victim')
     await writeFile(victim, 'keep\n')
     const file = join(dir, 'token')
@@ -109,7 +112,7 @@ describe('token', () => {
   })
 
   it.skipIf(process.platform === 'win32')('leaves no temp files and tightens a loose persisted token to 0600', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dsh-bridge-token-'))
+    const dir = tokenDir()
     const file = join(dir, 'token')
     const token = generateToken()
     await writeTokenFile(token, file)
@@ -122,13 +125,13 @@ describe('token', () => {
 
 describe('syncInstalledExtensionToken', () => {
   it('leaves directories the installer did not create alone', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dsh-ext-'))
+    const dir = extDir()
     expect(await syncInstalledExtensionToken('t', dir)).toBe('absent')
     await expect(stat(join(dir, 'bridge-token'))).rejects.toThrow()
   })
 
   it('writes the token once with owner-only permissions and then reports it unchanged', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'dsh-ext-'))
+    const dir = extDir()
     await mkdir(dir, { recursive: true })
     await writeFile(join(dir, 'install-info.json'), '{}')
     expect(await syncInstalledExtensionToken('first', dir)).toBe('written')
@@ -142,7 +145,7 @@ describe('syncInstalledExtensionToken', () => {
 
 describe('syncInstalledExtensionToken hardening', () => {
   async function installed(): Promise<string> {
-    const dir = await mkdtemp(join(tmpdir(), 'dsh-ext-'))
+    const dir = extDir()
     await writeFile(join(dir, 'install-info.json'), '{}')
     return dir
   }
@@ -167,7 +170,7 @@ describe('syncInstalledExtensionToken hardening', () => {
 
 describe('installedTokenMismatch', () => {
   it('reports only an installed copy that differs from the active token', async () => {
-    const plain = await mkdtemp(join(tmpdir(), 'dsh-ext-'))
+    const plain = extDir()
     expect(await installedTokenMismatch('t', plain)).toBe(false)
     await writeFile(join(plain, 'install-info.json'), '{}')
     expect(await installedTokenMismatch('t', plain)).toBe(false)
