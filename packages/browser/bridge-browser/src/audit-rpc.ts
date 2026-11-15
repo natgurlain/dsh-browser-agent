@@ -9,6 +9,7 @@
 
 import type { AuditAnnotation, BridgeAuditObserver } from './audit-log.ts'
 import { BRIDGE_AUDIT_EXPORT_METHOD, BRIDGE_AUDIT_RECORD_METHOD } from './protocol.ts'
+import { errorMessage, isRecord } from './host-api.ts'
 
 /** What the server hands the audit RPC handler. */
 export interface AuditRpcContext {
@@ -30,10 +31,6 @@ export type AuditRpcAnswer =
 
 const ANNOTATION_STRINGS = ['decision', 'url', 'navigatedTo', 'policy', 'policyReason', 'strict'] as const
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 /**
  * Handle one audit RPC.
  * @returns undefined when `method` is not an audit method.
@@ -47,7 +44,7 @@ export function handleAuditRpc(method: string, payload: unknown, context: AuditR
 function record(payload: unknown, context: AuditRpcContext): AuditRpcAnswer {
   if (!isRecord(payload)) return badRequest('payload must be an object')
   if (payload.event === 'kill-switch') {
-    context.audit?.killSwitch([], context.connection)
+    context.audit?.killSwitch(context.connection)
     context.onKillSwitch?.(context.connection)
     return { ok: true, result: { recorded: context.audit !== undefined } }
   }
@@ -89,7 +86,7 @@ async function exportLog(payload: unknown, context: AuditRpcContext): Promise<Au
   try {
     return { ok: true, result: await context.exportAudit(sessionId) }
   } catch (error: unknown) {
-    return { ok: false, error: { code: 'internal', message: error instanceof Error ? error.message : String(error) } }
+    return { ok: false, error: { code: 'internal', message: errorMessage(error) } }
   }
 }
 

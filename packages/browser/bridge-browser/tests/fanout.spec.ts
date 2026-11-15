@@ -17,6 +17,8 @@ import {
   type FanoutDeps,
   type FleetSubagents,
 } from '../src/fanout.ts'
+import { DESCRIPTION_BUDGET, fakeBridge } from './support/fake-bridge.ts'
+import { fakeContext } from './support/fake-ctx.ts'
 
 const signal = new AbortController().signal
 const tasks = [
@@ -117,10 +119,15 @@ describe('runFanout', () => {
     })
     await runFanout(parent, { tasks: [tasks[0]!], allowActions: false, closeTabs: true }, { signal }, { ...h.deps, subagents: () => ({ startActivation: start }) as never }, { toolTimeoutMs: 1000, provider: 'spawn' })
     expect(taintedAtStart).toBe(true)
-    const fresh = new SessionTaintRegistry()
-    fresh.link('kid', 'p')
-    fresh.mark('kid', 'browser_get_text')
-    expect(fresh.isTainted('p')).toBe(true)
+    // An untainted parent: a worker reading a page taints the parent through the fleet's link.
+    const clean = harness()
+    const reading = vi.fn(async (spec: Parameters<FleetSubagents['startActivation']>[0]) => {
+      clean.lineage.mark(spec.childId, 'browser_get_text')
+      return { childId: spec.childId, result: Promise.resolve({ output: [], stopReason: 'completed' }) as never, dispose: async () => {} }
+    })
+    expect(clean.lineage.isTainted('parent')).toBe(false)
+    await runFanout(parent, { tasks: [tasks[0]!], allowActions: false, closeTabs: true }, { signal }, { ...clean.deps, subagents: () => ({ startActivation: reading }) as never }, { toolTimeoutMs: 1000, provider: 'spawn' })
+    expect(clean.lineage.get('parent')).toMatchObject({ firstTool: expect.stringContaining('browser_get_text') })
   })
 
   it('does not record children of a session the bridge does not own', async () => {
@@ -135,6 +142,32 @@ describe('runFanout', () => {
     expect(text).toMatch(/1 of 2 tasks completed/)
     expect(text).toContain('Diagnostic: model failed')
     expect(text).toContain('Price: $3')
+    expect(h.requests.at(-1)!.name).toBe('browser_fleet_release')
+  })
+
+  it('returns the fleet answers when the release throws synchronously (extension gone)', async () => {
+    const h = harness()
+    const requestTool = h.deps.bridge.requestTool as unknown as ReturnType<typeof vi.fn<(...args: unknown[]) => unknown>>
+    const original = requestTool.getMockImplementation()!
+    // BridgeServer.requestTool throws (not rejects) when no extension is connected.
+    requestTool.mockImplementation((...args: unknown[]) => {
+      if (args[0] === 'browser_fleet_release') throw new Error('no browser extension is connected to the bridge')
+      return original(...args)
+    })
+    const text = await runFanout(parent, { tasks, allowActions: false, closeTabs: true }, { signal }, h.deps, { toolTimeoutMs: 1000, provider: 'spawn' })
+    expect(text).toMatch(/2 of 2 tasks completed/)
+  })
+
+  it('counts a rejected child start as one failed task and still releases the tabs', async () => {
+    let calls = 0
+    const start = vi.fn(async (spec: Parameters<FleetSubagents['startActivation']>[0]) => {
+      if (calls++ === 0) throw new Error('spawn refused')
+      return { childId: spec.childId, result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' }) as never, dispose: async () => {} }
+    })
+    const h = harness({ start })
+    const text = await runFanout(parent, { tasks, allowActions: false, closeTabs: true }, { signal }, h.deps, { toolTimeoutMs: 1000, provider: 'spawn' })
+    expect(text).toMatch(/1 of 2 tasks completed/)
+    expect(text).toContain('spawn refused')
     expect(h.requests.at(-1)!.name).toBe('browser_fleet_release')
   })
 
@@ -175,21 +208,23 @@ describe('fleet registration', () => {
     expect(guards[0]!({ name: 'bash', agent: { id: 'parent' } })).toBeUndefined()
   })
 
-  it('needs an agent and keeps every Phase 3 tool inside the description budget', async () => {
-    const h = harness()
-    const tool = defineFanoutTool(h.deps, { toolTimeoutMs: 1000, provider: 'spawn' })
+  it('needs an agent', async () => {
+    const tool = defineFanoutTool(harness().deps, { toolTimeoutMs: 1000, provider: 'spawn' })
     await expect((tool.execute as (a: unknown, e: unknown) => Promise<unknown>)({ tasks }, { signal })).rejects.toThrow(/needs an agent/)
-    const registered: { description: string }[] = []
-    const ctx = { tools: { register: (definition: { description: string }) => { registered.push(definition); return () => {} } } } as unknown as Context
-    registerBrowserTools(ctx, { requestTool: vi.fn() } as never, { toolTimeoutMs: 1000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+  })
+
+  it('keeps every Phase 3 tool (fanout, run, watch, watches) inside the shared description budget', () => {
+    const { ctx, definitions } = fakeContext()
+    const { bridge } = fakeBridge()
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const added = [
-      tool,
-      defineRunProgramTool({ requestTool: vi.fn() } as never, { toolTimeoutMs: 1000 }),
-      ...defineWatchTools({ requestTool: vi.fn() } as never, memoryWatchRecords(), { toolTimeoutMs: 1000 }),
+      defineFanoutTool(harness().deps, { toolTimeoutMs: 1000, provider: 'spawn' }),
+      defineRunProgramTool(bridge, { toolTimeoutMs: 1000 }),
+      ...defineWatchTools(bridge, memoryWatchRecords(), { toolTimeoutMs: 1000 }),
     ]
-    for (const entry of added) expect(String(entry.description).length).toBeLessThan(170)
-    const all = [...registered.map((entry) => entry.description), ...added.map((entry) => String(entry.description))]
-    expect(all.reduce((sum, text) => sum + text.length, 0) / all.length).toBeLessThan(170)
+    for (const entry of added) expect(String(entry.description).length, entry.name).toBeLessThan(DESCRIPTION_BUDGET)
+    const all = [...definitions.map((entry) => String(entry.description)), ...added.map((entry) => String(entry.description))]
+    expect(all.reduce((sum, text) => sum + text.length, 0) / all.length).toBeLessThan(DESCRIPTION_BUDGET)
   })
 
   it('tells read-only workers they cannot act', () => {

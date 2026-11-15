@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeServer } from '../src/server.ts'
 import { registerScreenshotTool } from '../src/screenshot-tools.ts'
+import { fakeContext } from './support/fake-ctx.ts'
 
 interface StoredImage { data: Uint8Array; mediaType: string }
 
@@ -13,7 +13,6 @@ function makeHarness(options: {
   attachments?: { saveImages: (inputs: ReadonlyArray<StoredImage>) => Promise<unknown[]> } | null
   capture?: (args: Record<string, unknown>) => { image: { data: string; mediaType: string; width?: number; height?: number } }
 } = {}) {
-  const registered: { name: string; definition: Record<string, unknown> }[] = []
   const saved: StoredImage[] = []
   const attachments = options.attachments === null
     ? undefined
@@ -30,15 +29,7 @@ function makeHarness(options: {
         }))
       }),
     }
-  const ctx = {
-    tools: {
-      register: vi.fn((definition: { name: string }) => {
-        registered.push({ name: definition.name, definition: definition as Record<string, unknown> })
-        return () => {}
-      }),
-    },
-    get: vi.fn((name: string) => (name === 'attachments' ? attachments : undefined)),
-  } as unknown as Context
+  const { ctx, entries: registered } = fakeContext({ get: vi.fn((name: string) => (name === 'attachments' ? attachments : undefined)) })
   const requestTool = vi.fn(async (_name: string, args: Record<string, unknown>) => {
     const capture = options.capture ?? (() => ({ image: { data: PNG_BASE64, mediaType: 'image/png' } }))
     return capture(args)

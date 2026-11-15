@@ -23,6 +23,7 @@ import {
   bridgeConfigPayload,
   type BridgeInstanceInfo,
 } from './protocol.ts'
+import { errorMessage } from './host-api.ts'
 
 /** Options for {@link startDiscoveryBeacon}. */
 export interface DiscoveryBeaconOptions {
@@ -114,7 +115,7 @@ export async function startDiscoveryBeacon(
     } catch (error) {
       server.close()
       if (!isPortBusy(error)) {
-        warn(`browser bridge: discovery beacon cannot bind 127.0.0.1:${String(port)}: ${describeError(error)}`)
+        warn(`browser bridge: discovery beacon cannot bind 127.0.0.1:${String(port)}: ${errorMessage(error)}`)
       }
       continue
     }
@@ -211,7 +212,3 @@ function isPortBusy(error: unknown): boolean {
   return code === 'EADDRINUSE' || code === 'EACCES'
 }
 
-/** One-line error text for a diagnostic. */
-function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}

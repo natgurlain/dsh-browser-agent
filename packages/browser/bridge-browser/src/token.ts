@@ -1,8 +1,10 @@
 /**
- * Bridge bearer-token lifecycle: generation, constant-time verification, and
- * file persistence under the dsh home directory.
+ * Bridge token lifecycle: generation, constant-time comparison, and file
+ * persistence under the dsh home directory.
  *
- * The token authenticates the browser extension against the bridge WebSocket.
+ * The token is the shared HMAC key of the bridge handshake (protocol v2+): it
+ * is never sent; both sides prove knowledge of it and derive the frame
+ * channel from it. It authenticates the browser extension against the bridge WebSocket.
  * It is NOT the /api trust fence (that stays untouched); it is the bridge
  * path's own auth because the bridge route lives outside the fence by design.
  *
@@ -11,9 +13,10 @@
 
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { constants } from 'node:fs'
-import { lstat, mkdir, open, rename, stat, unlink } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { lstat, open, stat } from 'node:fs/promises'
+import { join } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import { writePrivateFile } from './private-file.ts'
 
 /** File name of the persisted token inside the dsh home. */
 export const TOKEN_FILE_NAME = 'ext-bridge-token'
@@ -146,54 +149,13 @@ export async function readTokenFile(file: string = tokenFilePath()): Promise<str
 }
 
 /**
- * Persist a token with 0600 permissions. A symlink at the target is refused.
- *
- * POSIX: the temp file is created exclusively (`O_CREAT|O_EXCL|O_NOFOLLOW`,
- * random name, mode 0600) and renamed over the target, so the token is never
- * visible with looser permissions and never written through a planted link.
- *
- * Windows: there are no POSIX mode bits, and a rename would replace the
- * target's ACL with the directory's inherited one. An existing file is
- * therefore rewritten in place (keeping any ACL the user tightened); only a
- * missing file goes through the exclusive temp + rename path. This branch is
- * not exercised by the Linux CI.
+ * Persist a token with 0600 permissions; a symlink at the target is refused
+ * (see {@link writePrivateFile} for the POSIX and Windows strategies).
  * @param token - token to persist.
  * @param file - token file path.
  */
 export async function writeTokenFile(token: string, file: string = tokenFilePath()): Promise<void> {
-  await mkdir(dirname(file), { recursive: true })
-  let existing = false
-  try {
-    const info = await lstat(file)
-    if (info.isSymbolicLink()) throw new Error(`refusing to write the bridge token through a symlink: ${file}`)
-    existing = true
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-  }
-  const contents = `${token}\n`
-  if (process.platform === 'win32' && existing) {
-    const handle = await open(file, constants.O_WRONLY | constants.O_TRUNC)
-    try {
-      await handle.writeFile(contents)
-    } finally {
-      await handle.close()
-    }
-    return
-  }
-  const temp = `${file}.tmp-${randomBytes(8).toString('hex')}`
-  const handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | O_NOFOLLOW, 0o600)
-  try {
-    try {
-      await handle.writeFile(contents)
-      if (process.platform !== 'win32') await handle.chmod(0o600)
-    } finally {
-      await handle.close()
-    }
-    await rename(temp, file)
-  } catch (error: unknown) {
-    await unlink(temp).catch(() => undefined)
-    throw error
-  }
+  await writePrivateFile(file, `${token}\n`, 'the bridge token')
 }
 
 /**

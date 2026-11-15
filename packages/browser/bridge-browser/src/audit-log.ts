@@ -2,10 +2,13 @@
  * Hash-chained, append-only audit log of everything the agent did through the
  * browser bridge: one JSONL file per Agent session under the dsh home (plus an
  * `unscoped` file for agentless calls), each line
- * `{ seq, ts, prevHash, hash, kind, ... }` where `hash` is
- * `sha256(prevHash + "\n" + canonicalJson(entry without hash))`. Editing,
- * dropping, or reordering any line breaks every later link, which
- * {@link verifyAuditChain} reports.
+ * `{ seq, ts, alg, prevHash, hash, kind, ... }` where `hash` is
+ * HMAC-SHA256 under the bridge's private chain key over
+ * `prevHash + "\n" + canonicalJson(entry without hash)`, and the chain head
+ * is anchored (keyed) in `<log>.head` after every append (see
+ * {@link AUDIT_KEY_FILE}). Editing, dropping, reordering, or truncating any
+ * line breaks the chain or the anchor, which {@link verifyAuditChain} and
+ * {@link verifyAuditHead} report.
  *
  * Nothing secret is written: typed text, dialog answers, evaluated code,
  * upload paths, and request bodies are reduced to their length, and URLs keep
@@ -20,8 +23,9 @@
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { chmod, mkdir, open, readFile, rename, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, open, readFile, writeFile } from 'node:fs/promises'
 import { basename, join } from 'node:path'
+import { writePrivateFile } from './private-file.ts'
 
 /**
  * Keyed chain (tamper evidence against anyone who can edit the log but not
@@ -31,7 +35,9 @@ import { basename, join } from 'node:path'
  * cannot be re-hashed with the public {@link auditEntryHash}. After every
  * append the chain head (`seq`, `hash`) is anchored in `<log>.head` under
  * the same key, so dropping the tail is detected too. Logs written before
- * keying (no `alg`) still verify and are reported `unkeyed`.
+ * keying (no `alg`, plain sha256 links) verify and are reported `unkeyed`
+ * only while no chain key exists; once one does, an all-unkeyed chain is
+ * refused, since it is indistinguishable from a downgraded keyed one.
  */
 export const AUDIT_KEY_FILE = '.chain-key'
 /** `alg` of keyed entries. */
@@ -298,7 +304,8 @@ export function auditResultDigest(result: unknown): string {
 
 /**
  * Check every link of a chain. Legacy (unkeyed) entries are accepted only
- * before the first keyed one: a keyed log cannot be downgraded mid-chain.
+ * before the first keyed one: a keyed log cannot be downgraded mid-chain,
+ * and with a key an all-unkeyed chain is refused (full downgrade).
  * @param entries - parsed lines in file order (non-objects count as broken).
  * @param key - the chain key; keyed entries fail without it.
  * @returns whether the chain is intact and, if not, where it first breaks.
@@ -341,7 +348,16 @@ export function verifyAuditChain(entries: readonly unknown[], key?: Buffer): Aud
     previous = entry.hash
     expectedSeq = entry.seq + 1
   }
-  return entries.length > 0 && !keyed ? { ok: true, count: entries.length, unkeyed: true } : { ok: true, count: entries.length }
+  if (entries.length > 0 && !keyed) {
+    // With a chain key present, an all-unkeyed chain cannot be told apart
+    // from a keyed one downgraded (alg stripped, re-hashed with the public
+    // function, head anchor deleted): refuse it.
+    if (key !== undefined) {
+      return { ok: false, count: entries.length, brokenAt: 0, reason: 'unkeyed chain while the bridge holds a chain key (downgraded, or written before keying)' }
+    }
+    return { ok: true, count: entries.length, unkeyed: true }
+  }
+  return { ok: true, count: entries.length }
 }
 
 /** A log's anchored chain head. */
@@ -529,9 +545,7 @@ export class AuditLog {
 
   /** Atomically anchor a log's head. */
   private async writeHead(file: string, key: Buffer, seq: number, hash: string): Promise<void> {
-    const temp = `${file}.head.tmp`
-    await writeFile(temp, JSON.stringify({ seq, hash, mac: headMac(key, file, seq, hash) }), { mode: 0o600 })
-    await rename(temp, `${file}.head`)
+    await writePrivateFile(`${file}.head`, JSON.stringify({ seq, hash, mac: headMac(key, file, seq, hash) }), 'the audit head anchor')
   }
 
   private ensureDirectory(): Promise<void> {
@@ -612,7 +626,8 @@ export interface BridgeAuditObserver {
   dispatched(call: DispatchedCall): void
   annotated(id: string, annotation: AuditAnnotation): void
   settled(id: string, outcome: { ok: true; result: unknown } | { ok: false; error: { code: string; message: string } }): void
-  killSwitch(sessionIds: readonly (string | undefined)[], connection?: string): void
+  /** The kill switch: one entry in every session with calls in flight on `connection` (any, when undefined), else in the unscoped log. */
+  killSwitch(connection?: string): void
 }
 
 interface TrackedCall {
@@ -725,8 +740,8 @@ export class ToolCallAuditor implements BridgeAuditObserver {
     })
   }
 
-  killSwitch(sessionIds: readonly (string | undefined)[], connection?: string): void {
-    const targets = new Set<string | undefined>(sessionIds)
+  killSwitch(connection?: string): void {
+    const targets = new Set<string | undefined>()
     for (const call of this.calls.values()) {
       if (connection === undefined || call.connection === undefined || call.connection === connection) targets.add(call.sessionId)
     }

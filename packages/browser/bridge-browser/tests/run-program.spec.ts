@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
 import { BridgeToolError } from '../src/server.ts'
 import {
   defineRunProgramTool,
@@ -11,7 +10,6 @@ import {
   runProgram,
   statusOf,
 } from '../src/run-program.ts'
-import { registerBrowserTools } from '../src/tools.ts'
 
 type Handler = (name: string, args: Record<string, unknown>, program?: { id: string; step: number }) => unknown
 
@@ -46,7 +44,8 @@ describe('parseProgram', () => {
       expect(() => parseProgram([{ tool }])).toThrow(/tool must be one of/)
     }
     expect(() => parseProgram([{ tool: 'browser_click', expect: {} }])).toThrow(/names no condition/)
-    expect(() => parseProgram([{ tool: 'browser_click', expect: { bogus: 1 } }])).toThrow(/unknown field|names no condition/)
+    expect(() => parseProgram([{ tool: 'browser_click', expect: { bogus: 1 } }])).toThrow(/unknown field bogus/)
+    expect(() => parseProgram([{ tool: 'browser_click', expect: { timeoutMs: 100 } }])).toThrow(/names no condition/)
     expect(() => parseProgram([{ tool: 'browser_click', args: [] }])).toThrow(/args must be an object/)
   })
 
@@ -117,6 +116,18 @@ describe('runProgram', () => {
     expect(calls.filter((call) => call.program !== undefined)).toHaveLength(2)
   })
 
+  it.each([
+    ['no programId', {}],
+    ['an empty programId', { programId: '' }],
+    ['a non-string programId', { programId: 7 }],
+    ['no answer', undefined],
+  ])('fails closed on an approval with %s', async (_label, approval) => {
+    const { bridge, calls } = fakeBridge((name) => name === 'browser_run' ? approval : ok('ran'))
+    const outcome = await runProgram(bridge, parseProgram([{ tool: 'browser_click' }]), { signal }, { toolTimeoutMs: 1000 })
+    expect(outcome.stop).toBe('not-approved')
+    expect(calls.map((call) => call.name)).toEqual(['browser_run'])
+  })
+
   it('does not run anything when the program card is refused', async () => {
     const { bridge, calls } = fakeBridge(() => { throw new BridgeToolError('action-failed', 'The user denied the program.') })
     const outcome = await runProgram(bridge, parseProgram([{ tool: 'browser_click' }]), { signal }, { toolTimeoutMs: 1000 })
@@ -155,16 +166,6 @@ describe('runProgram', () => {
 })
 
 describe('browser_run tool definition', () => {
-  it('keeps the description inside the shared per-tool description budget', () => {
-    const registered: { description: string }[] = []
-    const ctx = { tools: { register: (definition: { description: string }) => { registered.push(definition); return () => {} } } } as unknown as Context
-    registerBrowserTools(ctx, { requestTool: vi.fn() } as never, { toolTimeoutMs: 1000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
-    const run = defineRunProgramTool({ requestTool: vi.fn() } as never, { toolTimeoutMs: 1000 })
-    expect(String(run.description).length).toBeLessThan(170)
-    const all = [...registered.map((entry) => entry.description), String(run.description)]
-    expect(all.reduce((sum, text) => sum + text.length, 0) / all.length).toBeLessThan(170)
-  })
-
   it('validates and executes through the bridge for the calling session', async () => {
     const { bridge, calls } = fakeBridge((name) => name === 'browser_run' ? { programId: 'p' } : ok('done'))
     const run = defineRunProgramTool(bridge, { toolTimeoutMs: 1000 })

@@ -13,7 +13,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { McpCallResult, McpCaller, McpContent, McpTool, McpToolHost } from './mcp-server.ts'
+import type { McpCallResult, McpContent, McpTool, McpToolHost } from './mcp-server.ts'
 import { bridgeCallArgs, withExternalCaller } from './external-caller.ts'
 import { DEVTOOLS_TOOL_NAMES } from './protocol.ts'
 import { BROWSER_TOOL_NAMES } from './tools.ts'
@@ -80,7 +80,7 @@ export function createMcpToolHost(
         concludeTurn: () => {},
       }, caller)
       try {
-        if (name === 'browser_screenshot') return await screenshot(bridge, args, exec, toolTimeoutMs, caller)
+        if (name === 'browser_screenshot') return await screenshot(bridge, args, exec, toolTimeoutMs)
         const value = await definition.execute(args, exec as never)
         return { content: toMcpContent(definition.output.render(args, value as never)) }
       } catch (error: unknown) {
@@ -93,7 +93,7 @@ export function createMcpToolHost(
   }
 }
 
-async function screenshot(bridge: BridgeLike, args: Record<string, unknown>, exec: object, toolTimeoutMs: number, _caller: McpCaller): Promise<McpCallResult> {
+async function screenshot(bridge: BridgeLike, args: Record<string, unknown>, exec: object, toolTimeoutMs: number): Promise<McpCallResult> {
   const format = args.format ?? 'png'
   if (format !== 'png' && format !== 'jpeg') return failure('format must be "png" or "jpeg"')
   if (args.quality !== undefined && (typeof args.quality !== 'number' || !Number.isFinite(args.quality))) return failure('quality must be a number')

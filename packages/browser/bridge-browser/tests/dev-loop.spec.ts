@@ -9,7 +9,6 @@ import {
   BRIDGE_DEVLOOP_CANDIDATES_METHOD,
   BRIDGE_DEVLOOP_LINK_METHOD,
   BRIDGE_DEVLOOP_UNLINK_METHOD,
-  BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   devLoopOrigin,
 } from '../src/protocol.ts'
 
@@ -128,7 +127,7 @@ describe('DevLoop', () => {
     expect(taint).toHaveBeenCalledWith('coding')
   })
 
-  it('injects nothing when the extension refuses or returns nothing', async () => {
+  it('injects nothing when the extension refuses', async () => {
     const log = vi.fn()
     const { devLoop, inject } = harness({ capture: async () => { throw new Error('not linked in this browser') }, log })
     await devLoop.link('coding', 'http://localhost:3000/', signal)
@@ -136,6 +135,44 @@ describe('DevLoop', () => {
     await devLoop.noteStatus('coding', 'idle')
     expect(inject).not.toHaveBeenCalled()
     expect(log).toHaveBeenCalledWith(expect.stringContaining('not linked in this browser'))
+  })
+
+  it.each([
+    ['nothing', undefined],
+    ['no text', {}],
+    ['blank text', { text: '  \n ', origins: ['http://localhost:3000'] }],
+    ['a non-string text', { text: 42 }],
+  ])('injects nothing when the capture returns %s', async (_label, value) => {
+    const { devLoop, inject, taint } = harness({ capture: async () => value })
+    await devLoop.link('coding', 'http://localhost:3000/', signal)
+    devLoop.noteToolResult('coding', 'edit', false)
+    await devLoop.noteStatus('coding', 'idle')
+    expect(inject).not.toHaveBeenCalled()
+    expect(taint).not.toHaveBeenCalled()
+  })
+
+  it('taints before it injects', async () => {
+    const { devLoop, inject, taint } = harness({ capture: async () => ({ text: 'x', origins: ['https://ads.example'] }) })
+    await devLoop.link('coding', 'http://localhost:3000/', signal)
+    devLoop.noteToolResult('coding', 'edit', false)
+    await devLoop.noteStatus('coding', 'idle')
+    expect(taint).toHaveBeenCalledOnce()
+    expect(inject).toHaveBeenCalledOnce()
+    expect(taint.mock.invocationCallOrder[0]!).toBeLessThan(inject.mock.invocationCallOrder[0]!)
+  })
+
+  it.each(['unlink', 'relink'] as const)('drops a capture whose link changed while it was in flight (%s)', async (change) => {
+    let release!: (value: unknown) => void
+    const { devLoop, inject } = harness({ capture: () => new Promise((resolve) => { release = resolve }) })
+    await devLoop.link('coding', 'http://localhost:3000/', signal)
+    devLoop.noteToolResult('coding', 'edit', false)
+    const running = devLoop.noteStatus('coding', 'idle')
+    await vi.waitFor(() => { expect(release).toBeDefined() })
+    if (change === 'unlink') devLoop.unlink('coding')
+    else await devLoop.link('coding', 'http://localhost:4000/', signal)
+    release({ text: 'Console errors (1)', origins: ['http://localhost:3000'] })
+    await running
+    expect(inject).not.toHaveBeenCalled()
   })
 })
 
@@ -220,7 +257,7 @@ describe('dev loop RPCs and the bridge policy', () => {
     const { devLoop } = harness()
     const api = withDevLoopMethods(fenced, devLoop)
     const call = (method: string, payload: unknown) => api.call({ rpcId: 'r', method, payload, signal })
-    return { api, call, inner, devLoop }
+    return { api, call, inner, devLoop, fenced }
   }
 
   it('serves candidates, link and unlink without touching the Host', async () => {
@@ -234,7 +271,7 @@ describe('dev loop RPCs and the bridge policy', () => {
   })
 
   it('still refuses prompting, steering or changing a linked coding session from the browser', async () => {
-    const { call, inner } = fencedHarness()
+    const { call, inner, fenced } = fencedHarness()
     await call(BRIDGE_DEVLOOP_LINK_METHOD, { sessionId: 'coding', url: 'http://localhost:5173/' })
     inner.mockClear()
     for (const [method, payload] of [
@@ -244,11 +281,10 @@ describe('dev loop RPCs and the bridge policy', () => {
     ] as const) {
       expect(await call(method, payload)).toMatchObject({ ok: false, error: { code: 'forbidden' } })
     }
-    expect(inner.mock.calls.every(([c]) => c.method === 'session.list')).toBe(true)
-    // The generic snapshot-injection RPC stays own-only (server.ts checks 'own' scope).
-    const { policy } = { policy: withBridgePolicy({ call: inner, async *events() {}, respond: async () => ({}) }, { allowDangerFullAccess: false, ledger: memorySessionLedger() }) }
-    expect(await policy.allowsSession('coding', signal, 'own')).toBe(false)
-    expect(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD).toBe('bridge.injectBrowserSnapshot')
+    // Nothing reached the Host except the policy's own session listing.
+    expect(inner.mock.calls.filter(([c]) => c.method !== 'session.list')).toEqual([])
+    // A linked coding session is still not the bridge's own: snapshot injection (an 'own' check in server.ts) stays refused.
+    expect(await fenced.allowsSession('coding', signal, 'own')).toBe(false)
   })
 })
 

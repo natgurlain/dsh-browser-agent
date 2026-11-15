@@ -4,11 +4,10 @@
  * authenticated socket. Protocol v4 binds the dialed endpoint and the caps
  * into both proofs and seals every later frame, so neither step works.
  */
-import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket, { WebSocketServer } from 'ws'
-import { BridgeServer } from '../src/server.ts'
+import type { BridgeServer } from '../src/server.ts'
 import {
   BRIDGE_CLOSE_CODES,
   BRIDGE_PROTOCOL_VERSION,
@@ -21,6 +20,7 @@ import {
   type BridgeEndpoint,
 } from '../src/protocol.ts'
 import type { BrowserHostApi } from '../src/host-api.ts'
+import { closeTestBridges, startTestBridge } from './support/bridge-client.ts'
 
 const TOKEN = '6f1d0c7a9b3e48f2a5c4d7e1b8f09a3c'
 const CAPS = { textOnly: true as const, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }
@@ -28,6 +28,7 @@ const CAPS = { textOnly: true as const, snapshotMaxChars: 32_000, maxInteractive
 const cleanups: Array<() => Promise<void> | void> = []
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup()
+  await closeTestBridges()
 })
 
 async function realBridge(
@@ -43,18 +44,11 @@ async function realBridge(
     async *events(signal: AbortSignal) { await new Promise((resolve) => { signal.addEventListener('abort', resolve) }) },
     respond: async () => ({ accepted: false }),
   }
-  const bridge = new BridgeServer({
-    token: TOKEN, api, toolTimeoutMs: 1_000, caps: CAPS, injectBrowserSnapshot() {}, async purgeSession() {}, forwardedPorts,
+  const { bridge, port } = await startTestBridge({
+    token: TOKEN, api, caps: CAPS, forwardedPorts,
     ...(localEndpointOverride === undefined ? {} : { localEndpointOverride }),
   })
-  const http: Server = createServer()
-  http.on('upgrade', (req, socket, head) => { bridge.handleUpgrade(req, socket, head) })
-  await new Promise<void>((resolve) => { http.listen(0, '127.0.0.1', resolve) })
-  cleanups.push(async () => {
-    await bridge.close()
-    await new Promise<void>((resolve) => { http.close(() => { resolve() }) })
-  })
-  return { bridge, port: (http.address() as AddressInfo).port, calls }
+  return { bridge, port, calls }
 }
 
 /** Honest v4 client: binds the URL it dials and verifies the server proof. */
@@ -144,7 +138,7 @@ describe('handshake relay', () => {
 
   it('accepts a forward only on a loopback port the operator configured', async () => {
     const forward = 45_999
-    const { bridge, port } = await realBridge([forward])
+    const { port } = await realBridge([forward])
     for (const [endpoint, accepted] of [
       [{ host: '127.0.0.1', port: forward }, true],
       [{ host: '127.0.0.1', port: forward + 1 }, false],
@@ -168,7 +162,6 @@ describe('handshake relay', () => {
       expect(await outcome, JSON.stringify(endpoint)).toBe(accepted ? 'accepted' : `closed ${String(BRIDGE_CLOSE_CODES.authFailed)}`)
       ws.terminate()
     }
-    expect(bridge).toBeDefined()
   })
 
   it('accepts a configured forward inside a container, where the socket address is not loopback', async () => {

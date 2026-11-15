@@ -20,6 +20,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { BridgeServer } from '../server.ts'
+import { sessionIdOfExec } from '../external-caller.ts'
 import { BridgeToolError, toolCallIdArg } from '../server.ts'
 import { auditResultDigest, redactAuditUrl } from '../audit-log.ts'
 import { workspaceWriteTarget } from '../workspace-write.ts'
@@ -30,6 +31,7 @@ import { parseScheduleTiming, WorkflowSchedules, type ScheduleServiceLike } from
 import { parseSiteDrivers, siteDriverToolName, type SiteDriverSummary } from './site-drivers.ts'
 import { listWorkflows, loadWorkflow, registerWorkflowSkills, saveWorkflow, workspaceRootOf, type SkillsServiceLike } from './store.ts'
 import { WorkflowError } from './workflow.ts'
+import { errorMessage, isRecord } from '../host-api.ts'
 
 /** Extension → bridge learning RPC methods. */
 export const LEARNING_METHODS = {
@@ -88,15 +90,13 @@ export interface LearningMount {
   disconnected: (connection: string) => void
   /** The user's kill switch: revoke every standing grant (workflow schedules). */
   revokeStandingGrants: () => Promise<void>
+  /** A session was purged: delete the workflow schedules that target it. */
+  forgetSession: (sessionId: string) => Promise<void>
   dispose: () => void
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 function errorAnswer(code: string, error: unknown): LearningRpcAnswer {
-  return { ok: false, error: { code, message: error instanceof Error ? error.message : String(error) } }
+  return { ok: false, error: { code, message: errorMessage(error) } }
 }
 
 /** Build a step caller bound to one session (undefined: agentless). */
@@ -114,7 +114,7 @@ export function bridgeStepCall(bridge: Pick<BridgeServer, 'requestTool'>, toolTi
       return {
         ok: false,
         code: error instanceof BridgeToolError ? error.code : 'internal',
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
       }
     }
   }
@@ -159,7 +159,7 @@ export function parseProgram(value: unknown): ProgramStep[] {
  * @param ctx - plugin context.
  * @param bridge - the bridge server (tool dispatch).
  * @param options - resolved options.
- * @param executorFor - executor factory seam (tests; a later `browser_run` executor).
+ * @param executorFor - executor factory seam (tests substitute their own).
  */
 export function mountLearning(
   ctx: Context,
@@ -176,9 +176,13 @@ export function mountLearning(
   let workflowDisposers: Array<() => void> | undefined
   /** Schedules this bridge recorded: the workflow tools stay registered (refusing) so a delivery while every install has workflows off is skipped and audited. */
   let liveSchedules = 0
+  /** Set by dispose: nothing registers again (a late schedule count included). */
+  let disposed = false
   const workflowsEnabled = (): boolean => [...states.values()].some((state) => state.workflows)
   const refreshScheduleCount = async (): Promise<void> => {
-    liveSchedules = await schedules.count().catch(() => 0)
+    const count = await schedules.count().catch(() => 0)
+    if (disposed) return
+    liveSchedules = count
     sync()
   }
   /** Fail closed: no connected install has saved workflows on. */
@@ -190,7 +194,7 @@ export function mountLearning(
   let skills: { dispose: () => void; invalidate: () => void } | undefined
   const driverDisposers = new Map<string, () => void>()
 
-  const sessionOf = (exec: Pick<ToolRunContext, 'agent'>): string | undefined => exec.agent === undefined ? undefined : String(exec.agent.id)
+  const sessionOf = (exec: Pick<ToolRunContext, 'agent'>): string | undefined => sessionIdOfExec(exec)
   const rootOf = (exec: Pick<ToolRunContext, 'agent'>): string => {
     const root = workspaceRootOf(exec.agent, options.workspacePath)
     if (root === undefined) throw new WorkflowError('this session has no workspace directory, so it has no saved workflows.')
@@ -229,7 +233,7 @@ export function mountLearning(
         const a = args as { name: string; params?: Record<string, unknown>; fromStep?: number }
         requireWorkflowsOn(exec, 'browser_workflow_run', a.name)
         const workflow = await loadWorkflow(rootOf(exec), a.name).catch((error: unknown) => {
-          throw new WorkflowError(`workflow "${a.name}" could not be loaded: ${error instanceof Error ? error.message : String(error)}`)
+          throw new WorkflowError(`workflow "${a.name}" could not be loaded: ${errorMessage(error)}`)
         })
         const report = await executorFor(execCall(exec)).runWorkflow(workflow, a.params ?? {}, {
           signal: exec.signal,
@@ -256,8 +260,8 @@ export function mountLearning(
   })
 
   const sync = (): void => {
-    const all = [...states.values()]
-    const workflowsOn = all.some((state) => state.workflows) || liveSchedules > 0
+    const all = disposed ? [] : [...states.values()]
+    const workflowsOn = all.some((state) => state.workflows) || (!disposed && liveSchedules > 0)
     if (workflowsOn && workflowDisposers === undefined) {
       workflowDisposers = workflowTools().map((tool) => ctx.tools.register(tool))
       const service = (ctx.get as (name: string) => unknown)('skills') as SkillsServiceLike | undefined
@@ -265,7 +269,7 @@ export function mountLearning(
         try {
           skills = registerWorkflowSkills(service)
         } catch (error: unknown) {
-          ctx.logger.warn(`browser bridge: workflow skills unavailable: ${error instanceof Error ? error.message : String(error)}`)
+          ctx.logger.warn(`browser bridge: workflow skills unavailable: ${errorMessage(error)}`)
         }
       }
     } else if (!workflowsOn && workflowDisposers !== undefined) {
@@ -307,7 +311,7 @@ export function mountLearning(
       await refreshScheduleCount()
       if (revoked > 0 || failed > 0) ctx.logger.info(`browser bridge: ${why}; revoked ${String(revoked)} workflow schedule(s)${failed > 0 ? `, ${String(failed)} could not be deleted` : ''}`)
     } catch (error: unknown) {
-      ctx.logger.warn(`browser bridge: could not revoke workflow schedules: ${error instanceof Error ? error.message : String(error)}`)
+      ctx.logger.warn(`browser bridge: could not revoke workflow schedules: ${errorMessage(error)}`)
     }
   }
 
@@ -412,7 +416,18 @@ export function mountLearning(
       if (states.delete(connection)) sync()
     },
     revokeStandingGrants: () => revokeSchedules('kill switch engaged'),
+    forgetSession: async (sessionId) => {
+      try {
+        const { revoked, failed } = await schedules.revokeSession(sessionId)
+        await refreshScheduleCount()
+        if (revoked > 0 || failed > 0) ctx.logger.info(`browser bridge: session ${sessionId} was purged; revoked ${String(revoked)} workflow schedule(s)${failed > 0 ? `, ${String(failed)} could not be deleted` : ''}`)
+      } catch (error: unknown) {
+        ctx.logger.warn(`browser bridge: could not revoke the purged session's workflow schedules: ${errorMessage(error)}`)
+      }
+    },
     dispose: () => {
+      disposed = true
+      liveSchedules = 0
       states.clear()
       sync()
     },

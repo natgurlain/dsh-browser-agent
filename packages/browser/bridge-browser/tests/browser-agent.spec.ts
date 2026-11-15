@@ -13,7 +13,6 @@ import {
 } from '../src/browser-agent.ts'
 import { apply as applyPreset, browserAgentAllows } from '../src/browser-preset.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { SessionTaintRegistry } from '../src/session-taint.ts'
 
 const SKILLS_DIR = fileURLToPath(new URL('../skills/', import.meta.url))
 
@@ -84,13 +83,31 @@ describe('delegate_browser_task', () => {
     }))
     await expect(tool.execute({ task: 'x' }, { signal })).rejects.toThrow(/calling agent/u)
     expect(BROWSER_DELEGATE_TOOL.startsWith('browser_')).toBe(false)
-    // No separate taint rule: the spawned child's header names its parent, so
-    // the taint lineage (session-taint.ts) carries the child's page reads up.
-    const lineage = new SessionTaintRegistry()
-    lineage.link('child-session', 'parent-session')
-    lineage.mark('child-session', 'browser_get_text')
-    expect(lineage.isTainted('parent-session')).toBe(true)
+    // No separate taint rule here: the spawned child's header names its parent,
+    // and session-taint.ts links it from there (covered in session-taint.spec).
     expect(registerBrowserDelegateTool(fakeCtx({}).ctx, defineTool as never)).toBe(false)
+  })
+
+  it('disposes the child once when the caller aborts mid-run', async () => {
+    const registered: Array<{ name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }> = []
+    const dispose = vi.fn(async () => {})
+    let finish!: (value: unknown) => void
+    const startActivation = vi.fn(async () => ({ result: new Promise((resolve) => { finish = resolve }), dispose }))
+    const { ctx } = fakeCtx({
+      subagents: { getProvider: () => ({}), startActivation },
+      tools: { register: (definition: never) => { registered.push(definition); return () => {} } },
+    })
+    registerBrowserDelegateTool(ctx, defineTool as never)
+    const tool = registered.find(entry => entry.name === BROWSER_DELEGATE_TOOL)!
+    const controller = new AbortController()
+    const running = tool.execute({ task: 'Check the page.' }, { agent: { id: 'parent' }, signal: controller.signal })
+    await vi.waitFor(() => { expect(startActivation).toHaveBeenCalled() })
+    controller.abort()
+    controller.abort()
+    expect(dispose).toHaveBeenCalledOnce()
+    finish({ output: [], stopReason: 'cancelled' })
+    await expect(running).resolves.toMatchObject({ stopReason: 'cancelled' })
+    expect(dispose).toHaveBeenCalledOnce()
   })
 })
 

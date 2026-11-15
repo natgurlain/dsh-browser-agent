@@ -10,6 +10,7 @@
  */
 
 import { WorkspaceWriteError, workspacePathComponents, writeWorkspaceFile, type WorkspaceWriteTarget } from './workspace-write.ts'
+import { errorMessage, isRecord } from './host-api.ts'
 
 /** Output formats the bridge writes. */
 export type ExtractFormat = 'csv' | 'json'
@@ -57,7 +58,7 @@ export function normalizeSavePath(saveTo: string, format?: string): { relativePa
   try {
     parts = workspacePathComponents(saveTo, { allowedExt: EXTRACT_EXTENSIONS, defaultExt: `.${format ?? 'csv'}` })
   } catch (error: unknown) {
-    throw new ExtractSaveError(`saveTo: ${error instanceof Error ? error.message : String(error)}`)
+    throw new ExtractSaveError(`saveTo: ${errorMessage(error)}`)
   }
   const relativePath = parts.join('/')
   const inferred: ExtractFormat = relativePath.toLowerCase().endsWith('.json') ? 'json' : 'csv'
@@ -121,7 +122,7 @@ export function extractDataOf(result: unknown): ExtractData | undefined {
   if (!Array.isArray(columns) || !Array.isArray(rows)) return undefined
   return {
     columns: columns.map(String),
-    rows: rows.filter((row): row is Record<string, unknown> => typeof row === 'object' && row !== null && !Array.isArray(row)),
+    rows: rows.filter(isRecord),
     ...typeof pages === 'number' ? { pages } : {},
     ...typeof url === 'string' ? { url } : {},
   }

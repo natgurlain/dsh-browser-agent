@@ -2,141 +2,51 @@
  * Multi-connection bridge: per-client slots, session routing, result
  * ownership, approval holds, and approval forwarding to dsh.
  */
-import { createServer, type Server } from 'node:http'
-import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket from 'ws'
-import { BridgeServer, BridgeToolError, MAX_READY_CONNECTIONS, toolCallIdArg, type HostApprovalRequest } from '../src/server.ts'
+import { BridgeToolError, MAX_READY_CONNECTIONS, toolCallIdArg, type HostApprovalRequest } from '../src/server.ts'
 import {
   BRIDGE_APPROVAL_ASK_METHOD,
   BRIDGE_AUDIT_RECORD_METHOD,
   BRIDGE_APPROVAL_WITHDRAW_METHOD,
   BRIDGE_CLOSE_CODES,
-  BRIDGE_PROTOCOL_VERSION,
   BRIDGE_TOOL_HOLD_METHOD,
-  BridgeFrameChannel,
   DEVTOOLS_CAPS_VERSION,
   HOST_APPROVALS_CAPS_VERSION,
   MAX_HOST_APPROVAL_REASON_CHARS,
   bridgeClientKey,
-  bridgeEndpointOfUrl,
-  computeBridgeProof,
-  createBridgeNonce,
   isBridgeClientIdentity,
-  parseBridgeFrame,
   type BridgeFrame,
 } from '../src/protocol.ts'
-import type { BrowserHostApi } from '../src/host-api.ts'
+import {
+  closeTestBridges,
+  connectClient as connectTestClient,
+  startTestBridge,
+  toolCallsOf,
+  TEST_CAPS,
+  waitFor,
+  type TestClient,
+} from './support/bridge-client.ts'
 
-const TOKEN = 'deadbeefdeadbeefdeadbeefdeadbeef'
-const BASE_CAPS = { textOnly: true as const, snapshotMaxChars: 12_000, maxInteractiveItems: 60 }
+const BASE_CAPS = TEST_CAPS
 const BINDING = 'a'.repeat(64)
 
-interface Harness {
-  bridge: BridgeServer
-  server: Server
-  url: string
-}
+afterEach(closeTestBridges)
 
-const harnesses: Harness[] = []
-const sockets: WebSocket[] = []
+const startBridge = startTestBridge
 
-afterEach(async () => {
-  for (const ws of sockets.splice(0)) ws.terminate()
-  for (const h of harnesses.splice(0)) {
-    await h.bridge.close()
-    await new Promise<void>((resolve) => { h.server.close(() => resolve()) })
-  }
-})
-
-async function startBridge(overrides: Partial<ConstructorParameters<typeof BridgeServer>[0]> = {}): Promise<Harness> {
-  const api: BrowserHostApi = {
-    call: async () => ({ ok: true, value: 'ok' }),
-    async *events() {},
-    respond: async () => ({ accepted: true }),
-  }
-  const bridge = new BridgeServer({
-    token: TOKEN,
-    api,
-    toolTimeoutMs: 1_000,
-    caps: { ...BASE_CAPS },
-    injectBrowserSnapshot: vi.fn(),
-    purgeSession: vi.fn(async () => {}),
-    ...overrides,
-  })
-  const server = createServer()
-  server.on('upgrade', (req, socket, head) => { bridge.handleUpgrade(req, socket, head) })
-  await new Promise<void>((resolve) => { server.listen(0, '127.0.0.1', resolve) })
-  const port = (server.address() as AddressInfo).port
-  const h = { bridge, server, url: `ws://127.0.0.1:${port}/ext/bridge` }
-  harnesses.push(h)
-  return h
-}
-
-interface Client {
-  ws: WebSocket
-  frames: BridgeFrame[]
-  closed: Promise<{ code: number }>
-  send(frame: BridgeFrame): void
-  /** Send one rpc and wait for its result. */
-  rpc(method: string, payload: unknown): Promise<Extract<BridgeFrame, { t: 'rpc.result' }>>
-}
-
-async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
-  const start = Date.now()
-  while (!predicate()) {
-    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out')
-    await new Promise((resolve) => { setTimeout(resolve, 5) })
-  }
-}
+type Client = TestClient
 
 /**
  * Connect and authenticate one client. `macCaps` lets a test sign different
  * caps than it sends (a relay rewriting the identity).
  */
-async function connectClient(
+function connectClient(
   url: string,
   caps: Record<string, unknown>,
   options: { macCaps?: Record<string, unknown>; expectReady?: boolean } = {},
 ): Promise<Client> {
-  const ws = new WebSocket(url)
-  sockets.push(ws)
-  const frames: BridgeFrame[] = []
-  let channel: BridgeFrameChannel | undefined
-  const closed = new Promise<{ code: number }>((resolve) => { ws.on('close', (code) => { resolve({ code }) }) })
-  ws.on('message', (data) => {
-    const text = data.toString()
-    if (channel !== undefined && (JSON.parse(text) as { t?: unknown }).t === 'sealed') {
-      const frame = channel.open(text)
-      if (frame === undefined) throw new Error('server frame does not verify')
-      frames.push(frame)
-      return
-    }
-    frames.push(parseBridgeFrame(text)!)
-  })
-  await new Promise<void>((resolve, reject) => { ws.once('open', () => resolve()); ws.once('error', reject) })
-  await waitFor(() => frames.some((frame) => frame.t === 'challenge'))
-  const challenge = frames.find((frame) => frame.t === 'challenge') as Extract<BridgeFrame, { t: 'challenge' }>
-  const nonce = createBridgeNonce()
-  const endpoint = bridgeEndpointOfUrl(url)!
-  const mac = await computeBridgeProof(TOKEN, 'client', challenge.nonce, nonce, endpoint, { client: options.macCaps ?? caps })
-  channel = BridgeFrameChannel.derive(TOKEN, 'client', challenge.nonce, nonce, endpoint)
-  ws.send(JSON.stringify({ t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, mac, endpoint, caps }))
-  if (options.expectReady !== false) await waitFor(() => frames.some((frame) => frame.t === 'hello.ok'))
-  let rpcSerial = 0
-  const client: Client = {
-    ws,
-    frames,
-    closed,
-    send: (frame) => { ws.send(channel!.seal(frame)) },
-    rpc: async (method, payload) => {
-      const id = `rpc-${String(++rpcSerial)}-${Math.random()}`
-      client.send({ t: 'rpc', id, method, payload })
-      await waitFor(() => frames.some((frame) => frame.t === 'rpc.result' && frame.id === id), 3_000)
-      return frames.find((frame) => frame.t === 'rpc.result' && frame.id === id) as Extract<BridgeFrame, { t: 'rpc.result' }>
-    },
-  }
-  return client
+  return connectTestClient(url, caps, options)
 }
 
 function identity(id: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -144,7 +54,7 @@ function identity(id: string, extra: Record<string, unknown> = {}): Record<strin
 }
 
 function toolCalls(client: Client): Array<Extract<BridgeFrame, { t: 'tool.call' }>> {
-  return client.frames.filter((frame): frame is Extract<BridgeFrame, { t: 'tool.call' }> => frame.t === 'tool.call')
+  return toolCallsOf(client.frames)
 }
 
 async function nextToolCall(client: Client, count = 1): Promise<Extract<BridgeFrame, { t: 'tool.call' }>> {
@@ -312,6 +222,32 @@ describe('tool routing', () => {
     expect(toolCalls(b)).toHaveLength(0)
   })
 
+  it('tags a browser_run step with its program on the tool.call frame', async () => {
+    const h = await startBridge()
+    const a = await connectClient(h.url, identity('client-aaaa'))
+    const step = h.bridge.requestTool('browser_click', { index: 1 }, new AbortController().signal, 1_000, 's-1', 'tc-1', { id: 'prog-1', step: 2 })
+    void step.catch(() => {})
+    const plain = h.bridge.requestTool('browser_click', { index: 1 }, new AbortController().signal, 1_000, 's-1')
+    void plain.catch(() => {})
+    const [tagged, untagged] = [await nextToolCall(a, 1), await nextToolCall(a, 2)]
+    expect(tagged).toMatchObject({ program: { id: 'prog-1', step: 2 } })
+    expect(untagged).not.toHaveProperty('program')
+  })
+
+  it('forgets a purged session\'s install binding', async () => {
+    const h = await startBridge()
+    const a = await connectClient(h.url, identity('client-aaaa'))
+    const b = await connectClient(h.url, identity('client-bbbb'))
+    await a.rpc('session.prompt', { sessionId: 's-a', text: 'go' })
+    a.ws.close()
+    await waitFor(() => h.bridge.connectionCount() === 1)
+    h.bridge.forgetSession('s-a')
+    const call = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1_000, 's-a')
+    void call.catch(() => {})
+    await nextToolCall(b)
+    expect(toolCalls(b)).toHaveLength(1)
+  })
+
   it('fails instead of falling back when the affine client lacks the capability', async () => {
     const h = await startBridge()
     const plain = await connectClient(h.url, identity('client-plan'))
@@ -384,7 +320,7 @@ describe('tool routing', () => {
     expect((await b.rpc(BRIDGE_AUDIT_RECORD_METHOD, { callId: frame.id, decision: 'allowed' })).ok).toBe(true)
     expect(audit.annotated).toHaveBeenCalledExactlyOnceWith(frame.id, { decision: 'allowed' })
     await a.rpc(BRIDGE_AUDIT_RECORD_METHOD, { event: 'kill-switch' })
-    expect(audit.killSwitch).toHaveBeenCalledWith([], expect.stringMatching(/aaaa/u))
+    expect(audit.killSwitch).toHaveBeenCalledWith(expect.stringMatching(/aaaa/u))
     b.send({ t: 'tool.result', id: frame.id, ok: true, result: { text: 'ok' } })
     await expect(call).resolves.toEqual({ text: 'ok' })
   })
@@ -441,7 +377,8 @@ describe('approval holds', () => {
   })
 
   it('extends an owned call past its budget, up to the configured ceiling', async () => {
-    const h = await startBridge({ toolTimeoutMs: 150, maxApprovalHoldMs: 250 })
+    // Budgets leave the hold RPC ample time to land on a loaded worker.
+    const h = await startBridge({ toolTimeoutMs: 600, maxApprovalHoldMs: 600 })
     const a = await connectClient(h.url, identity('client-aaaa'))
     const started = Date.now()
     const call = h.bridge.requestTool('browser_click', { index: 1 }, new AbortController().signal)
@@ -449,23 +386,25 @@ describe('approval holds', () => {
     const held = await a.rpc(BRIDGE_TOOL_HOLD_METHOD, { toolCallId: frame.id, holdMs: 60_000 })
     expect(held.ok).toBe(true)
     const expiresAt = (held as { result: { expiresAt: number } }).result.expiresAt
-    expect(expiresAt).toBeLessThanOrEqual(frame.expiresAt + 250)
+    expect(expiresAt).toBeLessThanOrEqual(frame.expiresAt + 600)
     expect(expiresAt).toBeGreaterThan(frame.expiresAt)
     await expect(call).rejects.toMatchObject({ code: 'timeout' })
-    expect(Date.now() - started).toBeGreaterThanOrEqual(300)
+    // Past the plain budget (600 ms), so the hold extended it.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900)
     await waitFor(() => a.frames.some((f) => f.t === 'tool.cancel' && f.id === frame.id))
   })
 
   it('keeps a held call alive until its result arrives', async () => {
-    const h = await startBridge({ toolTimeoutMs: 100 })
+    const h = await startBridge({ toolTimeoutMs: 500 })
     const a = await connectClient(h.url, identity('client-aaaa'))
     const call = h.bridge.requestTool('browser_click', { index: 1 }, new AbortController().signal)
     const frame = await nextToolCall(a)
-    await a.rpc(BRIDGE_TOOL_HOLD_METHOD, { toolCallId: frame.id, holdMs: 1_000 })
+    await a.rpc(BRIDGE_TOOL_HOLD_METHOD, { toolCallId: frame.id, holdMs: 3_000 })
     // A shorter hold never shortens the deadline.
     const shorter = await a.rpc(BRIDGE_TOOL_HOLD_METHOD, { toolCallId: frame.id, holdMs: 1 })
-    expect((shorter as { result: { expiresAt: number } }).result.expiresAt).toBeGreaterThan(Date.now() + 500)
-    await new Promise((resolve) => { setTimeout(resolve, 250) })
+    expect((shorter as { result: { expiresAt: number } }).result.expiresAt).toBeGreaterThan(Date.now() + 1_500)
+    // Answer after the plain 500 ms budget has passed.
+    await new Promise((resolve) => { setTimeout(resolve, 700) })
     a.send({ t: 'tool.result', id: frame.id, ok: true, result: { text: 'done' } })
     await expect(call).resolves.toEqual({ text: 'done' })
   })

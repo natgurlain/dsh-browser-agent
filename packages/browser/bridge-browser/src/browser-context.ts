@@ -31,7 +31,8 @@ const DEFAULT_MAX_PENDING = 32
 
 /**
  * Why the extension captured browser context: `follow` after an explicit tab
- * handoff, `resume` after the user paused or took over and then resumed.
+ * handoff, `resume` after the user paused or took over and then resumed,
+ * `devloop` for a linked localhost tab's capture after a turn that edited files.
  */
 export type BrowserContextReason = 'follow' | 'resume' | 'devloop'
 

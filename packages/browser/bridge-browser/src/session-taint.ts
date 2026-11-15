@@ -43,7 +43,12 @@ import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD } from './protocol.ts'
 
-/** Cross-session and job-output readers a tainted session may not run (see {@link TAINT_ALLOWED_TOOLS}). */
+/**
+ * Cross-session and job-output readers a tainted session may not run: a
+ * page could steer it into reading another conversation's or a background
+ * command's output and smuggling it out through a browser action. Denied
+ * explicitly by {@link toolAllowedWhileTainted}, whatever the allowlist says.
+ */
 export const TAINT_DENIED_READERS: readonly string[] = [
   'session_event_read', 'session_event_search', 'session_event_trace', 'session_search', 'session_trace',
   'job_output', 'job_list', 'team_task_get', 'team_task_list',
@@ -58,11 +63,7 @@ export const TAINT_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'list_subagent_models',
   'schedule_list',
   'schedule_view',
-  // Not here on purpose: cross-session and job-output readers
-  // (session_event_read/search/trace, session_search, session_trace,
-  // job_output, job_list, team_task_get/list). A page could steer a tainted
-  // session into reading another conversation's or a background command's
-  // output and smuggling it out through a browser action.
+  // Never here: TAINT_DENIED_READERS.
   // A structured subagent (a tab-fleet worker) reports its answer through this
   // child-scoped tool; it only hands a value to the parent, which treats it as
   // untrusted page-derived data.
@@ -91,6 +92,7 @@ const CONTENT_FREE_TOOLS: ReadonlySet<string> = new Set([
 
 /** Whether a tool may run in a tainted session (path-scoped reads: see {@link workspaceReadDenial}). */
 export function toolAllowedWhileTainted(name: string): boolean {
+  if (TAINT_DENIED_READERS.includes(name)) return false
   return TAINT_ALLOWED_TOOLS.has(name) || TAINT_WORKSPACE_READ_TOOLS.has(name) || name.startsWith('browser_')
 }
 
@@ -100,9 +102,8 @@ export function toolAllowedWhileTainted(name: string): boolean {
  * validation error). A failure that never reached a page costs only a
  * needless Clear; a missed taint costs data.
  * @param name - tool name.
- * @param _isError - ignored (kept for call-site compatibility).
  */
-export function resultTaintsSession(name: string, _isError?: boolean): boolean {
+export function resultTaintsSession(name: string): boolean {
   return name.startsWith('browser_') && !CONTENT_FREE_TOOLS.has(name)
 }
 
@@ -121,7 +122,7 @@ export function workspaceReadDenial(name: string, args: unknown, workspace: stri
   const deny = (why: string): string => `Tool "${name}" is limited to this session's workspace while the session holds untrusted web page content (${why}). `
     + 'The user can lift the restriction with "Clear" on the untrusted-content banner in the browser panel. Do not retry outside the workspace.'
   if (workspace === undefined || !isAbsolute(workspace)) return deny('the session has no workspace directory')
-  const record = typeof args === 'object' && args !== null && !Array.isArray(args) ? args as Record<string, unknown> : {}
+  const record = isRecord(args) ? args : {}
   const pattern = record.pattern
   if (name === 'glob' && typeof pattern === 'string'
     && (isAbsolute(pattern) || pattern.startsWith('~') || /(?:^|[\\/])\.\.(?:[\\/]|$)/u.test(pattern))) {
@@ -243,6 +244,18 @@ export class SessionTaintRegistry {
   isTainted(sessionId: string): boolean {
     return this.effective(sessionId) !== undefined
   }
+
+  /**
+   * Drop a purged session's entry and lineage link. Refused (returns false)
+   * while another session is linked under it: its children are tainted (and
+   * bound to an install) through it, so forgetting it would loosen them.
+   */
+  forget(sessionId: string): boolean {
+    for (const parent of this.parents.values()) if (parent === sessionId) return false
+    this.entries.delete(sessionId)
+    this.parents.delete(sessionId)
+    return true
+  }
 }
 
 /** Model-facing reason for a denied tool in a tainted session. */
@@ -262,10 +275,6 @@ interface GuardExec {
   name: string
   arguments?: unknown
   agent?: AgentLike
-}
-
-interface ToolsWithGuard {
-  guard?: (guard: (exec: GuardExec) => string | undefined) => () => void
 }
 
 interface AgentsWithInitiator {
@@ -296,10 +305,10 @@ export function installSessionTaint(ctx: Context, registry: SessionTaintRegistry
     } catch { /* outside an initiator scope */ }
     return undefined
   }))
-  disposers.push(ctx.on('tools/result', (exec: GuardExec, result: { isError: boolean }) => {
+  disposers.push(ctx.on('tools/result', (exec: GuardExec) => {
     linkFromHeader(registry, exec.agent)
     const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
-    if (sessionId !== undefined && resultTaintsSession(exec.name, result.isError)) registry.mark(sessionId, exec.name)
+    if (sessionId !== undefined && resultTaintsSession(exec.name)) registry.mark(sessionId, exec.name)
     return undefined
   }))
   const denial = (exec: GuardExec): string | undefined => {
@@ -310,17 +319,8 @@ export function installSessionTaint(ctx: Context, registry: SessionTaintRegistry
     const cwd = exec.agent.session?.header?.cwd
     return workspaceReadDenial(exec.name, exec.arguments, typeof cwd === 'string' ? cwd : undefined)
   }
-  const tools = ctx.tools as unknown as ToolsWithGuard | undefined
-  if (typeof tools?.guard === 'function') {
-    disposers.push(tools.guard(denial))
-  } else {
-    // Older registries: the pre-execute waterfall still denies (weaker only
-    // in that an earlier listener could short-circuit it).
-    disposers.push(ctx.on('tools/pre-execute', async (exec, next) => {
-      const reason = denial(exec as unknown as GuardExec)
-      return reason === undefined ? next() : { kind: 'deny', reason }
-    }))
-  }
+  // dsh-tools 0.2.2-rc.2 (the pinned peer; index.ts refuses older hosts) always has guard().
+  disposers.push(ctx.tools.guard((exec) => denial(exec as unknown as GuardExec)))
   return () => { for (const dispose of disposers.reverse()) dispose() }
 }
 

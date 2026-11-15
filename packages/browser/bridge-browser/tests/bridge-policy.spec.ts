@@ -115,10 +115,23 @@ describe('session ownership', () => {
   })
 
   it('answers session.list with only the bridge\'s own, non-subagent sessions', async () => {
-    const { call } = harness()
+    const { call } = harness({}, { ledger: memorySessionLedger(['listed', 'child']) })
     await call('session.create', {})
     const listed = await call('session.list', {}) as { ok: true; value: { items: Array<{ sessionId: string }> } }
-    expect(listed.value.items.map((item) => item.sessionId)).toEqual([])
+    // 'child' is owned but a subagent; 'earlier-bridge' is listed but not owned.
+    expect(listed.value.items.map((item) => item.sessionId)).toEqual(['listed'])
+  })
+
+  it('forgets a purged session from the read-tier listing cache', async () => {
+    let items = [{ sessionId: 'listed', origin: 'user' }]
+    const { policy } = harness({ 'session.list': () => ({ ok: true, value: { items } }) })
+    const signal = new AbortController().signal
+    expect(await policy.allowsSession('listed', signal)).toBe(true)
+    items = []
+    // Still cached until forgotten.
+    expect(await policy.allowsSession('listed', signal)).toBe(true)
+    policy.forgetSession('listed')
+    expect(await policy.allowsSession('listed', signal)).toBe(false)
   })
 
   it('projects workspace.list down to archived ids of the bridge\'s own sessions', async () => {
@@ -246,6 +259,24 @@ describe('deferred creation cannot adopt foreign sessions', () => {
     expect(created.value.sessionId).not.toBe('sub-1')
     expect(await call('session.prompt', { sessionId: 'sub-1', content: [{ type: 'text', text: 'pwn' }] })).toMatchObject({ ok: false, error: { code: 'forbidden' } })
     expect(hostCalls.filter((c) => (c.payload as { sessionId?: unknown } | undefined)?.sessionId === 'sub-1')).toEqual([])
+  })
+})
+
+describe('strict preset check for standing grants (dev loop)', () => {
+  it('reports a full-access preset even when allowDangerFullAccess lets writes through', async () => {
+    const signal = new AbortController().signal
+    const { policy } = harness({
+      'session.permissions': () => ({ ok: true, value: { current: 'danger-full-access' } }),
+    }, { allowDangerFullAccess: true, ledger: memorySessionLedger(['mine']) })
+    expect(await policy.allowsSession('mine', signal, 'write')).toBe(true)
+    expect(await policy.unsafePreset('mine', signal)).toBe('danger-full-access')
+  })
+
+  it('treats a failed permissions lookup as unknown, and a safe preset as safe', async () => {
+    const signal = new AbortController().signal
+    const failing = harness({ 'session.permissions': () => ({ ok: false, error: { code: 'internal', message: 'down', details: {} } }) }, { allowDangerFullAccess: true })
+    expect(await failing.policy.unsafePreset('mine', signal)).toBe('unknown')
+    expect(await harness().policy.unsafePreset('mine', signal)).toBeUndefined()
   })
 })
 

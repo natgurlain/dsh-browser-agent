@@ -1,18 +1,10 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { fileSessionLedger } from '../src/session-ledger.ts'
+import { tempDirs } from './support/tmp.ts'
 
-const dirs: string[] = []
-const temp = (): string => {
-  const dir = mkdtempSync(join(tmpdir(), 'dsh-ledger-'))
-  dirs.push(dir)
-  return dir
-}
-afterEach(() => {
-  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
-})
+const temp = tempDirs('dsh-ledger-')
 
 describe('fileSessionLedger', () => {
   it('loads a private ledger and persists additions', async () => {

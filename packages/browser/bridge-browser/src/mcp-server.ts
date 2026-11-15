@@ -31,6 +31,7 @@ import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { isLoopbackAddress } from './server.ts'
+import { errorMessage } from './host-api.ts'
 
 /** URL path of the MCP endpoint. */
 export const MCP_PATH = '/mcp'
@@ -112,7 +113,6 @@ export interface McpHttpServerOptions {
 interface McpSession {
   id: string
   caller: McpCaller
-  protocolVersion: string
   lastSeen: number
   /** In-flight `tools/call` requests by JSON-RPC id, for `notifications/cancelled`. */
   inflight: Map<string, AbortController>
@@ -148,9 +148,9 @@ export class McpHttpServer {
   /**
    * Listen on 127.0.0.1 (never another interface).
    * @param port - requested port; 0 picks a free one.
-   * @returns the bound URL of the MCP endpoint.
+   * @returns the bound address, port and URL of the MCP endpoint.
    */
-  async listen(port = 0): Promise<{ port: number; url: string }> {
+  async listen(port = 0): Promise<{ address: string; port: number; url: string }> {
     if (this.server !== undefined) throw new Error('the MCP endpoint is already listening')
     const server = createServer((req, res) => { void this.handle(req, res) })
     server.headersTimeout = 10_000
@@ -163,8 +163,10 @@ export class McpHttpServer {
       })
     })
     this.server = server
-    this.port = (server.address() as AddressInfo).port
-    return { port: this.port, url: `http://127.0.0.1:${String(this.port)}${MCP_PATH}` }
+    const bound = server.address() as AddressInfo
+    this.port = bound.port
+    // Report what the socket is actually bound to, not what was asked for.
+    return { address: bound.address, port: this.port, url: `http://${bound.address}:${String(this.port)}${MCP_PATH}` }
   }
 
   /** Stop listening and abort every in-flight call. */
@@ -246,7 +248,7 @@ export class McpHttpServer {
       }
       await this.dispatch(req, res, message)
     } catch (error: unknown) {
-      this.options.log?.(`browser bridge MCP: request failed: ${error instanceof Error ? error.message : String(error)}`)
+      this.options.log?.(`browser bridge MCP: request failed: ${errorMessage(error)}`)
       if (!res.headersSent) reply(res, 500, rpcError(null, -32603, 'internal error'))
       else res.end()
     }
@@ -342,7 +344,6 @@ export class McpHttpServer {
     const session: McpSession = {
       id: randomUUID(),
       caller,
-      protocolVersion,
       lastSeen: this.now(),
       inflight: new Map(),
     }

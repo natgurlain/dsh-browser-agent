@@ -31,7 +31,8 @@ import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-
 import type { BridgeServer } from './server.ts'
 import { toolCallIdArg } from './server.ts'
 import type { SessionLedger } from './session-ledger.ts'
-import { wrapUntrustedPageText } from './watchers.ts'
+import { wrapUntrustedPageText } from './protocol.ts'
+import { errorMessage } from './host-api.ts'
 
 /** Most tasks in one fleet. */
 export const MAX_FLEET_TASKS = 8
@@ -255,7 +256,7 @@ export async function runFanout(
           ...(result.diagnostic === undefined ? {} : { diagnostic: result.diagnostic }),
         }
       } catch (error: unknown) {
-        return { url: task.url, stopReason: 'error', diagnostic: error instanceof Error ? error.message : String(error) }
+        return { url: task.url, stopReason: 'error', diagnostic: errorMessage(error) }
       }
     }))
     return renderFleetResults(results)
@@ -263,8 +264,11 @@ export async function runFanout(
     for (const childId of childIds) deps.children.forget(childId)
     await Promise.allSettled(activations.map((activation) => activation.dispose()))
     // Release even when the caller gave up: a fresh signal, the parent's session.
-    await deps.bridge.requestTool(FLEET_RELEASE_ACTION, { fleetId, closeTabs: args.closeTabs }, new AbortController().signal, options.toolTimeoutMs, parentId)
-      .catch(() => {})
+    // Best effort; requestTool throws synchronously when the extension is gone,
+    // so a `.catch` would not see it and the throw would replace the result.
+    try {
+      await deps.bridge.requestTool(FLEET_RELEASE_ACTION, { fleetId, closeTabs: args.closeTabs }, new AbortController().signal, options.toolTimeoutMs, parentId)
+    } catch { /* release is best effort */ }
   }
 }
 

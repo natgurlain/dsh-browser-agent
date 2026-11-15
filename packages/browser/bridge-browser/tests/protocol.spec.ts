@@ -24,6 +24,10 @@ import {
   parseBridgeFrame,
   isExternalSessionId,
   sanitizeRequesterLabel,
+  UNTRUSTED_NOTICE,
+  UNTRUSTED_NOTICE_LEAD,
+  wrapUntrustedPageText,
+  isProgramStepRef,
 } from '../src/protocol.ts'
 
 const NONCE = 'a'.repeat(64)
@@ -144,6 +148,31 @@ describe('bridge handshake primitives', () => {
     expect(helloProtocolVersion(JSON.stringify({ t: 'rpc' }))).toBeUndefined()
     expect(helloProtocolVersion('nope')).toBeUndefined()
     expect(helloProtocolVersion('[]')).toBeUndefined()
+  })
+})
+
+describe('program step refs', () => {
+  it('accepts { id, step } and drops a malformed ref from a tool.call', () => {
+    expect(isProgramStepRef({ id: 'p', step: 0 })).toBe(true)
+    for (const bad of [undefined, null, 'p', {}, { id: '', step: 0 }, { id: 'p' }, { id: 'p', step: -1 }, { id: 'p', step: 1.5 }, { id: 7, step: 0 }]) {
+      expect(isProgramStepRef(bad), JSON.stringify(bad)).toBe(false)
+    }
+    const frame = (program: unknown) => parseBridgeFrame(JSON.stringify({ t: 'tool.call', id: 'c', name: 'browser_click', args: {}, expiresAt: 1, program }))
+    expect(frame({ id: 'p', step: 2 })).toMatchObject({ program: { id: 'p', step: 2 } })
+    expect(frame({ id: 'p', step: -1 })).not.toHaveProperty('program')
+    expect(frame('p')).not.toHaveProperty('program')
+  })
+})
+
+describe('untrusted-content fence', () => {
+  it('puts the notice on both sides of a nonce-tagged boundary', () => {
+    expect(wrapUntrustedPageText('page text', 'n-1')).toBe(
+      `${UNTRUSTED_NOTICE}\n<UNTRUSTED_PAGE_CONTENT nonce="n-1">\npage text\n</UNTRUSTED_PAGE_CONTENT nonce="n-1">\n${UNTRUSTED_NOTICE}`,
+    )
+    expect(UNTRUSTED_NOTICE.startsWith(UNTRUSTED_NOTICE_LEAD)).toBe(true)
+    const nonce = /nonce="([^"]+)"/u.exec(wrapUntrustedPageText('x'))![1]!
+    expect(nonce).toMatch(/^[0-9a-f-]{36}$/u)
+    expect(wrapUntrustedPageText('x')).not.toContain(nonce)
   })
 })
 

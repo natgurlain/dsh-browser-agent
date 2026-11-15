@@ -16,9 +16,9 @@
  * @module @natgurlain/dsh-bridge-browser/src/learning/schedules
  */
 
-import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { serialQueue, writePrivateFile } from '../private-file.ts'
 import type { Workflow } from './workflow.ts'
 
 /** DSH's per-task delivery floor (seconds). */
@@ -91,7 +91,7 @@ export function schedulePrompt(workflow: Pick<Workflow, 'name'>, params: Record<
 /** Schedules created by this bridge, persisted so ownership survives restarts. */
 export class WorkflowSchedules {
   private cache: ScheduleRecordEntry[] | undefined
-  private queue: Promise<unknown> = Promise.resolve()
+  private readonly serialized = serialQueue()
 
   constructor(
     private readonly file: string,
@@ -99,6 +99,13 @@ export class WorkflowSchedules {
     private readonly ownsSession: (sessionId: string) => Promise<boolean>,
   ) {}
 
+  /**
+   * The recorded schedules. Unlike the ledger and watcher records this read
+   * has no ownership or mode check, on purpose: these records only let the
+   * bridge list and delete schedules (they grant no access), and an ignored
+   * file would make the kill switch revoke nothing while the schedules keep
+   * firing in DSH.
+   */
   private async records(): Promise<ScheduleRecordEntry[]> {
     if (this.cache !== undefined) return this.cache
     try {
@@ -114,17 +121,10 @@ export class WorkflowSchedules {
   }
 
   private async persist(records: ScheduleRecordEntry[]): Promise<void> {
-    this.cache = records
     await mkdir(dirname(this.file), { recursive: true, mode: 0o700 })
-    const temporary = `${this.file}.${randomUUID()}.tmp`
-    await writeFile(temporary, `${JSON.stringify(records, null, 2)}\n`, { mode: 0o600 })
-    await rename(temporary, this.file)
-  }
-
-  private serialized<T>(task: () => Promise<T>): Promise<T> {
-    const run = this.queue.then(task, task)
-    this.queue = run.catch(() => {})
-    return run
+    await writePrivateFile(this.file, `${JSON.stringify(records, null, 2)}\n`, 'the workflow schedule records')
+    // Only a durable write updates what this process believes.
+    this.cache = records
   }
 
   private service(): ScheduleServiceLike {
@@ -186,28 +186,40 @@ export class WorkflowSchedules {
    * Delete the schedules this bridge created (all of them for the kill
    * switch; one install's when its user turns workflows off): a schedule is
    * a standing grant to run the browser unattended. Deletion failures are
-   * reported, and the record is dropped either way so a later list never
-   * resurrects it.
+   * reported and their records kept, so the panel can still list and cancel
+   * a schedule that keeps firing (`list` sweeps records whose schedule is gone).
    * @param install - only schedules created from this install (plus older records that name none).
    */
   revokeAll(install?: string): Promise<{ revoked: number; failed: number }> {
-    return this.serialized(async () => {
-      const all = await this.records()
-      const records = install === undefined ? all : all.filter((record) => record.install === undefined || record.install === install)
-      if (records.length === 0) return { revoked: 0, failed: 0 }
-      const service = this.schedule()
-      let failed = 0
-      for (const record of records) {
-        try {
-          if (service === undefined) throw new Error('no schedule service')
-          await service.edit({ id: record.id, action: 'delete' })
-        } catch {
-          failed += 1
-        }
-      }
-      await this.persist(all.filter((record) => !records.includes(record)))
-      return { revoked: records.length - failed, failed }
-    })
+    return this.serialized(async () => this.revokeWhere(
+      (record) => install === undefined || record.install === undefined || record.install === install,
+    ))
+  }
+
+  /**
+   * Delete the schedules targeting one (purged) session. Like
+   * {@link revokeAll}, a record whose delete failed is kept.
+   */
+  revokeSession(sessionId: string): Promise<{ revoked: number; failed: number }> {
+    return this.serialized(async () => this.revokeWhere((record) => record.sessionId === sessionId))
+  }
+
+  /** Delete the matching schedules; keep the records of those whose delete failed. Call inside {@link serialized}. */
+  private async revokeWhere(matches: (record: ScheduleRecordEntry) => boolean): Promise<{ revoked: number; failed: number }> {
+    const all = await this.records()
+    const records = all.filter(matches)
+    if (records.length === 0) return { revoked: 0, failed: 0 }
+    const service = this.schedule()
+    const deleted: ScheduleRecordEntry[] = []
+    for (const record of records) {
+      try {
+        if (service === undefined) throw new Error('no schedule service')
+        await service.edit({ id: record.id, action: 'delete' })
+        deleted.push(record)
+      } catch { /* counted below; the record stays so the panel can retry */ }
+    }
+    if (deleted.length > 0) await this.persist(all.filter((record) => !deleted.includes(record)))
+    return { revoked: deleted.length, failed: records.length - deleted.length }
   }
 
   /** Cancel (delete) one schedule this bridge created. */

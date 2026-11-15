@@ -43,6 +43,11 @@ export interface BrowserHostApi {
   respond(rpcId: string, result: RespondResult, signal: AbortSignal): Promise<unknown>
 }
 
+/** A thrown value as text: an Error's message, anything else stringified. */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 /** Narrow unknown JSON-like data without accepting arrays. */
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)

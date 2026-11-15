@@ -39,13 +39,15 @@ import { registerPdfTool } from './pdf-tools.ts'
 import { registerBrowserDevTools } from './devtools-tools.ts'
 import { registerRunProgramTool } from './run-program.ts'
 import { FleetChildren, registerFanoutTool, type FleetSubagents } from './fanout.ts'
-import { BRIDGE_WATCH_FIRE_METHOD, fileWatchRecords, handleWatchFire, registerWatchTools, WakeLimiter, type WatchRecordStore } from './watchers.ts'
+import { fileWatchRecords, handleWatchFire, registerWatchTools, WakeLimiter, type WatchRecordStore } from './watchers.ts'
 import {
   BEACON_PORTS,
   BRIDGE_CONFIG_PATH,
   BRIDGE_PATH,
+  BRIDGE_WATCH_FIRE_METHOD,
   bridgeConfigPayload,
   DEFAULT_SNAPSHOT_MAX_CHARS,
+  DEVLOOP_CAPTURE_TOOL,
   DEVTOOLS_CAPS_VERSION,
   MIN_SNAPSHOT_MAX_CHARS,
   PINNED_CHROME_EXTENSION_ID,
@@ -53,7 +55,8 @@ import {
 import { isLoopbackBindAddress, startDiscoveryBeacon, type DiscoveryBeacon } from './discovery-beacon.ts'
 import { withSessionDeferral } from './session-deferral.ts'
 import { withSessionWorkspace } from './session-workspace.ts'
-import { purgeSessionFiles, type SessionPurgeDeps } from './session-purge.ts'
+import { createSessionPurger } from './session-purge.ts'
+import { createKillSwitchHandler, createSessionForgetter, createSnapshotInjector } from './bridge-hooks.ts'
 import { installedTokenMismatch, resolveToken, syncInstalledExtensionToken } from './token.ts'
 import { withBridgePolicy } from './bridge-policy.ts'
 import { installSessionTaint, SessionTaintRegistry, withTaintMethods } from './session-taint.ts'
@@ -63,14 +66,14 @@ import {
   type HostConnectionLike,
   type TypertGatewayLike,
 } from './remote-host-api.ts'
-import { isRecord, type BrowserHostApi } from './host-api.ts'
+import type { BrowserHostApi } from './host-api.ts'
 import { mountMcpEndpoint, type McpConfig } from './mcp-mount.ts'
 import { createMcpToolHost, type ToolRegistryLike } from './mcp-tools.ts'
 import { registerBrowserDelegateTool, registerBrowserPreset, registerBrowserSkills } from './browser-agent.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { DEVLOOP_CAPTURE_TIMEOUT_MS, DevLoop, withDevLoopMethods } from './dev-loop.ts'
-import { DEVLOOP_CAPTURE_TOOL } from './protocol.ts'
 import { mountLearning, type LearningMount } from './learning/index.ts'
+import { errorMessage } from './host-api.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'bridge-browser'
@@ -111,8 +114,8 @@ const DEFAULT_DEFER_SESSION_CREATE = true
 /** Default: advertise a fixed-port discovery beacon so a random host port stays discoverable. */
 const DEFAULT_BEACON = true
 
-/** Reported to MCP clients as the server version. */
-const BRIDGE_PACKAGE_VERSION = '0.0.7'
+/** Reported to MCP clients as the server version; manifest.spec checks it equals package.json's. */
+export const BRIDGE_PACKAGE_VERSION = '0.0.7'
 
 /** Instance metadata the discovery endpoints advertise for the extension's picker. */
 const INSTANCE_INFO = { pid: process.pid, startedAt: new Date().toISOString() }
@@ -264,7 +267,7 @@ export async function apply(ctx: Context, resolved: ResolvedConfig): Promise<voi
       const synced = await syncInstalledExtensionToken(tokenRes.token)
       if (synced === 'written') ctx.logger.info('browser bridge: refreshed the token copy in the installed extension')
     } catch (error: unknown) {
-      ctx.logger.warn(`browser bridge: could not refresh the installed extension token: ${error instanceof Error ? error.message : String(error)}`)
+      ctx.logger.warn(`browser bridge: could not refresh the installed extension token: ${errorMessage(error)}`)
     }
   } else {
     // A pinned token is never copied into the installed extension; say so
@@ -315,75 +318,16 @@ function mountBridge(
     browserContext.activate(agent)
   })
 
-  const purgeSession = async (sessionId: string): Promise<void> => {
-    const runningSessionIds = new Set<string>()
-    try {
-      const listed = await api.call({
-        rpcId: randomUUID(),
-        method: 'session.list',
-        payload: {},
-        signal: new AbortController().signal,
-      })
-      if (listed.ok && isRecord(listed.value) && Array.isArray(listed.value.items)) {
-        for (const entry of listed.value.items) {
-          if (isRecord(entry) && entry.running === true && typeof entry.sessionId === 'string') {
-            runningSessionIds.add(entry.sessionId)
-          }
-        }
-      }
-    } catch {
-      // Listing is advisory; the required exclusive persistence handle below
-      // protects both active and idle sessions, including in other processes.
-    }
-    const deps: SessionPurgeDeps = {
-      sessionsRoot: SESSIONS_ROOT,
-      runningSessionIds,
-      acquireOwnership: async (id) => {
-        const persistence = ctx.get('sessionPersistence')
-        if (persistence === undefined) {
-          throw new Error('browser bridge: session persistence is required to safely purge a session')
-        }
-        return persistence.open(id as Parameters<typeof persistence.open>[0], 'write')
-      },
-      archiveSession: async (id) => {
-        const workspace = await api.call({
-          rpcId: randomUUID(), method: 'workspace.list', payload: {}, signal: new AbortController().signal,
-        })
-        if (!workspace.ok) throw new Error(workspace.error.message)
-        if (!isRecord(workspace.value) || !Array.isArray(workspace.value.archivedSessionIds)) {
-          throw new TypeError('workspace.list returned an invalid archive set')
-        }
-        const wasArchived = workspace.value.archivedSessionIds.includes(id)
-        const archived = await api.call({
-          rpcId: randomUUID(),
-          method: 'workspace.archiveSession',
-          payload: { sessionId: id },
-          signal: new AbortController().signal,
-        })
-        if (!archived.ok) throw new Error(archived.error.message)
-        if (wasArchived) return
-        return async () => {
-          const restored = await api.call({
-            rpcId: randomUUID(), method: 'workspace.unarchiveSession', payload: { sessionId: id },
-            signal: new AbortController().signal,
-          })
-          if (!restored.ok) throw new Error(restored.error.message)
-        }
-      },
-      waitForArchiveCleanup: async (id) => {
-        const worktrees = ctx.get('worktrees')
-        if (worktrees === undefined) return
-        const query = ctx.get('sessionQuery')
-        if (query === undefined) throw new Error('session query is required to finish worktree cleanup')
-        const session = await query.inspectSession(id as Parameters<typeof query.inspectSession>[0], session => session)
-        const pending = await worktrees.cleanupOf(session, null)
-        const cleanup = pending?.status === 'scheduled'
-          ? await worktrees.cleanupOf(session, pending.revision) : pending
-        if (cleanup?.status === 'failed') throw new Error('worktree cleanup failed')
-      },
-    }
-    await purgeSessionFiles(deps, sessionId)
-  }
+  const forgetSession = createSessionForgetter({
+    taint,
+    forgetAffinity: (sessionId) => { server.forgetSession(sessionId) },
+    wakeLimiter: { forget: (sessionId) => { wakeLimiter.forget(sessionId) } },
+    policy: { forgetSession: (sessionId) => { fenced.forgetSession(sessionId) } },
+    watchRecords,
+    learning: () => learning,
+    warn: (message) => { ctx.logger.warn(message) },
+  })
+  const purgeSession = createSessionPurger(ctx, api, SESSIONS_ROOT, forgetSession)
 
   // Least privilege: the extension reaches only what its panel uses, in scope.
   const fenced = withBridgePolicy(api, {
@@ -403,6 +347,7 @@ function mountBridge(
     ? handleWatchFire(payload, context.signal, {
         records: watchRecords,
         ownsSession: (sessionId, signal) => fenced.allowsSession(sessionId, signal, 'own'),
+        isRunning: (sessionId) => ctx.agents.get(sessionId as Parameters<typeof ctx.agents.get>[0]) !== undefined,
         wake: (sessionId, message) => {
           const agent = ctx.agents.get(sessionId as Parameters<typeof ctx.agents.get>[0])
           if (agent === undefined) return false
@@ -437,6 +382,7 @@ function mountBridge(
     devLoop.noteToolResult(exec.agent === undefined ? undefined : String(exec.agent.id), exec.name, result.isError)
   })
   ctx.on('agent/status', ({ agent, status }) => { void devLoop.noteStatus(String(agent.id), status) })
+  const killSwitch = createKillSwitchHandler({ devLoop, learning: () => learning, info: (message) => { ctx.logger.info(message) } })
   server = new BridgeServer({
     token: tokenRes.token,
     // An MCP client's external session is the bridge's own: the panel may clear its taint too.
@@ -453,17 +399,10 @@ function mountBridge(
       maxInteractiveItems: resolved.maxInteractiveItems,
       devTools: { version: DEVTOOLS_CAPS_VERSION },
     },
-    injectBrowserSnapshot: (sessionId, snapshot, reason) => {
-      browserContext.inject(sessionId, snapshot, reason)
-      taint.mark(sessionId, 'snapshot-injection')
-    },
+    injectBrowserSnapshot: createSnapshotInjector((sessionId, snapshot, reason) => browserContext.inject(sessionId, snapshot, reason), taint),
     purgeSession,
     // The kill switch revokes standing grants on the Host too.
-    onKillSwitch: () => {
-      const unlinked = devLoop.unlinkAll()
-      if (unlinked > 0) ctx.logger.info(`browser bridge: kill switch engaged; removed ${String(unlinked)} dev loop link(s)`)
-      void learning?.revokeStandingGrants()
-    },
+    onKillSwitch: () => { void killSwitch() },
     extraRpc: (method, payload, context) => extraRpc(method, payload, context)
       ?? learning?.rpc(method, payload, {
         connection: context.connection,
@@ -471,7 +410,7 @@ function mountBridge(
       }),
     ...(auditLog === undefined ? {} : {
       audit: new ToolCallAuditor(auditLog, (error) => {
-        ctx.logger.warn(`browser bridge: audit log write failed: ${error instanceof Error ? error.message : String(error)}`)
+        ctx.logger.warn(`browser bridge: audit log write failed: ${errorMessage(error)}`)
       }),
       exportAudit: (sessionId: string | undefined) => auditLog.read(sessionId),
     }),
@@ -495,7 +434,7 @@ function mountBridge(
       ...(auditLog === undefined ? {} : {
         audit: (sessionId, entry) => {
           void auditLog.append(sessionId, { kind: 'fixture', ...entry }).catch((error: unknown) => {
-            ctx.logger.warn(`browser bridge: audit log write failed: ${error instanceof Error ? error.message : String(error)}`)
+            ctx.logger.warn(`browser bridge: audit log write failed: ${errorMessage(error)}`)
           })
         },
       }),
@@ -590,7 +529,7 @@ function mountBridge(
     registerBrowserDelegateTool(ctx, defineTool as never)
   }
   void registerBrowserSkills(ctx, fileURLToPath(new URL('../skills/', import.meta.url))).catch((error: unknown) => {
-    ctx.logger.warn(`browser bridge: could not register the browser skills: ${error instanceof Error ? error.message : String(error)}`)
+    ctx.logger.warn(`browser bridge: could not register the browser skills: ${errorMessage(error)}`)
   })
 
   // Other harnesses drive the same browser tools over a loopback MCP endpoint
@@ -709,7 +648,7 @@ function mountDiscoveryBeacon(
       beacon = started
       ctx.logger.info(`browser bridge: discovery beacon on http://127.0.0.1:${String(started.port)}${BRIDGE_CONFIG_PATH}`)
     }, (error: unknown) => {
-      warn(`browser bridge: discovery beacon failed: ${error instanceof Error ? error.message : String(error)}`)
+      warn(`browser bridge: discovery beacon failed: ${errorMessage(error)}`)
     })
     return () => {
       disposed = true

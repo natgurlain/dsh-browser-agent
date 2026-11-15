@@ -1,8 +1,8 @@
 /**
  * The one way the bridge writes a file into a session's workspace.
  *
- * Every bridge-side file write (`browser_extract { saveTo }`, PDF and
- * download saves) goes through {@link writeWorkspaceFile}:
+ * Every bridge-side file write (`browser_extract { saveTo }`, PDF saves,
+ * saved workflows and failure fixtures) goes through {@link writeWorkspaceFile}:
  *
  * ```ts
  * const target = workspaceWriteTarget(ctx, exec.agent, options.workspacePath ?? '')
@@ -41,12 +41,20 @@ import { randomUUID } from 'node:crypto'
 import { constants, existsSync } from 'node:fs'
 import { link, lstat, mkdir, open, readlink, realpath, unlink, type FileHandle } from 'node:fs/promises'
 import { extname, isAbsolute, join, relative, sep } from 'node:path'
+import { errorMessage } from './host-api.ts'
 
 /** A refused or failed workspace write the model can act on. */
 export class WorkspaceWriteError extends Error {
-  constructor(message: string) {
+  /**
+   * Machine-readable refusal kind, for callers that recover from one
+   * (`exists`: the file is already there; `symlink`: the path goes through a
+   * link or non-directory). Absent for every other refusal.
+   */
+  readonly reason: 'exists' | 'symlink' | undefined
+  constructor(message: string, reason?: 'exists' | 'symlink') {
     super(message)
     this.name = 'WorkspaceWriteError'
+    this.reason = reason
   }
 }
 
@@ -113,7 +121,7 @@ export function workspaceWriteTarget(ctx: unknown, agent: unknown, fallbackWorks
   try {
     mode = (service.resolve as (request: object) => { mode?: unknown }).call(service, session === undefined ? {} : { session })?.mode
   } catch (error: unknown) {
-    throw new WorkspaceWriteError(`the session's sandbox policy could not be resolved (${error instanceof Error ? error.message : String(error)}); nothing was written.`)
+    throw new WorkspaceWriteError(`the session's sandbox policy could not be resolved (${errorMessage(error)}); nothing was written.`)
   }
   if (mode === 'read-only') {
     throw new WorkspaceWriteError('this session runs in a read-only sandbox, so the browser tools cannot write files into its workspace; nothing was written.')
@@ -178,11 +186,11 @@ function codeOf(error: unknown): string | undefined {
 }
 
 function symlinkRefusal(relPath: string): WorkspaceWriteError {
-  return new WorkspaceWriteError(`the path goes through a symbolic link or a non-directory: "${relPath}"; nothing was written.`)
+  return new WorkspaceWriteError(`the path goes through a symbolic link or a non-directory: "${relPath}"; nothing was written.`, 'symlink')
 }
 
 function existsRefusal(relPath: string): WorkspaceWriteError {
-  return new WorkspaceWriteError(`"${relPath}" already exists; existing files are never overwritten. Choose a new file name.`)
+  return new WorkspaceWriteError(`"${relPath}" already exists; existing files are never overwritten. Choose a new file name.`, 'exists')
 }
 
 /** Whether descriptor-relative paths (`/proc/self/fd/<fd>/<name>`) work here. */

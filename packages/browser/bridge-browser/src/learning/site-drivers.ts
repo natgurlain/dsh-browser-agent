@@ -17,6 +17,8 @@
  * @module @natgurlain/dsh-bridge-browser/src/learning/site-drivers
  */
 
+import { isRecord } from '../host-api.ts'
+
 /** Format marker of a saved driver. */
 export const SITE_DRIVER_FORMAT = 'dsh-site-driver/v1'
 
@@ -24,12 +26,13 @@ export const SITE_DRIVER_FORMAT = 'dsh-site-driver/v1'
 export const SITE_DRIVER_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const
 export type SiteDriverMethod = typeof SITE_DRIVER_METHODS[number]
 
-/** Plain headers a driver may carry verbatim. */
+/** How a driver's body is encoded, from its Content-Type header. */
 function bodyTypeOf(headers: Record<string, string>): 'json' | 'form' | 'text' {
   const contentType = Object.entries(headers).find(([name]) => name.toLowerCase() === 'content-type')?.[1] ?? ''
   return /json/iu.test(contentType) ? 'json' : /x-www-form-urlencoded/iu.test(contentType) ? 'form' : 'text'
 }
 
+/** Plain headers a driver may carry verbatim. */
 const KEPT_HEADERS = new Set(['content-type', 'accept', 'x-requested-with'])
 /** Headers never stored and never sent from a token source. */
 const FORBIDDEN_HEADERS = new Set(['cookie', 'authorization', 'proxy-authorization', 'host', 'origin', 'referer', 'content-length'])
@@ -115,10 +118,6 @@ export class SiteDriverError extends Error {
 const IDENT = /^[a-z][a-z0-9_]{0,39}$/u
 const PARAM = /^[A-Za-z_][A-Za-z0-9_]{0,39}$/u
 const PLACEHOLDER = /\{\{\s*(@(?:cookie|meta):[^}\s]{1,100}|[A-Za-z_][A-Za-z0-9_]*)\s*\}\}/gu
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 function originOf(url: string): string | undefined {
   try {
@@ -518,13 +517,6 @@ export function describeDriverRequest(request: DriverRequest): string {
       ? 'Filled from the page: nothing (any {{@…}} text above is sent literally).'
       : `Filled from the page (${String(filled.length)}):\n${filled.map((line) => `  ${line}`).join('\n')}\nAny other {{@…}} text above is sent literally.`,
   ].join('\n')
-}
-
-/** Export file of a set of drivers. */
-export interface SiteDriverExport {
-  format: 'dsh-site-drivers/v1'
-  exportedAt: string
-  drivers: SiteDriver[]
 }
 
 /** Parse an import file: every driver re-validated (origin binding included). */

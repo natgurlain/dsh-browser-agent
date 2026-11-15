@@ -66,7 +66,7 @@ async function start(tools: McpToolHost = host(), extra: Partial<ConstructorPara
   const server = new McpHttpServer({ token: TOKEN, tools, openSession, serverInfo: { name: 'dsh-browser', version: '0' }, ...extra })
   servers.push(server)
   const bound = await server.listen(0)
-  return { server, port: bound.port, url: bound.url, openSession }
+  return { server, address: bound.address, port: bound.port, url: bound.url, openSession }
 }
 
 async function initialize(port: number, clientInfo: Record<string, unknown> = { name: 'claude-code', version: '1' }) {
@@ -81,7 +81,9 @@ async function initialize(port: number, clientInfo: Record<string, unknown> = { 
 
 describe('McpHttpServer', () => {
   it('binds the loopback interface only', async () => {
-    const { url } = await start()
+    const { address, url } = await start()
+    // The socket's own address, not a literal: binding 0.0.0.0 would fail here.
+    expect(address).toBe('127.0.0.1')
     expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/u)
   })
 
@@ -175,6 +177,34 @@ describe('McpHttpServer', () => {
     expect((await send(port, { headers, body: { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 'c1' } } })).status).toBe(202)
     expect(seen?.aborted).toBe(true)
     expect((await pending).body).toMatchObject({ id: 'c1', result: { isError: true } })
+  })
+
+  it('aborts an in-flight call when the client drops the HTTP request', async () => {
+    let seen: AbortSignal | undefined
+    const tools = host({
+      call: (_name, _args, _caller, signal) => {
+        seen = signal
+        return new Promise((resolve) => {
+          signal.addEventListener('abort', () => { resolve({ content: [{ type: 'text', text: 'cancelled' }], isError: true }) })
+        })
+      },
+    })
+    const { port } = await start(tools)
+    const { session } = await initialize(port)
+    const body = JSON.stringify({ jsonrpc: '2.0', id: 'd1', method: 'tools/call', params: { name: 'browser_click', arguments: {} } })
+    const req = httpRequest({
+      host: '127.0.0.1', port, path: '/mcp', method: 'POST',
+      headers: {
+        host: `127.0.0.1:${String(port)}`, authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json',
+        accept: 'application/json, text/event-stream', 'mcp-session-id': session,
+      },
+    })
+    req.on('error', () => {})
+    req.end(body)
+    await vi.waitFor(() => { expect(seen).toBeDefined() })
+    expect(seen?.aborted).toBe(false)
+    req.destroy()
+    await vi.waitFor(() => { expect(seen?.aborted).toBe(true) })
   })
 
   it('expires idle sessions and evicts the least recently used one when full', async () => {

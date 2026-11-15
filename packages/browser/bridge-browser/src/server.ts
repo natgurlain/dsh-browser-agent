@@ -39,9 +39,11 @@
  * predecessor, whose in-flight tool calls settle as `bridge-closed`; clients
  * without an identity share one legacy slot. At most MAX_READY_CONNECTIONS
  * stay open: the least recently active one is evicted beyond that.
- * Tool calls go to the connection a session last prompted from (or that last
- * answered one of its tool calls), else to the most recently active
- * connection that can serve the tool. A `tool.result` is accepted only from
+ * Tool calls go to the connection a session is bound to (the one it was last
+ * prompted from or had a snapshot injected from; a connection that answered
+ * one of its calls binds it only while it is unbound; an MCP session binds at
+ * its first dispatch), else to the most recently active connection that can
+ * serve the tool. A `tool.result` is accepted only from
  * the connection the call was sent to.
  *
  * Panel-independent approvals: while a call waits on the user, the owning
@@ -96,6 +98,7 @@ import { SessionPurgeError } from './session-purge.ts'
 import type { BridgeAuditObserver } from './audit-log.ts'
 import { handleAuditRpc } from './audit-rpc.ts'
 import { verifyToken } from './token.ts'
+import { errorMessage } from './host-api.ts'
 
 /**
  * Gateway methods the /api carrier pins to loopback (mirror of
@@ -151,7 +154,7 @@ const nodeHmac: BridgeHmac = (key, message) => createHmac('sha256', key).update(
 /** Largest message an unauthenticated socket may send (a `hello` is < 1 KiB). */
 export const PRE_AUTH_MAX_PAYLOAD = 64 * 1024
 
-/** Sockets allowed to sit in the handshake at once; the oldest is evicted as busy. */
+/** Sockets allowed to sit in the handshake at once; beyond that the oldest is terminated. */
 export const MAX_PENDING_SOCKETS = 16
 
 /** Authenticated connections kept at once; the least recently active is evicted beyond it. */
@@ -250,13 +253,14 @@ export interface BridgeServerDeps {
   audit?: BridgeAuditObserver
   /** Read and verify one session's audit log (undefined: agentless calls). */
   exportAudit?: (sessionId: string | undefined) => Promise<unknown>
-  /**
-   * Bridge-internal RPCs owned by plugin modules (page watchers, tab fleets).
-   * Returns undefined for a method it does not own; checked after the audit
-   * RPCs and before anything reaches the Host API.
-   */
   /** The extension reported its kill switch (`bridge.audit.record { event: 'kill-switch' }`). */
   onKillSwitch?: (connection: string | undefined) => void
+  /**
+   * Bridge-internal RPCs owned by plugin modules (page watchers, learning).
+   * Returns undefined for a method it does not own; checked after the audit
+   * RPCs and before anything reaches the Host API. A rejection is answered
+   * as an `internal` error.
+   */
   extraRpc?: (method: string, payload: unknown, context: { connection: string; signal: AbortSignal }) =>
     Promise<{ ok: true; result: unknown } | { ok: false; error: { code: string; message: string } }> | undefined
   /**
@@ -279,7 +283,7 @@ export interface BridgeServerDeps {
    * handshake through it.
    */
   forwardedPorts?: readonly number[]
-  /** Seconds a fresh socket may present `hello`; defaults to HELLO_TIMEOUT_MS. */
+  /** Milliseconds a fresh socket may take to present `hello`; defaults to HELLO_TIMEOUT_MS. */
   helloTimeoutMs?: number
   /** Server ping cadence; defaults to PING_INTERVAL_MS. */
   pingIntervalMs?: number
@@ -387,7 +391,7 @@ export class BridgeServer {
   private readonly wss = new WebSocketServer({ noServer: true })
   /** Authenticated connections by client key. */
   private readonly connections = new Map<string, ReadyConnection>()
-  /** Session → client key that last prompted it or answered one of its tool calls. */
+  /** Session → client key it is bound to (see the class doc for when a binding is set). */
   private readonly sessionAffinity = new Map<string, string>()
   private connectionSerial = 0
   private readonly serverCaps: BridgeCaps
@@ -592,10 +596,7 @@ export class BridgeServer {
     return false
   }
 
-  /**
-   * The install a session is bound to: its own affinity, else its nearest
-   * ancestor's (a subagent or fork acts in the browser its parent drives).
-   */
+  /** Whether the session (or an ancestor) is tainted; fails closed when the lineage throws. */
   private sessionTainted(sessionId: string): boolean {
     try {
       return this.deps.sessionLineage?.isTainted(sessionId) === true
@@ -604,6 +605,18 @@ export class BridgeServer {
     }
   }
 
+  /**
+   * Forget a purged session's install binding. The caller decides whether
+   * that is safe (no child session inherits the binding through it).
+   */
+  forgetSession(sessionId: string): void {
+    this.sessionAffinity.delete(sessionId)
+  }
+
+  /**
+   * The install a session is bound to: its own affinity, else its nearest
+   * ancestor's (a subagent or fork acts in the browser its parent drives).
+   */
   private affinityOf(sessionId: string): string | undefined {
     let current: string | undefined = sessionId
     const seen = new Set<string>()
@@ -900,7 +913,7 @@ export class BridgeServer {
     }
     const forbidden = PRIVILEGED_METHODS.has(frame.method) && !isLoopbackAddress(conn.remoteAddress)
     if (forbidden) {
-      sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'forbidden', message: 'method is loopback-only' } })
+      this.rpcError(conn, frame.id, 'forbidden', 'method is loopback-only')
       return
     }
     const audited = handleAuditRpc(frame.method, frame.payload, {
@@ -916,10 +929,9 @@ export class BridgeServer {
     })
     const internal = audited ?? this.deps.extraRpc?.(frame.method, frame.payload, { connection: conn.key, signal: conn.abort.signal })
     if (internal !== undefined) {
-      const answer = await internal.catch((error: unknown) => ({ ok: false as const, error: { code: 'internal', message: error instanceof Error ? error.message : String(error) } }))
-      sendFrame(conn, answer.ok
-        ? { t: 'rpc.result', id: frame.id, ok: true, result: { type: 'server-response', rpcId: frame.id, result: { ok: true, value: answer.result } } }
-        : { t: 'rpc.result', id: frame.id, ok: false, error: answer.error })
+      const answer = await internal.catch((error: unknown) => ({ ok: false as const, error: { code: 'internal', message: errorMessage(error) } }))
+      if (answer.ok) sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { type: 'server-response', rpcId: frame.id, result: { ok: true, value: answer.result } } })
+      else this.rpcError(conn, frame.id, answer.error.code, answer.error.message)
       return
     }
     if (frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD || frame.method === BRIDGE_SESSION_PURGE_METHOD) {
@@ -934,24 +946,14 @@ export class BridgeServer {
           conn.abort.signal,
           frame.method === BRIDGE_SESSION_PURGE_METHOD ? 'own' : 'write',
         ).catch(() => false)) {
-        sendFrame(conn, {
-          t: 'rpc.result',
-          id: frame.id,
-          ok: false,
-          error: { code: 'forbidden', message: `session ${JSON.stringify(sessionId)} is not available to the browser bridge` },
-        })
+        this.rpcError(conn, frame.id, 'forbidden', `session ${JSON.stringify(sessionId)} is not available to the browser bridge`)
         return
       }
     }
     if (frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD) {
       const payload = browserSnapshotPayload(frame.payload)
       if (payload === undefined) {
-        sendFrame(conn, {
-          t: 'rpc.result',
-          id: frame.id,
-          ok: false,
-          error: { code: 'bad-request', message: 'sessionId and snapshot must be non-empty strings' },
-        })
+        this.rpcError(conn, frame.id, 'bad-request', 'sessionId and snapshot must be non-empty strings')
         return
       }
       try {
@@ -961,33 +963,21 @@ export class BridgeServer {
         this.sessionAffinity.set(payload.sessionId, conn.key)
         sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { accepted: true } })
       } catch (error: unknown) {
-        sendFrame(conn, {
-          t: 'rpc.result',
-          id: frame.id,
-          ok: false,
-          error: { code: 'internal', message: String(error) },
-        })
+        this.rpcError(conn, frame.id, 'internal', String(error))
       }
       return
     }
     if (frame.method === BRIDGE_SESSION_PURGE_METHOD) {
       const sessionId = purgeSessionPayload(frame.payload)
       if (sessionId === undefined) {
-        sendFrame(conn, {
-          t: 'rpc.result',
-          id: frame.id,
-          ok: false,
-          error: { code: 'bad-request', message: 'sessionId must be a non-empty string' },
-        })
+        this.rpcError(conn, frame.id, 'bad-request', 'sessionId must be a non-empty string')
         return
       }
       try {
         await this.deps.purgeSession(sessionId)
         sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { purged: true } })
       } catch (error: unknown) {
-        const code = error instanceof SessionPurgeError ? error.code : 'internal'
-        const message = error instanceof Error ? error.message : String(error)
-        sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: false, error: { code, message } })
+        this.rpcError(conn, frame.id, error instanceof SessionPurgeError ? error.code : 'internal', errorMessage(error))
       }
       return
     }
@@ -1009,7 +999,7 @@ export class BridgeServer {
         result: { type: 'server-response', rpcId: frame.id, result },
       })
     } catch (error: unknown) {
-      sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'internal', message: String(error) } })
+      this.rpcError(conn, frame.id, 'internal', String(error))
     }
   }
 
