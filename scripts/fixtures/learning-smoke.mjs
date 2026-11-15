@@ -14,6 +14,11 @@ export const learningSubmissions = []
 const csrf = `csrf-${randomUUID()}`
 const PEOPLE = ['Ada', 'Grace', 'Linus']
 const invited = []
+/** The long table: two rows the user does, then more than one program (25 steps) of remaining rows. */
+const MANY_ROWS = 16
+/** The id-first table: rows are told apart by their id only (every status reads "Paid", every field is "Email"). */
+const INVOICE_BASE = 1000
+const manyPeople = (count, who = 'Person') => Array.from({ length: count }, (_unused, index) => `${who} ${String(index + 1).padStart(2, '0')}`)
 
 /**
  * Fixture routes for the learning smoke (`/learn`, `/api/learn`, `/api/invite`).
@@ -38,6 +43,9 @@ export function handleLearningRequest(request, response) {
   // v=1 records, v=2 renames every id (self-healing), v=3 makes "Save" ambiguous.
   const v = url.searchParams.get('v') ?? '1'
   const suffix = v === '1' ? '' : v
+  // rows=N: a longer table, for a "do the remaining N" that exceeds one program.
+  const rows = Number(url.searchParams.get('rows') ?? 0)
+  const people = rows > 0 ? manyPeople(rows, url.searchParams.get('who') === 'Guest' ? 'Guest' : 'Person') : PEOPLE
   response.setHeader('set-cookie', `csrftoken=${csrf}; Path=/`)
   response.end(`<!doctype html><title>Learn ${v}</title><meta name="csrf-token" content="${csrf}">
 <body><h1>Contacts</h1>
@@ -49,7 +57,9 @@ export function handleLearningRequest(request, response) {
 </form>
 <p id="status"></p>
 <table id="people"><tbody>
-${PEOPLE.map((person, index) => `<tr><td>${person}</td><td><input aria-label="Email ${String(index + 1)}"></td><td><button type="button" class="invite">Invite</button></td></tr>`).join('\n')}
+${url.searchParams.get('shape') === 'ids'
+    ? Array.from({ length: rows }, (_unused, index) => `<tr><td>${String(INVOICE_BASE + index + 1)}</td><td>Paid</td><td><input aria-label="Email"></td><td><button type="button" class="invite">Invite</button></td></tr>`).join('\n')
+    : people.map((person, index) => `<tr><td>${person}</td><td><input aria-label="Email ${String(index + 1)}"></td><td><button type="button" class="invite">Invite</button></td></tr>`).join('\n')}
 </tbody></table>
 <script>
   const cookie = () => document.cookie.split('; ').find(part => part.startsWith('csrftoken='))?.slice(10) ?? ''
@@ -86,13 +96,13 @@ export async function runLearningSmoke(ctx) {
     globalThis.learnPort = chrome.runtime.connect({ name: 'dsh-learning' })
     learnPort.onMessage.addListener(message => learnMessages.push(message))
   })
-  const learn = async (type, body = {}) => {
+  const learn = async (type, body = {}, timeout = 60_000) => {
     const id = await panel.evaluate(({ type, body }) => {
       const id = crypto.randomUUID()
       learnPort.postMessage({ type, id, ...body })
       return id
     }, { type, body })
-    const answer = await waitFor(() => panel.evaluate(id => learnMessages.find(message => message.type === 'learning.result' && message.id === id), id), type)
+    const answer = await waitFor(() => panel.evaluate(id => learnMessages.find(message => message.type === 'learning.result' && message.id === id), id), type, timeout)
     assert.equal(answer.ok, true, `${type}: ${JSON.stringify(answer.error)}`)
     return answer.result
   }
@@ -238,6 +248,133 @@ export async function runLearningSmoke(ctx) {
   await waitFor(() => invited.includes('Linus'), 'remaining row done by the program')
   assert.equal(await panel.evaluate(() => messages.some(message => message.type === 'approval.request')), false, 'one card covered the program')
   results.push('Watch me learns two real repetitions over table rows and does the remaining row after a single program card')
+
+  // ---- 3.7 beyond one program: 14 remaining rows × 2 steps = 28 steps (> 25) ----
+  const many = manyPeople(MANY_ROWS)
+  await page.goto(`${origin}/learn?v=1&rows=${String(MANY_ROWS)}`)
+  await page.bringToFront()
+  await delay(1_700)
+  await learn('learning.watch.start')
+  for (const [index, person] of many.slice(0, 2).entries()) {
+    await page.locator('#people input').nth(index).fill(person)
+    await page.locator('.invite').nth(index).click()
+  }
+  const remainder = await waitFor(async () => {
+    const offered = (await state()).suggestion
+    return offered?.remaining === MANY_ROWS - 2 ? offered : undefined
+  }, 'watch-me suggestion for every remaining row')
+  assert.equal(remainder.program.length, 28, 'the offer holds the whole remainder, beyond one 25-step program')
+  assert.equal(remainder.more, false)
+  await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request' && message.type !== 'agent.pause-state') })
+  const longRun = learn('learning.watch.run', {}, 180_000)
+  const seriesCard = await waitFor(() => panel.evaluate(() => messages.find(message => message.type === 'approval.request')?.request), 'series card')
+  assert.equal(seriesCard.action, 'browser_run')
+  // The one card states the true total and reads as one line per row; a row's exact steps are behind its line.
+  assert.match(seriesCard.summary, /Repeat a 2-step action on 14 rows: 28 steps in total/u)
+  assert.equal(seriesCard.browserOnly, true)
+  assert.equal(seriesCard.details.length, 1)
+  assert.equal(seriesCard.details[0].kind, 'rows')
+  assert.equal(seriesCard.details[0].rows.length, 14)
+  assert.equal(seriesCard.details[0].rows[0].label, 'Type into “Email 3” ← “Person 03” → Click “Invite” — Person 03')
+  assert.equal(seriesCard.details[0].rows.at(-1).label, 'Type into “Email 16” ← “Person 16” → Click “Invite” — Person 16')
+  assert.ok(seriesCard.details[0].rows.at(-1).payload.includes(`tr:nth-child(${String(MANY_ROWS)})`), 'the last row\'s steps are on the card')
+  await panel.evaluate(id => { messages = messages.filter(message => message.type !== 'approval.request'); panelPort.postMessage({ type: 'approval.response', id, decision: 'allow-once' }) }, seriesCard.id)
+  // Pause as the first batch (12 rows) ends: the run must stop there until the user resumes.
+  await waitFor(() => invited.includes(many[13]), 'first batch done', 120_000)
+  await panel.evaluate(() => panelPort.postMessage({ type: 'agent.pause', mode: 'after-step' }))
+  const held = await waitFor(() => panel.evaluate(() => messages.filter(message => message.type === 'agent.pause-state').at(-1)?.state.held[0]), 'the run held by the pause', 20_000)
+  const doneWhilePaused = invited.filter(email => many.includes(email)).length
+  assert.ok(doneWhilePaused < MANY_ROWS, 'the pause landed before the run finished')
+  await delay(1_500)
+  assert.equal(invited.filter(email => many.includes(email)).length, doneWhilePaused, 'nothing runs while paused')
+  await panel.evaluate(() => panelPort.postMessage({ type: 'agent.resume' }))
+  const longOutcome = await longRun
+  assert.equal(longOutcome.report.status, 'completed', JSON.stringify(longOutcome).slice(0, 2_000))
+  assert.deepEqual(longOutcome.report.rows, { done: 14, total: 14, steps: 28 })
+  assert.match(longOutcome.text, /^Done: all 14 rows \(28 steps\)\./u)
+  assert.equal((await state()).resume, null)
+  await waitFor(() => many.every(person => invited.includes(person)), 'every remaining row done')
+  assert.deepEqual(invited.filter(email => many.includes(email)), many, 'each row exactly once, in order')
+  assert.equal(await panel.evaluate(() => messages.some(message => message.type === 'approval.request')), false, 'one card covered every batch')
+  results.push(`Watch me does a remainder longer than one program (14 rows, 28 steps) in batches under a single card that states the total; a pause held it at ${held.name === 'browser_run' ? 'the batch boundary' : `a step (${held.name})`} until resume`)
+
+  // ---- 3.7 a row relabelled after the approval stops the series; the rest continues on a new card ----
+  const guests = manyPeople(MANY_ROWS, 'Guest')
+  await page.goto(`${origin}/learn?v=1&rows=${String(MANY_ROWS)}&who=Guest`)
+  await page.bringToFront()
+  await delay(1_700)
+  await learn('learning.watch.start')
+  for (const [index, person] of guests.slice(0, 2).entries()) {
+    await page.locator('#people input').nth(index).fill(person)
+    await page.locator('.invite').nth(index).click()
+  }
+  await waitFor(async () => (await state()).suggestion?.remaining === MANY_ROWS - 2, 'watch-me suggestion for the guests')
+  await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request') })
+  const brokenRun = learn('learning.watch.run', {}, 180_000)
+  const guestCard = await waitFor(() => panel.evaluate(() => messages.find(message => message.type === 'approval.request')?.request), 'series card for the guests')
+  assert.equal(guestCard.details[0].rows.at(-1).label, 'Type into “Email 16” ← “Guest 16” → Click “Invite” — Guest 16')
+  await panel.evaluate(id => { messages = messages.filter(message => message.type !== 'approval.request'); panelPort.postMessage({ type: 'approval.response', id, decision: 'allow-once' }) }, guestCard.id)
+  // The page changes after the approval: the second-last row's button now does something else.
+  const relabelled = MANY_ROWS - 2
+  await page.locator('.invite').nth(relabelled).evaluate(button => { button.textContent = 'Delete' })
+  const brokenOutcome = await brokenRun
+  assert.equal(brokenOutcome.report.status, 'failed', JSON.stringify(brokenOutcome).slice(0, 2_000))
+  assert.deepEqual(brokenOutcome.report.rows, { done: 12, total: 14, steps: 28 })
+  assert.match(brokenOutcome.text, /^Stopped after 12 of 14 rows\. Row 13: it no longer looks like the rows you approved \(was “Invite”, now “Delete”\)\. Nothing was done to it\.\nRow 13 was left part-done \(1 of 2 steps ran\); continuing skips it, so finish it by hand\.\nNothing else was done\. You can continue/u)
+  await delay(500)
+  assert.equal(invited.includes(guests[relabelled]), false, 'the relabelled row was not clicked')
+  assert.equal(await page.locator('.invite').nth(relabelled).textContent(), 'Delete')
+  assert.deepEqual(invited.filter(email => guests.includes(email)), guests.slice(0, relabelled), 'every row before it ran once, in order; none after it')
+  assert.equal(await panel.evaluate(() => messages.some(message => message.type === 'approval.request')), false, 'no card was raised in place of the stopped series')
+  // The panel offers the row after it: the part-done row is not repeated, and both the panel and the new card say so.
+  assert.deepEqual((await state()).resume, { rows: 1, skipped: guests[relabelled] })
+  const continued = learn('learning.watch.continue', {}, 120_000)
+  const freshCard = await waitFor(() => panel.evaluate(() => messages.find(message => message.type === 'approval.request')?.request), 'a fresh card for the row that is left')
+  assert.equal(freshCard.action, 'browser_run')
+  assert.equal(freshCard.details[0].label, 'Please note')
+  assert.equal(freshCard.details[0].value, `“${guests[relabelled]}” was left part-done by the earlier run and is skipped here; finish it by hand.`)
+  assert.equal(freshCard.details.length, 3, 'the note, then the two steps of the one row that is left')
+  assert.ok(JSON.stringify(freshCard.details).includes(`tr:nth-child(${String(MANY_ROWS)})`))
+  assert.equal(JSON.stringify(freshCard.details).includes(`tr:nth-child(${String(relabelled + 1)})`), false, 'the part-done row is not on the new card')
+  await panel.evaluate(id => { messages = messages.filter(message => message.type !== 'approval.request'); panelPort.postMessage({ type: 'approval.response', id, decision: 'allow-once' }) }, freshCard.id)
+  assert.equal((await continued).report.status, 'completed')
+  await waitFor(() => invited.includes(guests[MANY_ROWS - 1]), 'the last row done after the new approval')
+  assert.equal(invited.includes(guests[relabelled]), false, 'the part-done row was left for the user')
+  assert.equal((await state()).resume, null)
+  results.push('a row relabelled after the series card was approved stops the run before that row is touched, with a plain reason; the rest continues only on a new card that names and skips the part-done row')
+
+  // ---- 3.7 an id-first table: a row removed mid-run puts another record under the selector, and the run stops ----
+  const invoiceId = row => String(INVOICE_BASE + row)
+  await page.goto(`${origin}/learn?v=1&rows=${String(MANY_ROWS)}&shape=ids`)
+  await page.bringToFront()
+  await delay(1_700)
+  await learn('learning.watch.start')
+  for (const index of [0, 1]) {
+    await page.locator('#people input').nth(index).fill(invoiceId(index + 1))
+    await page.locator('.invite').nth(index).click()
+  }
+  await waitFor(async () => (await state()).suggestion?.remaining === MANY_ROWS - 2, 'watch-me suggestion for the invoices')
+  await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request') })
+  const invoiceRun = learn('learning.watch.run', {}, 180_000)
+  const invoiceCard = await waitFor(() => panel.evaluate(() => messages.find(message => message.type === 'approval.request')?.request), 'series card for the invoices')
+  // Every line names its row by its id: the worded cell ("Paid") is the same on all of them.
+  assert.equal(invoiceCard.details[0].kind, 'rows')
+  assert.equal(invoiceCard.details[0].rows.length, 14)
+  assert.equal(invoiceCard.details[0].rows[0].label, `Type into “Email” ← “${invoiceId(3)}” → Click “Invite” — ${invoiceId(3)} · Paid`)
+  assert.equal(new Set(invoiceCard.details[0].rows.map(row => row.label.split(' — ')[1])).size, 14, 'no two rows share an identity')
+  await panel.evaluate(id => { messages = messages.filter(message => message.type !== 'approval.request'); panelPort.postMessage({ type: 'approval.response', id, decision: 'allow-once' }) }, invoiceCard.id)
+  // Invoice 1015 is removed while the first batch runs: the 15th row is now invoice 1016.
+  await page.locator('#people tr').nth(MANY_ROWS - 2).evaluate(row => { row.remove() })
+  const invoiceOutcome = await invoiceRun
+  assert.equal(invoiceOutcome.report.status, 'failed', JSON.stringify(invoiceOutcome).slice(0, 2_000))
+  assert.deepEqual(invoiceOutcome.report.rows, { done: 12, total: 14, steps: 28 })
+  assert.match(invoiceOutcome.text, new RegExp(`^Stopped after 12 of 14 rows\\. Row 13: it no longer looks like the rows you approved \\(was “${invoiceId(15)} · Paid”, now “${invoiceId(16)} · Paid”\\)\\. Nothing was done to it\\.\\nNothing else was done\\.`, 'u'))
+  await delay(500)
+  assert.deepEqual(invited.filter(email => /^10\d\d$/u.test(email)), Array.from({ length: 14 }, (_unused, index) => invoiceId(index + 1)), 'invoices 1001-1014 once each, in order; 1016 was not touched with 1015\'s value')
+  assert.equal(await page.locator('#people input').nth(MANY_ROWS - 2).inputValue(), '', 'nothing was typed into the record that moved under the selector')
+  assert.equal(await panel.evaluate(() => messages.some(message => message.type === 'approval.request')), false, 'no card was raised in place of the stopped series')
+  await learn('learning.watch.stop')
+  results.push('in an id-first table a row removed mid-run stops the series at the row whose record changed, before anything is typed or clicked there')
 
   // ---- Off again: tools withdrawn ----
   await learn('learning.settings', { settings: { workflows: false, fixtures: false, watchMe: false, siteDrivers: false } })

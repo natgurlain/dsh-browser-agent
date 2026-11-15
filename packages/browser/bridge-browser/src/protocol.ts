@@ -187,7 +187,70 @@ export const BRIDGE_CLOSE_CODES = {
    * bridges: this bridge terminates the evicted socket (the client sees 1006).
    */
   busy: 4005,
+  /**
+   * A pairing request could not be taken or ended without an attempt: this
+   * bridge does not pair, too many requests are arriving, or it expired
+   * before a code was entered on the host.
+   */
+  pairingClosed: 4006,
+  /**
+   * A pairing exchange failed: the request was malformed or did not describe
+   * the socket it arrived on (a relay), or the code entered on the host is
+   * not the code this requester holds.
+   */
+  pairingFailed: 4007,
+  /** Pairing is paused on the host (by the user, or after too many failed attempts). */
+  pairingPaused: 4008,
+  /**
+   * A newer pairing request took this one's place in the bridge's bounded
+   * queue. The extension asks again; it also means something else on the
+   * computer is asking to pair.
+   */
+  pairingReplaced: 4009,
 } as const
+
+/**
+ * Version of the pairing exchange (`pair.*` frames, see pairing.ts). It is
+ * independent of {@link BRIDGE_PROTOCOL_VERSION}: pairing only delivers the
+ * token, and the paired extension then runs the ordinary handshake.
+ */
+export const PAIRING_PROTOCOL_VERSION = 1
+
+/** Hex digits of one pairing share: an element of the 3072-bit group, fixed width. */
+export const PAIRING_SHARE_HEX_LENGTH = 768
+
+/** Longest token box (hex) a `pair.ok` may carry: the token is at most 1024 bytes. */
+export const PAIRING_BOX_HEX_MAX = 2048
+
+/**
+ * Browser names a pairing request may carry. The name is a hint the requester
+ * gives about itself ("says it is Brave"), never an identity, so it comes
+ * from this fixed list and nothing else reaches the host's screen or terminal.
+ */
+export const PAIRING_BROWSER_NAMES = ['Brave', 'Chrome', 'Chromium', 'Edge', 'Firefox', 'Opera', 'Vivaldi', 'Browser'] as const
+
+/** Whether a value is one of {@link PAIRING_BROWSER_NAMES}. */
+export function isPairingName(value: unknown): value is (typeof PAIRING_BROWSER_NAMES)[number] {
+  return typeof value === 'string' && (PAIRING_BROWSER_NAMES as readonly string[]).includes(value)
+}
+
+const PAIRING_ORIGIN = /^(?:chrome-extension:\/\/[a-p]{32}|moz-extension:\/\/[0-9a-f-]{36})$/u
+
+/**
+ * Whether an Origin may ask to pair: exactly a Chrome extension origin or a
+ * Firefox extension origin. Web pages and Origin-less clients cannot pair.
+ */
+export function isPairingOrigin(value: unknown): value is string {
+  return typeof value === 'string' && PAIRING_ORIGIN.test(value)
+}
+
+const PAIRING_SHARE = /^[0-9a-f]{768}$/u
+const PAIRING_BOX = /^(?:[0-9a-f]{2})+$/u
+
+/** Whether a value has the wire shape of a pairing share (range is checked in pairing.ts). */
+export function isPairingShareHex(value: unknown): value is string {
+  return typeof value === 'string' && PAIRING_SHARE.test(value)
+}
 
 /**
  * Chrome extension ID of the dsh browser extension, fixed by the public key in
@@ -804,6 +867,20 @@ export type ClientFrame =
   | { t: 'tool.result'; id: string; ok: false; error: ToolError; taintExempt?: true; taintExemptLocal?: true }
   /** Liveness reply. */
   | { t: 'pong' }
+  /**
+   * Asks to pair instead of `hello`, on a socket that has no token yet
+   * (pairing.ts). `share` is the client's key share under a generator chosen
+   * by the code the extension displays; it is a uniformly distributed group
+   * element and says nothing about the code. `origin` is the sender's own
+   * extension origin and must equal the socket's Origin header; `name` is a
+   * hint from {@link PAIRING_BROWSER_NAMES}. The request then waits until the
+   * user enters a code on the host.
+   */
+  | { t: 'pair.request'; v: typeof PAIRING_PROTOCOL_VERSION; nonce: string; endpoint: BridgeEndpoint; origin: string; name: string; share: string }
+  /** The client's key confirmation, answering `pair.share`: proves it holds the code the user entered on the host. */
+  | { t: 'pair.confirm'; mac: string }
+  /** The client verified `pair.ok` and stored the token. */
+  | { t: 'pair.done'; mac: string }
 
 /** Frames sent by the bridge plugin to the extension. */
 export type ServerFrame =
@@ -844,6 +921,18 @@ export type ServerFrame =
   | { t: 'tool.cancel'; id: string }
   /** Liveness probe. */
   | { t: 'ping' }
+  /**
+   * The bridge's key share, sent once the user entered a code on the host,
+   * under the generator that code selects. Also a uniformly distributed group
+   * element: a requester that holds another code learns nothing from it.
+   */
+  | { t: 'pair.share'; share: string }
+  /**
+   * Sent only to a requester whose `pair.confirm` verified: the bridge's own
+   * key confirmation (`mac`, over the transcript and the box) and the bridge
+   * token encrypted under the exchange key (`box`).
+   */
+  | { t: 'pair.ok'; box: string; mac: string }
   /** Fatal connection error; the client should re-authenticate. */
   | { t: 'error'; code: string; message: string }
 
@@ -885,6 +974,8 @@ export function isServerFrame(frame: BridgeFrame): frame is ServerFrame {
     || frame.t === 'tool.cancel'
     || frame.t === 'ping'
     || frame.t === 'error'
+    || frame.t === 'pair.share'
+    || frame.t === 'pair.ok'
 }
 
 /**
@@ -1001,6 +1092,34 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
     case 'error':
       return typeof frame.code === 'string' && typeof frame.message === 'string'
         ? { t: 'error', code: frame.code, message: frame.message }
+        : undefined
+    case 'pair.request':
+      return frame.v === PAIRING_PROTOCOL_VERSION
+        && isBridgeHex256(frame.nonce)
+        && isBridgeEndpoint(frame.endpoint)
+        && isPairingOrigin(frame.origin)
+        && isPairingName(frame.name)
+        && isPairingShareHex(frame.share)
+        ? {
+            t: 'pair.request',
+            v: PAIRING_PROTOCOL_VERSION,
+            nonce: frame.nonce,
+            endpoint: { host: frame.endpoint.host, port: frame.endpoint.port },
+            origin: frame.origin,
+            name: frame.name,
+            share: frame.share,
+          }
+        : undefined
+    case 'pair.confirm':
+      return isBridgeHex256(frame.mac) ? { t: 'pair.confirm', mac: frame.mac } : undefined
+    case 'pair.done':
+      return isBridgeHex256(frame.mac) ? { t: 'pair.done', mac: frame.mac } : undefined
+    case 'pair.share':
+      return isPairingShareHex(frame.share) ? { t: 'pair.share', share: frame.share } : undefined
+    case 'pair.ok':
+      return typeof frame.box === 'string' && frame.box.length <= PAIRING_BOX_HEX_MAX && PAIRING_BOX.test(frame.box)
+        && isBridgeHex256(frame.mac)
+        ? { t: 'pair.ok', box: frame.box, mac: frame.mac }
         : undefined
     default:
       return undefined

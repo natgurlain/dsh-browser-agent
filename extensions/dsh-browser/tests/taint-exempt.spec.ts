@@ -432,6 +432,20 @@ describe('local pages do not taint', () => {
       // Also on the path the worker takes for them: no recorded targets, only the tab.
       expect(h.policy.recordResult({ ...devtools, id: `${devtools.id}-bare`, sessionId: `${devtools.sessionId}-bare` }, true, undefined, { top: LOCAL, frames: [LOCAL], opaque: false }), name).toEqual({ exempt: false })
     }
+    // A program or series approval, a fleet and a watcher taint as before, even with only local frames in the tab.
+    for (const name of ['browser_run', 'browser_fanout', 'browser_watch', 'browser_watches']) {
+      expect(h.policy.recordResult({ id: `np-${name}`, name, sessionId: `np-${name}` }, true, LOCAL, { top: LOCAL, frames: [LOCAL], opaque: false }), name).toEqual({ exempt: false })
+      expect(h.policy.get(`np-${name}`), name).toBeDefined()
+    }
+    // A step of an approved program or series is the plain click, type or select it is.
+    for (const name of ['browser_click', 'browser_type', 'browser_select']) {
+      const step = { id: `step-${name}`, name, args: { index: 1 }, sessionId: `step-${name}`, program: { id: 'p1', step: 0 } }
+      h.policy.hook(step.id, step.sessionId, false)(step, { reads: [], acts: [LOCAL], pageOrigin: LOCAL })
+      expect(h.policy.recordResult(step, true, LOCAL, { top: LOCAL, frames: [LOCAL], opaque: false }), name).toMatchObject({ exempt: true })
+      const away = { ...step, id: `away-${name}`, sessionId: `away-${name}` }
+      h.policy.hook(away.id, away.sessionId, false)(away, { reads: [], acts: [EVIL], pageOrigin: EVIL })
+      expect(h.policy.recordResult(away, true, EVIL), name).toEqual({ exempt: false })
+    }
     // The list of past downloads names other sites, whatever the tab shows.
     const downloads = { id: 'dl', name: 'browser_downloads', args: {}, sessionId: 's5' }
     h.policy.hook('dl', 's5', false)(downloads, { reads: [], acts: [], pageOrigin: LOCAL })

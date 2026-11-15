@@ -92,7 +92,13 @@ const WHOLE_TAB_PROVENANCE_TOOLS: ReadonlySet<string> = new Set(['browser_dialog
  * frame, whatever origin served them (cross-origin images, a frame that
  * loaded between the frame listing and the capture).
  */
-const NEVER_EXEMPT_TOOLS: ReadonlySet<string> = new Set(['browser_downloads', 'browser_screenshot', 'browser_save_pdf'])
+const NEVER_EXEMPT_TOOLS: ReadonlySet<string> = new Set([
+  'browser_downloads', 'browser_screenshot', 'browser_save_pdf',
+  // Their own results carry no frame provenance (a program or series approval, a fleet, a watcher):
+  // they taint as before, whatever the tab shows. The steps of a program or series are ordinary
+  // calls (click, type, select) and are judged as such.
+  'browser_run', 'browser_fanout', 'browser_watch', 'browser_watches',
+])
 
 /** What the caller knows about a settled result beyond its targets. */
 export interface ResultFacts {

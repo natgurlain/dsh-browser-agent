@@ -11,6 +11,7 @@ Page snapshots contain structured text with numbered controls and masked form fi
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `token` | `string` | generated | Fixed bearer token. When absent, a token is generated on first boot and saved to `~/.dsh/ext-bridge-token` (chmod 0600). The boot log shows the file path. |
+| `pairing` | `boolean` | `true` | Let an extension without a token (a store or Brave build, Firefox) ask to pair: its panel shows a six-character code that the user types into DSH. `false` accepts only the provisioned or pasted token and the configured extension IDs. |
 | `toolTimeoutMs` | `number` | 90000 | Per-tool-call budget, leaving time for the extension's 60-second approval window. |
 | `snapshotMaxChars` | `number` | 32000 | Upper bound on one rendered snapshot's characters, minimum 500 (also negotiated to the extension via `hello.ok` caps). |
 | `maxInteractiveItems` | `number` | 60 | Upper bound on interactive inventory items per snapshot. |
@@ -187,4 +188,5 @@ Rules that still hold:
 
 - One active extension connection at a time.
 - Accessible cross-origin iframes are snapshotted and operated with stable `(frame, index)` addresses. Restricted or short-lived frames are reported as unavailable without failing the whole page snapshot.
-- Token rotation is manual (edit `~/.dsh/ext-bridge-token` or set `token` in config); no expiry.
+- Token rotation is manual (edit `~/.dsh/ext-bridge-token` or set `token` in config); no expiry. An extension that obtained the token by pairing must pair again after a rotation.
+- Pairing (for extensions without an installer-written token) is a password-authenticated key exchange keyed by a six-character code the extension shows and the user types into DSH; see `docs/store/README.md`. Paired extensions (Chrome IDs and Firefox origins) are kept in `~/.dsh/browser-paired-extensions.json` and can be unpaired in DSH Settings or with `/browser-pair unpair <extension>`: the extension's connection is closed and its origin refused. Unpairing does not take the token back; "Reset bridge token" (or `/browser-pair reset-token`) replaces it and disconnects every browser. A Firefox extension that is reinstalled gets a new origin, so for Firefox only the token reset is a complete cut-off.

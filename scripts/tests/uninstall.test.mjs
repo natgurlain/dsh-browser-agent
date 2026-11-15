@@ -19,7 +19,7 @@ const { runPluginCommand } = await import(pathToFileURL(require.resolve('@deepse
 const current = '@natgurlain/dsh-bridge-browser'
 const legacy = '@deepseek-ai/dsh-bridge-browser'
 const other = '@deepseek-ai/dsh-experimental-terminal-bundle'
-const BRIDGE_HOME_FILES = ['browser-mcp-token', 'browser-mcp.json', 'browser-bridge-sessions.json', 'browser-bridge-watchers.json', 'browser-workflow-schedules.json']
+const BRIDGE_HOME_FILES = ['browser-mcp-token', 'browser-mcp.json', 'browser-bridge-sessions.json', 'browser-bridge-watchers.json', 'browser-workflow-schedules.json', 'browser-paired-extensions.json']
 // One language per run: English here, whatever the locale of the machine running the tests.
 const baseEnv = { ...process.env, DSH_BROWSER_LANG: 'en' }
 
