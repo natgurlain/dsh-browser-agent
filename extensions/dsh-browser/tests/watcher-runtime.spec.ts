@@ -157,4 +157,20 @@ describe('page watcher runtime', () => {
     harness.onMessage.emit({ type: 'DSH_WATCH_INVALID', watchId: 'w-1' }, hitSender(), () => {})
     await vi.waitFor(() => { expect(runtime.registry.list().map((entry) => entry.id)).toEqual(['w-2']) })
   })
+
+  it('keeps a watcher when the report comes from another origin or is not about a selector', async () => {
+    const harness = stubChrome({
+      session: { [WATCHERS_STORAGE_KEY]: [watcher(), watcher({ id: 'w-text', condition: { kind: 'text', text: 'In stock', gone: false } }), watcher({ id: 'w-last' })] },
+      openTabs: [5],
+    })
+    const runtime = new PageWatcherRuntime(runtimeOptions())
+    await runtime.registry.ready
+    // The tab navigated away from the watched origin: the new page has no say over the watcher.
+    harness.onMessage.emit({ type: 'DSH_WATCH_INVALID', watchId: 'w-1' }, hitSender({ url: 'https://evil.example/' }), () => {})
+    // Only a selector can fail to parse.
+    harness.onMessage.emit({ type: 'DSH_WATCH_INVALID', watchId: 'w-text' }, hitSender(), () => {})
+    harness.onMessage.emit({ type: 'DSH_WATCH_INVALID', watchId: 'w-last' }, hitSender(), () => {})
+    await vi.waitFor(() => { expect(runtime.registry.list().map((entry) => entry.id)).not.toContain('w-last') })
+    expect(runtime.registry.list().map((entry) => entry.id)).toEqual(['w-1', 'w-text'])
+  })
 })

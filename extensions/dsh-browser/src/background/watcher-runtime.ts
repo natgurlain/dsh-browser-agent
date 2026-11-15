@@ -10,6 +10,7 @@
 
 import { BRIDGE_WATCH_FIRE_METHOD } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { isExtensionPageSender } from './policy-runtime.ts'
+import { httpOrigin } from '../security/web-url.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import type { ToolCall } from './tools.ts'
 import {
@@ -194,6 +195,8 @@ export class PageWatcherRuntime {
         void this.registry.ready.then(async () => {
           const watcher = typeof watchId === 'string' ? this.registry.get(watchId) : undefined
           if (watcher === undefined || watcher.tabId !== tabId || (sender.frameId ?? 0) !== 0) return
+          // Same checks as a hit: only the watched origin's page, and only a selector can fail to parse.
+          if (watcher.condition.kind !== 'selector' || httpOrigin(sender.url) !== watcher.origin) return
           await this.registry.remove(watcher.id)
           this.broadcast()
         })
