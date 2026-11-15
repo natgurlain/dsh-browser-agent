@@ -1287,6 +1287,35 @@ try {
   await settings({ allowPageWatchers: true, trustedActionOrigins: [origin] })
   await page.goto(`${origin}/stock`)
   await page.bringToFront()
+  // Extension storage (settings, kill switch, the standing-work hint) is closed
+  // to content scripts: one that a page's renderer took over could otherwise
+  // forge them. Ask from inside this page's content-script world.
+  const contentWorlds = []
+  cdp.on('Runtime.executionContextCreated', ({ context }) => {
+    if (context.auxData?.type === 'isolated' && String(context.origin).includes(extensionId)) contentWorlds.push(context.id)
+  })
+  await cdp.send('Runtime.enable')
+  await waitFor(() => contentWorlds.length > 0 || undefined, 'the content script world of the fixture page')
+  const storageProbe = await cdp.send('Runtime.evaluate', {
+    contextId: contentWorlds.at(-1),
+    awaitPromise: true,
+    returnByValue: true,
+    expression: `(async () => {
+      const out = { runtime: typeof chrome?.runtime?.sendMessage }
+      try { out.read = Object.keys(await chrome.storage.local.get(null)).length } catch (error) { out.read = 'denied' }
+      try {
+        await chrome.storage.local.set({ dshStandingHost: { schedules: 1, mcp: true, url: 'ws://attacker.example:9000/ext/bridge', seenAt: Date.now() } })
+        out.write = 'allowed'
+      } catch (error) { out.write = 'denied' }
+      return out
+    })()`,
+  })
+  assert.deepEqual(storageProbe.result.value, { runtime: 'function', read: 'denied', write: 'denied' },
+    'a content script can message the worker but cannot read or write storage.local')
+  await cdp.send('Runtime.disable')
+  const hintAfterProbe = (await currentWorker().evaluate(() => chrome.storage.local.get('dshStandingHost'))).dshStandingHost
+  assert.notEqual(hintAfterProbe?.url, 'ws://attacker.example:9000/ext/bridge')
+  results.push('storage.local is limited to trusted contexts: a content script can neither read the settings nor plant a standing-work hint')
   const watchSession = phase3State.sessionId
   assert.ok(watchSession, 'the Phase 3 session')
   await panel.evaluate(sessionId => { panelPort.postMessage({ type: 'session.active', sessionId, isNew: false }) }, watchSession)

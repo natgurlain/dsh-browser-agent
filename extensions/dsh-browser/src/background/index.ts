@@ -147,6 +147,8 @@ import { RUNTIME_LEASE_STORAGE_KEY, RuntimeKeeper, RuntimeLease, STANDING_RETRY_
 import {
   NO_HOST_STANDING,
   STANDING_HOST_STORAGE_KEY,
+  hintAddressAllowed,
+  normalizeBridgeUrl,
   parseStoredStandingHost,
   standingCount,
   storedStandingHost,
@@ -477,6 +479,39 @@ const BRIDGE_KEEPALIVE_ALARM = 'bridge-keepalive'
 let hostStanding: StandingWork = NO_HOST_STANDING
 /** Whether storage.local may hold a host hint (so "none" has something to clear). */
 let hostStandingStored = false
+/** `chrome.storage.local` key of {@link bridgeRefusal}. */
+const BRIDGE_REFUSAL_KEY = 'dshBridgeRefusal'
+/** Why the bridge ended the connection for good, when it did; only a user action or a new connection clears it. */
+type BridgeRefusal = 'replaced' | 'token-mismatch' | 'version-mismatch' | 'origin-rejected'
+const BRIDGE_REFUSALS: readonly string[] = ['replaced', 'token-mismatch', 'version-mismatch', 'origin-rejected']
+/**
+ * The bridge gave this install's slot to another browser (close code 4000)
+ * or refused it for a reason only the user can fix (token, protocol version,
+ * extension ID). While set, nothing reconnects headlessly and standing work
+ * counts as zero: retrying would evict the other browser or repeat the
+ * refusal. Cleared when a panel opens, the user reconnects or changes the
+ * connection settings, or a connection succeeds. Persisted in storage.local.
+ */
+let bridgeRefusal: BridgeRefusal | undefined
+/** Set once this worker decided the latch itself; the stored value then no longer applies. */
+let bridgeRefusalDecided = false
+const bridgeRefusalReady = (async (): Promise<void> => {
+  try {
+    const stored = (await chrome.storage.local.get(BRIDGE_REFUSAL_KEY))?.[BRIDGE_REFUSAL_KEY]
+    if (!bridgeRefusalDecided && typeof stored === 'string' && BRIDGE_REFUSALS.includes(stored)) bridgeRefusal = stored as BridgeRefusal
+  } catch { /* unreadable: no latch */ }
+  bridgeRefusalDecided = true
+})()
+
+function setBridgeRefusal(next: BridgeRefusal | undefined): void {
+  // Before the stored latch is read, a clear must still remove it.
+  if (bridgeRefusal === next && bridgeRefusalDecided) return
+  bridgeRefusalDecided = true
+  bridgeRefusal = next
+  void (async () => {
+    await (next === undefined ? chrome.storage.local.remove(BRIDGE_REFUSAL_KEY) : chrome.storage.local.set({ [BRIDGE_REFUSAL_KEY]: next }))
+  })().catch(() => {})
+}
 /** Spacing of reconnect attempts while only standing work wants an unreachable bridge. */
 const standingRetry = new StandingBackoff()
 /** Invalidates an asynchronous discovery attempt when its panel lease ends. */
@@ -889,6 +924,27 @@ function normalizeSettings(candidate: Settings): Settings {
   return applyManagedOverrides(normalizeUserSettings(candidate), policyRuntime.managed)
 }
 
+/**
+ * Keep extension storage to trusted contexts (this worker and extension
+ * pages). Chrome's default lets content scripts read and write
+ * `storage.local`; they run in the renderer of whatever page is open, and the
+ * settings, the kill switch and the standing-work hint live there. No content
+ * script of this extension uses storage. Firefox has no such API: there the
+ * checks on what is read back are the only layer.
+ */
+function restrictStorageAccess(): void {
+  type Restrictable = { setAccessLevel?: (options: { accessLevel: string }) => Promise<void> | void }
+  const storage = (globalThis as { chrome?: { storage?: Record<string, Restrictable | undefined> } }).chrome?.storage
+  for (const name of ['local', 'sync', 'session']) {
+    try {
+      const area = storage?.[name]
+      if (typeof area?.setAccessLevel !== 'function') continue
+      void Promise.resolve(area.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' })).catch(() => {})
+    } catch { /* not supported here */ }
+  }
+}
+restrictStorageAccess()
+
 // The side panel owns the UI language preference, but approval notifications
 // and tool error strings are formatted here, so mirror the same key into this
 // worker's cache and keep following panel writes.
@@ -1104,6 +1160,8 @@ async function engageKillSwitch(): Promise<void> {
   hostStandingStored = true
   setHostStanding(NO_HOST_STANDING)
   clearStandingRetry()
+  // A watcher hit waiting for a reconnect stops waiting; its re-check sees the switch.
+  for (const resolve of [...bridgeWaiters]) resolve()
   disarmBridgeKeepalive()
   refreshActionBadges()
   broadcastStatus()
@@ -1123,6 +1181,7 @@ async function releaseKillSwitch(): Promise<void> {
   if (!killSwitchEngaged) return
   killSwitchEngaged = false
   persistKillSwitch()
+  setBridgeRefusal(undefined)
   discoveryLatch = 'idle'
   persistDiscoveryLatch('idle')
   refreshActionBadges()
@@ -1565,10 +1624,11 @@ const runtimeLease = new RuntimeLease({
 
 /**
  * Unattended work that wants the connection. Zero while the kill switch is
- * engaged or not yet read, and watchers count only while their setting is on.
+ * engaged or not yet read, or while the bridge has refused this install
+ * ({@link bridgeRefusal}); watchers count only while their setting is on.
  */
 function standingSummary(): StandingSummary {
-  if (!killSwitchLoaded || killSwitchEngaged) return { watchers: 0, schedules: 0, mcp: false }
+  if (!killSwitchLoaded || killSwitchEngaged || bridgeRefusal !== undefined) return { watchers: 0, schedules: 0, mcp: false }
   return {
     watchers: settingsLoaded && settings.allowPageWatchers ? pageWatchers.registry.list().length : 0,
     schedules: hostStanding.schedules,
@@ -1596,6 +1656,19 @@ function setHostStanding(work: StandingWork): void {
     })().catch(() => {})
   }
   if (changed) onStandingWorkChanged()
+}
+
+/**
+ * The connection settings changed (address or token): what the previous
+ * bridge said, and its address, no longer apply. Nothing may reconnect to a
+ * bridge the user just left.
+ */
+function forgetStandingHost(): void {
+  headlessBridgeUrl = undefined
+  hostStandingStored = true
+  setHostStanding(NO_HOST_STANDING)
+  clearStandingRetry()
+  runtimeKeeper.persistNow()
 }
 
 function persistStandingRetry(): void {
@@ -1753,7 +1826,12 @@ async function restoreHostStanding(): Promise<void> {
     if (raw === undefined) return
     // A connection made meanwhile already delivered (and stored) a fresher hint.
     if (caps !== null && hostStandingStored) return
-    const stored = killSwitchEngaged || caps !== null ? undefined : parseStoredStandingHost(raw)
+    const parsed = killSwitchEngaged || caps !== null ? undefined : parseStoredStandingHost(raw)
+    // Never dial an address that appears only in the hint: it must be the
+    // configured one, or the loopback address remembered after a proven handshake.
+    await discoveryMemory
+    const stored = parsed !== undefined && settingsLoaded
+      && hintAddressAllowed(parsed.url, settings.bridgeUrl, lastBridgeUrl, isLocalBridgeAddress, BRIDGE_PATH) ? parsed : undefined
     if (stored === undefined) {
       await area.remove(STANDING_HOST_STORAGE_KEY)
       return
@@ -1771,7 +1849,7 @@ async function restoreHostStanding(): Promise<void> {
  * read first: standing work depends on all three.
  */
 const runtimeRestored = (async () => {
-  await Promise.allSettled([killSwitchReady, settingsReady, pageWatchers.registry.ready])
+  await Promise.allSettled([killSwitchReady, settingsReady, pageWatchers.registry.ready, bridgeRefusalReady])
   await restoreRuntimeLease()
   await restoreHostStanding()
   runtimeKeeper.update()
@@ -2942,6 +3020,10 @@ async function startBridge(): Promise<void> {
   let url = settings.bridgeUrl
   let discovered: string | undefined
   if (panelPorts.size === 0) {
+    // The bridge ended this install's connection for good: no headless
+    // reconnect until the user comes back (a panel, Reconnect, new settings).
+    await bridgeRefusalReady
+    if (bridgeRefusal !== undefined) return
     // Headless (panel-free) reconnect: only an address already in use, never
     // a discovery pass the user did not ask for.
     await discoveryMemory
@@ -2980,13 +3062,8 @@ async function startBridge(): Promise<void> {
   }
   // 手动填的地址常只有主机部分（如 ws://127.0.0.1:3080）；桥路径是协议
   // 常量，缺省时自动补全，避免连到根路径失败。
-  try {
-    const parsed = new URL(url)
-    if (parsed.pathname === '' || parsed.pathname === '/') parsed.pathname = BRIDGE_PATH
-    url = parsed.toString()
-  } catch {
-    // 非法 URL 原样交给 WebSocket 构造函数报错。
-  }
+  // 非法 URL 原样交给 WebSocket 构造函数报错。
+  url = normalizeBridgeUrl(url, BRIDGE_PATH)
   // The hello must carry this install's identity.
   if (clientIdentity === undefined) {
     await clientIdentityReady
@@ -3000,6 +3077,16 @@ async function startBridge(): Promise<void> {
           cancelAllToolCalls()
           interactionResponses.failAll(responseMessages().disconnected)
           transientEvents.clear()
+        }
+        // Replaced by another browser, or refused for a reason only the user
+        // can fix: latch it, so no headless start (this worker or a restarted
+        // one) reclaims the slot or repeats the refusal.
+        if (state !== 'connected' && state !== 'connecting') {
+          const refusal = client.replaced ? 'replaced' : client.failure
+          if (refusal !== undefined && BRIDGE_REFUSALS.includes(refusal) && bridgeRefusal !== refusal) {
+            setBridgeRefusal(refusal as BridgeRefusal)
+            onStandingWorkChanged()
+          }
         }
         // Only standing work wants this connection and the attempt failed:
         // back off instead of retrying every few seconds (this client is done).
@@ -3015,8 +3102,11 @@ async function startBridge(): Promise<void> {
       },
       onFrame: (frame) => {
         if (frame.t === 'event' && frame.frame.method === BRIDGE_STANDING_EVENT_METHOD) {
-          // The bridge's own sealed notice; never shown to panels. A malformed one changes nothing.
-          if (isStandingWork(frame.frame.payload)) setHostStanding(frame.frame.payload)
+          // The bridge's own sealed notice; never shown to panels. A malformed one
+          // changes nothing, and neither does one on a connection whose hello.ok
+          // carried no standing cap: an older bridge does not reserve this method,
+          // so there it could be a Host-stream event that merely uses the name.
+          if (caps?.standing !== undefined && isStandingWork(frame.frame.payload)) setHostStanding(frame.frame.payload)
           return
         }
         if (frame.t === 'event') {
@@ -3042,6 +3132,7 @@ async function startBridge(): Promise<void> {
         // Connected: normal cadence again, and the Host's standing work as of
         // now (an older bridge sends none, which clears a stored hint).
         if (clearStandingRetry()) armBridgeKeepalive()
+        setBridgeRefusal(undefined)
         setHostStanding(negotiated.standing ?? NO_HOST_STANDING)
         for (const resolve of [...bridgeWaiters]) resolve()
         runtimeKeeper.update()
@@ -3203,8 +3294,10 @@ chrome.runtime.onConnect.addListener((port) => {
   // idempotent, but a double click must not race two acknowledgements.
   const tabAffinityReturns = new Set<string>()
   panelPorts.add(port)
-  // A panel restores the normal reconnect cadence.
+  // A panel restores the normal reconnect cadence, and is the user coming
+  // back after the bridge refused or replaced this install.
   clearStandingRetry()
+  setBridgeRefusal(undefined)
   if (wasIdle) armBridgeKeepalive()
   runtimeKeeper.update()
   void settingsReady.then(syncSelectionWatch)
@@ -3308,6 +3401,9 @@ chrome.runtime.onConnect.addListener((port) => {
             const connectionChanged = settings.bridgeUrl !== previousConnection.bridgeUrl
               || settings.token !== previousConnection.token
             if (connectionChanged) {
+              // The hint and the headless address belong to the previous connection.
+              forgetStandingHost()
+              setBridgeRefusal(undefined)
               // An explicit address supersedes a confirmed miss from this lease.
               rejectedBridgeUrls.clear()
               discoveryLatch = 'idle'

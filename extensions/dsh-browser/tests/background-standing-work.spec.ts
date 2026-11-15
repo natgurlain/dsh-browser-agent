@@ -7,6 +7,7 @@
  * for nothing behind the kill switch.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { BRIDGE_CLOSE_CODES } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
 import { FakeWebSocket } from './support/fake-websocket.ts'
 import { chromeEvent, memoryStorage, panelPort } from './support/chrome.ts'
@@ -27,8 +28,10 @@ function watcher(extra: Record<string, unknown> = {}): Record<string, unknown> {
   }
 }
 
-function mockChrome(options: { local?: Record<string, unknown>; session?: Record<string, unknown>; settings?: Record<string, unknown> } = {}) {
+function mockChrome(options: { local?: Record<string, unknown>; session?: Record<string, unknown>; settings?: Record<string, unknown>; accessLevels?: boolean } = {}) {
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
+  const onCommand = chromeEvent<[string]>()
+  const setAccessLevel = vi.fn(async () => {})
   const onAlarm = chromeEvent<[chrome.alarms.Alarm]>()
   const onMessage = chromeEvent<RuntimeMessage>()
   const local = memoryStorage({
@@ -41,7 +44,7 @@ function mockChrome(options: { local?: Record<string, unknown>; session?: Record
   vi.stubGlobal('chrome', {
     alarms,
     action: { setBadgeText: vi.fn(), setBadgeBackgroundColor: vi.fn() },
-    commands: { onCommand: chromeEvent<[string]>() },
+    commands: { onCommand },
     notifications: {
       create: vi.fn(async () => ''),
       clear: vi.fn(async () => true),
@@ -56,7 +59,10 @@ function mockChrome(options: { local?: Record<string, unknown>; session?: Record
       onMessage,
     },
     sidePanel: { open: vi.fn(async () => {}), setPanelBehavior: vi.fn(async () => {}) },
-    storage: { local: local.area, session: session.area },
+    storage: {
+      local: options.accessLevels === true ? Object.assign(local.area, { setAccessLevel }) : local.area,
+      session: session.area,
+    },
     tabs: {
       get: vi.fn(async (tabId: number) => ({ id: tabId, windowId: 1, title: 'Tab', url: WATCHED_PAGE } as chrome.tabs.Tab)),
       query: vi.fn(async () => [{ id: 7, windowId: 1, title: 'Tab', url: WATCHED_PAGE }] as chrome.tabs.Tab[]),
@@ -74,7 +80,7 @@ function mockChrome(options: { local?: Record<string, unknown>; session?: Record
     scripting: { executeScript: vi.fn(async () => []) },
     windows: { WINDOW_ID_NONE: -1, onFocusChanged: chromeEvent<[number]>(), onRemoved: chromeEvent<[number]>() },
   } as unknown as typeof chrome)
-  return { alarms, onAlarm, onConnect, onMessage, local, session }
+  return { alarms, onAlarm, onConnect, onCommand, onMessage, local, session, setAccessLevel }
 }
 
 /** A clock the test can move forward; installed before the worker module captures `Date.now`. */
@@ -108,7 +114,16 @@ const settle = (ms = 40): Promise<void> => new Promise((resolve) => { setTimeout
 const statuses = (postMessage: { mock: { calls: unknown[][] } }): Array<{ state: string; standing?: unknown }> => postMessage.mock.calls
   .map(([message]) => message as { type?: string; state: string; standing?: unknown })
   .filter((message) => message.type === 'status')
+/** The panel's automatic discovery pass ended (so nothing of it outlives the test). */
+const discoveryFinished = (postMessage: { mock: { calls: unknown[][] } }): Promise<void> => vi.waitFor(() => {
+  expect(postMessage.mock.calls.some(([message]) => (message as { type?: string; discovery?: string }).type === 'status'
+    && (message as { discovery?: string }).discovery === 'not-found')).toBe(true)
+}, { timeout: 10_000 })
 const hostHint = (mock: ReturnType<typeof mockChrome>): unknown => mock.local.data.dshStandingHost
+const ATTACKER = 'ws://attacker.example:9000/ext/bridge'
+/** A stored hint as an earlier connection to `url` left it. */
+const storedHint = (url: string, extra: Record<string, unknown> = {}): Record<string, unknown> =>
+  ({ dshStandingHost: { schedules: 1, mcp: true, url, seenAt: Date.now() - 1_000, ...extra } })
 
 async function connectedWithPanel(mock: ReturnType<typeof mockChrome>, caps: Record<string, unknown> = PLAIN_CAPS) {
   await boot()
@@ -149,7 +164,7 @@ describe('host hint from the bridge', () => {
     await vi.waitFor(() => { expect(hostHint(mock)).toMatchObject({ schedules: 3, mcp: false, url: REMOTE }) })
     expect(statuses(panel.postMessage).at(-1)).toMatchObject({ standing: { schedules: 3, mcp: false } })
 
-    for (const payload of [{ schedules: 'lots', mcp: false }, { schedules: -1, mcp: false }, { schedules: 1 }, { schedules: 1, mcp: true, extra: 1 }, null]) {
+    for (const payload of [{ schedules: 'lots', mcp: false }, { schedules: -1, mcp: false }, { schedules: 1 }, { mcp: true }, null]) {
       socket.receive({ t: 'event', frame: { rpcId: '', method: 'bridge/standing', payload } })
     }
     await settle()
@@ -234,7 +249,7 @@ describe('headless reconnect for standing work', () => {
 
   it('after a browser restart: the hint in storage.local reconnects to its own address, without discovery', async () => {
     // storage.session is empty after a browser restart; watchers are gone by design.
-    mockChrome({ local: { dshStandingHost: { schedules: 1, mcp: true, url: LOCAL, seenAt: Date.now() - 3_600_000 } } })
+    mockChrome({ local: { dshLastBridgeUrl: LOCAL, dshStandingHost: { schedules: 1, mcp: true, url: LOCAL, seenAt: Date.now() - 3_600_000 } } })
     const fetchMock = reachable()
     await boot()
     await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
@@ -250,7 +265,7 @@ describe('headless reconnect for standing work', () => {
       { schedules: 1, mcp: false, url: 'https://example.com/', seenAt: Date.now() },
     ]) {
       vi.resetModules()
-      const mock = mockChrome({ local: { dshStandingHost: stale } })
+      const mock = mockChrome({ local: { dshLastBridgeUrl: LOCAL, dshStandingHost: stale } })
       const fetchMock = reachable()
       await boot()
       await vi.waitFor(() => { expect(hostHint(mock)).toBeUndefined() })
@@ -262,7 +277,7 @@ describe('headless reconnect for standing work', () => {
 })
 
 describe('backoff while dsh is unreachable', () => {
-  const hint = () => ({ dshStandingHost: { schedules: 1, mcp: false, url: LOCAL, seenAt: Date.now() - 1_000 } })
+  const hint = () => ({ dshLastBridgeUrl: LOCAL, dshStandingHost: { schedules: 1, mcp: false, url: LOCAL, seenAt: Date.now() - 1_000 } })
   const oneShots = (mock: ReturnType<typeof mockChrome>): number[] => mock.alarms.create.mock.calls
     .map(([, info]) => (info as { when?: number }).when)
     .filter((when): when is number => typeof when === 'number')
@@ -341,9 +356,11 @@ describe('backoff while dsh is unreachable', () => {
     unreachable()
     await boot()
     await vi.waitFor(() => { expect(mock.session.data.dshStandingRetry).toMatchObject({ failures: 1 }) })
-    mock.onConnect.emit(panelPort().port)
+    const panel = panelPort()
+    mock.onConnect.emit(panel.port)
     await vi.waitFor(() => { expect(mock.session.data.dshStandingRetry).toBeUndefined() })
     expect(mock.alarms.create).toHaveBeenLastCalledWith('bridge-keepalive', { periodInMinutes: 0.5 })
+    await discoveryFinished(panel.postMessage)
   })
 
   it('a successful connection restores the normal cadence', async () => {
@@ -366,7 +383,7 @@ describe('kill switch', () => {
   it('engaged at startup: standing work counts as zero, nothing reconnects, and the stored hint is removed', async () => {
     const mock = mockChrome({
       settings: { allowPageWatchers: true },
-      local: { dshKillSwitch: true, dshStandingHost: { schedules: 2, mcp: true, url: LOCAL, seenAt: Date.now() - 1_000 } },
+      local: { dshKillSwitch: true, dshLastBridgeUrl: LOCAL, dshStandingHost: { schedules: 2, mcp: true, url: LOCAL, seenAt: Date.now() - 1_000 } },
       session: { dshRuntimeLease: { activeUntil: Date.now() - 1, url: LOCAL }, dshPageWatchers: [watcher()] },
     })
     const fetchMock = reachable()
@@ -453,5 +470,317 @@ describe('a watcher hit while the bridge is reconnecting', () => {
     const stored = (mock.session.data.dshPageWatchers as Array<Record<string, unknown>>)[0]!
     expect(stored).toMatchObject({ fires: 1 })
     expect(stored).not.toHaveProperty('lastMiss')
+  })
+})
+
+describe('storage is closed to content scripts', () => {
+  it('restricts storage.local to trusted contexts at worker start, and works where the API is missing', async () => {
+    const mock = mockChrome({ accessLevels: true })
+    await boot()
+    expect(mock.setAccessLevel).toHaveBeenCalledWith({ accessLevel: 'TRUSTED_CONTEXTS' })
+    // Firefox: no setAccessLevel anywhere. Booting must not throw.
+    vi.resetModules()
+    const firefox = mockChrome()
+    await boot()
+    await settle()
+    expect(firefox.setAccessLevel).not.toHaveBeenCalled()
+  })
+
+  it('a throwing or rejecting setAccessLevel does not stop the worker', async () => {
+    const mock = mockChrome({ accessLevels: true, settings: { bridgeUrl: REMOTE } })
+    mock.setAccessLevel.mockImplementation(async () => { throw new Error('not allowed') })
+    const { panel } = await connectedWithPanel(mock)
+    expect(statuses(panel.postMessage).at(-1)).toMatchObject({ state: 'connected' })
+  })
+})
+
+describe('a stored hint never names the address to dial', () => {
+  async function staysAsleep(mock: ReturnType<typeof mockChrome>, fetchMock: ReturnType<typeof vi.fn>): Promise<void> {
+    await boot()
+    await vi.waitFor(() => { expect(hostHint(mock)).toBeUndefined() })
+    await settle()
+    mock.onAlarm.emit(ALARM)
+    await settle()
+    expect(FakeWebSocket.instances).toHaveLength(0)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(mock.alarms.create).not.toHaveBeenCalled()
+  }
+
+  it('a forged hint alone (no panel, no configured address) dials nothing and is removed', async () => {
+    await staysAsleep(mockChrome({ local: storedHint(ATTACKER) }), reachable())
+  })
+
+  it('with no configured address, only the remembered loopback address counts', async () => {
+    // Loopback, but not an address this extension remembered from a proven handshake.
+    await staysAsleep(mockChrome({ local: storedHint(LOCAL) }), reachable())
+    vi.resetModules()
+    await staysAsleep(mockChrome({ local: { ...storedHint('ws://127.0.0.1:4555/ext/bridge'), dshLastBridgeUrl: LOCAL } }), reachable())
+    // Remembered, but not loopback (a forged "remembered" address is not enough either).
+    vi.resetModules()
+    await staysAsleep(mockChrome({ local: { ...storedHint(ATTACKER), dshLastBridgeUrl: ATTACKER } }), reachable())
+  })
+
+  it('a hint from another bridge does not hold the lease for the configured address', async () => {
+    await staysAsleep(mockChrome({ settings: { bridgeUrl: 'wss://other.example/ext/bridge' }, local: storedHint(REMOTE) }), unreachable())
+  })
+
+  it('a hint for an address the user has since removed is dropped after a browser restart', async () => {
+    await staysAsleep(mockChrome({ settings: { bridgeUrl: '' }, local: storedHint(REMOTE, { seenAt: Date.now() - 6 * 24 * 60 * 60_000 }) }), unreachable())
+  })
+
+  it('a hint for the configured address reconnects there (a bare host matches its bridge path) and is renewed only by an authenticated hello.ok', async () => {
+    const seenAt = Date.now() - 6 * 24 * 60 * 60_000
+    const mock = mockChrome({ settings: { bridgeUrl: 'wss://bridge.example' }, local: storedHint(REMOTE, { seenAt }) })
+    await boot()
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    const socket = FakeWebSocket.instances[0]!
+    expect(socket.url).toBe(REMOTE)
+    socket.open()
+    await settle()
+    // Dialling, restoring and waiting never touch the stored record.
+    expect(hostHint(mock)).toMatchObject({ seenAt })
+    // The bridge proves the token but reports no standing work: the hint is gone, not renewed.
+    await completeHandshake(socket, { caps: { ...PLAIN_CAPS, standing: { schedules: 0, mcp: false } }, until: () => { expect(hostHint(mock)).toBeUndefined() } })
+  })
+})
+
+describe('changing the connection settings', () => {
+  async function leftBridge(change: Record<string, unknown>) {
+    const clock = movableClock()
+    const mock = mockChrome({ settings: { bridgeUrl: REMOTE } })
+    const { panel, socket } = await connectedWithPanel(mock, { ...PLAIN_CAPS, standing: { schedules: 1, mcp: true } })
+    await vi.waitFor(() => { expect(hostHint(mock)).toBeDefined() })
+    unreachable()
+    panel.onMessage.emit({ type: 'settings', id: 's1', settings: change })
+    await vi.waitFor(() => {
+      expect(panel.postMessage.mock.calls.some(([message]) => (message as { type?: string }).type === 'settings.result')).toBe(true)
+    }, { timeout: 15_000 })
+    return { clock, mock, panel, socket }
+  }
+
+  it('removing the address forgets the hint and the headless address: nothing redials the removed bridge', async () => {
+    const { clock, mock, panel, socket } = await leftBridge({ bridgeUrl: '' })
+    await vi.waitFor(() => { expect(socket.readyState).toBe(FakeWebSocket.CLOSED) }, { timeout: 15_000 })
+    expect(hostHint(mock)).toBeUndefined()
+    expect(statuses(panel.postMessage).at(-1)).toMatchObject({ standing: { watchers: 0, schedules: 0, mcp: false } })
+    const sockets = FakeWebSocket.instances.length
+    panel.onDisconnect.emit()
+    clock.advance(6 * 60_000)
+    mock.onAlarm.emit(ALARM)
+    await settle(200)
+    expect(FakeWebSocket.instances).toHaveLength(sockets)
+    expect(mock.session.data.dshRuntimeLease).toBeUndefined()
+  }, 40_000)
+
+  it('removing the address right after agent activity: the still-active lease does not redial the removed bridge either', async () => {
+    const mock = mockChrome({ settings: { bridgeUrl: REMOTE } })
+    const { panel, socket } = await connectedWithPanel(mock, { ...PLAIN_CAPS, standing: { schedules: 1, mcp: true } })
+    // A tool call just ran: the lease is held by recent activity, whatever standing work says.
+    socket.receive({ t: 'tool.call', id: 'recent', name: 'browser_tabs', args: {}, expiresAt: Date.now() + 10_000 })
+    await vi.waitFor(() => { expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'recent' })) })
+    unreachable()
+    panel.onMessage.emit({ type: 'settings', id: 's1', settings: { bridgeUrl: '' } })
+    await discoveryFinished(panel.postMessage)
+    const sockets = FakeWebSocket.instances.length
+    panel.onDisconnect.emit()
+    mock.onAlarm.emit(ALARM)
+    await settle(200)
+    expect(FakeWebSocket.instances).toHaveLength(sockets)
+  }, 40_000)
+
+  it('changing only the token forgets the hint too; the new connection must report it again', async () => {
+    const { mock } = await leftBridge({ token: 'another-token' })
+    expect(hostHint(mock)).toBeUndefined()
+  }, 40_000)
+})
+
+describe('a bridge that ended the connection for good', () => {
+  it('after close code 4000 (replaced) neither the alarm nor a restarted worker reclaims the slot; a panel does', async () => {
+    const clock = movableClock()
+    const mock = mockChrome({ settings: { bridgeUrl: REMOTE } })
+    const { panel, socket } = await connectedWithPanel(mock, { ...PLAIN_CAPS, standing: { schedules: 1, mcp: false } })
+    await vi.waitFor(() => { expect(hostHint(mock)).toBeDefined() })
+    panel.onDisconnect.emit()
+    clock.advance(6 * 60_000)
+    socket.close(BRIDGE_CLOSE_CODES.replaced, 'replaced')
+    await vi.waitFor(() => { expect(mock.local.data.dshBridgeRefusal).toBe('replaced') })
+    mock.onAlarm.emit(ALARM)
+    await settle()
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    // The worker sleeps; the next one starts from storage.
+    const local = { ...mock.local.data }
+    const session = { ...mock.session.data }
+    vi.resetModules()
+    const again = mockChrome({ local, session, settings: { bridgeUrl: REMOTE } })
+    await boot()
+    again.onAlarm.emit(ALARM)
+    await settle(150)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    // Standing work does not keep waking a worker that may not reconnect.
+    expect(again.alarms.create).not.toHaveBeenCalled()
+    // The user opens a panel: an explicit return clears the latch and reconnects.
+    again.onConnect.emit(panelPort().port)
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })
+    expect(again.local.data.dshBridgeRefusal).toBeUndefined()
+  })
+
+  it('replaced while the lease is still held by recent activity: a restarted worker does not reclaim the slot', async () => {
+    const mock = mockChrome({ settings: { bridgeUrl: REMOTE } })
+    const { panel, socket } = await connectedWithPanel(mock)
+    panel.onDisconnect.emit()
+    await vi.waitFor(() => { expect(mock.session.data.dshRuntimeLease).toMatchObject({ url: REMOTE }) })
+    const lease = mock.session.data.dshRuntimeLease
+    socket.close(BRIDGE_CLOSE_CODES.replaced, 'replaced')
+    await vi.waitFor(() => { expect(mock.local.data.dshBridgeRefusal).toBe('replaced') })
+    vi.resetModules()
+    const again = mockChrome({ local: { ...mock.local.data }, session: { dshRuntimeLease: lease }, settings: { bridgeUrl: REMOTE } })
+    await boot()
+    again.onAlarm.emit(ALARM)
+    await settle(150)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+  })
+
+  it.each([
+    ['token-mismatch', BRIDGE_CLOSE_CODES.authFailed],
+    ['version-mismatch', BRIDGE_CLOSE_CODES.versionMismatch],
+    ['origin-rejected', BRIDGE_CLOSE_CODES.originRejected],
+  ] as const)('a headless reconnect refused with %s is not retried', async (failure, code) => {
+    const clock = movableClock()
+    const mock = mockChrome({ settings: { bridgeUrl: REMOTE }, local: storedHint(REMOTE) })
+    await boot()
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    await settle()
+    socket.close(code, 'refused')
+    await vi.waitFor(() => { expect(mock.local.data.dshBridgeRefusal).toBe(failure) })
+    for (const wait of [31_000, 61_000, 5 * 60_000]) {
+      clock.advance(wait)
+      mock.onAlarm.emit(ALARM)
+      await settle()
+    }
+    expect(FakeWebSocket.instances).toHaveLength(1)
+  })
+
+  it('a busy bridge is not a refusal: the standing-work backoff keeps retrying', async () => {
+    const clock = movableClock()
+    const mock = mockChrome({ settings: { bridgeUrl: REMOTE }, local: storedHint(REMOTE) })
+    await boot()
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    FakeWebSocket.instances[0]!.open()
+    await settle()
+    FakeWebSocket.instances[0]!.close(BRIDGE_CLOSE_CODES.busy, 'busy')
+    await vi.waitFor(() => { expect(mock.session.data.dshStandingRetry).toMatchObject({ failures: 1 }) })
+    expect(mock.local.data.dshBridgeRefusal).toBeUndefined()
+    clock.advance(31_000)
+    mock.onAlarm.emit(ALARM)
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(2) })
+  })
+})
+
+describe('bridge/standing events need the cap', () => {
+  it('an older bridge (no standing cap) cannot set the hint with an event that uses the name, and it is not shown to the panel', async () => {
+    const mock = mockChrome({ settings: { bridgeUrl: REMOTE } })
+    const { panel, socket } = await connectedWithPanel(mock, PLAIN_CAPS)
+    socket.receive({ t: 'event', frame: { rpcId: 'host-1', method: 'bridge/standing', payload: { schedules: 9, mcp: true } } })
+    await settle(80)
+    expect(hostHint(mock)).toBeUndefined()
+    expect(statuses(panel.postMessage).at(-1)).toMatchObject({ standing: { watchers: 0, schedules: 0, mcp: false } })
+    expect(panel.postMessage.mock.calls.some(([message]) => (message as { type?: string }).type === 'event')).toBe(false)
+  })
+})
+
+describe('kill switch during a reconnect', () => {
+  const hit = (mock: ReturnType<typeof mockChrome>, answered: (response: unknown) => void): void => {
+    mock.onMessage.emit(
+      { type: 'DSH_WATCH_HIT', watchId: 'w-1', matched: 'In stock' },
+      { id: 'test-extension', tab: { id: 7, url: WATCHED_PAGE } as chrome.tabs.Tab, url: WATCHED_PAGE, frameId: 0 },
+      answered,
+    )
+  }
+
+  it('engaged in the middle of a backoff: the retry is dropped, the hint cleared, and releasing it resurrects neither', async () => {
+    const clock = movableClock()
+    const mock = mockChrome({ local: { dshLastBridgeUrl: LOCAL, ...storedHint(LOCAL) } })
+    const fetchMock = unreachable()
+    await boot()
+    await vi.waitFor(() => { expect(mock.session.data.dshStandingRetry).toMatchObject({ failures: 1 }) })
+    mock.onCommand.emit('kill-switch')
+    await vi.waitFor(() => { expect(hostHint(mock)).toBeUndefined() })
+    expect(mock.session.data.dshStandingRetry).toBeUndefined()
+    expect(mock.local.data.dshKillSwitch).toBe(true)
+    const probes = fetchMock.mock.calls.length
+    // The retry's one-shot alarm (or any later wake-up) finds nothing to do.
+    clock.advance(10 * 60_000)
+    mock.onAlarm.emit(ALARM)
+    await settle()
+    expect(fetchMock.mock.calls.length).toBe(probes)
+    expect(FakeWebSocket.instances).toHaveLength(0)
+
+    // Released from a panel: the user's reconnect runs, but the cleared hint stays cleared.
+    const panel = panelPort()
+    mock.onConnect.emit(panel.port)
+    panel.onMessage.emit({ type: 'kill-switch.release' })
+    await vi.waitFor(() => { expect(mock.local.data.dshKillSwitch).toBe(false) })
+    await discoveryFinished(panel.postMessage)
+    expect(hostHint(mock)).toBeUndefined()
+    expect(statuses(panel.postMessage).at(-1)).toMatchObject({ standing: { watchers: 0, schedules: 0, mcp: false } })
+    // With the panel closed again nothing holds the lease.
+    panel.onDisconnect.emit()
+    const afterRelease = fetchMock.mock.calls.length
+    clock.advance(10 * 60_000)
+    mock.onAlarm.emit(ALARM)
+    await settle()
+    expect(fetchMock.mock.calls.length).toBe(afterRelease)
+    expect(FakeWebSocket.instances).toHaveLength(0)
+  })
+
+  it('engaged while a watcher hit waits for the reconnect: the hit is refused at once and never fires', async () => {
+    const mock = mockChrome({
+      settings: { allowPageWatchers: true },
+      session: { dshRuntimeLease: { activeUntil: Date.now() - 60_000, url: LOCAL }, dshPageWatchers: [watcher()] },
+    })
+    reachable()
+    await boot()
+    const answered = vi.fn()
+    hit(mock, answered)
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    const socket = FakeWebSocket.instances[0]!
+    await settle()
+    expect(answered).not.toHaveBeenCalled()
+    const engagedAt = Date.now()
+    mock.onCommand.emit('kill-switch')
+    await vi.waitFor(() => { expect(answered).toHaveBeenCalledWith(expect.objectContaining({ accepted: false })) })
+    expect(Date.now() - engagedAt).toBeLessThan(3_000)
+    expect(socket.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(socket.sent.some((frame) => (frame as { method?: string }).method === 'bridge.watch.fire')).toBe(false)
+    // The switch revoked the watcher itself.
+    await vi.waitFor(() => { expect(mock.session.data.dshPageWatchers).toEqual([]) })
+  })
+})
+
+describe('a watcher hit whose tab moved on during the wait', () => {
+  it('does not fire for the page the tab left: the origin is checked against where the tab is now', async () => {
+    const mock = mockChrome({
+      settings: { allowPageWatchers: true },
+      session: { dshRuntimeLease: { activeUntil: Date.now() - 60_000, url: LOCAL }, dshPageWatchers: [watcher()] },
+    })
+    reachable()
+    await boot()
+    const answered = vi.fn()
+    mock.onMessage.emit(
+      { type: 'DSH_WATCH_HIT', watchId: 'w-1', matched: 'In stock' },
+      { id: 'test-extension', tab: { id: 7, url: WATCHED_PAGE } as chrome.tabs.Tab, url: WATCHED_PAGE, frameId: 0 },
+      answered,
+    )
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    const socket = FakeWebSocket.instances[0]!
+    await settle()
+    const elsewhere = 'https://bank.example/account'
+    ;(chrome.tabs.get as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (tabId: number) => ({ id: tabId, windowId: 1, title: 'Bank', url: elsewhere }))
+    socket.open()
+    await completeHandshake(socket, { until: () => { expect(answered).toHaveBeenCalledWith({ accepted: false, reason: 'other-origin' }) } })
+    await settle()
+    expect(socket.sent.some((frame) => (frame as { method?: string }).method === 'bridge.watch.fire')).toBe(false)
   })
 })

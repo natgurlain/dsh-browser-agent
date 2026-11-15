@@ -108,7 +108,10 @@ export class PageWatcherRuntime {
         }
         return answer
       },
-      ...(this.options.connected === undefined ? {} : { connected: this.options.connected }),
+      ...(this.options.connected === undefined ? {} : {
+        connected: this.options.connected,
+        currentUrl: (tabId: number) => chrome.tabs.get(tabId).then((tab) => tab.url, () => undefined),
+      }),
       changed: () => { this.broadcast() },
     }
   }

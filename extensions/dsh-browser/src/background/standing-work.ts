@@ -17,6 +17,14 @@
  * {@link STANDING_HOST_MAX_AGE_MS} is ignored (and removed), so an uninstalled
  * or moved dsh does not leave the browser probing for it forever.
  *
+ * The stored copy is not trusted to name an address: it is honoured only for
+ * the address the user configured, or, with none configured, for the loopback
+ * address the extension itself remembered after a proven handshake
+ * ({@link hintAddressAllowed}). An address that appears only in the hint is
+ * never dialled. Only an authenticated `hello.ok` (or a sealed event on a
+ * connection whose `hello.ok` carried the cap) writes or renews it, and a
+ * change of the connection settings drops it.
+ *
  * @module
  */
 
@@ -64,7 +72,8 @@ export function standingCount(summary: StandingSummary): number {
 export function parseStoredStandingHost(value: unknown, now: number = Date.now()): StoredStandingHost | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const { url, seenAt, ...work } = value as Record<string, unknown>
-  if (!isStandingWork(work) || !hostHasStanding(work)) return undefined
+  // The record is written by this module only: exactly its own keys.
+  if (Object.keys(work).length !== 2 || !isStandingWork(work) || !hostHasStanding(work)) return undefined
   if (typeof url !== 'string' || !/^wss?:\/\//u.test(url)) return undefined
   if (typeof seenAt !== 'number' || !Number.isFinite(seenAt) || seenAt > now || now - seenAt > STANDING_HOST_MAX_AGE_MS) return undefined
   return { schedules: work.schedules, mcp: work.mcp, url, seenAt }
@@ -74,4 +83,35 @@ export function parseStoredStandingHost(value: unknown, now: number = Date.now()
 export function storedStandingHost(work: StandingWork, url: string | undefined, now: number = Date.now()): StoredStandingHost | undefined {
   if (url === undefined || !hostHasStanding(work)) return undefined
   return parseStoredStandingHost({ schedules: work.schedules, mcp: work.mcp, url, seenAt: now }, now)
+}
+
+/** The bridge URL as it is dialled: a bare host gets the bridge path. Unparseable input is returned as is. */
+export function normalizeBridgeUrl(url: string, bridgePath: string): string {
+  try {
+    const parsed = new URL(url)
+    if (parsed.pathname === '' || parsed.pathname === '/') parsed.pathname = bridgePath
+    return parsed.toString()
+  } catch {
+    return url
+  }
+}
+
+/**
+ * Whether a stored hint may hold the lease and be reconnected to.
+ * @param hintUrl - the address stored with the hint.
+ * @param configuredUrl - the user's bridge address setting ('' when automatic).
+ * @param rememberedUrl - the address remembered after a proven handshake, if any.
+ * @param isLoopback - loopback test for a bridge URL.
+ * @param bridgePath - the protocol's bridge path (for comparing bare hosts).
+ */
+export function hintAddressAllowed(
+  hintUrl: string,
+  configuredUrl: string,
+  rememberedUrl: string | undefined,
+  isLoopback: (url: string) => boolean,
+  bridgePath: string,
+): boolean {
+  const hint = normalizeBridgeUrl(hintUrl, bridgePath)
+  if (configuredUrl !== '') return hint === normalizeBridgeUrl(configuredUrl, bridgePath)
+  return rememberedUrl !== undefined && hint === normalizeBridgeUrl(rememberedUrl, bridgePath) && isLoopback(hintUrl)
 }
