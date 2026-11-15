@@ -9,6 +9,18 @@ No further configuration is required: the extension discovers local dsh automati
 
 这是 scripts/install.sh 的 Windows 对应版本，两者共享同一套托管目录与 install-info.json 约定。
 This is the Windows counterpart of scripts/install.sh; both share one managed-root and install-info.json contract.
+
+Where the files come from (same rules as install.sh):
+  .\scripts\install.ps1                     inside a checkout: installs that checkout, downloads nothing
+  install.ps1 [--release latest|vX.Y.Z]     on its own (or with --release): downloads that tagged release
+                                            (default: the latest) and verifies it against its SHA256SUMS
+                                            before unpacking or running any of it
+  install.ps1 --unverified-branch <name>    development only: a branch archive, with no checksum at all
+DSH_BROWSER_VERSION and DSH_BROWSER_UNVERIFIED_BRANCH are the environment forms of the two options.
+DSH_BROWSER_GITHUB_TOKEN (or an authenticated gh) is needed while the repository is private.
+DSH_BROWSER_NO_LAUNCH=1 keeps the installer from opening Chrome or touching the clipboard.
+
+The release path of this script has never been run on Windows (see RELEASING.md).
 #>
 # This file is UTF-8 with a BOM on purpose: Windows PowerShell 5.1 decodes a BOM-less script
 # with the machine's ANSI codepage and turns every Chinese line into mojibake. The BOM is also
@@ -23,16 +35,252 @@ $ProgressPreference = 'SilentlyContinue'
 # message into question marks on a non-Chinese install.
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
 
-$Repository = 'natgurlain/dsh-browser-agent'
-$RemoteRef = 'main'
 $DshHomeDir = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
 $ManagedRoot = Join-Path $DshHomeDir 'dsh-browser'
 # Same marker filename as scripts/install.sh: one managed root, one definition of "managed".
 $ManagedMarker = Join-Path $ManagedRoot '.managed-by-install-sh'
-$ArchiveUrl = "https://github.com/$Repository/archive/refs/heads/$RemoteRef.zip"
 # Earlier package names of this bridge (upstream and its origin); scripts/uninstall.mjs knows the same names.
 $LegacyPlugins = @('@deepseek-ai/dsh-bridge-browser', '@yuxianglin/dsh-bridge-browser')
 $BridgePlugin = '@natgurlain/dsh-bridge-browser'
+$InstallArguments = @($args)
+
+# >>> release-fetch
+# Shared by install.ps1 and uninstall.ps1 (each must run on its own, so the block is
+# duplicated; scripts/tests/release-consistency.test.mjs keeps the copies identical). It is
+# the PowerShell counterpart of the release-fetch block in install.sh.
+#
+#   Get-VerifiedRelease -Directory <dir> -Tag <tag or ''> -Assets <names>
+#
+# resolves the release (the latest one when -Tag is empty), downloads SHA256SUMS and the
+# named assets into <dir>, checks every asset's SHA-256 against SHA256SUMS and returns the
+# resolved tag. Any failure (download error, missing SHA256SUMS, missing or duplicated line,
+# digest mismatch) throws after recording a bilingual message in $script:ReleaseFailure.
+# Callers must not read, unpack or run anything in <dir> before it returns. "{tag}" in an
+# asset name is replaced by the resolved tag.
+#
+# A private repository answers anonymous requests with 404. Then the download goes through
+# the GitHub API with DSH_BROWSER_GITHUB_TOKEN when that is set, or through an authenticated
+# gh when one is installed. The token is only ever sent to the API host and is never printed.
+$ReleaseRepository = 'natgurlain/dsh-browser-agent'
+$ReleaseGitHubUrl = if ($env:DSH_BROWSER_GITHUB_URL) { $env:DSH_BROWSER_GITHUB_URL.TrimEnd('/') } else { 'https://github.com' }
+$ReleaseApiUrl = if ($env:DSH_BROWSER_GITHUB_API_URL) { $env:DSH_BROWSER_GITHUB_API_URL.TrimEnd('/') } else { 'https://api.github.com' }
+$ReleaseTagPattern = '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+$script:ReleaseFailure = $null
+
+function Stop-Release {
+  param([string]$Zh, [string]$En)
+  $script:ReleaseFailure = @($Zh, $En)
+  throw "dsh-browser release: $En"
+}
+
+function Assert-ReleaseBase {
+  param([string]$Url)
+  if ($Url -match '^https://\S+$' -or $Url -match '^http://(127\.0\.0\.1|localhost)(:[0-9]+)?(/\S*)?$') { return }
+  Stop-Release "下载地址必须使用 HTTPS（只有本机回环地址可以使用 HTTP）：$Url" `
+    "Download URLs must use HTTPS (plain HTTP is accepted for loopback only): $Url"
+}
+
+function Invoke-ReleaseRequest {
+  <#
+    One GET. Returns @{ Status = <HTTP status, 0 when the transfer failed>; Url = <final URL> }.
+    With -OutFile the body is saved there; without it the body is discarded.
+  #>
+  param([string]$Uri, [string]$OutFile = '', [hashtable]$Headers = @{})
+
+  # Windows PowerShell defaults to protocols GitHub no longer accepts.
+  try {
+    [Net.ServicePointManager]::SecurityProtocol =
+      [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  } catch { }
+
+  try {
+    if ($OutFile) {
+      Invoke-WebRequest -Uri $Uri -OutFile $OutFile -Headers $Headers -UseBasicParsing | Out-Null
+      return @{ Status = 200; Url = $Uri }
+    }
+    $response = Invoke-WebRequest -Uri $Uri -Headers $Headers -UseBasicParsing
+    $final = $Uri
+    # Windows PowerShell exposes the final URL as ResponseUri, PowerShell 7 through the request message.
+    if ($response.BaseResponse.ResponseUri) {
+      $final = $response.BaseResponse.ResponseUri.AbsoluteUri
+    } elseif ($response.BaseResponse.RequestMessage) {
+      $final = $response.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+    }
+    return @{ Status = [int]$response.StatusCode; Url = $final }
+  } catch {
+    $failed = $_.Exception.Response
+    if ($failed -and $failed.StatusCode) { return @{ Status = [int]$failed.StatusCode; Url = $Uri } }
+    return @{ Status = 0; Url = $Uri }
+  }
+}
+
+function Invoke-ReleaseGh {
+  <# Run gh quietly. Returns @{ Code = <exit code, -1 when gh is absent>; Output = <stdout and stderr> }. #>
+  param([string[]]$Arguments)
+
+  if (-not (Get-Command -Name 'gh' -ErrorAction SilentlyContinue)) { return @{ Code = -1; Output = '' } }
+  # A native command's stderr becomes a terminating error while $ErrorActionPreference is Stop.
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $output = (& gh @Arguments 2>&1 | Out-String)
+    return @{ Code = $LASTEXITCODE; Output = $output.Trim() }
+  } catch {
+    return @{ Code = 1; Output = [string]$_ }
+  } finally {
+    $ErrorActionPreference = $previous
+  }
+}
+
+function Get-ReleaseDigest {
+  <# The digest SHA256SUMS records for $Name; stops unless there is exactly one. #>
+  param([string]$Directory, [string]$Name, [string]$Tag)
+
+  $found = @()
+  foreach ($line in @(Get-Content -LiteralPath (Join-Path $Directory 'SHA256SUMS') -Encoding UTF8)) {
+    $parts = @($line.Trim() -split '\s+')
+    if ($parts.Count -eq 2 -and ($parts[1] -ceq $Name -or $parts[1] -ceq "*$Name")) { $found += $parts[0].ToLowerInvariant() }
+  }
+  if ($found.Count -ne 1 -or $found[0] -notmatch '^[0-9a-f]{64}$') {
+    Stop-Release "$Tag 的 SHA256SUMS 中没有 $Name 的唯一校验值，已停止。" `
+      "SHA256SUMS of $Tag has no single digest for $Name; stopping."
+  }
+  return $found[0]
+}
+
+function Get-VerifiedRelease {
+  param(
+    [Parameter(Mandatory = $true)][string]$Directory,
+    [string]$Tag = '',
+    [Parameter(Mandatory = $true)][string[]]$Assets
+  )
+
+  Assert-ReleaseBase $ReleaseGitHubUrl
+  Assert-ReleaseBase $ReleaseApiUrl
+  if ($Tag -and $Tag -notmatch $ReleaseTagPattern) {
+    Stop-Release "不是有效的发布版本号：$Tag（示例：v0.1.5）。" "Not a release tag: $Tag (expected something like v0.1.5)."
+  }
+  New-Item -ItemType Directory -Path $Directory -Force | Out-Null
+  $token = $env:DSH_BROWSER_GITHUB_TOKEN
+  $wanted = if ($Tag) { $Tag } else { 'latest' }
+  $mode = 'public'
+  $assetUrls = @{}
+
+  if ($token) {
+    $mode = 'token'
+    if ($token -notmatch '^[A-Za-z0-9_.-]+$') {
+      Stop-Release "DSH_BROWSER_GITHUB_TOKEN 含有不允许的字符。" "DSH_BROWSER_GITHUB_TOKEN contains characters a GitHub token never has."
+    }
+    $path = if ($Tag) { "releases/tags/$Tag" } else { 'releases/latest' }
+    $description = Join-Path $Directory '.release.json'
+    $answer = Invoke-ReleaseRequest -Uri "$ReleaseApiUrl/repos/$ReleaseRepository/$path" -OutFile $description `
+      -Headers @{ Authorization = "Bearer $token"; Accept = 'application/vnd.github+json' }
+    if ($answer.Status -eq 401 -or $answer.Status -eq 403) {
+      Stop-Release "GitHub 拒绝了 DSH_BROWSER_GITHUB_TOKEN（HTTP $($answer.Status)）。" "GitHub rejected DSH_BROWSER_GITHUB_TOKEN (HTTP $($answer.Status))."
+    }
+    if ($answer.Status -eq 404) {
+      Stop-Release "用该 token 找不到 $ReleaseRepository 的发布版本 $wanted；请确认版本已发布且 token 可以读取该仓库。" `
+        "No release $wanted of $ReleaseRepository is visible to this token; check that it is published and that the token can read the repository."
+    }
+    if ($answer.Status -ne 200) {
+      Stop-Release "无法从 GitHub API 读取发布信息（HTTP $($answer.Status)）。" "Could not read the release from the GitHub API (HTTP $($answer.Status))."
+    }
+    try {
+      $release = Get-Content -LiteralPath $description -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+      Stop-Release "GitHub API 返回的发布信息无法解析。" "The release description from the GitHub API could not be parsed."
+    }
+    $Tag = [string]$release.tag_name
+    foreach ($asset in @($release.assets)) { $assetUrls[[string]$asset.name] = [string]$asset.url }
+    Remove-Item -LiteralPath $description -Force -ErrorAction SilentlyContinue
+  } else {
+    # Find the release without credentials: 404 means it is not visible anonymously.
+    $releases = "$ReleaseGitHubUrl/$ReleaseRepository/releases"
+    $probe = if ($Tag) { "$releases/tag/$Tag" } else { "$releases/latest" }
+    $answer = Invoke-ReleaseRequest -Uri $probe
+    if ($answer.Status -eq 200) {
+      if (-not $Tag) {
+        # /releases/latest redirects to /releases/tag/<tag>, or to /releases when there is none.
+        if ($answer.Url -match '/releases/tag/([^/?#]+)$') {
+          $Tag = $Matches[1]
+        } else {
+          Stop-Release "$ReleaseRepository 还没有发布任何版本。" "$ReleaseRepository has not published a release yet."
+        }
+      }
+    } elseif (@(401, 403, 404) -contains $answer.Status) {
+      $reachable = $false
+      if ((Invoke-ReleaseGh @('auth', 'status')).Code -eq 0) {
+        $mode = 'gh'
+        $reachable = $true
+        if (-not $Tag) {
+          $viewed = Invoke-ReleaseGh @('release', 'view', '--repo', $ReleaseRepository, '--json', 'tagName', '--jq', '.tagName')
+          if ($viewed.Code -eq 0) { $Tag = $viewed.Output } else { $reachable = $false }
+        }
+      }
+      if (-not $reachable) {
+        Stop-Release "无法匿名访问 $ReleaseRepository 的发布版本 $wanted：仓库是私有的，或该版本不存在。可以先运行 gh auth login，或设置 DSH_BROWSER_GITHUB_TOKEN 为可读取该仓库的 token，或者 git clone 后在 checkout 中运行 .\scripts\install.ps1。" `
+          "Release $wanted of $ReleaseRepository is not reachable anonymously: the repository is private, or there is no such release. Run 'gh auth login' first, or set DSH_BROWSER_GITHUB_TOKEN to a token that can read the repository, or clone it and run .\scripts\install.ps1 from the checkout."
+      }
+    } else {
+      Stop-Release "下载失败：无法连接 $ReleaseGitHubUrl。现有安装未被修改。" `
+        "Download failed: could not reach $ReleaseGitHubUrl. The existing installation was not changed."
+    }
+  }
+  if ($Tag -notmatch $ReleaseTagPattern) {
+    Stop-Release "发布版本号无效：$Tag" "The release reports an invalid tag: $Tag"
+  }
+
+  # SHA256SUMS first, then each asset; every name goes through the same download.
+  $names = @('SHA256SUMS') + @($Assets | ForEach-Object { $_.Replace('{tag}', $Tag) })
+  foreach ($name in $names) {
+    $target = Join-Path $Directory $name
+    $status = 0
+    if ($mode -eq 'public') {
+      $status = (Invoke-ReleaseRequest -Uri "$ReleaseGitHubUrl/$ReleaseRepository/releases/download/$Tag/$name" -OutFile $target).Status
+    } elseif ($mode -eq 'token') {
+      $url = $assetUrls[$name]
+      if (-not $url) {
+        $status = 404
+      } elseif (-not $url.StartsWith("$ReleaseApiUrl/", [System.StringComparison]::Ordinal)) {
+        # The token goes to the API host only, whatever the release description says.
+        $status = 0
+      } else {
+        $status = (Invoke-ReleaseRequest -Uri $url -OutFile $target `
+            -Headers @{ Authorization = "Bearer $token"; Accept = 'application/octet-stream' }).Status
+      }
+    } else {
+      $fetched = Invoke-ReleaseGh @('release', 'download', $Tag, '--repo', $ReleaseRepository, '--pattern', $name, '--dir', $Directory, '--clobber')
+      if ($fetched.Code -eq 0 -and (Test-Path -LiteralPath $target -PathType Leaf)) {
+        $status = 200
+      } elseif ($fetched.Code -eq 0 -or $fetched.Output -match 'no assets match') {
+        $status = 404
+      } else {
+        Write-Host $fetched.Output
+      }
+    }
+
+    if ($status -ne 200) {
+      if ($name -eq 'SHA256SUMS' -and $status -eq 404) {
+        Stop-Release "发布版本 $Tag 没有 SHA256SUMS，无法校验，已停止。" "Release $Tag has no SHA256SUMS, so nothing can be verified; stopping."
+      }
+      Stop-Release "下载 $name 失败（不完整或不存在）。现有安装未被修改。" `
+        "Downloading $name failed (incomplete or missing). The existing installation was not changed."
+    }
+    if ($name -eq 'SHA256SUMS') { continue }
+
+    $expected = Get-ReleaseDigest -Directory $Directory -Name $name -Tag $Tag
+    $actual = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) {
+      Stop-Release "$name 的 SHA-256 与 SHA256SUMS 不符（期望 $expected，实际 $actual）。文件未被解压或执行。" `
+        "SHA-256 mismatch for $name (expected $expected, got $actual). Nothing was unpacked or run."
+    }
+  }
+
+  Write-Host ("已校验：{0} 的 {1} 个文件与 SHA256SUMS 一致。" -f $Tag, $Assets.Count)
+  Write-Host ("   Verified: {0} file(s) of {1} match SHA256SUMS." -f $Assets.Count, $Tag)
+  return $Tag
+}
+# <<< release-fetch
 
 function Write-Step {
   param([int]$Number, [string]$Zh, [string]$En)
@@ -131,7 +379,10 @@ function Sync-Directory {
   param(
     [Parameter(Mandatory = $true)][string]$Source,
     [Parameter(Mandatory = $true)][string]$Destination,
-    [string[]]$ExcludeName = @()
+    [string[]]$ExcludeName = @(),
+    # Copy every file even when size and timestamp match: archive timestamps are fixed per
+    # release, so those two alone could miss a changed file of the same length.
+    [switch]$AlwaysCopy
   )
 
   $sourceRoot = (Resolve-Path -LiteralPath $Source).ProviderPath.TrimEnd('\')
@@ -154,7 +405,7 @@ function Sync-Directory {
       continue
     }
     $existing = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
-    if ($existing -and -not $existing.PSIsContainer -and
+    if (-not $AlwaysCopy -and $existing -and -not $existing.PSIsContainer -and
         $existing.Length -eq $entry.Item.Length -and
         $existing.LastWriteTimeUtc -eq $entry.Item.LastWriteTimeUtc) {
       continue
@@ -344,6 +595,9 @@ function Install-BridgeToken {
 }
 
 function Install-RemoteWorkspace {
+  <# -Wanted: a release tag, or '' for the latest. -Branch: a branch name for the unverified development path. #>
+  param([string]$Wanted = '', [string]$Branch = '')
+
   Assert-Command 'Expand-Archive' "当前 PowerShell 缺少 Expand-Archive；请升级到 PowerShell 5.1 或更高版本。" "This PowerShell has no Expand-Archive; upgrade to PowerShell 5.1 or newer."
 
   if ((Test-Path -LiteralPath $ManagedRoot -PathType Container) -and
@@ -354,39 +608,69 @@ function Install-RemoteWorkspace {
       "$ManagedRoot already exists and is not managed by this installer; move it or run .\scripts\install.ps1 inside it to avoid overwriting it."
   }
 
-  Write-Pair "未检测到完整的本地 checkout，切换到免 clone 安装。" "No complete local checkout was detected; switching to the clone-free install."
-  Write-Pair "正在从 $Repository 的 $RemoteRef 分支下载安装文件……" "Downloading installation files from $Repository at $RemoteRef…"
-
-  # Windows PowerShell defaults to protocols GitHub no longer accepts.
-  try {
-    [Net.ServicePointManager]::SecurityProtocol =
-      [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-  } catch { }
-
   $tempBase = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
   $bootstrap = Join-Path $tempBase ('dsh-browser-install-' + [System.Guid]::NewGuid().ToString('N').Substring(0, 8))
-  New-Item -ItemType Directory -Path $bootstrap -Force | Out-Null
+  $download = Join-Path $bootstrap 'download'
+  $expanded = Join-Path $bootstrap 'source'
+  New-Item -ItemType Directory -Path $download -Force | Out-Null
 
+  $failure = $null
+  $sourceLabel = ''
   try {
-    $archive = Join-Path $bootstrap 'source.zip'
-    $expanded = Join-Path $bootstrap 'source'
-    Invoke-WebRequest -Uri $ArchiveUrl -OutFile $archive -UseBasicParsing
-    Expand-Archive -LiteralPath $archive -DestinationPath $expanded -Force
+    if ($Branch) {
+      if ($Branch -notmatch '^[A-Za-z0-9._/-]+$' -or $Branch.Contains('..')) {
+        Stop-Release "不是有效的分支名：$Branch" "Not a usable branch name: $Branch"
+      }
+      Write-Pair "警告：正在安装 $ReleaseRepository 的 $Branch 分支。分支归档没有校验值，内容未经校验；仅用于开发。" `
+        "WARNING: installing branch $Branch of $ReleaseRepository. A branch archive has no checksum and is NOT verified; use this for development only."
+      Assert-ReleaseBase $ReleaseGitHubUrl
+      $archive = Join-Path $download 'branch.zip'
+      $answer = Invoke-ReleaseRequest -Uri "$ReleaseGitHubUrl/$ReleaseRepository/archive/refs/heads/$Branch.zip" -OutFile $archive
+      if (@(401, 403, 404) -contains $answer.Status) {
+        Stop-Release "无法匿名下载 $Branch 分支：仓库是私有的，或没有这个分支。请 git clone 后在 checkout 中运行 .\scripts\install.ps1。" `
+          "Branch $Branch cannot be downloaded anonymously: the repository is private, or there is no such branch. Clone the repository and run .\scripts\install.ps1 from the checkout."
+      }
+      if ($answer.Status -ne 200) {
+        Stop-Release "下载 $Branch 分支失败。现有安装未被修改。" "Downloading branch $Branch failed. The existing installation was not changed."
+      }
+      $sourceLabel = "branch $Branch (unverified)"
+    } else {
+      $shown = if ($Wanted) { $Wanted } else { 'latest' }
+      Write-Pair "正在从 $ReleaseRepository 下载发布版本 $shown 并校验……" "Downloading release $shown of $ReleaseRepository and verifying it…"
+      # Nothing below this line touches the download until Get-VerifiedRelease has verified it.
+      $tag = [string](Get-VerifiedRelease -Directory $download -Tag $Wanted -Assets @('dsh-browser-source-{tag}.zip') |
+          Select-Object -Last 1)
+      $archive = Join-Path $download "dsh-browser-source-$tag.zip"
+      $sourceLabel = "release $tag (SHA256SUMS verified)"
+    }
 
+    Expand-Archive -LiteralPath $archive -DestinationPath $expanded -Force
     $extracted = @(Get-ChildItem -LiteralPath $expanded -Directory)
     if ($extracted.Count -ne 1 -or -not (Test-Workspace $extracted[0].FullName)) {
-      Stop-Install "下载内容不完整，未修改现有安装。" "The download is incomplete; the existing installation was not changed."
+      Stop-Release "下载内容不完整，未修改现有安装。" "The download is incomplete; the existing installation was not changed."
     }
 
     New-Item -ItemType Directory -Path $ManagedRoot -Force | Out-Null
-    New-Item -ItemType File -Path $ManagedMarker -Force | Out-Null
+    # The marker exists before the sync starts, so an interrupted sync is still a managed
+    # directory the next run may repair; it names the source once the sync is complete.
+    if (-not (Test-Path -LiteralPath $ManagedMarker -PathType Leaf)) {
+      New-Item -ItemType File -Path $ManagedMarker -Force | Out-Null
+    }
     Sync-Directory -Source $extracted[0].FullName -Destination $ManagedRoot `
-      -ExcludeName @('node_modules', '.managed-by-install-sh')
+      -ExcludeName @('node_modules', '.managed-by-install-sh') -AlwaysCopy
+    [System.IO.File]::WriteAllText($ManagedMarker, "$sourceLabel`n", (New-Object System.Text.UTF8Encoding $false))
+  } catch {
+    $failure = if ($script:ReleaseFailure) {
+      $script:ReleaseFailure
+    } else {
+      @("下载或解压安装文件失败：$($_.Exception.Message)", "Downloading or unpacking the installation files failed: $($_.Exception.Message)")
+    }
   } finally {
     Remove-Item -LiteralPath $bootstrap -Recurse -Force -ErrorAction SilentlyContinue
   }
+  if ($failure) { Stop-Install $failure[0] $failure[1] }
 
-  Write-Pair "安装文件已同步到 $ManagedRoot。" "Installation files are ready in $ManagedRoot."
+  Write-Pair "安装文件已同步到 $ManagedRoot（$sourceLabel）。" "Installation files are ready in $ManagedRoot ($sourceLabel)."
 
   # Hand over to the version that was just downloaded, the way the Unix installer re-execs.
   # -ExecutionPolicy Bypass keeps a restricted machine from rejecting the freshly written file.
@@ -395,16 +679,80 @@ function Install-RemoteWorkspace {
   } else {
     Join-Path $PSHOME 'powershell.exe'
   }
+  # The second stage must install what was just unpacked, not download again.
+  $env:DSH_BROWSER_BOOTSTRAPPED = '1'
   & $hostExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ManagedRoot 'scripts\install.ps1')
   exit $LASTEXITCODE
+}
+
+function Write-Usage {
+  Write-Host @'
+Usage: install.ps1 [--release latest|vX.Y.Z] [--unverified-branch <name>]
+
+  (no option, inside a checkout)   install this checkout; nothing is downloaded
+  (no option, standalone)          same as --release latest
+  --release latest|vX.Y.Z          download that tagged release, verify every file against
+                                   its SHA256SUMS, then install it (env: DSH_BROWSER_VERSION)
+  --unverified-branch <name>       development only: install a branch archive, which has no
+                                   checksum (env: DSH_BROWSER_UNVERIFIED_BRANCH)
+
+Private repository: set DSH_BROWSER_GITHUB_TOKEN, or log in with gh, or install from a checkout.
+'@
 }
 
 if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
   Stop-Install "install.ps1 仅用于 Windows；macOS 与 Linux 请运行 scripts/install.sh。" "install.ps1 is for Windows only; run scripts/install.sh on macOS and Linux."
 }
 
-$Root = Get-WorkspaceRoot
-if (-not $Root) { Install-RemoteWorkspace }
+$RequestedRelease = [string]$env:DSH_BROWSER_VERSION
+$RequestedBranch = [string]$env:DSH_BROWSER_UNVERIFIED_BRANCH
+for ($index = 0; $index -lt $InstallArguments.Count; $index++) {
+  $argument = [string]$InstallArguments[$index]
+  if ($argument -eq '--release' -or $argument -eq '--unverified-branch') {
+    if ($index + 1 -ge $InstallArguments.Count) { Stop-Install "$argument 需要一个值。" "$argument needs a value." }
+    $index++
+    if ($argument -eq '--release') {
+      $RequestedRelease = [string]$InstallArguments[$index]
+    } else {
+      $RequestedBranch = [string]$InstallArguments[$index]
+    }
+  } elseif ($argument.StartsWith('--release=')) {
+    $RequestedRelease = $argument.Substring('--release='.Length)
+  } elseif ($argument.StartsWith('--unverified-branch=')) {
+    $RequestedBranch = $argument.Substring('--unverified-branch='.Length)
+  } elseif ($argument -eq '--help' -or $argument -eq '-h') {
+    Write-Usage
+    exit 0
+  } else {
+    Write-Usage
+    Stop-Install "未知参数：$argument" "Unknown option: $argument"
+  }
+}
+if ($RequestedRelease -and $RequestedBranch) {
+  Stop-Install "--release 与 --unverified-branch 不能同时使用。" "--release and --unverified-branch cannot be combined."
+}
+# A bare version number is accepted for the tag: 0.1.5 means v0.1.5.
+if ($RequestedRelease -match '^[0-9]') { $RequestedRelease = "v$RequestedRelease" }
+
+$Root = $null
+if ($env:DSH_BROWSER_BOOTSTRAPPED -eq '1') {
+  # Second stage of a download: install the files this script sits in.
+  $Root = Get-WorkspaceRoot
+  if (-not $Root) { Stop-Install "下载的安装文件不完整。" "The downloaded installation files are incomplete." }
+} elseif ($RequestedBranch) {
+  Install-RemoteWorkspace -Branch $RequestedBranch
+} elseif ($RequestedRelease) {
+  if ($RequestedRelease -eq 'latest') { $RequestedRelease = '' }
+  Install-RemoteWorkspace -Wanted $RequestedRelease
+} else {
+  $Root = Get-WorkspaceRoot
+  if (-not $Root) {
+    Write-Pair "未检测到完整的本地 checkout，切换到免 clone 安装。" "No complete local checkout was detected; switching to the clone-free install."
+    Install-RemoteWorkspace
+  } elseif (-not (Test-Path -LiteralPath (Join-Path $Root '.managed-by-install-sh') -PathType Leaf)) {
+    Write-Pair "从本地 checkout 安装，不下载任何文件：$Root" "Installing from this local checkout; nothing is downloaded: $Root"
+  }
+}
 
 $Ext = Join-Path $Root 'extensions\dsh-browser'
 $Plugin = Join-Path $Root 'packages\browser\bridge-browser'
@@ -482,7 +830,8 @@ Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', 'd
   -FailZh "扩展构建失败。" -FailEn "The extension build failed."
 
 Write-Step 4 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
-Confirm-Browser | Out-Null
+$NoLaunch = $env:DSH_BROWSER_NO_LAUNCH -eq '1'
+if (-not $NoLaunch) { Confirm-Browser | Out-Null }
 $DistDir = Join-Path $DshHomeDir 'browser-extension'
 $IsUpdate = Test-Path -LiteralPath (Join-Path $DistDir 'manifest.json') -PathType Leaf
 New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
@@ -495,8 +844,8 @@ $InstallMode = if (Test-Path -LiteralPath (Join-Path $Root '.managed-by-install-
 if ($LASTEXITCODE -ne 0) { Stop-Install '写入安装信息失败。' 'Writing install metadata failed.' }
 Install-BridgeToken -ExtensionDir $DistDir
 
-$ClipboardReady = Set-ClipboardText $DistDir
-$ChromeOpened = Start-ExtensionsPage (Get-BrowserPath)
+$ClipboardReady = (-not $NoLaunch) -and (Set-ClipboardText $DistDir)
+$ChromeOpened = (-not $NoLaunch) -and (Start-ExtensionsPage (Get-BrowserPath))
 
 Write-Host ''
 if (-not $ChromeOpened) {
