@@ -42,7 +42,8 @@ test('streamed Bash preserves download failures and removes its temporary direct
       input: readFileSync(join(root, 'scripts', 'uninstall.sh'), 'utf8'),
     })
     if (result.error) throw result.error
-    assert.equal(result.status, 7, result.stdout + result.stderr)
+    assert.equal(result.status, 1, result.stdout + result.stderr)
+    assert.match(result.stderr, /Download failed: could not reach https:\/\/github\.com/)
     assert.doesNotMatch(result.stderr, /unbound variable/)
     cleaned(fixture)
   } finally {
@@ -62,7 +63,7 @@ for (const shell of powershells) {
       const script = join(fixture.base, 'uninstall.ps1')
       cpSync(join(root, 'scripts', 'uninstall.ps1'), script)
       const command = entry === 'script' ? `& ${powerShellQuote(script)} --dry-run`
-        : uninstallCommand({ mode: 'unknown' }, 'Windows')
+        : uninstallCommand({ mode: 'unknown' }, 'Windows', '0.1.5')
       // 设置真实代理连接失败，覆盖下载中断后的清理。
       const source = `$ErrorActionPreference = 'Stop'; [System.Net.WebRequest]::DefaultWebProxy = New-Object System.Net.WebProxy('${proxy}'); ${command}`
       try {
@@ -71,7 +72,8 @@ for (const shell of powershells) {
         })
         if (result.error) throw result.error
         assert.equal(result.status, 1, result.stdout + result.stderr)
-        assert.match(result.stderr, /Invoke-WebRequest/)
+        // The copied command fails fetching uninstall.ps1; the script itself fails resolving the release.
+        assert.match(result.stderr, entry === 'script' ? /Download failed: could not reach https:\/\/github\.com/ : /Invoke-WebRequest/)
         cleaned(fixture)
       } finally {
         if (process.platform !== 'win32') chmodSync(fixture.cwd, 0o755)
