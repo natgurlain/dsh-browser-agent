@@ -17,19 +17,39 @@
 
 ## 快速安装
 
-安装器会安装桥插件和 Chrome 扩展。它下载当前 `main` 分支并从源码构建；目前不使用发布资产，也不校验校验和（见 [RELEASING.md](RELEASING.md)）。
+安装器会安装桥插件和 Chrome 扩展。它下载一个带标签的发布版本，把每个下载的文件与该版本的 `SHA256SUMS` 逐一比对，校验通过后才解压并从源码构建。校验值不符、缺少 `SHA256SUMS` 或下载不完整时，安装会在解压或执行任何内容之前停止。
 
-macOS 与 Linux：
+> [!NOTE]
+> 仓库目前是私有的，`v0.1.5` 也尚未发布。在此之前，下面的下载命令会返回 404。请改为从 checkout 安装（见[安装或更新](#安装或更新)），或者先让安装器获得访问权限：运行 `gh auth login`，或 `export DSH_BROWSER_GITHUB_TOKEN=<可读取该仓库的 token>`，然后在 checkout 中以 `--release v0.1.5` 运行 `install.sh`。
+
+macOS 与 Linux。先下载安装器，用已发布的校验值核对，再运行：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/install.sh | bash
+tag=v0.1.5
+base=https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag
+curl --proto '=https' --tlsv1.2 -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS"
+grep ' install.sh$' SHA256SUMS | sha256sum -c -    # macOS: shasum -a 256 -c -
+bash install.sh --release "$tag"
 ```
 
-Windows（PowerShell）：
+Windows（PowerShell；`install.ps1` 的发布版本路径尚未在 Windows 机器上运行过）：
 
 ```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+$tag = 'v0.1.5'
+$base = "https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag"
+irm "$base/install.ps1" -OutFile install.ps1; irm "$base/SHA256SUMS" -OutFile SHA256SUMS
+$want = (Select-String -Path SHA256SUMS -Pattern ' install\.ps1$').Line.Split(' ')[0]
+if ((Get-FileHash install.ps1 -Algorithm SHA256).Hash -ne $want) { throw 'install.ps1 does not match SHA256SUMS' }
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --release $tag
 ```
+
+同样的校验值也印在每个[发布版本](https://github.com/natgurlain/dsh-browser-agent/releases)的说明里。下面的简短形式不会先核对安装脚本本身；安装器下载的内容仍会被校验：
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.1.5/install.sh | bash -s -- --release v0.1.5
+```
+
+`--release latest` 安装最新的发布版本，而不是指定的版本。`SHA256SUMS` 与文件来自同一个发布版本，因此它能发现损坏、截断或被替换的下载，但不能防范接管了仓库或发布流程的人所发布的版本；见 [RELEASING.md](RELEASING.md#what-verification-covers)。
 
 安装器打开 `chrome://extensions` 后，请按提示加载或重新加载 **dsh 浏览器助手**。如果 dsh 已经在运行，安装完成后请重启。前置要求、启动命令、更新方式和开发者安装详见[详细安装与使用](#详细安装与使用)。
 
@@ -113,9 +133,24 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 
 ### 安装或更新
 
-运行[快速安装命令](#快速安装)即可安装或更新。安装器打开 `chrome://extensions` 后，首次安装时加载 `~/.dsh/browser-extension` 目录；更新后点击**重新加载**。如果 dsh 已在运行，请重启。
+运行[快速安装命令](#快速安装)即可安装。安装器打开 `chrome://extensions` 后，首次安装时加载 `~/.dsh/browser-extension` 目录；更新后点击**重新加载**。如果 dsh 已在运行，请重启。
 
-如需从源码 checkout 安装当前分支：
+更新时，在侧栏打开**设置 → 软件更新**。检查会把当前版本与 GitHub 上的最新发布版本比较，并给出一条用本机已有的安装器安装该版本的命令，例如：
+
+```sh
+DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.1.5
+```
+
+安装器选项：
+
+| 选项 | 环境变量 | 作用 |
+| --- | --- | --- |
+| `--release latest` 或 `--release vX.Y.Z` | `DSH_BROWSER_VERSION` | 下载该发布版本并用它的 `SHA256SUMS` 校验。不在 checkout 中运行时，这是默认行为。 |
+| `--unverified-branch <name>` | `DSH_BROWSER_UNVERIFIED_BRANCH` | 仅用于开发：安装分支归档。分支没有校验值，内容不会被校验。 |
+| | `DSH_BROWSER_GITHUB_TOKEN` | 私有仓库使用的 token。只会发送到 `api.github.com`，不会被打印。未设置时安装器会改用已登录的 `gh`。 |
+| | `DSH_BROWSER_NO_LAUNCH=1` | 不打开 Chrome，也不改动剪贴板。 |
+
+如需从源码 checkout 安装（不下载任何文件；仓库私有期间也用这种方式安装）：
 
 ```sh
 git clone https://github.com/natgurlain/dsh-browser-agent.git
@@ -129,16 +164,16 @@ Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版�
 
 在扩展的**设置 → 卸载 dsh-browser**中复制命令，然后在终端运行。
 
-也可以直接运行。macOS 或 Linux：
+记录了安装位置的安装由本机已有的卸载器移除。否则，命令会获取与扩展自身版本一同发布的卸载器；它从该发布版本下载 `uninstall.mjs`，只有在其 SHA-256 与 `SHA256SUMS` 一致后才运行。macOS 或 Linux：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/uninstall.sh | bash
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.1.5/uninstall.sh | bash -s -- --release v0.1.5
 ```
 
 Windows 请运行：
 
 ```powershell
-& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
+& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.1.5/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s --release v0.1.5 } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
 ```
 
 在源码目录中运行 `bash scripts/uninstall.sh` 或 `.\scripts\uninstall.ps1`。

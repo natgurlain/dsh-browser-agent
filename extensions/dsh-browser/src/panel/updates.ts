@@ -1,25 +1,47 @@
 /**
  * Release checks for the unpacked browser extension.
  *
- * The managed installer follows the repository's main branch, so that
- * branch's manifest is the update source of truth. The check is deliberately
- * read-only: Chrome does not let an unpacked extension replace itself.
+ * Updates follow tagged GitHub releases: the check reads the latest release tag, and every
+ * command offered here installs one named tag, which the installer verifies against that
+ * release's SHA256SUMS before unpacking or running it. The check is deliberately read-only:
+ * Chrome does not let an unpacked extension replace itself.
  */
 
-export const UPDATE_MANIFEST_URL =
-  'https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/extensions/dsh-browser/manifest.json'
+export const RELEASE_REPOSITORY = 'natgurlain/dsh-browser-agent'
 
-export const UPDATE_COMMAND =
-  'curl -fsSL https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/install.sh | bash'
+/** GitHub REST: the newest release that is neither a draft nor a prerelease. */
+export const LATEST_RELEASE_URL = `https://api.github.com/repos/${RELEASE_REPOSITORY}/releases/latest`
+
+const RELEASE_DOWNLOAD_URL = `https://github.com/${RELEASE_REPOSITORY}/releases/download`
+
+/** The release tag of an extension version: 0.1.5 is published as v0.1.5. */
+export function releaseTag(version: string): string {
+  versionParts(version)
+  return `v${version}`
+}
+
+/** URL of one asset of a tagged release (the bootstrap scripts are published as assets). */
+export function releaseAssetUrl(tag: string, asset: string): string {
+  return `${RELEASE_DOWNLOAD_URL}/${tag}/${asset}`
+}
+
+/**
+ * Fetch the installer of one tag and have it install that same tag. The piped script itself
+ * is only protected by TLS; what it downloads is checked against the release's SHA256SUMS.
+ */
+export function releaseInstallCommand(tag: string): string {
+  return `curl --proto '=https' --tlsv1.2 -fsSL ${releaseAssetUrl(tag, 'install.sh')} | bash -s -- --release ${tag}`
+}
 
 /**
  * install.ps1 carries a UTF-8 BOM so Windows PowerShell renders its Chinese half, and a
  * leading BOM is exactly what Invoke-Expression refuses, so the file is downloaded and run.
  */
-export const WINDOWS_UPDATE_COMMAND =
-  '$s="$env:TEMP\\dsh-install.ps1"; '
-  + 'irm https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/install.ps1 -OutFile $s; '
-  + 'powershell -NoProfile -ExecutionPolicy Bypass -File $s'
+export function windowsReleaseInstallCommand(tag: string): string {
+  return '$s="$env:TEMP\\dsh-install.ps1"; '
+    + `irm ${releaseAssetUrl(tag, 'install.ps1')} -OutFile $s; `
+    + `powershell -NoProfile -ExecutionPolicy Bypass -File $s --release ${tag}`
+}
 
 export interface ExtensionUpdateResult {
   currentVersion: string
@@ -94,10 +116,26 @@ export function checkoutInstallCommand(sourceRoot: string): string {
 }
 
 /**
- * Select the managed installer for the browser's current platform.
+ * The update command for a managed install: move it to the release `latestVersion`.
+ *
+ * When the installer recorded its home, the command runs the installer that is already on
+ * disk (it came out of a verified release) and nothing is piped from the network. Older
+ * installs without that record get the one-liner pinned to the same tag.
  */
-export function managedInstallCommand(userAgent: string = navigator.userAgent): string {
-  return /windows/i.test(userAgent) ? WINDOWS_UPDATE_COMMAND : UPDATE_COMMAND
+export function managedInstallCommand(
+  info: ExtensionInstallInfo,
+  latestVersion: string,
+  userAgent: string = navigator.userAgent,
+): string {
+  const tag = releaseTag(latestVersion)
+  const windows = /windows/i.test(userAgent)
+  const home = info.mode === 'managed' ? info.dshHome : undefined
+  if (home === undefined) return windows ? windowsReleaseInstallCommand(tag) : releaseInstallCommand(tag)
+  if (windows) {
+    return `$env:DSH_HOME=${powerShellQuote(home)}; powershell -NoProfile -ExecutionPolicy Bypass -File `
+      + `${powerShellQuote(`${home}\\dsh-browser\\scripts\\install.ps1`)} --release ${tag}`
+  }
+  return `DSH_HOME=${shellQuote(home)} bash ${shellQuote(`${home}/dsh-browser/scripts/install.sh`)} --release ${tag}`
 }
 
 function versionParts(version: string): number[] {
@@ -118,22 +156,30 @@ export function compareExtensionVersions(left: string, right: string): number {
   return 0
 }
 
-/** Fetch the main-branch manifest and compare it with the running extension. */
+/**
+ * Read the latest release tag and compare it with the running extension. A private
+ * repository, or one without a release, answers 404 and is reported as a failed check.
+ */
 export async function checkForExtensionUpdate(
   currentVersion: string,
   request: typeof fetch = fetch,
 ): Promise<ExtensionUpdateResult> {
   versionParts(currentVersion)
-  const response = await request(UPDATE_MANIFEST_URL, { cache: 'no-store' })
-  if (!response.ok) throw new Error(`update manifest request failed (${response.status})`)
+  const response = await request(LATEST_RELEASE_URL, {
+    cache: 'no-store',
+    headers: { accept: 'application/vnd.github+json' },
+  })
+  if (!response.ok) throw new Error(`latest release request failed (${response.status})`)
 
-  const manifest = await response.json() as { version?: unknown }
-  if (typeof manifest.version !== 'string') throw new Error('update manifest has no version')
-  versionParts(manifest.version)
+  const release = await response.json() as { tag_name?: unknown } | null
+  const tag = release?.tag_name
+  if (typeof tag !== 'string' || !tag.startsWith('v')) throw new Error('latest release has no version tag')
+  const latestVersion = tag.slice(1)
+  versionParts(latestVersion)
 
   return {
     currentVersion,
-    latestVersion: manifest.version,
-    updateAvailable: compareExtensionVersions(currentVersion, manifest.version) < 0,
+    latestVersion,
+    updateAvailable: compareExtensionVersions(currentVersion, latestVersion) < 0,
   }
 }

@@ -25,7 +25,7 @@ Everything needed to list the extension on the Chrome Web Store and on addons.mo
   - A store build has **no bridge token**. The installer writes the token into the unpacked extension's own directory, and a store-installed extension has no such file. Until a pairing flow exists, a store user pairs by hand, the same way Firefox users do: copy the token from `~/.dsh/ext-bridge-token` (the dsh startup log prints that file's path) into the extension's Settings. Put these steps in the listing's setup instructions and in the reviewer notes. The token field accepts a pasted token only; nothing in the extension can read the file for the user.
 - [ ] Firefox: run `pnpm --filter dsh-browser-extension run build:firefox` and zip it. Keep `browser_specific_settings.gecko.id` stable (`dsh-browser-agent@natgurlain.github.io`, or your own domain).
 - [ ] AMO requires **source code** whenever the upload is bundled or minified (Vite output is). Upload a source zip with build instructions: `pnpm install && pnpm --filter dsh-browser-extension run build:firefox`, with Node and pnpm versions pinned.
-- [ ] Decide whether store builds keep the GitHub update check (`raw.githubusercontent.com` in `connect-src`, the update card). Stores update extensions themselves. If you remove it, update `permissions.md` and the privacy policy.
+- [ ] Decide whether store builds keep the GitHub update check (`api.github.com` in `connect-src`, the update card). Stores update extensions themselves. If you remove it, update `permissions.md` and the privacy policy.
 - [ ] Remove the uninstall-script card, or reword it, if it points at `curl | bash` installers. Reviewers flag that.
 
 ### Signing

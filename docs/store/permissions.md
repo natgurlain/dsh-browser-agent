@@ -24,7 +24,7 @@ The Chrome Web Store asks for one justification per permission, plus a "single p
 | `tabGroups` (optional) | yes | — | Declared optional and used only when granted: the background tabs a "read many pages" task (`browser_fanout`) opens are put into one labelled group, so the user can see and close them together. Without it the tabs stay ungrouped. The current build checks for the permission but never prompts for it, so a store reviewer may ask why it is declared; either add a prompt (for example on the fan-out approval card) or drop it from `optional_permissions` before submitting. |
 | `pageCapture` (optional) | yes | — | Requested at runtime only when the user turns on the experimental failure fixtures. When an agent step fails, the page is saved as MHTML (`chrome.pageCapture.saveAsMHTML`) into the user's own session workspace, so the failure can be replayed locally as a test. Sensitive values are masked and nothing is uploaded. |
 | `http://127.0.0.1/*` in `connect-src` | yes | yes | The panel and the worker connect only to the DSH bridge on the user's own computer (a loopback WebSocket with a mutual challenge-response handshake). |
-| `https://raw.githubusercontent.com` in `connect-src` | yes | yes | The optional "check for updates" button reads the published `manifest.json` version. No user data is sent. Remove this, and the update card, from store builds if the store's own updates are enough. |
+| `https://api.github.com` in `connect-src` | yes | yes | The optional "check for updates" button reads the tag of the latest published GitHub release. No user data is sent. Remove this, and the update card, from store builds if the store's own updates are enough. |
 
 ## Host permission justification (Chrome "Host permission" field)
 

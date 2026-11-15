@@ -1,17 +1,291 @@
 #!/bin/bash
+# shellcheck disable=SC1111 # the typographic quotes in the user-facing text are intended
 # dsh-browser 一键安装：支持远程托管安装和本地 checkout 安装。
 # dsh-browser one-command install: supports both managed remote installs and local checkout installs.
 # 之后无需任何配置：扩展自动探测本机 dsh，并用安装时放入扩展目录的桥 token 完成双向认证。
 # No further configuration is required: the extension discovers local dsh automatically and authenticates with the bridge token the installer places in its directory.
+#
+# Where the files come from:
+#   ./scripts/install.sh                     run inside a checkout: installs that checkout, downloads nothing
+#   install.sh [--release latest|vX.Y.Z]     run on its own (or with --release): downloads that tagged release
+#                                            (default: the latest) and verifies it against its SHA256SUMS
+#                                            before unpacking or running any of it
+#   install.sh --unverified-branch <name>    development only: a branch archive, with no checksum at all
+# DSH_BROWSER_VERSION and DSH_BROWSER_UNVERIFIED_BRANCH are the environment forms of the two
+# options. DSH_BROWSER_GITHUB_TOKEN (or an authenticated gh) is needed while the repository is
+# private. DSH_BROWSER_NO_LAUNCH=1 keeps the installer from opening Chrome or touching the
+# clipboard.
 set -euo pipefail
 
-REPOSITORY="natgurlain/dsh-browser-agent"
-REMOTE_REF="main"
 DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
 MANAGED_ROOT="$DSH_HOME_DIR/dsh-browser"
 MANAGED_MARKER="$MANAGED_ROOT/.managed-by-install-sh"
-ARCHIVE_URL="https://github.com/$REPOSITORY/archive/refs/heads/${REMOTE_REF}.tar.gz"
 BOOTSTRAP_TMP=""
+
+# >>> release-fetch
+# Shared by install.sh and uninstall.sh. Each must work when piped into bash, so the block
+# is duplicated; scripts/tests/release-consistency.test.mjs keeps the copies identical.
+#
+#   release_fetch <directory> <tag-or-empty> <asset>...
+#
+# resolves the release (the latest one when the tag is empty), downloads SHA256SUMS and the
+# named assets into <directory> and checks every asset's SHA-256 against SHA256SUMS. It
+# exits with a message on a download error, a missing SHA256SUMS, a missing or duplicated
+# line, or a digest mismatch. Callers must not read, unpack or run anything in <directory>
+# before it returns. The resolved tag is left in RELEASE_TAG; "{tag}" in an asset name is
+# replaced by it.
+#
+# A private repository answers anonymous requests with 404. Then the download goes through
+# the GitHub API with DSH_BROWSER_GITHUB_TOKEN when that is set, or through an authenticated
+# `gh` when one is installed. The token is handed to curl on stdin, so it never appears in a
+# process list, and it is only ever sent to the API host.
+RELEASE_REPOSITORY="natgurlain/dsh-browser-agent"
+RELEASE_GITHUB_URL="${DSH_BROWSER_GITHUB_URL:-https://github.com}"
+RELEASE_API_URL="${DSH_BROWSER_GITHUB_API_URL:-https://api.github.com}"
+RELEASE_TAG=""
+RELEASE_MODE="public"
+RELEASE_STATUS=""
+RELEASE_EFFECTIVE_URL=""
+
+release_fail() {
+  printf '\n错误：%s\n' "$1" >&2
+  printf 'Error: %s\n' "$2" >&2
+  exit 1
+}
+
+release_check_base() {
+  if [[ "$1" =~ ^https://[^[:space:]]+$ ]] ||
+    [[ "$1" =~ ^http://(127\.0\.0\.1|localhost)(:[0-9]+)?(/[^[:space:]]*)?$ ]]; then
+    return 0
+  fi
+  release_fail \
+    "下载地址必须使用 HTTPS（只有本机回环地址可以使用 HTTP）：$1" \
+    "Download URLs must use HTTPS (plain HTTP is accepted for loopback only): $1"
+}
+
+# release_http <url> <output> [token] [accept]: one GET. Leaves the HTTP status in
+# RELEASE_STATUS ("000" when the transfer failed, including a short body) and the final URL
+# in RELEASE_EFFECTIVE_URL.
+release_http() {
+  local url="$1" output="$2" token="${3:-}" accept="${4:-}"
+  local proto="=https" result=""
+  # Only a loopback base passes release_check_base with http://.
+  case "$url" in http://*) proto="=http" ;; esac
+  RELEASE_STATUS="000"
+  RELEASE_EFFECTIVE_URL=""
+  if result="$(
+    {
+      if [ -n "$token" ]; then printf 'header = "Authorization: Bearer %s"\n' "$token"; fi
+      if [ -n "$accept" ]; then printf 'header = "Accept: %s"\n' "$accept"; fi
+    } | curl --config - --silent --show-error --location \
+      --proto "$proto" --proto-redir "$proto" --retry 2 \
+      --output "$output" --write-out '%{http_code} %{url_effective}' "$url"
+  )"; then
+    RELEASE_STATUS="${result%% *}"
+    RELEASE_EFFECTIVE_URL="${result#* }"
+  fi
+}
+
+release_valid_tag() {
+  [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]
+}
+
+release_gh_ready() {
+  command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1
+}
+
+# Find the release without credentials. 0: RELEASE_TAG names an existing release.
+# 4: the repository or release is not visible anonymously. 5: no release is published.
+# 1: the request itself failed.
+release_resolve_public() {
+  local releases="$RELEASE_GITHUB_URL/$RELEASE_REPOSITORY/releases"
+  if [ -n "$RELEASE_TAG" ]; then
+    release_http "$releases/tag/$RELEASE_TAG" /dev/null
+  else
+    release_http "$releases/latest" /dev/null
+  fi
+  case "$RELEASE_STATUS" in
+    200) ;;
+    401 | 403 | 404) return 4 ;;
+    *) return 1 ;;
+  esac
+  if [ -z "$RELEASE_TAG" ]; then
+    # /releases/latest redirects to /releases/tag/<tag>, or to /releases when there is none.
+    case "$RELEASE_EFFECTIVE_URL" in
+      */releases/tag/*) RELEASE_TAG="${RELEASE_EFFECTIVE_URL##*/releases/tag/}" ;;
+      *) return 5 ;;
+    esac
+  fi
+  return 0
+}
+
+release_resolve_token() {
+  local directory="$1" token="$2" path="releases/latest"
+  [[ "$token" =~ ^[A-Za-z0-9_.-]+$ ]] || release_fail \
+    "DSH_BROWSER_GITHUB_TOKEN 含有不允许的字符。" \
+    "DSH_BROWSER_GITHUB_TOKEN contains characters a GitHub token never has."
+  command -v node >/dev/null 2>&1 || release_fail \
+    "通过 token 下载需要 Node.js。" "Downloading with a token needs Node.js."
+  if [ -n "$RELEASE_TAG" ]; then path="releases/tags/$RELEASE_TAG"; fi
+  release_http "$RELEASE_API_URL/repos/$RELEASE_REPOSITORY/$path" "$directory/.release.json" "$token" "application/vnd.github+json"
+  case "$RELEASE_STATUS" in
+    200) ;;
+    401 | 403) release_fail \
+      "GitHub 拒绝了 DSH_BROWSER_GITHUB_TOKEN（HTTP $RELEASE_STATUS）。" \
+      "GitHub rejected DSH_BROWSER_GITHUB_TOKEN (HTTP $RELEASE_STATUS)." ;;
+    404) release_fail \
+      "用该 token 找不到 $RELEASE_REPOSITORY 的发布版本 ${RELEASE_TAG:-latest}；请确认版本已发布且 token 可以读取该仓库。" \
+      "No release ${RELEASE_TAG:-latest} of $RELEASE_REPOSITORY is visible to this token; check that it is published and that the token can read the repository." ;;
+    *) release_fail \
+      "无法从 GitHub API 读取发布信息（HTTP $RELEASE_STATUS）。" \
+      "Could not read the release from the GitHub API (HTTP $RELEASE_STATUS)." ;;
+  esac
+  # One "name<TAB>url" line per asset, after the tag on the first line.
+  # shellcheck disable=SC2016 # JavaScript template literals, not shell expansions
+  node -e '
+    const release = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))
+    const lines = [String(release.tag_name)]
+    for (const asset of release.assets ?? []) lines.push(`${asset.name}\t${asset.url}`)
+    process.stdout.write(`${lines.join("\n")}\n`)
+  ' "$directory/.release.json" >"$directory/.release-assets" || release_fail \
+    "GitHub API 返回的发布信息无法解析。" "The release description from the GitHub API could not be parsed."
+  RELEASE_TAG="$(head -n 1 "$directory/.release-assets")"
+}
+
+# release_get <directory> <name> [token]: download one asset. 0: saved. 4: the release has
+# no such asset. 1: the download failed.
+release_get() {
+  local directory="$1" name="$2" token="${3:-}" url="" problem=""
+  case "$RELEASE_MODE" in
+    public)
+      release_http "$RELEASE_GITHUB_URL/$RELEASE_REPOSITORY/releases/download/$RELEASE_TAG/$name" "$directory/$name"
+      ;;
+    token)
+      url="$(awk -F '\t' -v name="$name" 'NR > 1 && $1 == name { print $2 }' "$directory/.release-assets")"
+      [ -n "$url" ] || return 4
+      # The token goes to the API host only, whatever the release description says.
+      case "$url" in
+        "$RELEASE_API_URL"/*) ;;
+        *) return 1 ;;
+      esac
+      release_http "$url" "$directory/$name" "$token" "application/octet-stream"
+      ;;
+    gh)
+      if problem="$(gh release download "$RELEASE_TAG" --repo "$RELEASE_REPOSITORY" --pattern "$name" --dir "$directory" --clobber 2>&1)"; then
+        [ -f "$directory/$name" ] && return 0
+        return 4
+      fi
+      case "$problem" in
+        *"no assets match"*) return 4 ;;
+      esac
+      printf '%s\n' "$problem" >&2
+      return 1
+      ;;
+  esac
+  case "$RELEASE_STATUS" in
+    200) return 0 ;;
+    404) return 4 ;;
+    *) return 1 ;;
+  esac
+}
+
+release_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d ' ' -f 1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d ' ' -f 1
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 -r "$1" | cut -d ' ' -f 1
+  else
+    return 1
+  fi
+}
+
+release_verify() {
+  local directory="$1" name="$2" expected="" actual=""
+  expected="$(awk -v name="$name" 'NF == 2 && ($2 == name || $2 == "*" name) { print $1 }' "$directory/SHA256SUMS" | tr 'A-F' 'a-f')"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || release_fail \
+    "$RELEASE_TAG 的 SHA256SUMS 中没有 $name 的唯一校验值，已停止。" \
+    "SHA256SUMS of $RELEASE_TAG has no single digest for $name; stopping."
+  actual="$(release_sha256 "$directory/$name")" || release_fail \
+    "未找到 sha256sum、shasum 或 openssl，无法校验下载内容。" \
+    "None of sha256sum, shasum or openssl was found, so the download cannot be verified."
+  if [ "$actual" != "$expected" ]; then
+    release_fail \
+      "$name 的 SHA-256 与 SHA256SUMS 不符（期望 $expected，实际 $actual）。文件未被解压或执行。" \
+      "SHA-256 mismatch for $name (expected $expected, got $actual). Nothing was unpacked or run."
+  fi
+}
+
+release_fetch() {
+  local directory="$1" token="${DSH_BROWSER_GITHUB_TOKEN:-}" name="" status=0
+  RELEASE_TAG="$2"
+  shift 2
+  command -v curl >/dev/null 2>&1 || release_fail "未找到 curl；请先安装 curl。" "curl was not found; install curl first."
+  release_check_base "$RELEASE_GITHUB_URL"
+  release_check_base "$RELEASE_API_URL"
+  if [ -n "$RELEASE_TAG" ] && ! release_valid_tag "$RELEASE_TAG"; then
+    release_fail "不是有效的发布版本号：$RELEASE_TAG（示例：v0.1.5）。" "Not a release tag: $RELEASE_TAG (expected something like v0.1.5)."
+  fi
+  mkdir -p "$directory"
+
+  if [ -n "$token" ]; then
+    RELEASE_MODE="token"
+    release_resolve_token "$directory" "$token"
+  else
+    RELEASE_MODE="public"
+    release_resolve_public || status=$?
+    if [ "$status" -eq 4 ] && release_gh_ready; then
+      RELEASE_MODE="gh"
+      status=0
+      if [ -z "$RELEASE_TAG" ]; then
+        RELEASE_TAG="$(gh release view --repo "$RELEASE_REPOSITORY" --json tagName --jq .tagName 2>/dev/null)" || status=4
+      fi
+    fi
+    case "$status" in
+      0) ;;
+      4) release_fail \
+        "无法匿名访问 $RELEASE_REPOSITORY 的发布版本 ${RELEASE_TAG:-latest}：仓库是私有的，或该版本不存在。可以先运行 gh auth login，或设置 DSH_BROWSER_GITHUB_TOKEN 为可读取该仓库的 token，或者 git clone 后在 checkout 中运行 ./scripts/install.sh。" \
+        "Release ${RELEASE_TAG:-latest} of $RELEASE_REPOSITORY is not reachable anonymously: the repository is private, or there is no such release. Run 'gh auth login' first, or set DSH_BROWSER_GITHUB_TOKEN to a token that can read the repository, or clone it and run ./scripts/install.sh from the checkout." ;;
+      5) release_fail \
+        "$RELEASE_REPOSITORY 还没有发布任何版本。" \
+        "$RELEASE_REPOSITORY has not published a release yet." ;;
+      *) release_fail \
+        "下载失败：无法连接 $RELEASE_GITHUB_URL。现有安装未被修改。" \
+        "Download failed: could not reach $RELEASE_GITHUB_URL. The existing installation was not changed." ;;
+    esac
+  fi
+  release_valid_tag "$RELEASE_TAG" || release_fail \
+    "发布版本号无效：$RELEASE_TAG" "The release reports an invalid tag: $RELEASE_TAG"
+
+  status=0
+  release_get "$directory" SHA256SUMS "$token" || status=$?
+  case "$status" in
+    0) ;;
+    4) release_fail \
+      "发布版本 $RELEASE_TAG 没有 SHA256SUMS，无法校验，已停止。" \
+      "Release $RELEASE_TAG has no SHA256SUMS, so nothing can be verified; stopping." ;;
+    *) release_fail \
+      "下载 SHA256SUMS 失败。现有安装未被修改。" \
+      "Downloading SHA256SUMS failed. The existing installation was not changed." ;;
+  esac
+
+  for name in "$@"; do
+    name="${name//\{tag\}/$RELEASE_TAG}"
+    status=0
+    release_get "$directory" "$name" "$token" || status=$?
+    if [ "$status" -ne 0 ]; then
+      release_fail \
+        "下载 $name 失败（不完整或不存在）。现有安装未被修改。" \
+        "Downloading $name failed (incomplete or missing). The existing installation was not changed."
+    fi
+    release_verify "$directory" "$name"
+  done
+  rm -f -- "$directory/.release.json" "$directory/.release-assets"
+  printf '已校验：%s 的 %d 个文件与 SHA256SUMS 一致。\n' "$RELEASE_TAG" "$#"
+  printf '   Verified: %d file(s) of %s match SHA256SUMS.\n' "$#" "$RELEASE_TAG"
+}
+# <<< release-fetch
 
 print_step() {
   printf '\n[%s/4] %s\n' "$1" "$2"
@@ -249,9 +523,13 @@ cleanup_bootstrap() {
   fi
 }
 
+# bootstrap_remote_install <release tag, or empty for the latest> <branch, or empty>
 bootstrap_remote_install() {
+  local wanted="$1"
+  local branch="$2"
   local archive
   local source_dir
+  local source_label
   local temp_base="${TMPDIR:-/tmp}"
 
   require_command curl "未找到 curl；请先安装 curl。" "curl was not found; install curl first."
@@ -264,38 +542,132 @@ bootstrap_remote_install() {
       "$MANAGED_ROOT already exists and is not managed by this installer; move it or run ./scripts/install.sh inside it to avoid overwriting it."
   fi
 
-  print_pair "未检测到完整的本地 checkout，切换到免 clone 安装。" "No complete local checkout was detected; switching to the clone-free install."
-  print_pair "正在从 $REPOSITORY 的 $REMOTE_REF 分支下载安装文件……" "Downloading installation files from $REPOSITORY at ${REMOTE_REF}…"
-
   BOOTSTRAP_TMP="$(mktemp -d "$temp_base/dsh-browser-install.XXXXXX")"
   trap cleanup_bootstrap EXIT HUP INT TERM
-  archive="$BOOTSTRAP_TMP/source.tar.gz"
   source_dir="$BOOTSTRAP_TMP/source"
-  mkdir -p "$source_dir"
+  mkdir -p "$source_dir" "$BOOTSTRAP_TMP/download"
 
-  curl --fail --location --silent --show-error --retry 3 "$ARCHIVE_URL" --output "$archive"
-  tar -xzf "$archive" -C "$source_dir" --strip-components=1
+  if [ -n "$branch" ]; then
+    [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] && [[ "$branch" != *..* ]] || fail_pair \
+      "不是有效的分支名：$branch" "Not a usable branch name: $branch"
+    print_pair \
+      "警告：正在安装 $RELEASE_REPOSITORY 的 $branch 分支。分支归档没有校验值，内容未经校验；仅用于开发。" \
+      "WARNING: installing branch $branch of $RELEASE_REPOSITORY. A branch archive has no checksum and is NOT verified; use this for development only."
+    release_check_base "$RELEASE_GITHUB_URL"
+    archive="$BOOTSTRAP_TMP/download/branch.tar.gz"
+    release_http "$RELEASE_GITHUB_URL/$RELEASE_REPOSITORY/archive/refs/heads/$branch.tar.gz" "$archive"
+    case "$RELEASE_STATUS" in
+      200) ;;
+      401 | 403 | 404) fail_pair \
+        "无法匿名下载 $branch 分支：仓库是私有的，或没有这个分支。请 git clone 后在 checkout 中运行 ./scripts/install.sh。" \
+        "Branch $branch cannot be downloaded anonymously: the repository is private, or there is no such branch. Clone the repository and run ./scripts/install.sh from the checkout." ;;
+      *) fail_pair \
+        "下载 $branch 分支失败。现有安装未被修改。" \
+        "Downloading branch $branch failed. The existing installation was not changed." ;;
+    esac
+    source_label="branch $branch (unverified)"
+  else
+    print_pair \
+      "正在从 $RELEASE_REPOSITORY 下载发布版本 ${wanted:-latest} 并校验……" \
+      "Downloading release ${wanted:-latest} of $RELEASE_REPOSITORY and verifying it…"
+    # Nothing below this line touches the download until release_fetch has verified it.
+    release_fetch "$BOOTSTRAP_TMP/download" "$wanted" "dsh-browser-source-{tag}.tar.gz"
+    archive="$BOOTSTRAP_TMP/download/dsh-browser-source-$RELEASE_TAG.tar.gz"
+    source_label="release $RELEASE_TAG (SHA256SUMS verified)"
+  fi
+
+  tar -xzf "$archive" -C "$source_dir" --strip-components=1 || fail_pair \
+    "无法解压下载的归档，未修改现有安装。" \
+    "The downloaded archive could not be unpacked; the existing installation was not changed."
   has_workspace "$source_dir" || fail_pair \
     "下载内容不完整，未修改现有安装。" \
     "The download is incomplete; the existing installation was not changed."
 
   mkdir -p "$MANAGED_ROOT"
-  touch "$MANAGED_MARKER"
-  rsync -a --delete-after \
+  # The marker exists before the sync starts, so an interrupted sync is still a managed
+  # directory the next run may repair; it names the source once the sync is complete.
+  [ -f "$MANAGED_MARKER" ] || : >"$MANAGED_MARKER"
+  # --checksum: archive timestamps are fixed per release, so size and time alone could
+  # miss a changed file of the same length.
+  rsync -a --checksum --delete-after \
     --exclude 'node_modules/' \
     --exclude '.managed-by-install-sh' \
     "$source_dir/" "$MANAGED_ROOT/"
+  printf '%s\n' "$source_label" >"$MANAGED_MARKER"
 
   cleanup_bootstrap
   trap - EXIT HUP INT TERM
-  print_pair "安装文件已同步到 ${MANAGED_ROOT}。" "Installation files are ready in $MANAGED_ROOT."
-  exec /bin/bash "$MANAGED_ROOT/scripts/install.sh"
+  print_pair "安装文件已同步到 ${MANAGED_ROOT}（${source_label}）。" "Installation files are ready in $MANAGED_ROOT ($source_label)."
+  # The second stage must install what was just unpacked, not download again.
+  DSH_BROWSER_BOOTSTRAPPED=1 exec /bin/bash "$MANAGED_ROOT/scripts/install.sh"
 }
 
-if ROOT="$(workspace_root_from_script)"; then
-  :
+print_usage() {
+  cat <<'USAGE'
+Usage: install.sh [--release latest|vX.Y.Z] [--unverified-branch <name>]
+
+  (no option, inside a checkout)   install this checkout; nothing is downloaded
+  (no option, standalone)          same as --release latest
+  --release latest|vX.Y.Z          download that tagged release, verify every file against
+                                   its SHA256SUMS, then install it (env: DSH_BROWSER_VERSION)
+  --unverified-branch <name>       development only: install a branch archive, which has no
+                                   checksum (env: DSH_BROWSER_UNVERIFIED_BRANCH)
+
+Private repository: set DSH_BROWSER_GITHUB_TOKEN, or log in with gh, or install from a checkout.
+USAGE
+}
+
+REQUESTED_RELEASE="${DSH_BROWSER_VERSION:-}"
+REQUESTED_BRANCH="${DSH_BROWSER_UNVERIFIED_BRANCH:-}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --release | --unverified-branch)
+      [ "$#" -ge 2 ] || fail_pair "$1 需要一个值。" "$1 needs a value."
+      if [ "$1" = "--release" ]; then REQUESTED_RELEASE="$2"; else REQUESTED_BRANCH="$2"; fi
+      shift 2
+      ;;
+    --release=*)
+      REQUESTED_RELEASE="${1#--release=}"
+      shift
+      ;;
+    --unverified-branch=*)
+      REQUESTED_BRANCH="${1#--unverified-branch=}"
+      shift
+      ;;
+    -h | --help)
+      print_usage
+      exit 0
+      ;;
+    *)
+      print_usage >&2
+      fail_pair "未知参数：$1" "Unknown option: $1"
+      ;;
+  esac
+done
+if [ -n "$REQUESTED_RELEASE" ] && [ -n "$REQUESTED_BRANCH" ]; then
+  fail_pair "--release 与 --unverified-branch 不能同时使用。" "--release and --unverified-branch cannot be combined."
+fi
+# A bare version number is accepted for the tag: 0.1.5 means v0.1.5.
+case "$REQUESTED_RELEASE" in
+  [0-9]*) REQUESTED_RELEASE="v$REQUESTED_RELEASE" ;;
+esac
+
+if [ "${DSH_BROWSER_BOOTSTRAPPED:-0}" = "1" ]; then
+  # Second stage of a download: install the files this script sits in.
+  ROOT="$(workspace_root_from_script)" || fail_pair \
+    "下载的安装文件不完整。" "The downloaded installation files are incomplete."
+elif [ -n "$REQUESTED_BRANCH" ]; then
+  bootstrap_remote_install "" "$REQUESTED_BRANCH"
+elif [ -n "$REQUESTED_RELEASE" ]; then
+  if [ "$REQUESTED_RELEASE" = "latest" ]; then REQUESTED_RELEASE=""; fi
+  bootstrap_remote_install "$REQUESTED_RELEASE" ""
+elif ROOT="$(workspace_root_from_script)"; then
+  if [ ! -f "$ROOT/.managed-by-install-sh" ]; then
+    print_pair "从本地 checkout 安装，不下载任何文件：$ROOT" "Installing from this local checkout; nothing is downloaded: $ROOT"
+  fi
 else
-  bootstrap_remote_install
+  print_pair "未检测到完整的本地 checkout，切换到免 clone 安装。" "No complete local checkout was detected; switching to the clone-free install."
+  bootstrap_remote_install "" ""
 fi
 
 EXT="$ROOT/extensions/dsh-browser"
@@ -353,7 +725,10 @@ print_step 3 "构建 Chrome 扩展" "Build the Chrome extension"
 (cd "$ROOT" && pnpm --filter dsh-browser-extension run build >/dev/null 2>&1)
 
 print_step 4 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
-ensure_chrome || true
+NO_LAUNCH="${DSH_BROWSER_NO_LAUNCH:-0}"
+if [ "$NO_LAUNCH" != "1" ]; then
+  ensure_chrome || true
+fi
 DIST_DIR="$DSH_HOME_DIR/browser-extension"
 if [ -f "$DIST_DIR/manifest.json" ]; then
   IS_UPDATE=1
@@ -372,13 +747,13 @@ fi
 node "$ROOT/scripts/write-install-info.mjs" \
   "$DIST_DIR/install-info.json" "$INSTALL_MODE" "$ROOT" "$DSH_HOME_DIR"
 provision_bridge_token "$DIST_DIR"
-if copy_to_clipboard "$DIST_DIR"; then
+if [ "$NO_LAUNCH" != "1" ] && copy_to_clipboard "$DIST_DIR"; then
   CLIPBOARD_READY=1
 else
   CLIPBOARD_READY=0
 fi
 
-if open_chrome_extensions; then
+if [ "$NO_LAUNCH" != "1" ] && open_chrome_extensions; then
   CHROME_OPENED=1
 else
   CHROME_OPENED=0

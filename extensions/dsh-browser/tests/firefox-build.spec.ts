@@ -31,7 +31,7 @@ describe('Firefox build contract', () => {
     expect(firefoxManifest.version).toBe(packageManifest.version)
     expect(firefoxManifest.version).toBe(chromeManifest.version)
     expect(firefoxManifest.permissions).toContain('notifications')
-    expect(firefoxManifest.content_security_policy.extension_pages).toContain('https://raw.githubusercontent.com')
+    expect(firefoxManifest.content_security_policy.extension_pages).toContain('https://api.github.com')
   })
 
   it('uses a Firefox event page, sidebar, and AMO data-transmission declaration', async () => {

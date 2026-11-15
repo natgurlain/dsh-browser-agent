@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { parseExtensionInstallInfo } from '../src/panel/updates.ts'
 import { uninstallCommand } from '../src/panel/uninstall.ts'
 
@@ -18,17 +18,36 @@ describe('uninstall handoff', () => {
       parseExtensionInstallInfo({ schemaVersion: 1, mode: 'checkout', sourceRoot: '/source' }),
       parseExtensionInstallInfo(null),
     ]) {
-      expect(uninstallCommand(info, 'Linux'))
-        .toBe('curl -fsSL https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/uninstall.sh | bash')
-      expect(uninstallCommand(info, 'Windows')).toContain('-File $s } finally {')
+      expect(uninstallCommand(info, 'Linux', '0.1.5')).toBe(
+        "curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.1.5/uninstall.sh"
+        + ' | bash -s -- --release v0.1.5',
+      )
+      const windows = uninstallCommand(info, 'Windows', '0.1.5')
+      expect(windows).toContain(
+        'Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.1.5/uninstall.ps1 -OutFile $s; ',
+      )
+      expect(windows).toContain('-File $s --release v0.1.5 } finally {')
+      for (const command of [uninstallCommand(info, 'Linux', '0.1.5'), windows]) {
+        expect(command).not.toMatch(/refs\/heads|raw\.githubusercontent|\bmain\b/)
+      }
     }
+  })
+
+  it('pins the downloaded uninstaller to the running extension version by default', () => {
+    vi.stubGlobal('chrome', { runtime: { getManifest: () => ({ version: '0.4.2' }) } })
+    try {
+      expect(uninstallCommand({ mode: 'unknown' }, 'Linux')).toContain('/releases/download/v0.4.2/uninstall.sh | bash -s -- --release v0.4.2')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    expect(() => uninstallCommand({ mode: 'unknown' }, 'Linux', 'next')).toThrow('invalid extension version')
   })
 
   it('quotes Windows directories for the installed PowerShell script', () => {
     const command = uninstallCommand({ mode: 'managed', dshHome: "C:\\DSH 空间\\dev's home" }, 'Windows NT')
     expect(command).toContain("--home 'C:\\DSH 空间\\dev''s home'")
     expect(command).toContain("dsh-browser\\scripts\\uninstall.ps1' --home")
-    const legacy = uninstallCommand({ mode: 'unknown' }, 'Windows')
+    const legacy = uninstallCommand({ mode: 'unknown' }, 'Windows', '0.1.5')
     expect(legacy).toContain('Invoke-WebRequest -UseBasicParsing')
     expect(legacy).toContain("$ErrorActionPreference = 'Stop'")
   })

@@ -17,19 +17,39 @@ Pages become structured text with a numbered inventory of interactive elements. 
 
 ## Quick install
 
-The installer installs the bridge plugin and Chrome extension. It downloads the current `main` branch and builds it from source; it does not use the release assets or verify checksums yet (see [RELEASING.md](RELEASING.md)).
+The installer installs the bridge plugin and Chrome extension. It downloads one tagged release, checks every downloaded file against that release's `SHA256SUMS`, and only then unpacks it and builds it from source. A digest mismatch, a missing `SHA256SUMS` or an incomplete download stops the install before anything is unpacked or run.
 
-macOS and Linux:
+> [!NOTE]
+> The repository is private for now and `v0.1.5` has not been published yet. Until it is, the download commands below answer 404. Install from a checkout instead (see [Install or update](#install-or-update)), or give the installer access first: `gh auth login`, or `export DSH_BROWSER_GITHUB_TOKEN=<a token that can read the repository>`, then run `install.sh` from a checkout with `--release v0.1.5`.
+
+macOS and Linux. Download the installer, check it against the published digest, then run it:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/install.sh | bash
+tag=v0.1.5
+base=https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag
+curl --proto '=https' --tlsv1.2 -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS"
+grep ' install.sh$' SHA256SUMS | sha256sum -c -    # macOS: shasum -a 256 -c -
+bash install.sh --release "$tag"
 ```
 
-Windows, in PowerShell:
+Windows, in PowerShell (the release path of `install.ps1` has not been run on a Windows machine yet):
 
 ```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+$tag = 'v0.1.5'
+$base = "https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag"
+irm "$base/install.ps1" -OutFile install.ps1; irm "$base/SHA256SUMS" -OutFile SHA256SUMS
+$want = (Select-String -Path SHA256SUMS -Pattern ' install\.ps1$').Line.Split(' ')[0]
+if ((Get-FileHash install.ps1 -Algorithm SHA256).Hash -ne $want) { throw 'install.ps1 does not match SHA256SUMS' }
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --release $tag
 ```
+
+The same digests are printed in the notes of each [release](https://github.com/natgurlain/dsh-browser-agent/releases). The shorter form below runs the installer without checking the script first; what the installer downloads is still verified:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.1.5/install.sh | bash -s -- --release v0.1.5
+```
+
+`--release latest` installs the newest release instead of a named one. `SHA256SUMS` comes from the same release as the files, so it catches a corrupted, truncated or substituted download, not a release that was itself published by someone who took over the repository or its release workflow; see [RELEASING.md](RELEASING.md#what-verification-covers).
 
 When the installer opens `chrome://extensions`, follow its instructions to load or reload **dsh Browser Assistant**. If dsh is already running, restart it after installation. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
 
@@ -113,9 +133,24 @@ Requirements: Node.js `>=24.9.0`, Corepack/pnpm, and Chrome 125+ or Firefox 140+
 
 ### Install or update
 
-Run the [quick install command](#quick-install) to install or update. The installer opens `chrome://extensions`; load `~/.dsh/browser-extension` as an unpacked extension the first time, or click **Reload** after an update. Restart dsh if it is already running.
+Run the [quick install commands](#quick-install) to install. The installer opens `chrome://extensions`; load `~/.dsh/browser-extension` as an unpacked extension the first time, or click **Reload** after an update. Restart dsh if it is already running.
 
-To install the current branch from a source checkout instead:
+To update, open **Settings → Updates** in the side panel. The check compares the running version with the latest GitHub release and offers a command that installs exactly that release with the installer already on disk, for example:
+
+```sh
+DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.1.5
+```
+
+Installer options:
+
+| Option | Environment | Effect |
+| --- | --- | --- |
+| `--release latest` or `--release vX.Y.Z` | `DSH_BROWSER_VERSION` | Download that tagged release and verify it against its `SHA256SUMS`. This is the default when the installer is not run from a checkout. |
+| `--unverified-branch <name>` | `DSH_BROWSER_UNVERIFIED_BRANCH` | Development only: install a branch archive. A branch has no checksum, so nothing is verified. |
+| | `DSH_BROWSER_GITHUB_TOKEN` | Token for a private repository. It is sent to `api.github.com` only and never printed. Without it the installer falls back to an authenticated `gh`. |
+| | `DSH_BROWSER_NO_LAUNCH=1` | Do not open Chrome or touch the clipboard. |
+
+To install from a source checkout instead (nothing is downloaded; this is also the way to install while the repository is private):
 
 ```sh
 git clone https://github.com/natgurlain/dsh-browser-agent.git
@@ -129,16 +164,16 @@ On Windows, run `.\scripts\install.ps1` from the checkout instead. After pulling
 
 Open **Settings → Uninstall dsh-browser** in the extension, copy the command, and run it in Terminal.
 
-You can also run it directly. On macOS or Linux:
+An installation that recorded its location is removed by the uninstaller it has on disk. Otherwise the command fetches the uninstaller published with the extension's own release; it downloads `uninstall.mjs` from that release and runs it only after its SHA-256 matched `SHA256SUMS`. On macOS or Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/uninstall.sh | bash
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.1.5/uninstall.sh | bash -s -- --release v0.1.5
 ```
 
 On Windows:
 
 ```powershell
-& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
+& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.1.5/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s --release v0.1.5 } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
 ```
 
 From a checkout, run `bash scripts/uninstall.sh` or `.\scripts\uninstall.ps1`.
