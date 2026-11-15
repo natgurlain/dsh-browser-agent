@@ -110,6 +110,8 @@ export interface PanelCopy {
     detectPick: string
     detectCurrent: string
     detectConnected: (address: string) => string
+    /** Why the browser stays connected (and reconnects) with the panel closed. */
+    staysConnected: (standing: { watchers: number; schedules: number; mcp: boolean }) => string
     detectSource: Record<'fixed' | 'beacon', string>
     tokenHelp: string
     tokenPlaceholder: string
@@ -629,6 +631,11 @@ const EN: PanelCopy = {
     detectPick: 'Select an instance to fill in its address.',
     detectCurrent: 'in use',
     detectConnected: (address) => `Connected to ${address}`,
+    staysConnected: ({ watchers, schedules, mcp }) => `Stays connected with the panel closed for: ${[
+      ...watchers > 0 ? [`${String(watchers)} page watcher${watchers === 1 ? '' : 's'}`] : [],
+      ...schedules > 0 ? [`${String(schedules)} workflow schedule${schedules === 1 ? '' : 's'}`] : [],
+      ...mcp ? ['MCP clients'] : [],
+    ].join(', ')}`,
     detectSource: { fixed: 'fixed port', beacon: 'beacon' },
     tokenHelp: 'Required by Firefox and remote deployments',
     tokenPlaceholder: 'Required for Firefox / remote deployments',
@@ -1157,6 +1164,11 @@ const ZH: PanelCopy = {
     detectPick: '点击实例即可填入它的地址。',
     detectCurrent: '当前使用',
     detectConnected: (address) => `已连接：${address}`,
+    staysConnected: ({ watchers, schedules, mcp }) => `面板关闭后仍保持连接：${[
+      ...watchers > 0 ? [`${String(watchers)} 个页面监视`] : [],
+      ...schedules > 0 ? [`${String(schedules)} 个定时工作流`] : [],
+      ...mcp ? ['MCP 客户端'] : [],
+    ].join('、')}`,
     detectSource: { fixed: '固定端口', beacon: '信标' },
     tokenHelp: 'Firefox 和远程部署需要填写',
     tokenPlaceholder: 'Firefox / 远程部署时填写',

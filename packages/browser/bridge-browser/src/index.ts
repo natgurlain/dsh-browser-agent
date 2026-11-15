@@ -49,6 +49,7 @@ import {
   DEFAULT_SNAPSHOT_MAX_CHARS,
   DEVLOOP_CAPTURE_TOOL,
   DEVTOOLS_CAPS_VERSION,
+  MAX_STANDING_SCHEDULES,
   MIN_SNAPSHOT_MAX_CHARS,
   PINNED_CHROME_EXTENSION_ID,
 } from './protocol.ts'
@@ -423,12 +424,19 @@ function mountBridge(
     ),
     maxApprovalHoldMs: DEFAULT_MAX_APPROVAL_HOLD_MS,
     onDisconnect: (connection) => { learning?.disconnected(connection) },
+    // Reasons for an extension to stay connected with no side panel open:
+    // this install's workflow schedules, and the MCP endpoint (both opt-in).
+    standingWork: (connection) => ({
+      schedules: Math.min(learning?.standingSchedules(connection) ?? 0, MAX_STANDING_SCHEDULES),
+      mcp: resolved.mcp.enabled,
+    }),
   })
   ctx.effect(() => {
     learning = mountLearning(ctx, server, {
       toolTimeoutMs: resolved.toolTimeoutMs,
       workspacePath: resolved.sessionWorkspacePath,
       scheduleFile: dshHomePath(LEARNING_SCHEDULE_FILE_NAME),
+      onSchedulesChanged: () => { server.notifyStandingWork() },
       ownsSession: (sessionId) => fenced.allowsSession(sessionId, new AbortController().signal, 'own'),
       markTainted: (sessionId) => { taint.mark(sessionId, 'browser_failure_fixture') },
       ...(auditLog === undefined ? {} : {

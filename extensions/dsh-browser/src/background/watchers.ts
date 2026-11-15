@@ -511,6 +511,13 @@ export interface WatchHitDeps {
   pageHidden?: (url: string) => boolean
   /** Ask the bridge to wake the session; resolves with its answer. */
   fire: (payload: Record<string, unknown>) => Promise<unknown>
+  /**
+   * Give a reconnecting bridge a moment to come back (bounded by the caller).
+   * Runs only for a hit that already passed the watcher, sender and
+   * enabled/blocked checks, and every one of those checks runs again after
+   * it, so nothing is decided on state from before the wait.
+   */
+  connected?: () => Promise<void>
   changed: () => void
 }
 
@@ -531,17 +538,30 @@ export async function handleWatchHit(
   deps: WatchHitDeps,
 ): Promise<HitOutcome> {
   await deps.registry.ready
-  if (typeof hit.watchId !== 'string') return { accepted: false, reason: 'bad-request' }
-  const watcher = deps.registry.get(hit.watchId)
-  if (watcher === undefined) return { accepted: false, reason: 'unknown' }
-  if (sender.tabId !== watcher.tabId || (sender.frameId !== undefined && sender.frameId !== 0)) return { accepted: false, reason: 'wrong-tab' }
-  // A URL watcher reports from the background and may follow the tab to another site;
-  // every other watcher fires only on the origin the user approved.
-  if (sender.urlWatcher === true ? watcher.condition.kind !== 'url' : (watcher.condition.kind === 'url' || httpOrigin(sender.url) !== watcher.origin)) {
-    return { accepted: false, reason: 'other-origin' }
+  const watchId = hit.watchId
+  if (typeof watchId !== 'string') return { accepted: false, reason: 'bad-request' }
+  /** The watcher this hit may fire, as of now; or why not. */
+  const admit = (): PageWatcher | HitOutcome => {
+    const found = deps.registry.get(watchId)
+    if (found === undefined) return { accepted: false, reason: 'unknown' }
+    if (sender.tabId !== found.tabId || (sender.frameId !== undefined && sender.frameId !== 0)) return { accepted: false, reason: 'wrong-tab' }
+    // A URL watcher reports from the background and may follow the tab to another site;
+    // every other watcher fires only on the origin the user approved.
+    if (sender.urlWatcher === true ? found.condition.kind !== 'url' : (found.condition.kind === 'url' || httpOrigin(sender.url) !== found.origin)) {
+      return { accepted: false, reason: 'other-origin' }
+    }
+    if (!deps.enabled()) return { accepted: false, reason: 'disabled' }
+    if (deps.blocked()) return { accepted: false, reason: 'paused' }
+    return found
   }
-  if (!deps.enabled()) return { accepted: false, reason: 'disabled' }
-  if (deps.blocked()) return { accepted: false, reason: 'paused' }
+  let watcher = admit()
+  if ('accepted' in watcher) return watcher
+  if (deps.connected !== undefined) {
+    await deps.connected().catch(() => {})
+    // The wait took time: the watcher may be gone, the setting off, the agent stopped.
+    watcher = admit()
+    if ('accepted' in watcher) return watcher
+  }
   // Site policy as of now, not as of approval: a blocked page suspends the watcher.
   const pageUrl = sender.url ?? watcher.url
   // A network watcher's match is a request URL, possibly to another (blocked) origin.

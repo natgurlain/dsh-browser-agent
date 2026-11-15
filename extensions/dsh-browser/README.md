@@ -140,6 +140,7 @@ Chrome uses `sidePanel`; Firefox uses `sidebar_action`. Both request `storage` (
 ## Known limitations
 
 - Only one extension connection at a time. An unopened browser profile never claims it; if another open panel replaces a live connection, the replaced client yields instead of starting a reconnect fight.
+- With no side panel open the connection is kept for 5 minutes after the last tool call or approval. It is kept longer, and re-established headlessly (the address already in use only, never a discovery scan; retries back off from 30 s to 5 minutes), only for standing work: live page watchers while **Allow the agent to watch pages** is on, and the bridge's hint that it holds workflow schedules for this install or serves the MCP endpoint. That hint is stored in `chrome.storage.local` with the bridge address and dropped when the bridge reports none, when no connection has confirmed it for 7 days, or when the kill switch is engaged. While connected for standing work the background worker stays awake.
 - Developer tools require Chrome 125+, a setting/session grant or per-call approval, and an available debugger connection. Chrome shows its debugging banner while the connection remains attached, including during network capture.
 - Tab affinity is global to that extension connection rather than per chat session.
 - Accessible cross-origin iframes are snapshotted and operated with stable `(frame, index)` addresses. Restricted or short-lived frames are reported as unavailable without failing the whole page snapshot.

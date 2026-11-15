@@ -169,6 +169,8 @@ export async function runPhase3Smoke(ctx) {
   await chat.getByRole('button', { name: 'Continue generating', exact: true }).waitFor({ timeout: 30_000 })
   const session = (await bridgeRpc('session.list', {})).items.find(item => !item.blank && !before.has(item.sessionId))
   assert.ok(session, 'Phase 3 session')
+  // The standing-work check at the end of smoke-browser.mjs prompts this session again.
+  phase3State.sessionId = session.sessionId
   await hostRpc('session', 'selectModel', { sessionId: session.sessionId, provider: 'phase3-check', model: 'phase3-check' })
   await waitFor(async () => (await chat.locator('.composer-model > button').textContent()).includes('phase3-check'), 'Phase 3 model selected')
   const send = async text => {

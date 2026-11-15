@@ -41,6 +41,10 @@ export interface PageWatcherRuntimeOptions {
   rpc: (method: string, payload: unknown) => Promise<unknown>
   /** Record that page content entered a session (extension-side taint). */
   noteTaint: (sessionId: string, origin: string) => void
+  /** A hit is about to fire: wait briefly for a reconnecting bridge (watchers.ts `WatchHitDeps.connected`). */
+  connected?: () => Promise<void>
+  /** The set of watchers (or the setting) changed: the runtime lease counts live watchers. */
+  changed?: () => void
 }
 
 /** Per-call dependencies supplied by the dispatch path. */
@@ -104,6 +108,7 @@ export class PageWatcherRuntime {
         }
         return answer
       },
+      ...(this.options.connected === undefined ? {} : { connected: this.options.connected }),
       changed: () => { this.broadcast() },
     }
   }
@@ -179,6 +184,7 @@ export class PageWatcherRuntime {
   }
 
   broadcast(): void {
+    this.options.changed?.()
     for (const port of this.ports) this.post(port)
   }
 

@@ -68,6 +68,22 @@ export interface DiscoveryProgress {
   instances: BridgeInstance[]
 }
 
+/** Unattended work that keeps the browser connected with no panel open (background standing-work.ts). */
+export interface StandingStatus {
+  watchers: number
+  schedules: number
+  mcp: boolean
+}
+
+/** Read the status payload's `standing`; anything malformed or empty is "none". */
+export function parseStandingStatus(value: unknown): StandingStatus | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const { watchers, schedules, mcp } = value as Record<string, unknown>
+  const count = (raw: unknown): number => typeof raw === 'number' && Number.isSafeInteger(raw) && raw > 0 ? raw : 0
+  const standing = { watchers: count(watchers), schedules: count(schedules), mcp: mcp === true }
+  return standing.watchers > 0 || standing.schedules > 0 || standing.mcp ? standing : undefined
+}
+
 interface StatusMessage {
   type: 'status'
   state: BridgeState
@@ -76,6 +92,7 @@ interface StatusMessage {
   address?: string
   /** Why the bridge refused the last attempt (token, version, extension ID). */
   failure?: BridgeFailure
+  standing?: unknown
 }
 
 interface DiscoveryProgressMessage {
@@ -220,7 +237,7 @@ function panelRpcError(failure: RpcFailurePayload | undefined, fallbackMessage: 
 export interface PanelApi {
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>
   respond(rpcId: string, result: RespondResult): Promise<unknown>
-  onStatus(callback: (state: BridgeState, caps: BridgeCaps | null, discovery: DiscoveryStatus, address?: string, failure?: BridgeFailure) => void): () => void
+  onStatus(callback: (state: BridgeState, caps: BridgeCaps | null, discovery: DiscoveryStatus, address?: string, failure?: BridgeFailure, standing?: StandingStatus) => void): () => void
   onEvent(callback: (frame: ServerFrame) => void): () => void
   onApprovalRequest(callback: (request: ApprovalRequest) => void): () => void
   onApprovalResolved(callback: (id: string) => void): () => void
@@ -289,7 +306,7 @@ export function connectPanel(): PanelApi {
     resolve: () => void
     reject: (error: Error) => void
   }>()
-  const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null, discovery: DiscoveryStatus, address?: string, failure?: BridgeFailure) => void>()
+  const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null, discovery: DiscoveryStatus, address?: string, failure?: BridgeFailure, standing?: StandingStatus) => void>()
   const discoveryProgressListeners = new Set<(progress: DiscoveryProgress) => void>()
   const pendingScans = new Map<string, { resolve: (instances: BridgeInstance[]) => void; reject: (error: Error) => void }>()
   const eventListeners = new Set<(frame: ServerFrame) => void>()
@@ -354,6 +371,7 @@ export function connectPanel(): PanelApi {
             msg.discovery ?? 'idle',
             typeof msg.address === 'string' ? msg.address : undefined,
             typeof msg.failure === 'string' ? msg.failure : undefined,
+            parseStandingStatus(msg.standing),
           )
         }
         break
