@@ -42,6 +42,10 @@ export async function startDshBackend({
   benchmarkRoot,
   runtimeRoot,
   startUrl,
+  // Appended to the backend's patch (for example a scripted model provider).
+  extraPatch = '',
+  // Replaces the inherited environment (for example an isolated DSH_HOME).
+  baseEnv = process.env,
 }) {
   const backendRoot = join(runtimeRoot, backend)
   const sessionRoot = join(backendRoot, 'sessions')
@@ -55,13 +59,13 @@ export async function startDshBackend({
   const patchText = (await readFile(patchTemplate, 'utf8'))
     .replace('__BENCHMARK_PLAYWRIGHT_PLUGIN__', pluginUrl)
     .replace('__BENCHMARK_BRIDGE_PLUGIN__', bridgePluginUrl)
-  await writeFile(patch, patchText)
+  await writeFile(patch, extraPatch === '' ? patchText : `${patchText.trimEnd()}\n\n${extraPatch.trimEnd()}\n`)
   const logPath = join(logsRoot, `dsh-${backend}.log`)
   const log = createWriteStream(logPath, { flags: 'a' })
   const child = spawn('pnpm', ['exec', 'dsh', '--profile', 'web', '--patch', patch, '--', '--no-open', '--port', String(port)], {
     cwd: repoRoot,
     env: {
-      ...process.env,
+      ...baseEnv,
       BENCHMARK_SESSION_ROOT: sessionRoot,
       BENCHMARK_STORAGE_ROOT: storageRoot,
       BENCHMARK_START_URL: startUrl,
