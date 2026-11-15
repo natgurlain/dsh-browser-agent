@@ -20,14 +20,48 @@ const BRIDGE_HOME_FILES = [
 const KEPT_HOME_DATA = ['browser-audit', 'browser-sessions']
 const scriptRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
-// Messages are bilingual: English first, Chinese on the line below.
+// One language per run, chosen the way install.sh and uninstall.sh choose it:
+// DSH_BROWSER_LANG=en|zh decides (uninstall.sh and uninstall.ps1 export it for --lang);
+// otherwise Chinese when the locale is Chinese, and English for everything else.
+function detectLanguage() {
+  const forced = String(process.env.DSH_BROWSER_LANG ?? '').toLowerCase()
+  if (forced.startsWith('zh')) return 'zh'
+  if (forced.startsWith('en')) return 'en'
+  const locale = [process.env.LC_ALL, process.env.LC_MESSAGES, process.env.LANG].find(Boolean) ?? ''
+  if (/^zh/iu.test(locale)) return 'zh'
+  if (locale !== '' && !/^(C|POSIX)(\.|$)/u.test(locale)) return 'en'
+  try {
+    if (process.platform === 'darwin') {
+      // Prints a parenthesised list, one quoted language tag per line.
+      const listed = spawnSync('defaults', ['read', '-g', 'AppleLanguages'], {
+        encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'],
+      })
+      const first = String(listed.stdout ?? '').split('\n')[1] ?? ''
+      if (/^zh/iu.test(first.replace(/[", ]/gu, ''))) return 'zh'
+    } else if (process.platform === 'win32') {
+      // Windows sets none of the locale variables; uninstall.ps1 normally passes its choice.
+      if (/^zh/iu.test(Intl.DateTimeFormat().resolvedOptions().locale)) return 'zh'
+    }
+  } catch {
+    // The language list is a convenience; English is the answer when it cannot be read.
+  }
+  return 'en'
+}
+
+let language = detectLanguage()
+
+// Every message exists in Chinese and in English, and a run prints one of them.
 // Callers pass the Chinese text first and the English text second.
+function text(zh, en) {
+  return language === 'zh' ? zh : en
+}
+
 function fail(zh, en) {
-  throw new Error(`${en}\n${zh}`)
+  throw new Error(text(zh, en))
 }
 
 function pair(zh, en) {
-  console.log(`${en}\n   ${zh}`)
+  console.log(text(zh, en))
 }
 
 function stat(path) {
@@ -236,7 +270,8 @@ function removeDesktopBridge(plan) {
       env: { ...process.env, DSH_HOME: plan.home }, stdio: ['ignore', 'inherit', 'inherit'],
     })
     if (result.error || result.status !== 0) {
-      const outcome = result.error ? result.error.message : `exit code ${result.status ?? result.signal}`
+      const outcome = result.error ? result.error.message
+        : text(`退出码 ${result.status ?? result.signal}`, `exit code ${result.status ?? result.signal}`)
       fail(`从 desktop profile 移除插件失败，停止清理文件。命令：${command} ${commandArgs.join(' ')}（${outcome}）`,
         `Plugin removal from the desktop profile failed; file cleanup stopped. Command: ${command} ${commandArgs.join(' ')} (${outcome})`)
     }
@@ -291,16 +326,34 @@ async function main() {
   const { values } = parseArgs({ options: {
     home: { type: 'string' }, 'runtime-root': { type: 'string' },
     'desktop-app': { type: 'string' }, 'dry-run': { type: 'boolean' }, help: { type: 'boolean' },
+    lang: { type: 'string' },
   } })
+  if (values.lang !== undefined) {
+    const wanted = values.lang.toLowerCase()
+    if (wanted !== 'en' && wanted !== 'zh') fail(`--lang 只接受 en 或 zh：${values.lang}`, `--lang accepts en or zh: ${values.lang}`)
+    language = wanted
+  }
   if (values.help) {
-    console.log(`Usage: uninstall [--home <path>] [--dry-run] [--runtime-root <checkout>] [--desktop-app <path>]
+    console.log(text(`用法：uninstall [--home <path>] [--dry-run] [--runtime-root <checkout>] [--desktop-app <path>] [--lang en|zh]
+
+  --home <path>             DSH 目录（默认为 DSH_HOME 或 ~/.dsh）
+  --dry-run                 只列出将要移除的文件和插件
+  --runtime-root <checkout> 使用该 checkout 中的 DSH 依赖
+  --desktop-app <path>      DeepSeek Harness 桌面应用，用它自带的 CLI 从 desktop profile 移除插件
+                            （默认为 DSH_DESKTOP_APP，其次是 macOS 上的 /Applications 和
+                            ~/Applications；"none" 表示不处理 desktop profile）
+  --lang en|zh              输出语言（默认为 DSH_BROWSER_LANG，其次在中文环境下为中文，
+                            其他环境为英文）`,
+    `Usage: uninstall [--home <path>] [--dry-run] [--runtime-root <checkout>] [--desktop-app <path>] [--lang en|zh]
 
   --home <path>             DSH directory (defaults to DSH_HOME or ~/.dsh)
   --dry-run                 List the files and plugins to remove
   --runtime-root <checkout> Use DSH dependencies from this checkout
   --desktop-app <path>      DeepSeek Harness desktop app whose bundled CLI removes the plugin from
                             the desktop profile (defaults to DSH_DESKTOP_APP, then /Applications
-                            and ~/Applications on macOS; "none" leaves the desktop profile alone)`)
+                            and ~/Applications on macOS; "none" leaves the desktop profile alone)
+  --lang en|zh              Language of the output (defaults to DSH_BROWSER_LANG, then Chinese
+                            when the locale is Chinese and English otherwise)`))
     return
   }
   let home = values.home ?? process.env.DSH_HOME ?? join(homedir(), '.dsh')
