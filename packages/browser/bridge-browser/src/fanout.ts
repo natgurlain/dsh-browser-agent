@@ -33,6 +33,7 @@ import { toolCallIdArg } from './server.ts'
 import type { SessionLedger } from './session-ledger.ts'
 import { wrapUntrustedPageText } from './protocol.ts'
 import { errorMessage } from './host-api.ts'
+import { startActivationCompat } from './subagent-compat.ts'
 
 /** Most tasks in one fleet. */
 export const MAX_FLEET_TASKS = 8
@@ -237,7 +238,7 @@ export async function runFanout(
     const results = await Promise.all(args.tasks.map(async (task, index): Promise<FleetResult> => {
       const childId = childIds[index]!
       try {
-        const activation = await subagents.startActivation({
+        const activation = await startActivationCompat(subagents, {
           provider: options.provider,
           parent,
           label: `fleet ${String(index + 1)}: ${new URL(task.url).host}`,

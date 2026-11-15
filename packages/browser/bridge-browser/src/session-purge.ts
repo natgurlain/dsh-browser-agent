@@ -174,6 +174,16 @@ export async function purgeSessionFiles(deps: SessionPurgeDeps, sessionId: strin
   if (failure !== undefined) throw failure
 }
 
+/** The worktree service's archive-cleanup report (DSH 0.2.2-rc.2 and later). */
+interface ArchiveCleanupWorktrees {
+  cleanupOf?(session: unknown, revision: unknown): Promise<{ status?: string; revision?: unknown } | null | undefined>
+}
+
+/** The session query's inspection entry point (DSH 0.2.2-rc.2 and later). */
+interface ArchiveCleanupQuery {
+  inspectSession?(sessionId: string, read: (session: unknown) => unknown): Promise<unknown>
+}
+
 /**
  * The panel's purge: list running sessions (advisory), then
  * {@link purgeSessionFiles} under the runtime's exclusive write ownership,
@@ -246,11 +256,17 @@ export function createSessionPurger(
         }
       },
       waitForArchiveCleanup: async (id) => {
-        const worktrees = ctx.get('worktrees')
-        if (worktrees === undefined) return
-        const query = ctx.get('sessionQuery')
-        if (query === undefined) throw new Error('session query is required to finish worktree cleanup')
-        const session = await query.inspectSession(id as Parameters<typeof query.inspectSession>[0], session => session)
+        // Typed structurally: DSH 0.2.2-rc.1 has neither cleanupOf nor
+        // inspectSession, and its archive does not report a cleanup to wait
+        // for, so on that host the purge goes on as it did before the wait
+        // existed. A host with cleanupOf but no way to inspect is an error.
+        const worktrees = ctx.get('worktrees') as unknown as ArchiveCleanupWorktrees | undefined
+        if (worktrees === undefined || typeof worktrees.cleanupOf !== 'function') return
+        const query = ctx.get('sessionQuery') as unknown as ArchiveCleanupQuery | undefined
+        if (query === undefined || typeof query.inspectSession !== 'function') {
+          throw new Error('session query is required to finish worktree cleanup')
+        }
+        const session = await query.inspectSession(id, session => session)
         const pending = await worktrees.cleanupOf(session, null)
         const cleanup = pending?.status === 'scheduled'
           ? await worktrees.cleanupOf(session, pending.revision) : pending

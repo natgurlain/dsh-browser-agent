@@ -2,7 +2,8 @@
  * Build extension targets sequentially into dist/ (or dist-firefox/
  * with --firefox, or dist-store/ with --store for a Chrome Web Store upload,
  * whose manifest omits the `key` that pins unpacked installs to one ID):
- * background (es|iife) → content (iife) → panel (React) → offscreen (iife).
+ * background (es|iife) → content (iife) → page-world listener shim (iife) →
+ * panel (React) → offscreen (iife).
  * The first target cleans the output; the later ones append.
  * Pass --watch for dev rebuilds.
  */
@@ -25,6 +26,7 @@ if (process.argv.includes('--store')) {
 const configs = [
   'vite.background.config.ts',
   'vite.content.config.ts',
+  'vite.shim.config.ts',
   'vite.panel.config.ts',
   'vite.offscreen.config.ts',
 ]

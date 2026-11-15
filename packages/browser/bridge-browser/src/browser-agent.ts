@@ -21,6 +21,7 @@ import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { errorMessage } from './host-api.ts'
+import { startActivationCompat } from './subagent-compat.ts'
 
 /** Id of the agent preset this plugin registers. */
 export const BROWSER_AGENT_PRESET_ID = 'browser'
@@ -213,7 +214,7 @@ export function registerBrowserDelegateTool(ctx: Context, defineTool: (options: 
       if (subagents.getProvider(SPAWN_PROVIDER) === undefined) {
         throw new Error('The Host has no in-process "spawn" subagent backend, so the browser subagent cannot start.')
       }
-      const started = await subagents.startActivation({
+      const started = await startActivationCompat(subagents, {
         provider: SPAWN_PROVIDER,
         label: (args.label ?? 'browser task').slice(0, 80),
         prompt: [{ type: 'text', text: args.task }],
@@ -223,7 +224,9 @@ export function registerBrowserDelegateTool(ctx: Context, defineTool: (options: 
         delivery: 'caller',
       })
       const onAbort = (): void => { void started.dispose().catch(() => {}) }
-      exec.signal.addEventListener('abort', onAbort, { once: true })
+      // The caller may have aborted while the child was starting.
+      if (exec.signal.aborted) onAbort()
+      else exec.signal.addEventListener('abort', onAbort, { once: true })
       try {
         const result = await started.result
         const text = result.output.flatMap(block => block.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('\n').trim()

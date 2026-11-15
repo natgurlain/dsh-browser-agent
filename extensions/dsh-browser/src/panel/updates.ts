@@ -16,8 +16,9 @@ const RELEASE_DOWNLOAD_URL = `https://github.com/${RELEASE_REPOSITORY}/releases/
 
 /** The release tag of an extension version: 0.1.5 is published as v0.1.5. */
 export function releaseTag(version: string): string {
-  versionParts(version)
-  return `v${version}`
+  // A build from a checkout carries a fourth part, the build number
+  // (shared/build-stamp.ts); releases are tagged by the first three.
+  return `v${versionParts(version).slice(0, 3).join('.')}`
 }
 
 /** URL of one asset of a tagged release (the bootstrap scripts are published as assets). */

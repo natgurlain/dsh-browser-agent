@@ -101,7 +101,10 @@ export async function apply(ctx, config) {
     try {
       assert.equal(observation.source, 'prepared')
       assert.ok(observation.projections)
-      await writeFile(config.marker, JSON.stringify({ source: observation.source }))
+      // DSH 0.2.2-rc.1 has no archive-cleanup report (worktrees.cleanupOf and the
+      // worktree/cleanup event arrived in rc.2); the smoke branches on this.
+      const archiveCleanup = typeof ctx.worktrees?.cleanupOf === 'function'
+      await writeFile(config.marker, JSON.stringify({ source: observation.source, archiveCleanup }))
     } finally {
       observation[Symbol.dispose]()
     }

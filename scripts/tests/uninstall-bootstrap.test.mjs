@@ -22,7 +22,7 @@ function workspace(name) {
   if (process.platform !== 'win32') chmodSync(cwd, 0o555)
   return {
     base, cwd, temporary,
-    env: { ...process.env, TMPDIR: temporary, TMP: temporary, TEMP: temporary,
+    env: { ...process.env, DSH_BROWSER_LANG: 'en', TMPDIR: temporary, TMP: temporary, TEMP: temporary,
       HTTPS_PROXY: proxy, https_proxy: proxy, HTTP_PROXY: proxy, http_proxy: proxy, NO_PROXY: '', no_proxy: '' },
   }
 }

@@ -332,7 +332,7 @@ describe('purgeSessionFiles', () => {
 })
 
 describe('createSessionPurger', () => {
-  function purgerHarness(running: string[]) {
+  function purgerHarness(running: string[], services: Record<string, unknown> = {}) {
     const methods: string[] = []
     const api = {
       call: vi.fn(async (call: { method: string }) => {
@@ -343,7 +343,7 @@ describe('createSessionPurger', () => {
       }),
     }
     const ctx = {
-      get: (name: string) => name === 'sessionPersistence' ? { open: async () => ({ close: async () => {} }) } : undefined,
+      get: (name: string) => name === 'sessionPersistence' ? { open: async () => ({ close: async () => {} }) } : services[name],
     } as unknown as Context
     return { api, ctx, methods }
   }
@@ -357,6 +357,53 @@ describe('createSessionPurger', () => {
     expect(await readdir(target)).toEqual([])
     expect(methods).toEqual(['session.list', 'workspace.list', 'workspace.archiveSession'])
     expect(onPurged).toHaveBeenCalledWith(SESSION_A)
+  })
+
+  describe('archive cleanup across DSH host shapes', () => {
+    it('waits for the worktree cleanup on a host that reports it (0.2.2-rc.2 and later)', async () => {
+      const root = await makeSessionsRoot()
+      const target = await makeSession(root, 'ws', SESSION_A)
+      const session = { id: SESSION_A }
+      const inspectSession = vi.fn(async (_id: string, read: (value: unknown) => unknown) => read(session))
+      const cleanupOf = vi.fn(async (_session: unknown, revision: unknown) => revision === null
+        ? { status: 'scheduled', revision: 7 } : { status: 'removed', revision: 7 })
+      const { api, ctx } = purgerHarness([], { worktrees: { cleanupOf }, sessionQuery: { inspectSession } })
+      await createSessionPurger(ctx, api as never, root)(SESSION_A)
+      expect(inspectSession).toHaveBeenCalledWith(SESSION_A, expect.any(Function))
+      expect(cleanupOf.mock.calls).toEqual([[session, null], [session, 7]])
+      expect(await readdir(target)).toEqual([])
+    })
+
+    it('keeps the data and restores the archive state when that cleanup failed', async () => {
+      const root = await makeSessionsRoot()
+      const target = await makeSession(root, 'ws', SESSION_A)
+      const { api, ctx, methods } = purgerHarness([], {
+        worktrees: { cleanupOf: async () => ({ status: 'failed' }) },
+        sessionQuery: { inspectSession: async (_id: string, read: (value: unknown) => unknown) => read({}) },
+      })
+      await expect(createSessionPurger(ctx, api as never, root)(SESSION_A)).rejects.toThrow(/worktree cleanup failed/)
+      expect(await readdir(target)).not.toEqual([])
+      expect(methods).toContain('workspace.unarchiveSession')
+    })
+
+    it('purges without the wait on a host whose services predate it (0.2.2-rc.1)', async () => {
+      const root = await makeSessionsRoot()
+      const target = await makeSession(root, 'ws', SESSION_A)
+      // The rc.1 shapes: a worktree service without cleanupOf, a session query without inspectSession.
+      const { api, ctx, methods } = purgerHarness([], { worktrees: { list: async () => [] }, sessionQuery: { listSessions: async () => [] } })
+      const onPurged = vi.fn(async () => {})
+      await createSessionPurger(ctx, api as never, root, onPurged)(SESSION_A)
+      expect(await readdir(target)).toEqual([])
+      expect(methods).toEqual(['session.list', 'workspace.list', 'workspace.archiveSession'])
+      expect(onPurged).toHaveBeenCalledWith(SESSION_A)
+    })
+
+    it('refuses when the host reports cleanups but cannot inspect the session', async () => {
+      const root = await makeSessionsRoot()
+      await makeSession(root, 'ws', SESSION_A)
+      const { api, ctx } = purgerHarness([], { worktrees: { cleanupOf: async () => null }, sessionQuery: {} })
+      await expect(createSessionPurger(ctx, api as never, root)(SESSION_A)).rejects.toThrow(/session query is required/)
+    })
   })
 
   it('keeps the session state when the purge is refused', async () => {

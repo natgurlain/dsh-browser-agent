@@ -7,7 +7,9 @@ Each `## vX.Y.Z` section becomes the notes of that GitHub release
 
 First release of dsh Browser Agent, a fork of [dsh-browser](https://github.com/omdsh-dev/dsh-browser)
 v0.1.4 by Yuxiang Lin and contributors (MIT; see NOTICE). The extension is 0.1.5 and the
-bridge plugin is `@natgurlain/dsh-bridge-browser` 0.0.7. It runs on DSH 0.2.2-rc.2.
+bridge plugin is `@natgurlain/dsh-bridge-browser` 0.0.7. It runs on DSH 0.2.2-rc.1 to
+0.2.2-rc.3 (0.2.2-rc.2 by default); on 0.2.2-rc.1 Continue after a failed turn and the wait for
+worktree cleanup on delete are unavailable. See `docs/dsh-matrix.md`.
 
 Upgrading from upstream 0.1.4: run the installer. It removes the bridge registered under
 the earlier package names (`@deepseek-ai/dsh-bridge-browser`, `@yuxianglin/dsh-bridge-browser`)
@@ -31,6 +33,12 @@ handshake changed and an older extension or plugin is refused.
   keeps the audit log and session workspaces.
 - The installer provisions the bridge token into the installed extension, so no address or
   token has to be entered, and keeps it across updates.
+- `install.sh` also registers the bridge with the DeepSeek Harness desktop app, through the
+  CLI bundled in the app, and the uninstaller removes it there. An app whose DSH version
+  the plugin does not support is reported and skipped; the version check is never overridden.
+- `install.sh` uses an already installed Node.js or pnpm when the one on PATH is missing or
+  unusable (the app's, then asdf, nvm, fnm, volta or mise), and opens the Chromium browser
+  that is installed (Chrome, Chromium, Brave, Edge, Vivaldi or Arc) instead of assuming Chrome.
 - The Windows release path (`install.ps1`, `uninstall.ps1`) has not been run on Windows yet.
 
 ### Bridge

@@ -99,6 +99,11 @@ export interface PanelCopy {
     languageAuto: string
     languageEnglish: string
     languageChinese: string
+    theme: string
+    themeHelp: string
+    themeAuto: string
+    themeLight: string
+    themeDark: string
     bridgeAddress: string
     bridgeHelp: string
     bridgePlaceholder: string
@@ -635,6 +640,11 @@ const EN: PanelCopy = {
     languageAuto: 'Automatic (follow Chrome)',
     languageEnglish: 'English',
     languageChinese: '中文',
+    theme: 'Theme',
+    themeHelp: 'Colours of the assistant panel. Automatic follows the browser or system setting.',
+    themeAuto: 'Automatic (follow system)',
+    themeLight: 'Light',
+    themeDark: 'Dark',
     bridgeAddress: 'Bridge address',
     bridgeHelp: 'Leave blank to detect a local service automatically',
     bridgePlaceholder: 'Auto-detect (desktop beacon 43189–43198 included)',
@@ -846,9 +856,9 @@ const EN: PanelCopy = {
     managedAllowedOnly: (origins) => `Only these sites are allowed: ${origins.join(', ') || '(none)'}`,
     trustedNote: 'Pages from trusted sites are not treated as untrusted content.',
     exemptLocal: 'Don\'t restrict sessions that only read local pages',
-    exemptLocalHelp: 'Pages served from this computer (localhost, 127.0.0.1) do not make a conversation ask before risky actions or turn its shell and file tools off. Once it reads any other page it is restricted as usual, and sending data to a local address then still asks.',
+    exemptLocalHelp: 'Pages served from this computer (localhost, 127.0.0.1) are not treated as untrusted content.',
     exemptTrusted: 'Don\'t restrict sessions that only read sites I trust',
-    exemptTrustedHelp: 'Sites with a Trusted rule here or in "Always-allowed domains" do not restrict a conversation either. A trusted site that shows other people\'s content (comments, tickets, mail) can still carry instructions aimed at the agent.',
+    exemptTrustedHelp: 'Sites you marked Trusted or always-allowed are not treated as untrusted content, even when they show other people\'s posts.',
     managedNoLocalExemption: 'Local pages restrict a session like any other page.',
     managedNoTrustedExemption: 'Trusted sites restrict a session like any other page.',
   },
@@ -1181,6 +1191,11 @@ const ZH: PanelCopy = {
     languageAuto: '自动（跟随 Chrome）',
     languageEnglish: 'English',
     languageChinese: '中文',
+    theme: '外观主题',
+    themeHelp: '助手侧栏的配色。“自动”会跟随浏览器或系统设置。',
+    themeAuto: '自动（跟随系统）',
+    themeLight: '浅色',
+    themeDark: '深色',
     bridgeAddress: '桥地址',
     bridgeHelp: '留空时自动检测本机服务',
     bridgePlaceholder: '自动检测（含桌面版信标 43189–43198）',
@@ -1392,9 +1407,9 @@ const ZH: PanelCopy = {
     managedAllowedOnly: (origins) => `仅允许以下站点：${origins.join('、') || '（无）'}`,
     trustedNote: '受信任站点的页面不会被当作不受信任的内容。',
     exemptLocal: '只读取本地页面的会话不受限制',
-    exemptLocalHelp: '本机提供的页面（localhost、127.0.0.1）不会让对话在高风险操作前询问，也不会停用命令行与文件工具。一旦读取其他页面，会话照常受限，此后向本地地址发送数据仍需询问。',
+    exemptLocalHelp: '本机提供的页面（localhost、127.0.0.1）不会被当作不受信任的内容。',
     exemptTrusted: '只读取受信任站点的会话不受限制',
-    exemptTrustedHelp: '在此处设为「信任」或列入「永久免确认域名」的站点同样不会限制对话。显示他人内容（评论、工单、邮件）的受信任站点仍可能带有针对助手的指令。',
+    exemptTrustedHelp: '设为「信任」或永久免确认的站点不会被当作不受信任的内容，即使其中显示他人发布的内容。',
     managedNoLocalExemption: '本地页面与其他页面一样会限制会话。',
     managedNoTrustedExemption: '受信任站点与其他页面一样会限制会话。',
   },

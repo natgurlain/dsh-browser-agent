@@ -9,10 +9,19 @@
 #                                            (default: the latest) and verifies it against its SHA256SUMS
 #                                            before unpacking or running any of it
 #   install.sh --unverified-branch <name>    development only: a branch archive, with no checksum at all
+#   install.sh --lang en|zh                  language of the output (every form above takes it)
 # DSH_BROWSER_VERSION and DSH_BROWSER_UNVERIFIED_BRANCH are the environment forms of the two
-# options. DSH_BROWSER_GITHUB_TOKEN (or an authenticated gh) is needed while the repository is
-# private. DSH_BROWSER_NO_LAUNCH=1 keeps the installer from opening Chrome or touching the
-# clipboard.
+# download options, DSH_BROWSER_LANG that of --lang. Without either, the output is Chinese
+# when the locale is Chinese and English otherwise; one language is printed per run.
+# DSH_BROWSER_GITHUB_TOKEN (or an authenticated gh) is needed while the repository is
+# private. DSH_BROWSER_NO_LAUNCH=1 keeps the installer from opening the browser or touching
+# the clipboard.
+#
+# The bridge is registered with the web profile and, when the DeepSeek Harness desktop app
+# is installed, with the app's own profile through the CLI bundled in the app.
+# DSH_DESKTOP_APP names the app when it is not in /Applications or ~/Applications;
+# DSH_DESKTOP_APP=none skips it. When node or pnpm on PATH is missing or unusable, an
+# already installed one is used (the app's, or a version manager's); nothing is installed.
 set -euo pipefail
 
 # Corepack would otherwise stop and ask before downloading the pinned pnpm.
@@ -48,10 +57,64 @@ RELEASE_MODE="public"
 RELEASE_STATUS=""
 RELEASE_EFFECTIVE_URL=""
 
+# One language per run. DSH_BROWSER_LANG=en|zh decides; otherwise Chinese when the locale
+# is Chinese (the first of LC_ALL, LC_MESSAGES and LANG that is set; on macOS, when none
+# names a language, the first entry of the system language list), English for everything
+# else. Every message is written as a pair, Chinese first and English second, and exactly
+# one of the two is printed.
+RELEASE_LANG="en"
+
+release_detect_lang() {
+  local locale=""
+  case "${DSH_BROWSER_LANG:-}" in
+    [zZ][hH]*)
+      RELEASE_LANG="zh"
+      return 0
+      ;;
+    [eE][nN]*) return 0 ;;
+  esac
+  locale="${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}"
+  case "$locale" in
+    [zZ][hH]*) RELEASE_LANG="zh" ;;
+    "" | C | POSIX | C.* | POSIX.*)
+      if [ "$(uname -s 2>/dev/null)" = "Darwin" ]; then
+        # Prints a parenthesised list, one quoted language tag per line.
+        locale="$(defaults read -g AppleLanguages 2>/dev/null | sed -n '2{s/[", ]//g;p;}')" || locale=""
+        case "$locale" in [zZ][hH]*) RELEASE_LANG="zh" ;; esac
+      fi
+      ;;
+  esac
+  return 0
+}
+release_detect_lang
+
+# release_say <Chinese> <English>: prints the one that matches the run's language.
+release_say() {
+  if [ "$RELEASE_LANG" = "zh" ]; then
+    printf '%s\n' "$1"
+  else
+    printf '%s\n' "$2"
+  fi
+}
+
 release_fail() {
-  printf '\nError: %s\n' "$2" >&2
-  printf '错误：%s\n' "$1" >&2
+  if [ "$RELEASE_LANG" = "zh" ]; then
+    printf '\n错误：%s\n' "$1" >&2
+  else
+    printf '\nError: %s\n' "$2" >&2
+  fi
   exit 1
+}
+
+# release_set_lang <en|zh>: the --lang option. Exported so that a second stage and
+# uninstall.mjs use the same language.
+release_set_lang() {
+  case "$1" in
+    [zZ][hH]) RELEASE_LANG="zh" ;;
+    [eE][nN]) RELEASE_LANG="en" ;;
+    *) release_fail "--lang 只接受 en 或 zh：$1" "--lang accepts en or zh: $1" ;;
+  esac
+  export DSH_BROWSER_LANG="$RELEASE_LANG"
 }
 
 release_check_base() {
@@ -132,13 +195,13 @@ release_resolve_token() {
   case "$RELEASE_STATUS" in
     200) ;;
     401 | 403) release_fail \
-      "GitHub 拒绝了 DSH_BROWSER_GITHUB_TOKEN（HTTP $RELEASE_STATUS）。" \
+      "GitHub 拒绝了 DSH_BROWSER_GITHUB_TOKEN（HTTP ${RELEASE_STATUS}）。" \
       "GitHub rejected DSH_BROWSER_GITHUB_TOKEN (HTTP $RELEASE_STATUS)." ;;
     404) release_fail \
       "用该 token 找不到 $RELEASE_REPOSITORY 的发布版本 ${RELEASE_TAG:-latest}；请确认版本已发布且 token 可以读取该仓库。" \
       "No release ${RELEASE_TAG:-latest} of $RELEASE_REPOSITORY is visible to this token; check that it is published and that the token can read the repository." ;;
     *) release_fail \
-      "无法从 GitHub API 读取发布信息（HTTP $RELEASE_STATUS）。" \
+      "无法从 GitHub API 读取发布信息（HTTP ${RELEASE_STATUS}）。" \
       "Could not read the release from the GitHub API (HTTP $RELEASE_STATUS)." ;;
   esac
   # One "name<TAB>url" line per asset, after the tag on the first line.
@@ -213,7 +276,7 @@ release_verify() {
     "None of sha256sum, shasum or openssl was found, so the download cannot be verified."
   if [ "$actual" != "$expected" ]; then
     release_fail \
-      "$name 的 SHA-256 与 SHA256SUMS 不符（期望 $expected，实际 $actual）。文件未被解压或执行。" \
+      "$name 的 SHA-256 与 SHA256SUMS 不符（期望 ${expected}，实际 ${actual}）。文件未被解压或执行。" \
       "SHA-256 mismatch for $name (expected $expected, got $actual). Nothing was unpacked or run."
   fi
 }
@@ -226,7 +289,7 @@ release_fetch() {
   release_check_base "$RELEASE_GITHUB_URL"
   release_check_base "$RELEASE_API_URL"
   if [ -n "$RELEASE_TAG" ] && ! release_valid_tag "$RELEASE_TAG"; then
-    release_fail "不是有效的发布版本号：$RELEASE_TAG（示例：v0.1.5）。" "Not a release tag: $RELEASE_TAG (expected something like v0.1.5)."
+    release_fail "不是有效的发布版本号：${RELEASE_TAG}（示例：v0.1.5）。" "Not a release tag: $RELEASE_TAG (expected something like v0.1.5)."
   fi
   mkdir -p "$directory"
 
@@ -252,7 +315,7 @@ release_fetch() {
         "$RELEASE_REPOSITORY 还没有发布任何版本。" \
         "$RELEASE_REPOSITORY has not published a release yet." ;;
       *) release_fail \
-        "下载失败：无法连接 $RELEASE_GITHUB_URL。现有安装未被修改。" \
+        "下载失败：无法连接 ${RELEASE_GITHUB_URL}。现有安装未被修改。" \
         "Download failed: could not reach $RELEASE_GITHUB_URL. The existing installation was not changed." ;;
     esac
   fi
@@ -283,33 +346,29 @@ release_fetch() {
     release_verify "$directory" "$name"
   done
   rm -f -- "$directory/.release.json" "$directory/.release-assets"
-  printf 'Verified: %d file(s) of %s match SHA256SUMS.\n' "$#" "$RELEASE_TAG"
-  printf '   已校验：%s 的 %d 个文件与 SHA256SUMS 一致。\n' "$RELEASE_TAG" "$#"
+  release_say "已校验：$RELEASE_TAG 的 $# 个文件与 SHA256SUMS 一致。" "Verified: $# file(s) of $RELEASE_TAG match SHA256SUMS."
 }
 # <<< release-fetch
 
-# Messages are bilingual: English first, Chinese on the indented line below.
-# Callers pass the Chinese text first and the English text second.
+# Every message exists in Chinese and in English, and a run prints one of them (see
+# RELEASE_LANG above). Callers pass the Chinese text first and the English text second.
 print_step() {
-  printf '\n[%s/4] %s\n' "$1" "$3"
-  printf '      %s\n' "$2"
+  printf '\n[%s/4] ' "$1"
+  release_say "$2" "$3"
 }
 
 print_pair() {
-  printf '%s\n' "$2"
-  printf '   %s\n' "$1"
+  release_say "$1" "$2"
 }
 
 fail_pair() {
-  printf '\nError: %s\n' "$2" >&2
-  printf '错误：%s\n' "$1" >&2
-  exit 1
+  release_fail "$1" "$2"
 }
 
 # Runs a command in the checkout with its output hidden. When it fails, the end
-# of that output is shown and the install stops, so a failed build or dependency
-# install is never a silent exit.
-run_quiet() {
+# of that output is shown and the command's exit code is returned, so a failed
+# build or dependency install is never silent.
+run_logged() {
   local zh="$1" en="$2" log status=0
   shift 2
   local watcher=""
@@ -318,7 +377,8 @@ run_quiet() {
   # not look like a hang: every 15 seconds show the latest line of its output.
   (
     waited=0
-    while sleep 15; do
+    # Its stdio is detached so the sleep still running at the end holds no pipe of ours.
+    while sleep 15 >/dev/null 2>&1; do
       waited=$((waited + 15))
       printf '      ... %ss: %s\n' "$waited" "$(tail -n 1 "$log" 2>/dev/null | cut -c1-100)"
     done
@@ -335,12 +395,33 @@ run_quiet() {
   fi
   printf '\n' >&2
   tail -n 40 "$log" >&2
-  printf '\nFull output: %s\n' "$log" >&2
-  printf '完整输出：%s\n' "$log" >&2
-  printf '\nError: %s (exit code %s).\n' "$en" "$status" >&2
-  printf '错误：%s（退出码 %s）。\n' "$zh" "$status" >&2
-  # Keep the command's own exit code for whoever called the installer.
-  exit "$status"
+  {
+    printf '\n'
+    print_pair "完整输出：$log" "Full output: $log"
+    printf '\n'
+    print_pair "错误：${zh}（退出码 ${status}）。" "Error: $en (exit code $status)."
+  } >&2
+  return "$status"
+}
+
+# A build step. A failure stops the install with the command's own exit code, with one
+# exception: when the Node in use is the one bundled with the DeepSeek Harness app (it can
+# be Electron running as Node, which not every build tool accepts), the step is retried with
+# the next usable Node the installer found.
+run_quiet() {
+  local status=0
+  while :; do
+    status=0
+    run_logged "$@" || status=$?
+    [ "$status" -eq 0 ] && return 0
+    if [ "$NODE_FROM_APP" -eq 1 ] && activate_next_node; then
+      unset -f pnpm 2>/dev/null || true
+      resolve_pnpm
+      print_pair "上一步使用 DeepSeek Harness 应用自带的 Node.js 执行失败，改用上面的 Node.js 重试。" "That step failed with the Node.js bundled in the DeepSeek Harness app; retrying with the Node.js named above."
+      continue
+    fi
+    exit "$status"
+  done
 }
 
 has_workspace() {
@@ -367,12 +448,22 @@ workspace_root_from_script() {
 # A pnpm on PATH can be present and still not run: a version-manager shim with no version
 # set for the active Node exits non-zero on every call. Use pnpm when it runs; otherwise
 # define a pnpm shell function (inherited by subshells and by run_quiet) that goes through
-# Corepack, or through npx with the version package.json pins.
+# the pnpm bundled in the DeepSeek Harness app, or Corepack, or npx with the version
+# package.json pins.
 resolve_pnpm() {
   local found=0
   if command -v pnpm >/dev/null 2>&1; then
     found=1
     if pnpm --version >/dev/null 2>&1; then return 0; fi
+  fi
+  if [ -n "$DESKTOP_PNPM" ] && node "$DESKTOP_PNPM" --version >/dev/null 2>&1; then
+    pnpm() { node "$DESKTOP_PNPM" "$@"; }
+    if [ "$found" -eq 1 ]; then
+      print_pair "PATH 上的 pnpm 无法在当前 Node 下运行，改用 DeepSeek Harness 应用自带的 pnpm：$DESKTOP_PNPM" "pnpm on PATH does not run with this Node; using the pnpm bundled in the DeepSeek Harness app instead: $DESKTOP_PNPM"
+    else
+      print_pair "未找到 pnpm，改用 DeepSeek Harness 应用自带的 pnpm：$DESKTOP_PNPM" "pnpm was not found; using the pnpm bundled in the DeepSeek Harness app instead: $DESKTOP_PNPM"
+    fi
+    return 0
   fi
   if corepack --version >/dev/null 2>&1; then
     pnpm() { COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack pnpm "$@"; }
@@ -391,9 +482,9 @@ resolve_pnpm() {
     [ -n "$PNPM_NPX_SPEC" ] || PNPM_NPX_SPEC="pnpm"
     pnpm() { npx --yes "$PNPM_NPX_SPEC" "$@"; }
     if [ "$found" -eq 1 ]; then
-      print_pair "PATH 上的 pnpm 无法在当前 Node 下运行，改用 npx $PNPM_NPX_SPEC。" "pnpm on PATH does not run with this Node; using npx $PNPM_NPX_SPEC instead."
+      print_pair "PATH 上的 pnpm 无法在当前 Node 下运行，改用 npx ${PNPM_NPX_SPEC}。" "pnpm on PATH does not run with this Node; using npx $PNPM_NPX_SPEC instead."
     else
-      print_pair "未找到 pnpm，改用 npx $PNPM_NPX_SPEC。" "pnpm was not found; using npx $PNPM_NPX_SPEC instead."
+      print_pair "未找到 pnpm，改用 npx ${PNPM_NPX_SPEC}。" "pnpm was not found; using npx $PNPM_NPX_SPEC instead."
     fi
     return 0
   fi
@@ -401,6 +492,317 @@ resolve_pnpm() {
     fail_pair "PATH 上的 pnpm 无法运行，也没有可用的 Corepack 或 npx；请先启用 Corepack 或重新安装 pnpm。" "pnpm on PATH does not run, and neither Corepack nor npx is usable; enable Corepack or reinstall pnpm first."
   fi
   fail_pair "未找到 pnpm；请先启用 Corepack 或安装 pnpm。" "pnpm was not found; enable Corepack or install pnpm first."
+}
+
+# ---- DeepSeek Harness desktop app -------------------------------------------------------
+# The desktop app owns the reserved profile <DSH home>/profiles/desktop; the npm dsh CLI
+# refuses that profile, the CLI bundled in the app manages it. The app also ships a Node
+# and a pnpm, which the installer can borrow. Layout seen on macOS:
+#   <app>/Contents/Resources/runtime/bin/node            (may be Electron running as Node)
+#   <app>/Contents/Resources/runtime/cli/bin/dsh         (shell launcher of the bundled CLI)
+#   <app>/Contents/Resources/runtime/primary-runtime/dependencies/pnpm/bin/pnpm.mjs
+# DSH documents the desktop app for macOS and Windows only, so on Linux it is looked for
+# only when DSH_DESKTOP_APP names it. DSH_DESKTOP_APP=none turns the detection off.
+DESKTOP_APP=""
+DESKTOP_RUNTIME=""
+DESKTOP_CLI=""
+DESKTOP_PNPM=""
+# absent | registered | no-profile | no-cli | rejected | failed
+DESKTOP_STATUS="absent"
+DESKTOP_APP_VERSION=""
+DESKTOP_PLUGIN_RANGE=""
+DESKTOP_RUNNING=0
+
+first_existing() {
+  local candidate
+  for candidate in "$@"; do
+    if [ -e "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_desktop_app() {
+  local candidate override="${DSH_DESKTOP_APP:-}"
+  if [ "$override" = "none" ]; then return 0; fi
+  if [ -n "$override" ]; then
+    if [ -d "$override" ]; then
+      DESKTOP_APP="${override%/}"
+    else
+      print_pair "DSH_DESKTOP_APP 指向的目录不存在，按未安装桌面应用处理：$override" "DSH_DESKTOP_APP names a directory that does not exist; continuing as if the desktop app were not installed: $override"
+      return 0
+    fi
+  elif is_macos; then
+    for candidate in "/Applications/DeepSeek Harness.app" "$HOME/Applications/DeepSeek Harness.app"; do
+      if [ -d "$candidate" ]; then
+        DESKTOP_APP="$candidate"
+        break
+      fi
+    done
+  fi
+  [ -n "$DESKTOP_APP" ] || return 0
+
+  DESKTOP_RUNTIME="$(first_existing \
+    "$DESKTOP_APP/Contents/Resources/runtime" \
+    "$DESKTOP_APP/Resources/runtime" \
+    "$DESKTOP_APP/resources/runtime")" || DESKTOP_RUNTIME=""
+  [ -n "$DESKTOP_RUNTIME" ] || return 0
+  DESKTOP_CLI="$(first_existing "$DESKTOP_RUNTIME/cli/bin/dsh" "$DESKTOP_RUNTIME/bin/dsh")" ||
+    DESKTOP_CLI="$(find "$DESKTOP_RUNTIME" -maxdepth 5 -type f -name dsh -path '*/bin/*' 2>/dev/null | head -n 1)" ||
+    DESKTOP_CLI=""
+  DESKTOP_PNPM="$(first_existing \
+    "$DESKTOP_RUNTIME/primary-runtime/dependencies/pnpm/bin/pnpm.mjs" \
+    "$DESKTOP_RUNTIME/primary-runtime/dependencies/pnpm/bin/pnpm.cjs")" ||
+    DESKTOP_PNPM="$(find "$DESKTOP_RUNTIME" -maxdepth 7 -type f \( -name pnpm.mjs -o -name pnpm.cjs \) -path '*/pnpm/bin/*' 2>/dev/null | head -n 1)" ||
+    DESKTOP_PNPM=""
+}
+
+# Node binaries the app may ship, most likely first; one path per line.
+desktop_node_paths() {
+  [ -n "$DESKTOP_RUNTIME" ] || return 0
+  printf '%s\n' "$DESKTOP_RUNTIME/bin/node" "$DESKTOP_RUNTIME/node/bin/node" "$DESKTOP_RUNTIME/primary-runtime/bin/node"
+  find "$DESKTOP_RUNTIME" -maxdepth 6 -name node \( -type f -o -type l \) -path '*/bin/*' 2>/dev/null || true
+}
+
+desktop_cli() {
+  if [ -x "$DESKTOP_CLI" ]; then
+    "$DESKTOP_CLI" "$@"
+  else
+    /bin/sh "$DESKTOP_CLI" "$@"
+  fi
+}
+
+desktop_app_running() {
+  [ -n "$DESKTOP_APP" ] || return 1
+  # The main process is started by its full path below <app>/Contents/MacOS/.
+  ps -axo command= 2>/dev/null |
+    DSH_APP_PREFIX="$DESKTOP_APP/Contents/MacOS/" awk 'index($0, ENVIRON["DSH_APP_PREFIX"]) == 1 { found = 1 } END { exit found ? 0 : 1 }'
+}
+
+desktop_profile_has() {
+  profile_has_dependency "$DSH_HOME_DIR/profiles/desktop/package.json" "$1"
+}
+
+# Shows why a bundled-CLI call failed: the command, its exit code and the end of its output.
+desktop_report_failure() {
+  local status="$1" log="$2"
+  shift 2
+  local command
+  command="$(printf '%q' "$DESKTOP_CLI")$(printf ' %q' "$@")"
+  {
+    print_pair "   应用：$DESKTOP_APP" "   app:       $DESKTOP_APP"
+    print_pair "   命令：$command" "   command:   $command"
+    print_pair "   工作目录：$ROOT" "   cwd:       $ROOT"
+    print_pair "   DSH 目录：$DSH_HOME_DIR" "   DSH home:  $DSH_HOME_DIR"
+    print_pair "   退出码：$status" "   exit code: $status"
+    print_pair "   输出（最后 20 行）：" "   output (last 20 lines):"
+    tail -n 20 "$log" | sed 's/^/      /'
+  } >&2
+}
+
+# Registers the bridge with the desktop profile through the app's own CLI. Nothing here
+# stops the install: the web profile and the extension do not depend on it. The CLI's
+# version override (allow-version --accept-risk) is never used.
+register_desktop() {
+  local log status=0 legacy_plugin
+  [ -n "$DESKTOP_APP" ] || return 0
+  if [ -z "$DESKTOP_CLI" ]; then
+    DESKTOP_STATUS="no-cli"
+    print_pair "找到了 DeepSeek Harness 应用，但没有找到它自带的 CLI，跳过桌面应用。应用：${DESKTOP_APP}；已查找：${DESKTOP_RUNTIME:-$DESKTOP_APP/Contents/Resources/runtime}/cli/bin/dsh" "The DeepSeek Harness app was found, but not its bundled CLI; skipping the desktop app. App: $DESKTOP_APP; looked for: ${DESKTOP_RUNTIME:-$DESKTOP_APP/Contents/Resources/runtime}/cli/bin/dsh"
+    return 0
+  fi
+  if [ ! -d "$DSH_HOME_DIR/profiles/desktop" ]; then
+    DESKTOP_STATUS="no-profile"
+    print_pair "找到了 DeepSeek Harness 应用，但 $DSH_HOME_DIR/profiles/desktop 不存在：请先打开一次应用，再重新运行本安装脚本。" "The DeepSeek Harness app was found, but $DSH_HOME_DIR/profiles/desktop does not exist: open the app once, then run this installer again."
+    return 0
+  fi
+  if desktop_app_running; then DESKTOP_RUNNING=1; fi
+  print_pair "通过应用自带的 CLI 注册到 DeepSeek Harness 桌面应用：$DESKTOP_APP" "Registering with the DeepSeek Harness desktop app through its bundled CLI: $DESKTOP_APP"
+  log="$(mktemp "${TMPDIR:-/tmp}/dsh-browser-install.XXXXXX")"
+
+  for legacy_plugin in $LEGACY_PLUGINS; do
+    if desktop_profile_has "$legacy_plugin"; then
+      status=0
+      (cd "$ROOT" && desktop_cli plugin --profile desktop remove "$legacy_plugin") >"$log" 2>&1 </dev/null || status=$?
+      if [ "$status" -ne 0 ]; then
+        DESKTOP_STATUS="failed"
+        print_pair "警告：无法从桌面应用移除旧的桥插件 ${legacy_plugin}，桌面应用未注册。" "WARNING: could not remove the old bridge plugin $legacy_plugin from the desktop app; the desktop app was not registered." >&2
+        desktop_report_failure "$status" "$log" plugin --profile desktop remove "$legacy_plugin"
+        rm -f "$log"
+        return 0
+      fi
+    fi
+  done
+
+  status=0
+  (cd "$ROOT" && desktop_cli plugin --profile desktop add -w "@natgurlain/dsh-bridge-browser@link:$PLUGIN") >"$log" 2>&1 </dev/null || status=$?
+  if [ "$status" -eq 0 ]; then
+    DESKTOP_STATUS="registered"
+    rm -f "$log"
+    if [ "$DESKTOP_RUNNING" -eq 1 ]; then
+      print_pair "DeepSeek Harness 正在运行：插件已写入，请退出并重新打开应用后生效。" "DeepSeek Harness is running: the plugin was added, and it takes effect after you quit and reopen the app."
+    fi
+    return 0
+  fi
+
+  if grep -q -E 'installation rejected|is incompatible with dsh' "$log"; then
+    DESKTOP_STATUS="rejected"
+    DESKTOP_APP_VERSION="$(sed -n 's/.*is incompatible with dsh \([^: ]*\):.*/\1/p' "$log" | head -n 1)"
+    DESKTOP_PLUGIN_RANGE="$(sed -n 's/.*"engines\.dsh":"\([^"]*\)".*/\1/p' "$log" | head -n 1)"
+    [ -n "$DESKTOP_PLUGIN_RANGE" ] || DESKTOP_PLUGIN_RANGE="$(node -e 'process.stdout.write(String(require(process.argv[1]).engines?.dsh ?? ""))' "$PLUGIN/package.json" 2>/dev/null)" || true
+    [ -n "$DESKTOP_APP_VERSION" ] || DESKTOP_APP_VERSION="unknown"
+    [ -n "$DESKTOP_PLUGIN_RANGE" ] || DESKTOP_PLUGIN_RANGE="unknown"
+    print_pair "警告：DeepSeek Harness 应用的 DSH 版本是 ${DESKTOP_APP_VERSION}，本插件支持 ${DESKTOP_PLUGIN_RANGE}，应用拒绝了安装。请更新 DeepSeek Harness 应用，然后重新运行本安装脚本。安装会继续，web profile 不受影响。" "WARNING: the DeepSeek Harness app has DSH $DESKTOP_APP_VERSION and this plugin supports $DESKTOP_PLUGIN_RANGE, so the app rejected it. Update the DeepSeek Harness app, then run this installer again. The install continues; the web profile is not affected." >&2
+  else
+    DESKTOP_STATUS="failed"
+    print_pair "警告：注册到 DeepSeek Harness 桌面应用失败。安装会继续完成其余步骤。" "WARNING: registering with the DeepSeek Harness desktop app failed. The install continues with the remaining steps." >&2
+  fi
+  desktop_report_failure "$status" "$log" plugin --profile desktop add -w "@natgurlain/dsh-bridge-browser@link:$PLUGIN"
+  rm -f "$log"
+  return 0
+}
+
+# ---- Node.js ------------------------------------------------------------------------------
+# The build needs Node.js >= 24.9.0. When `node` on PATH is missing or older, an already
+# installed one is used instead, in this order: the one bundled in the DeepSeek Harness app,
+# then the newest suitable version each of asdf, nvm, fnm, volta and mise already has.
+# Nothing is installed or downloaded; the chosen directory is put first on PATH for this
+# process only.
+NODE_CANDIDATES=""
+NODE_TRIED=""
+NODE_INDEX=0
+NODE_FROM_APP=0
+NODE_BASE_PATH="$PATH"
+NODE_APP_LABEL="the DeepSeek Harness app"
+if [ "$RELEASE_LANG" = "zh" ]; then NODE_APP_LABEL="DeepSeek Harness 应用"; fi
+
+node_version_of() {
+  "$1" -e 'process.stdout.write(process.versions.node)' 2>/dev/null </dev/null
+}
+
+# Echoes a sortable key for a suitable version (>= 24.9.0); fails for anything else.
+node_version_key() {
+  [[ "$1" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]] || return 1
+  local major="${BASH_REMATCH[1]}" minor="${BASH_REMATCH[2]}" patch="${BASH_REMATCH[3]}"
+  [ "$major" -gt 24 ] || { [ "$major" -eq 24 ] && [ "$minor" -ge 9 ]; } || return 1
+  printf '%05d%05d%05d\n' "$major" "$minor" "$patch"
+}
+
+# add_node_candidates <label> <node path>...: keeps the newest suitable one of the paths.
+add_node_candidates() {
+  local label="$1" bin version key best="" best_key="" best_version="" unusable="did not run"
+  if [ "$RELEASE_LANG" = "zh" ]; then unusable="无法运行"; fi
+  shift
+  for bin in "$@"; do
+    [ -e "$bin" ] || continue
+    version="$(node_version_of "$bin")" || version=""
+    NODE_TRIED="${NODE_TRIED}   $bin (${label}): ${version:-$unusable}"$'\n'
+    key="$(node_version_key "$version")" || continue
+    if [ -z "$best_key" ] || [ "$key" \> "$best_key" ]; then
+      best="$bin"
+      best_key="$key"
+      best_version="$version"
+    fi
+  done
+  [ -n "$best" ] || return 0
+  NODE_CANDIDATES="${NODE_CANDIDATES}${label}|${best_version}|${best}"$'\n'
+}
+
+collect_node_candidates() {
+  local bin data="${XDG_DATA_HOME:-$HOME/.local/share}"
+  while IFS= read -r bin; do
+    [ -n "$bin" ] || continue
+    # Each app path is its own candidate, so one that does not build can be skipped.
+    case "$NODE_TRIED" in *"   $bin ("*) continue ;; esac
+    add_node_candidates "$NODE_APP_LABEL" "$bin"
+  done <<<"$(desktop_node_paths)"
+  add_node_candidates asdf "${ASDF_DATA_DIR:-$HOME/.asdf}"/installs/nodejs/*/bin/node
+  add_node_candidates nvm "${NVM_DIR:-$HOME/.nvm}"/versions/node/*/bin/node
+  add_node_candidates fnm "${FNM_DIR:-$data/fnm}"/node-versions/*/installation/bin/node \
+    "$HOME/Library/Application Support/fnm"/node-versions/*/installation/bin/node \
+    "$HOME/.fnm"/node-versions/*/installation/bin/node
+  add_node_candidates volta "${VOLTA_HOME:-$HOME/.volta}"/tools/image/node/*/bin/node
+  add_node_candidates mise "${MISE_DATA_DIR:-$data/mise}"/installs/node/*/bin/node
+}
+
+# Switches to the next collected Node; fails when there is none left.
+activate_next_node() {
+  local line label version bin
+  NODE_INDEX=$((NODE_INDEX + 1))
+  line="$(printf '%s' "$NODE_CANDIDATES" | sed -n "${NODE_INDEX}p")"
+  [ -n "$line" ] || return 1
+  label="${line%%|*}"
+  line="${line#*|}"
+  version="${line%%|*}"
+  bin="${line#*|}"
+  PATH="$(dirname "$bin"):$NODE_BASE_PATH"
+  export PATH
+  hash -r 2>/dev/null || true
+  NODE_FROM_APP=0
+  if [ "$label" = "$NODE_APP_LABEL" ]; then NODE_FROM_APP=1; fi
+  print_pair "PATH 上没有可用的 Node.js，改用 $label 提供的 Node.js ${version}（仅本次安装）：$bin" "No usable Node.js on PATH; using Node.js $version from $label (for this install only): $bin"
+  return 0
+}
+
+# The exact command for each tool this machine has.
+print_node_install_hints() {
+  local any=0
+  if command -v asdf >/dev/null 2>&1 || [ -d "${ASDF_DATA_DIR:-$HOME/.asdf}" ]; then
+    printf '   asdf:   asdf plugin add nodejs; asdf install nodejs 24.11.0; asdf set nodejs 24.11.0\n'
+    any=1
+  fi
+  if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+    printf '   nvm:    nvm install 24 && nvm alias default 24\n'
+    any=1
+  fi
+  if command -v fnm >/dev/null 2>&1; then
+    printf '   fnm:    fnm install 24 && fnm default 24\n'
+    any=1
+  fi
+  if command -v volta >/dev/null 2>&1; then
+    printf '   volta:  volta install node@24\n'
+    any=1
+  fi
+  if command -v mise >/dev/null 2>&1; then
+    printf '   mise:   mise use --global node@24\n'
+    any=1
+  fi
+  if command -v brew >/dev/null 2>&1; then
+    printf '   brew:   brew install node\n'
+    any=1
+  fi
+  if [ "$any" -eq 0 ]; then
+    printf '   https://nodejs.org/en/download\n'
+  fi
+}
+
+resolve_node() {
+  local current="" found=0 where=""
+  if command -v node >/dev/null 2>&1; then
+    found=1
+    current="$(node_version_of node)" || current=""
+    if node_version_key "$current" >/dev/null; then return 0; fi
+  fi
+  collect_node_candidates
+  if activate_next_node; then return 0; fi
+  {
+    printf '\n'
+    if [ "$found" -eq 1 ]; then
+      where="$(command -v node)"
+      print_pair "错误：需要 Node.js 24.9.0 或更新版本；PATH 上的 node 是 ${current:-无法运行}（${where}）。" "Error: Node.js 24.9.0 or newer is required; node on PATH is ${current:-not runnable} ($where)."
+    else
+      print_pair "错误：未找到 Node.js；需要 24.9.0 或更新版本。" "Error: Node.js was not found; version 24.9.0 or newer is required."
+    fi
+    if [ -n "$NODE_TRIED" ]; then
+      print_pair "同时检查了以下位置，均不可用：" "Also checked, none usable:"
+      printf '%s' "$NODE_TRIED"
+    fi
+    print_pair "请用下面任一命令安装，然后重新运行本安装脚本：" "Install it with one of these, then run this installer again:"
+    print_node_install_hints
+  } >&2
+  exit 1
 }
 
 require_command() {
@@ -439,34 +841,52 @@ copy_to_clipboard() {
   return 1
 }
 
-# Echoes a launch target for the local Chrome, Chromium or Brave install: on macOS an app bundle path
-# or a LaunchServices app name (both accepted by `open -a`), on Linux an executable on PATH.
-find_browser_target() {
-  local name
+# Chromium browsers the extension can be loaded into, in order of preference:
+#   label|extensions page|macOS app name|macOS bundle id (lower case)|Linux commands|xdg desktop-file prefix
+BROWSER_TABLE='Google Chrome|chrome://extensions|Google Chrome|com.google.chrome|google-chrome google-chrome-stable|google-chrome
+Google Chrome Canary|chrome://extensions|Google Chrome Canary|com.google.chrome.canary||
+Chromium|chrome://extensions|Chromium|org.chromium.chromium|chromium chromium-browser|chromium
+Brave|brave://extensions|Brave Browser|com.brave.browser|brave-browser brave-browser-stable brave|brave
+Microsoft Edge|edge://extensions|Microsoft Edge|com.microsoft.edgemac|microsoft-edge microsoft-edge-stable|microsoft-edge
+Vivaldi|vivaldi://extensions|Vivaldi|com.vivaldi.vivaldi|vivaldi vivaldi-stable|vivaldi
+Arc|arc://extensions|Arc|company.thebrowser.browser||'
+# What the instructions name. They stay on Chrome when no browser was detected.
+BROWSER_NAME="Chrome"
+BROWSER_URL="chrome://extensions"
+BROWSER_TARGET=""
 
+# Echoes the user's default browser in lower case: a bundle id on macOS, a desktop-file
+# name on Linux. Empty when it cannot be read; the table order decides then.
+default_browser_id() {
   if is_macos; then
-    local dir app
-    for dir in "/Applications" "$HOME/Applications"; do
-      for name in "Google Chrome" "Google Chrome Canary" "Chromium" "Brave Browser"; do
-        app="$dir/$name.app"
-        if [ -x "$app/Contents/MacOS/$name" ]; then
-          printf '%s\n' "$app"
-          return 0
-        fi
-      done
-    done
+    # Each handler prints LSHandlerRoleAll before LSHandlerURLScheme.
+    defaults read com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers 2>/dev/null |
+      awk '/LSHandlerRoleAll/ { id = $3 } /LSHandlerURLScheme = https;/ { print id; exit }' |
+      tr -d '";' | tr '[:upper:]' '[:lower:]' || true
+  elif command -v xdg-settings >/dev/null 2>&1; then
+    xdg-settings get default-web-browser 2>/dev/null </dev/null | tr '[:upper:]' '[:lower:]' || true
+  fi
+}
 
-    # Fallback: recognize apps registered with LaunchServices in non-standard locations.
-    for name in "Google Chrome" "Google Chrome Canary" "Chromium" "Brave Browser"; do
-      if open -Ra "$name" >/dev/null 2>&1; then
-        printf '%s\n' "$name"
+# Echoes a launch target for one browser: on macOS an app bundle path or a LaunchServices
+# app name (both accepted by `open -a`), on Linux an executable on PATH.
+browser_target() {
+  local app="$1" commands="$2" dir name
+  if is_macos; then
+    for dir in "/Applications" "$HOME/Applications"; do
+      if [ -x "$dir/$app.app/Contents/MacOS/$app" ]; then
+        printf '%s\n' "$dir/$app.app"
         return 0
       fi
     done
+    # Apps registered with LaunchServices in non-standard locations.
+    if open -Ra "$app" >/dev/null 2>&1; then
+      printf '%s\n' "$app"
+      return 0
+    fi
     return 1
   fi
-
-  for name in google-chrome google-chrome-stable chromium chromium-browser brave-browser brave-browser-stable brave; do
+  for name in $commands; do
     if command -v "$name" >/dev/null 2>&1; then
       printf '%s\n' "$name"
       return 0
@@ -475,16 +895,57 @@ find_browser_target() {
   return 1
 }
 
-open_chrome_extensions() {
-  local url="chrome://extensions"
-  local target
-  local pid
+# Sets BROWSER_TARGET, BROWSER_NAME and BROWSER_URL to the default browser when it is one
+# of the installed Chromium browsers, otherwise to the first installed one in table order.
+detect_browser() {
+  local wanted label url app id commands xdg target is_default
+  wanted="$(default_browser_id)" || wanted=""
+  BROWSER_TARGET=""
+  while IFS='|' read -r label url app id commands xdg; do
+    target="$(browser_target "$app" "$commands")" || continue
+    is_default=0
+    if [ -n "$wanted" ]; then
+      if is_macos; then
+        if [ "$wanted" = "$id" ]; then is_default=1; fi
+      elif [ -n "$xdg" ]; then
+        case "$wanted" in "$xdg"*) is_default=1 ;; esac
+      fi
+    fi
+    if [ -z "$BROWSER_TARGET" ] || [ "$is_default" -eq 1 ]; then
+      BROWSER_TARGET="$target"
+      BROWSER_NAME="$label"
+      BROWSER_URL="$url"
+    fi
+    if [ "$is_default" -eq 1 ]; then break; fi
+  done <<<"$BROWSER_TABLE"
+  [ -n "$BROWSER_TARGET" ]
+}
 
-  target="$(find_browser_target)" || target=""
+open_browser_extensions() {
+  # Every Chromium browser accepts chrome://extensions and shows its own page for it.
+  local url="chrome://extensions"
+  local target="$BROWSER_TARGET"
+  local pid
 
   if is_macos; then
     if [ -n "$target" ]; then
+      # `open -a <app> chrome://…` is refused by LaunchServices for some
+      # browsers (seen with Brave: no handler is registered for the scheme), so
+      # ask the browser itself first. Its name is the bundle name without ".app".
+      local app_name="${target##*/}"
+      app_name="${app_name%.app}"
+      if command -v osascript >/dev/null 2>&1 &&
+        osascript \
+          -e 'on run argv' \
+          -e 'tell application (item 1 of argv)' \
+          -e 'open location (item 2 of argv)' \
+          -e 'activate' \
+          -e 'end tell' \
+          -e 'end run' "$app_name" "$url" >/dev/null 2>&1; then
+        return 0
+      fi
       open -a "$target" "$url" >/dev/null 2>&1 && return 0
+      return 1
     fi
     open -b com.google.Chrome "$url" >/dev/null 2>&1 && return 0
     return 1
@@ -571,12 +1032,13 @@ install_browser() {
   return 0
 }
 
+# Nothing is installed when any browser of BROWSER_TABLE is present.
 ensure_chrome() {
-  if find_browser_target >/dev/null 2>&1; then
+  if [ -n "$BROWSER_TARGET" ]; then
     return 0
   fi
 
-  print_pair "未检测到 Chrome/Chromium 浏览器。" "No Chrome/Chromium browser was detected."
+  print_pair "未检测到 Chrome、Chromium、Brave、Edge、Vivaldi 或 Arc 浏览器。" "No Chrome, Chromium, Brave, Edge, Vivaldi or Arc browser was detected."
 
   # Installing a browser system-wide is a surprising side effect for a one-line installer,
   # so it stays opt-in and never runs sudo on its own.
@@ -589,7 +1051,7 @@ ensure_chrome() {
   print_pair "DSH_INSTALL_BROWSER=1，尝试自动安装……" "DSH_INSTALL_BROWSER=1 is set; attempting to install…"
   install_browser
 
-  if find_browser_target >/dev/null 2>&1; then
+  if detect_browser; then
     return 0
   fi
   print_pair "自动安装未完成，本次安装会继续，但需要你手动安装浏览器后再加载扩展。" "Automatic browser installation did not complete; continuing, but install a browser manually before loading the extension."
@@ -609,6 +1071,7 @@ bootstrap_remote_install() {
   local archive
   local source_dir
   local source_label
+  local source_label_zh
   local temp_base="${TMPDIR:-/tmp}"
 
   require_command curl "未找到 curl；请先安装 curl。" "curl was not found; install curl first."
@@ -645,6 +1108,7 @@ bootstrap_remote_install() {
         "Downloading branch $branch failed. The existing installation was not changed." ;;
     esac
     source_label="branch $branch (unverified)"
+    source_label_zh="$branch 分支，未校验"
   else
     print_pair \
       "正在从 $RELEASE_REPOSITORY 下载发布版本 ${wanted:-latest} 并校验……" \
@@ -653,6 +1117,7 @@ bootstrap_remote_install() {
     release_fetch "$BOOTSTRAP_TMP/download" "$wanted" "dsh-browser-source-{tag}.tar.gz"
     archive="$BOOTSTRAP_TMP/download/dsh-browser-source-$RELEASE_TAG.tar.gz"
     source_label="release $RELEASE_TAG (SHA256SUMS verified)"
+    source_label_zh="发布版本 ${RELEASE_TAG}，已通过 SHA256SUMS 校验"
   fi
 
   tar -xzf "$archive" -C "$source_dir" --strip-components=1 || fail_pair \
@@ -676,14 +1141,31 @@ bootstrap_remote_install() {
 
   cleanup_bootstrap
   trap - EXIT HUP INT TERM
-  print_pair "安装文件已同步到 ${MANAGED_ROOT}（${source_label}）。" "Installation files are ready in $MANAGED_ROOT ($source_label)."
+  print_pair "安装文件已同步到 ${MANAGED_ROOT}（${source_label_zh}）。" "Installation files are ready in $MANAGED_ROOT ($source_label)."
   # The second stage must install what was just unpacked, not download again.
   DSH_BROWSER_BOOTSTRAPPED=1 exec /bin/bash "$MANAGED_ROOT/scripts/install.sh"
 }
 
 print_usage() {
+  if [ "$RELEASE_LANG" = "zh" ]; then
+    cat <<'USAGE'
+用法：install.sh [--release latest|vX.Y.Z] [--unverified-branch <name>] [--lang en|zh]
+
+  （不带选项，在 checkout 中）     安装当前 checkout，不下载任何文件
+  （不带选项，单独运行）           等同于 --release latest
+  --release latest|vX.Y.Z          下载该发布版本，按其 SHA256SUMS 校验每个文件后再安装
+                                   （环境变量：DSH_BROWSER_VERSION）
+  --unverified-branch <name>       仅用于开发：安装分支归档，分支归档没有校验值
+                                   （环境变量：DSH_BROWSER_UNVERIFIED_BRANCH）
+  --lang en|zh                     输出语言（环境变量：DSH_BROWSER_LANG）；默认在中文
+                                   环境下为中文，其他环境为英文
+
+私有仓库：设置 DSH_BROWSER_GITHUB_TOKEN，或先用 gh 登录，或在 checkout 中安装。
+USAGE
+    return 0
+  fi
   cat <<'USAGE'
-Usage: install.sh [--release latest|vX.Y.Z] [--unverified-branch <name>]
+Usage: install.sh [--release latest|vX.Y.Z] [--unverified-branch <name>] [--lang en|zh]
 
   (no option, inside a checkout)   install this checkout; nothing is downloaded
   (no option, standalone)          same as --release latest
@@ -691,6 +1173,8 @@ Usage: install.sh [--release latest|vX.Y.Z] [--unverified-branch <name>]
                                    its SHA256SUMS, then install it (env: DSH_BROWSER_VERSION)
   --unverified-branch <name>       development only: install a branch archive, which has no
                                    checksum (env: DSH_BROWSER_UNVERIFIED_BRANCH)
+  --lang en|zh                     language of the output (env: DSH_BROWSER_LANG); default:
+                                   Chinese when the locale is Chinese, English otherwise
 
 Private repository: set DSH_BROWSER_GITHUB_TOKEN, or log in with gh, or install from a checkout.
 USAGE
@@ -700,10 +1184,18 @@ REQUESTED_RELEASE="${DSH_BROWSER_VERSION:-}"
 REQUESTED_BRANCH="${DSH_BROWSER_UNVERIFIED_BRANCH:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --release | --unverified-branch)
+    --release | --unverified-branch | --lang)
       [ "$#" -ge 2 ] || fail_pair "$1 需要一个值。" "$1 needs a value."
-      if [ "$1" = "--release" ]; then REQUESTED_RELEASE="$2"; else REQUESTED_BRANCH="$2"; fi
+      case "$1" in
+        --release) REQUESTED_RELEASE="$2" ;;
+        --unverified-branch) REQUESTED_BRANCH="$2" ;;
+        *) release_set_lang "$2" ;;
+      esac
       shift 2
+      ;;
+    --lang=*)
+      release_set_lang "${1#--lang=}"
+      shift
       ;;
     --release=*)
       REQUESTED_RELEASE="${1#--release=}"
@@ -782,9 +1274,8 @@ profile_has_dependency() {
   ' "$manifest" "$package_name"
 }
 
-require_command node "未找到 Node.js；请先安装受支持的 Node.js 版本。" "Node.js was not found; install a supported Node.js version first."
-node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 24 || (major === 24 && minor >= 9) ? 0 : 1)' ||
-  fail_pair "需要 Node.js 24.9.0 或更新版本。" "Node.js 24.9.0 or newer is required."
+find_desktop_app
+resolve_node
 resolve_pnpm
 require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not found; install rsync first."
 
@@ -792,18 +1283,23 @@ print_step 1 "构建浏览器桥" "Build the browser bridge"
 run_quiet "依赖安装失败" "Installing dependencies failed" pnpm install --frozen-lockfile
 run_quiet "桥插件构建失败" "Building the bridge plugin failed" pnpm --filter @natgurlain/dsh-bridge-browser run build
 
-print_step 2 "注册到本机 web profile" "Register with the local web profile"
+print_step 2 "注册到 DSH（web profile 与桌面应用）" "Register with DSH (web profile and desktop app)"
 for legacy_plugin in $LEGACY_PLUGINS; do
   if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$legacy_plugin"; then
-    (cd "$ROOT" && pnpm exec dsh plugin --profile web remove "$legacy_plugin" >/dev/null)
+    run_quiet "从 web profile 移除旧的桥插件失败" "Removing the old bridge plugin from the web profile failed" \
+      pnpm exec dsh plugin --profile web remove "$legacy_plugin"
   fi
 done
-(cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "@natgurlain/dsh-bridge-browser@link:$PLUGIN" >/dev/null)
+run_quiet "注册到 web profile 失败" "Registering with the web profile failed" \
+  pnpm exec dsh plugin --profile web add -w "@natgurlain/dsh-bridge-browser@link:$PLUGIN"
+print_pair "已注册到 web profile。" "Registered with the web profile."
+register_desktop
 
-print_step 3 "构建 Chrome 扩展" "Build the Chrome extension"
+print_step 3 "构建浏览器扩展" "Build the browser extension"
 run_quiet "扩展构建失败" "Building the extension failed" pnpm --filter dsh-browser-extension run build
 
-print_step 4 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
+detect_browser || true
+print_step 4 "准备扩展并打开 $BROWSER_NAME" "Prepare the extension and open $BROWSER_NAME"
 NO_LAUNCH="${DSH_BROWSER_NO_LAUNCH:-0}"
 if [ "$NO_LAUNCH" != "1" ]; then
   ensure_chrome || true
@@ -832,62 +1328,111 @@ else
   CLIPBOARD_READY=0
 fi
 
-if [ "$NO_LAUNCH" != "1" ] && open_chrome_extensions; then
-  CHROME_OPENED=1
+if [ "$NO_LAUNCH" != "1" ] && open_browser_extensions; then
+  BROWSER_OPENED=1
 else
-  CHROME_OPENED=0
+  BROWSER_OPENED=0
 fi
 printf '\n'
-if [ "$CHROME_OPENED" -ne 1 ]; then
-  print_pair "无法自动打开 Chrome，请手动打开浏览器并在地址栏输入 chrome://extensions。" "Could not open Chrome automatically; open the browser and type chrome://extensions in the address bar."
+if [ "$BROWSER_OPENED" -ne 1 ]; then
+  print_pair "无法自动打开 ${BROWSER_NAME}，请手动打开浏览器并在地址栏输入 ${BROWSER_URL}。" "Could not open $BROWSER_NAME automatically; open the browser and type $BROWSER_URL in the address bar."
 fi
 if [ "$IS_UPDATE" -eq 1 ]; then
   print_pair "检测到已有扩展目录，文件已安全更新。" "Existing extension directory detected; its files were updated safely."
-  print_pair "打开 Google Chrome（注意不是 Edge/Firefox）：" "Open Google Chrome (not Edge/Firefox):"
+  print_pair "打开 ${BROWSER_NAME}（注意不是 Firefox）：" "Open $BROWSER_NAME (not Firefox):"
   printf '\n'
-  print_pair "    地址栏输入 chrome://extensions" "    Type chrome://extensions in the address bar"
+  print_pair "    地址栏输入 $BROWSER_URL" "    Type $BROWSER_URL in the address bar"
   printf '\n'
   print_pair "如果页面上已有“dsh 浏览器助手”卡片：" "If the “dsh Browser Assistant” card is already listed:"
   print_pair "  点击卡片上的“重新加载”按钮，让扩展加载新文件。" "  Click “Reload” on that card so it picks up the updated files."
   printf '\n'
   print_pair "如果没有该卡片（例如从未加载过）：" "If the card is not listed (e.g. it was never loaded):"
-  print_pair "  打开右上角 “开发者模式”" "  Enable “Developer mode” in the upper-right corner"
-  print_pair "  点左上角 “加载已解压的扩展程序”" "  Click “Load unpacked” in the upper-left corner"
+  print_pair "  打开“开发者模式”" "  Enable “Developer mode”"
+  print_pair "  点击“加载已解压的扩展程序”" "  Click “Load unpacked”"
   print_pair "  选择这个目录：" "  Select this directory:"
   printf '   %s\n' "$DIST_DIR"
   printf '\n'
   print_pair "出现 “dsh 浏览器助手” 卡片即成功。" "When the “dsh Browser Assistant” card appears, it is loaded."
 else
-  if [ "$CHROME_OPENED" -eq 1 ]; then
-    print_pair "Chrome 扩展管理页已打开，请完成以下操作：" "Chrome Extensions is open. Complete these steps:"
+  if [ "$BROWSER_OPENED" -eq 1 ]; then
+    print_pair "$BROWSER_NAME 扩展管理页（${BROWSER_URL}）已打开，请完成以下操作：" "$BROWSER_NAME Extensions ($BROWSER_URL) is open. Complete these steps:"
   else
-    print_pair "请在 Chrome 扩展管理页完成以下操作：" "Complete these steps on the Chrome Extensions page:"
+    print_pair "请在 $BROWSER_NAME 扩展管理页（${BROWSER_URL}）完成以下操作：" "Complete these steps on the $BROWSER_NAME Extensions page ($BROWSER_URL):"
   fi
   printf '\n'
-  print_pair "开启右上角的“开发者模式”" "1. Enable “Developer mode” in the upper-right corner"
-  print_pair "点击“加载已解压的扩展程序”" "2. Click “Load unpacked”"
+  print_pair "1. 开启“开发者模式”" "1. Enable “Developer mode”"
+  print_pair "2. 点击“加载已解压的扩展程序”" "2. Click “Load unpacked”"
   if is_macos; then
     if [ "$CLIPBOARD_READY" -eq 1 ]; then
-      print_pair "按 Cmd+Shift+G，粘贴以下路径（已复制到剪贴板）：" "3. Press Cmd+Shift+G and paste this path (already copied):"
+      print_pair "3. 按 Cmd+Shift+G，粘贴以下路径（已复制到剪贴板）：" "3. Press Cmd+Shift+G and paste this path (already copied):"
     else
-      print_pair "按 Cmd+Shift+G，粘贴以下路径：" "3. Press Cmd+Shift+G and paste this path:"
+      print_pair "3. 按 Cmd+Shift+G，粘贴以下路径：" "3. Press Cmd+Shift+G and paste this path:"
     fi
   else
     if [ "$CLIPBOARD_READY" -eq 1 ]; then
-      print_pair "粘贴以下路径（已复制到剪贴板）：" "3. Paste this path (already copied):"
+      print_pair "3. 粘贴以下路径（已复制到剪贴板）：" "3. Paste this path (already copied):"
     else
-      print_pair "复制并粘贴以下路径：" "3. Copy and paste this path:"
+      print_pair "3. 复制并粘贴以下路径：" "3. Copy and paste this path:"
     fi
   fi
   printf '   %s\n' "$DIST_DIR"
 fi
 
+# ---- Summary: where the bridge was registered, then how to start DSH ----------------------
+printf '\n'
+print_pair "DSH 注册结果：" "DSH targets:"
+print_pair "• web profile：已注册" "• web profile: registered"
+case "$DESKTOP_STATUS" in
+  registered)
+    print_pair "• DeepSeek Harness 桌面应用：已注册（${DESKTOP_APP}）" "• DeepSeek Harness desktop app: registered ($DESKTOP_APP)"
+    ;;
+  rejected)
+    print_pair "• DeepSeek Harness 桌面应用：未注册。警告：应用的 DSH 版本是 ${DESKTOP_APP_VERSION}，本插件支持 ${DESKTOP_PLUGIN_RANGE}。请更新 DeepSeek Harness 应用，然后重新运行本安装脚本。" "• DeepSeek Harness desktop app: NOT registered. WARNING: the app has DSH $DESKTOP_APP_VERSION and this plugin supports $DESKTOP_PLUGIN_RANGE. Update the DeepSeek Harness app, then run this installer again."
+    ;;
+  failed)
+    print_pair "• DeepSeek Harness 桌面应用：未注册。警告：应用自带的 CLI 执行失败，命令、退出码和输出见上文第 2 步。" "• DeepSeek Harness desktop app: NOT registered. WARNING: its bundled CLI failed; the command, exit code and output are under step 2 above."
+    ;;
+  no-profile)
+    print_pair "• DeepSeek Harness 桌面应用：已跳过，$DSH_HOME_DIR/profiles/desktop 不存在。请先打开一次应用，再重新运行本安装脚本。" "• DeepSeek Harness desktop app: skipped, $DSH_HOME_DIR/profiles/desktop does not exist. Open the app once, then run this installer again."
+    ;;
+  no-cli)
+    print_pair "• DeepSeek Harness 桌面应用：已跳过，在 $DESKTOP_APP 中没有找到自带的 CLI。" "• DeepSeek Harness desktop app: skipped, no bundled CLI was found in $DESKTOP_APP."
+    ;;
+  *)
+    if is_macos; then
+      print_pair "• DeepSeek Harness 桌面应用：已跳过，未在 /Applications 或 ~/Applications 找到（可用 DSH_DESKTOP_APP 指定路径）。" "• DeepSeek Harness desktop app: skipped, not found in /Applications or ~/Applications (set DSH_DESKTOP_APP to its path if it is elsewhere)."
+    else
+      print_pair "• DeepSeek Harness 桌面应用：已跳过，仅在 macOS 上自动检测（可用 DSH_DESKTOP_APP 指定路径）。" "• DeepSeek Harness desktop app: skipped, it is detected on macOS only (set DSH_DESKTOP_APP to its path to use one here)."
+    fi
+    ;;
+esac
+
 printf '\n'
 print_pair "加载完成后：" "After loading the extension:"
-print_pair "点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "• Click the DeepSeek whale icon in the toolbar to open the side panel"
-print_pair "扩展会自动发现本机 dsh，无需填写地址或 token（已放入扩展目录）" "• The extension discovers local dsh automatically; no address or token is required (it was placed in the extension directory)"
-printf '• Start the pinned version: cd %q && pnpm start\n' "$ROOT"
-printf '   启动固定版本：cd %q && pnpm start\n' "$ROOT"
-print_pair "或直接启动固定版本：npx @deepseek-ai/dsh@0.2.2-rc.2 web" "• Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.2-rc.2 web"
+if [ "$DESKTOP_STATUS" = "registered" ]; then
+  if [ "$DESKTOP_RUNNING" -eq 1 ]; then
+    print_pair "• 打开 DeepSeek Harness（它正在运行：请先退出再重新打开）" "• Open DeepSeek Harness (it is running now: quit it and open it again)"
+  else
+    print_pair "• 打开 DeepSeek Harness（如果它正在运行，请重启）" "• Open DeepSeek Harness (restart it if it was running)"
+  fi
+fi
+print_pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "• Click the DeepSeek whale icon in the toolbar to open the side panel"
+print_pair "• 扩展会自动发现本机 dsh，无需填写地址或 token（已放入扩展目录）" "• The extension discovers local dsh automatically; no address or token is required (it was placed in the extension directory)"
+if [ "$DESKTOP_STATUS" = "registered" ]; then
+  print_pair "• 没有桌面应用时的替代方式（独立的 web profile，不包含桌面应用里配置的模型）：" "• Alternative without the desktop app (the separate web profile, which has none of the models configured in the app):"
+  printf '    cd %q && pnpm start\n' "$ROOT"
+  printf '    npx @deepseek-ai/dsh@0.2.2-rc.2 web\n'
+else
+  QUOTED_ROOT="$(printf '%q' "$ROOT")"
+  print_pair "• 启动固定版本：cd $QUOTED_ROOT && pnpm start" "• Start the pinned version: cd $QUOTED_ROOT && pnpm start"
+  print_pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.2.2-rc.2 web" "• Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.2-rc.2 web"
+  if [ "$DESKTOP_STATUS" != "absent" ]; then
+    print_pair "  注意：这样启动的是独立的 web profile，不包含 DeepSeek Harness 桌面应用里配置的模型。" "  Note: this starts the separate web profile, which has none of the models configured in the DeepSeek Harness desktop app."
+  fi
+fi
 printf '\n'
 print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/natgurlain/dsh-browser-agent" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/natgurlain/dsh-browser-agent"
+if [ "$DESKTOP_STATUS" = "failed" ]; then
+  # Everything else is installed; the exit code still says one target was not.
+  exit 1
+fi
