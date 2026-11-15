@@ -126,7 +126,7 @@ export async function runLearningSmoke(ctx) {
   assert.equal(file.includes('hunter2'), false)
   assert.equal(/"index"|"selector"/u.test(file), false)
   assert.match(file, /"text": "\{\{password\}\}"/u)
-  // The real host's skill registry exposes the saved workflow (agentless lookups use the bridge workspace).
+  // The real host's skill registry exposes the saved workflow (a lookup from that workspace only).
   const skill = await hostSkill({ name: 'browser-workflow-smoke-login', cwd: workspace })
   assert.equal(skill?.name, 'browser-workflow-smoke-login', JSON.stringify(skill))
   assert.match(skill.content, /browser_workflow_run \{ "name": "smoke-login"/u)

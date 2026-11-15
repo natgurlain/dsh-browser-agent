@@ -96,18 +96,16 @@ export interface SkillsServiceLike {
 const WORKFLOW_SKILL_RANK = 350
 
 /**
- * Register a skill provider that lists saved workflows of the looked-up
- * workspace (and the bridge's own workspace) as skills.
+ * Register a skill provider that lists the saved workflows of the looked-up
+ * workspace only (the session's own `cwd`). There is no global fallback: a
+ * workflow saved in one workspace never shows up as a skill in another
+ * session's lookup, and a lookup without a workspace lists nothing.
  * @param skills - `ctx.skills`.
- * @param fallbackRoot - the bridge's configured session workspace.
  * @returns the provider's disposer and an invalidation hook (call after a save).
  */
-export function registerWorkflowSkills(skills: SkillsServiceLike, fallbackRoot: string): { dispose: () => void; invalidate: () => void } {
+export function registerWorkflowSkills(skills: SkillsServiceLike): { dispose: () => void; invalidate: () => void } {
   let invalidate = (): void => {}
-  const roots = (cwd: string | undefined): string[] => [...new Set([
-    ...(cwd !== undefined && isAbsolute(cwd) ? [cwd] : []),
-    ...(fallbackRoot !== '' && isAbsolute(fallbackRoot) ? [fallbackRoot] : []),
-  ])]
+  const roots = (cwd: string | undefined): string[] => cwd !== undefined && isAbsolute(cwd) ? [cwd] : []
   const dispose = skills.registerProvider((control) => {
     invalidate = control.invalidate
     return {
@@ -134,9 +132,11 @@ export function registerWorkflowSkills(skills: SkillsServiceLike, fallbackRoot: 
         }
         return candidates
       },
-      get: async (candidate) => {
+      get: async (candidate, { cwd }) => {
         const locator = candidate.locator as { root?: unknown; name?: unknown }
-        if (typeof locator.root !== 'string' || typeof locator.name !== 'string') return undefined
+        if (typeof locator.root !== 'string' || typeof locator.name !== 'string' || !isAbsolute(locator.root)) return undefined
+        // A lookup from another workspace never reads this one's workflow.
+        if (cwd !== undefined && cwd !== locator.root) return undefined
         try {
           const workflow = await loadWorkflow(locator.root, locator.name)
           const { rank: _rank, locator: _locator, ...summary } = candidate as Record<string, unknown>

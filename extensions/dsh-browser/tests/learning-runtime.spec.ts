@@ -66,6 +66,30 @@ describe('learning runtime', () => {
     expect(learning.stepsFor('s1')).toEqual([])
   })
 
+  it('never records keys pressed into a sensitive field (review finding 8)', async () => {
+    const { learning } = runtime({}, { dshLearningSettings: { workflows: true } })
+    await learning.ready
+    let focused: Record<string, unknown> | undefined = { role: 'textbox', name: 'PIN', css: '#pin', sensitive: true, password: false }
+    sendMessage.mockImplementation(async () => focused === undefined ? { ok: false } : { ok: true, result: focused })
+    const press = async (key: string) => {
+      const pressed = call('browser_press', { key })
+      learning.wrapPolicy(pressed, { id: 7, url: tabUrl }, policy)!(pressed, { reads: [], acts: [] })
+      learning.recordResult(pressed, { ok: true, result: { text: 'ok' } }, { tabId: 7, url: tabUrl })
+      await flush()
+      await flush()
+    }
+    for (const key of ['4', '2', 'Enter']) await press(key)
+    expect(learning.stepsFor('s1')).toEqual([])
+    // Unknown target: only named keys are kept.
+    focused = undefined
+    await press('7')
+    await press('Enter')
+    focused = { role: 'searchbox', name: 'Search', css: '#q', sensitive: false, password: false }
+    await press('a')
+    expect(learning.stepsFor('s1').map((step) => step.args.key)).toEqual(['Enter', 'a'])
+    expect(learning.stepsFor('s1')[1]).not.toHaveProperty('locator')
+  })
+
   it('records steps with locators, dropping values typed into sensitive fields', async () => {
     const { learning, request } = runtime({}, { dshLearningSettings: { workflows: true } })
     await learning.ready

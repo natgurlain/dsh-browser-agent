@@ -281,7 +281,9 @@ export class LearningRuntime {
   }
 
   private wantsLocator(call: ToolCall): boolean {
-    return this.settings.workflows && ELEMENT_TOOLS.has(call.name)
+    // browser_press is probed too (its target or the focused element), only
+    // to know whether its keys went into a sensitive field.
+    return this.settings.workflows && (ELEMENT_TOOLS.has(call.name) || call.name === 'browser_press')
   }
 
   private wantsNetwork(call: ToolCall, url: string | undefined): boolean {
@@ -352,6 +354,13 @@ export class LearningRuntime {
     delete args.selector
     delete args.frame
     delete args.trusted
+    if (call.name === 'browser_press') {
+      // Keys pressed into a sensitive field (a PIN typed key by key) are never
+      // recorded; with no idea of the target only named keys (Enter, Tab) are.
+      const key = typeof call.args.key === 'string' ? call.args.key : ''
+      if (locator?.sensitive === true || locator?.password === true) return
+      if (locator === undefined && [...key].length <= 1) return
+    }
     let sensitive = false
     if (call.name === 'browser_type' && (locator?.sensitive === true || locator?.password === true)) {
       // Latched sensitivity from the content script: the value is never kept.
@@ -362,7 +371,7 @@ export class LearningRuntime {
       id: crypto.randomUUID(),
       tool: call.name,
       args,
-      ...(locator === undefined ? {} : {
+      ...(locator === undefined || !ELEMENT_TOOLS.has(call.name) ? {} : {
         locator: {
           ...(locator.role === undefined ? {} : { role: locator.role }),
           ...(locator.name === undefined ? {} : { name: locator.name }),

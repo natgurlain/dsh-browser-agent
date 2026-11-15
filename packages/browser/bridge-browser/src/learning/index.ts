@@ -248,7 +248,7 @@ export function mountLearning(
       const service = (ctx.get as (name: string) => unknown)('skills') as SkillsServiceLike | undefined
       if (service !== undefined && typeof service.registerProvider === 'function') {
         try {
-          skills = registerWorkflowSkills(service, options.workspacePath)
+          skills = registerWorkflowSkills(service)
         } catch (error: unknown) {
           ctx.logger.warn(`browser bridge: workflow skills unavailable: ${error instanceof Error ? error.message : String(error)}`)
         }
