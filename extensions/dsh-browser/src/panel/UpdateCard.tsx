@@ -47,8 +47,10 @@ export function UpdateCard({ copy }: { copy: PanelCopy['update'] }): React.JSX.E
   }
 
   async function copyCommand(): Promise<void> {
+    // The button only exists once a newer release is known; its tag is what gets installed.
+    if (checkState.status !== 'available') return
     const command = installInfo?.mode === 'managed'
-      ? managedInstallCommand()
+      ? managedInstallCommand(installInfo, checkState.latestVersion)
       : installInfo?.mode === 'checkout'
         ? checkoutInstallCommand(installInfo.sourceRoot)
         : null

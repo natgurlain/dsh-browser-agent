@@ -23,7 +23,7 @@ The DSH Browser Assistant connects your browser to the DSH agent runtime that yo
 
 ## What the extension does not do
 
-- It does not send data to the publisher or to any server other than your local DSH bridge. There is one exception: the optional update check fetches a public version file from `raw.githubusercontent.com`, and sends no personal data. [Delete this exception if the store build removes the update check.]
+- It does not send data to the publisher or to any server other than your local DSH bridge. There is one exception: the optional update check asks `api.github.com` for the latest public release tag, and sends no personal data. [Delete this exception if the store build removes the update check.]
 - It does not sell data, use it for advertising, or use it to determine creditworthiness.
 - It does not collect analytics or telemetry.
 - It does not read tabs you have not handed to the agent.

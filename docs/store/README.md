@@ -24,7 +24,7 @@ Everything needed to list the extension on the Chrome Web Store and on addons.mo
   - The store assigns a **new extension ID**. Add that ID to the bridge plugin's `allowedChromeExtensionIds`, or make it the pinned default, so the bridge accepts the store build.
 - [ ] Firefox: run `pnpm --filter dsh-browser-extension run build:firefox` and zip it. Keep `browser_specific_settings.gecko.id` stable (`dsh-browser-agent@natgurlain.github.io`, or your own domain).
 - [ ] AMO requires **source code** whenever the upload is bundled or minified (Vite output is). Upload a source zip with build instructions: `pnpm install && pnpm --filter dsh-browser-extension run build:firefox`, with Node and pnpm versions pinned.
-- [ ] Decide whether store builds keep the GitHub update check (`raw.githubusercontent.com` in `connect-src`, the update card). Stores update extensions themselves. If you remove it, update `permissions.md` and the privacy policy.
+- [ ] Decide whether store builds keep the GitHub update check (`api.github.com` in `connect-src`, the update card). Stores update extensions themselves. If you remove it, update `permissions.md` and the privacy policy.
 - [ ] Remove the uninstall-script card, or reword it, if it points at `curl | bash` installers. Reviewers flag that.
 
 ### Signing

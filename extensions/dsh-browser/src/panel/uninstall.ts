@@ -1,8 +1,18 @@
-import { powerShellQuote, shellQuote, type ExtensionInstallInfo } from './updates.ts'
+import {
+  powerShellQuote, releaseAssetUrl, releaseTag, shellQuote, type ExtensionInstallInfo,
+} from './updates.ts'
 
-const SCRIPT_ROOT = 'https://raw.githubusercontent.com/natgurlain/dsh-browser-agent/refs/heads/main/scripts'
-
-export function uninstallCommand(info: ExtensionInstallInfo, userAgent: string = navigator.userAgent): string {
+/**
+ * The uninstall command to show. An install that recorded its home runs the uninstaller it
+ * has on disk. Anything older fetches the uninstaller published with this extension's own
+ * release tag; that script downloads uninstall.mjs from the same tag and runs it only after
+ * its SHA-256 matched the release's SHA256SUMS.
+ */
+export function uninstallCommand(
+  info: ExtensionInstallInfo,
+  userAgent: string = navigator.userAgent,
+  version?: string,
+): string {
   const home = info.mode === 'unknown' ? undefined : info.dshHome
   const windows = /windows/i.test(userAgent)
   if (home !== undefined) {
@@ -13,13 +23,15 @@ export function uninstallCommand(info: ExtensionInstallInfo, userAgent: string =
       ? `powershell -NoProfile -ExecutionPolicy Bypass -File ${powerShellQuote(script)} --home ${powerShellQuote(home)}`
       : `bash ${shellQuote(script)} --home ${shellQuote(home)}`
   }
+  // Read lazily: an install with a recorded home never needs the manifest.
+  const tag = releaseTag(version ?? chrome.runtime.getManifest().version)
   if (windows) {
     return '& { $ErrorActionPreference = \'Stop\'; '
       + '$d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) (\'dsh-browser-uninstall.\'+[Guid]::NewGuid().ToString(\'N\'))); '
       + 'try { $s=Join-Path $d.FullName \'uninstall.ps1\'; '
-      + `Invoke-WebRequest -UseBasicParsing ${SCRIPT_ROOT}/uninstall.ps1 -OutFile $s; `
-      + 'powershell -NoProfile -ExecutionPolicy Bypass -File $s } '
+      + `Invoke-WebRequest -UseBasicParsing ${releaseAssetUrl(tag, 'uninstall.ps1')} -OutFile $s; `
+      + `powershell -NoProfile -ExecutionPolicy Bypass -File $s --release ${tag} } `
       + 'finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }'
   }
-  return `curl -fsSL ${SCRIPT_ROOT}/uninstall.sh | bash`
+  return `curl --proto '=https' --tlsv1.2 -fsSL ${releaseAssetUrl(tag, 'uninstall.sh')} | bash -s -- --release ${tag}`
 }
