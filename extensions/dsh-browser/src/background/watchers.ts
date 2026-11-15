@@ -5,7 +5,8 @@
  * a watcher always shows its own card (forced: no trusted origin, session
  * grant, or unrestricted access skips it) naming the page, the condition, the
  * prompt, the lifetime, and the number of fires. Approved watchers persist in
- * `chrome.storage.local`, so they survive worker restarts, and are re-armed in
+ * `chrome.storage.session` (watcher-runtime.ts), so they survive worker
+ * restarts but not the browser session their tab ids belong to, and are re-armed in
  * their tab's content script (content/watch.ts) after every navigation.
  *
  * When a condition is met the content script reports it; the background

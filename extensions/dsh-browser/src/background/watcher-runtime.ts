@@ -20,7 +20,9 @@ import {
   panelView,
   urlHits,
   WATCHERS_PORT_NAME,
+  WATCHERS_STORAGE_KEY,
   WatcherRegistry,
+  type WatchStorage,
   type WatchAnswer,
   type WatchHitDeps,
 } from './watchers.ts'
@@ -53,15 +55,32 @@ function unwrapServerResponse(value: unknown): unknown {
   return result?.ok === true ? result.value : value
 }
 
+/**
+ * Where watchers persist: `chrome.storage.session` (survives worker restarts,
+ * cleared with the browser session), because a watcher is bound to a tab id
+ * and tab ids are only unique within one browser session. Without a session
+ * area local storage is used; startup then drops watchers of tabs that no
+ * longer exist.
+ */
+function watcherStorage(): WatchStorage {
+  const session = (chrome.storage as { session?: chrome.storage.StorageArea }).session
+  if (session !== undefined) {
+    // Watchers an older build kept in local storage name tabs of an earlier browser session.
+    void Promise.resolve().then(() => chrome.storage.local.remove(WATCHERS_STORAGE_KEY)).catch(() => {})
+  }
+  const area = session ?? chrome.storage.local
+  return {
+    get: async (key) => await area.get(key) as Record<string, unknown>,
+    set: async (items) => { await area.set(items) },
+  }
+}
+
 export class PageWatcherRuntime {
   readonly registry: WatcherRegistry
   private readonly ports = new Set<chrome.runtime.Port>()
 
   constructor(private readonly options: PageWatcherRuntimeOptions, registry?: WatcherRegistry) {
-    this.registry = registry ?? new WatcherRegistry({
-      get: async (key) => await chrome.storage.local.get(key) as Record<string, unknown>,
-      set: async (items) => { await chrome.storage.local.set(items) },
-    })
+    this.registry = registry ?? new WatcherRegistry(watcherStorage())
     this.install()
   }
 
@@ -173,8 +192,15 @@ export class PageWatcherRuntime {
       return undefined
     })
     // A restarted worker re-arms every watched tab; content scripts keep observing meanwhile.
+    // A tab closed while no worker ran (tabs.onRemoved missed) takes its watchers with it.
     void this.registry.ready.then(async () => {
-      for (const tabId of new Set(this.registry.list().map((watcher) => watcher.tabId))) await this.arm(tabId)
+      let changed = false
+      for (const tabId of new Set(this.registry.list().map((watcher) => watcher.tabId))) {
+        const open = await chrome.tabs.get(tabId).then(() => true, () => false)
+        if (open) await this.arm(tabId)
+        else if (await this.registry.removeTab(tabId)) changed = true
+      }
+      if (changed) this.broadcast()
     })
     chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       // A finished navigation has a fresh content script: give it the tab's watchers.
