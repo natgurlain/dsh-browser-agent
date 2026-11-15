@@ -242,6 +242,14 @@ describe('local pages do not taint', () => {
     expect(read(h, 's3', [LOCAL])).toEqual({ exempt: false })
     expect(h.policy.recordSelection('s4', undefined)).toEqual({ exempt: false })
     expect(h.policy.get('s4')?.sources).toEqual([UNKNOWN_SOURCE])
+    // Developer-tools output quotes whatever the page talked to (response bodies, console text).
+    for (const name of ['browser_devtools_request_body', 'browser_console_logs', 'browser_console_eval', 'browser_devtools_elements']) {
+      const devtools = { id: `dt-${name}`, name, args: {}, sessionId: `dt-${name}` }
+      h.policy.hook(devtools.id, devtools.sessionId, false)(devtools, { reads: [LOCAL], acts: [], pageOrigin: LOCAL })
+      expect(h.policy.recordResult(devtools, true, LOCAL, { top: LOCAL, frames: [LOCAL], opaque: false }), name).toEqual({ exempt: false })
+      // Also on the path the worker takes for them: no recorded targets, only the tab.
+      expect(h.policy.recordResult({ ...devtools, id: `${devtools.id}-bare`, sessionId: `${devtools.sessionId}-bare` }, true, undefined, { top: LOCAL, frames: [LOCAL], opaque: false }), name).toEqual({ exempt: false })
+    }
     // The list of past downloads names other sites, whatever the tab shows.
     const downloads = { id: 'dl', name: 'browser_downloads', args: {}, sessionId: 's5' }
     h.policy.hook('dl', 's5', false)(downloads, { reads: [], acts: [], pageOrigin: LOCAL })

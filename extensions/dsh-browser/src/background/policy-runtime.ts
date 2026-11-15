@@ -289,12 +289,15 @@ export class PolicyRuntime {
    *   early, or it is a kind this layer has no frame provenance for) or that
    *   can quote any frame is exempt only when every frame in the tab is;
    * - no known origin at all, a non-web page, or a non-web destination is
-   *   never exempt.
+   *   never exempt;
+   * - developer-tools results are never exempt: console output and captured
+   *   network traffic quote whatever origins the page talked to, and page
+   *   JavaScript can return anything.
    */
   private exemptProvenance(name: string, record: CallRecord | undefined, fallbackOrigin: string | undefined, after: TabProvenance | undefined): string[] | undefined {
     const config = this.exemption()
     if (!config.localPages && !config.trustedSites) return undefined
-    if (NEVER_EXEMPT_TOOLS.has(name)) return undefined
+    if (NEVER_EXEMPT_TOOLS.has(name) || isDevToolsTool(name)) return undefined
     const origins = new Set<string>()
     const judged = record?.targets !== undefined
     if (judged) {

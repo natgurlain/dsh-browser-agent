@@ -78,6 +78,10 @@ const scripted = await startScriptedModel([
 
 /** Poll until truthy; fails early (with the DSH log) once DSH has exited. */
 const waitFor = (check, label, timeout = 60_000) => pollFor(check, label, { timeout, host })
+// Host names Chromium maps to the loopback fixture server: neither is a loopback name,
+// so pages reached under them taint a session (the second one merely looks local).
+const EXTERNAL_HOST = 'external.test'
+const LOOKALIKE_HOST = 'localhost.external.test'
 
 const inner = `<!doctype html><body style="margin:0;min-height:1000px"><button id="inner" style="position:absolute;left:20px;top:20px;width:100px;height:50px">Inner target</button>
   <input id="upload" type="file" style="position:absolute;left:10px;top:100px;width:130px">
@@ -371,7 +375,11 @@ try {
     channel: 'chromium', headless: true,
     env: { ...process.env, TMPDIR: runtimeTmp },
     viewport: { width: 1280, height: 900 },
-    args: ['--site-per-process', `--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
+    args: [
+      '--site-per-process', `--disable-extensions-except=${extension}`, `--load-extension=${extension}`,
+      // The fixture server under host names that are not loopback (the taint exemption steps).
+      `--host-resolver-rules=${[EXTERNAL_HOST, LOOKALIKE_HOST].map(name => `MAP ${name} 127.0.0.1`).join(', ')}`,
+    ],
   })
   const worker = browser.serviceWorkers()[0] ?? await browser.waitForEvent('serviceworker')
   const extensionId = new URL(worker.url()).host
@@ -396,7 +404,13 @@ try {
       return id
     }
     // No token here: the extension reads the provisioned bridge-token file.
-    return sendSettings({ bridgeUrl: config.wsUrl, token: '', autoResumeSession: false, trustedActionOrigins: [origin] })
+    // Every fixture here is served from loopback and its origin is always-allowed, both of which
+    // exempt a page from session taint by default. The taint steps of this smoke test real
+    // tainting, so both exemptions are off except in the section that tests them.
+    return sendSettings({
+      bridgeUrl: config.wsUrl, token: '', autoResumeSession: false, trustedActionOrigins: [origin],
+      taintExemptLocalPages: false, taintExemptTrustedSites: false,
+    })
     function assertTab(tab) { if (tab?.id === undefined) throw new Error('Fixture tab missing') }
   }, { config: { wsUrl: config.wsUrl }, origin })
   const settingsDone = async id => {
@@ -950,7 +964,10 @@ try {
   await policyPanel.goto(`chrome-extension://${extensionId}/panel/index.html`)
   const banner = policyPanel.getByTestId('taint-banner')
   await banner.waitFor({ timeout: 15_000 })
-  assert.match(await banner.textContent(), /untrusted page content/)
+  // One short sentence naming the host (not the full origin), and no Trust choice:
+  // the trusted-sites exemption is off here, and a loopback address cannot be a trusted site rule.
+  assert.match(await banner.textContent(), new RegExp(`This conversation read web pages \\(${new URL(origin).host.replaceAll('.', '\\.')}[^)]*\\), so risky actions ask first and shell and file tools are off\\.`))
+  assert.equal(await banner.getByRole('button', { name: /^Trust/ }).count(), 0)
   // The banner tracks the panel's current session. Let the panel settle on
   // it (its follow snapshot taints it), then Clear exactly that record.
   await delay(2_000)
@@ -970,6 +987,124 @@ try {
   succeed(await tool('browser_follow_tab', { tabId }))
   succeed(await tool('browser_clipboard', { action: 'write', text: 'after-clear' }))
   results.push('a page read taints the session: clipboard writes and data-carrying cross-origin navigation ask even under unrestricted access until the panel banner\'s Clear')
+
+  // ---- Taint exemptions: the user's own local pages, and sites the user trusts, do not taint ----
+  const externalOrigin = `http://${EXTERNAL_HOST}:${server.address().port}`
+  const lookalikeOrigin = `http://${LOOKALIKE_HOST}:${server.address().port}`
+  const probeTainted = async () => '(no-session)' in await taintRecords()
+  const noCards = () => panel.evaluate(() => !messages.some(message => message.type === 'approval.request'))
+  const dataUrl = marker => `${crossSiteOrigin}/inner?d=${Buffer.from(`${marker}-secret-value-1234567890`).toString('base64url')}`
+  await settings({ taintExemptLocalPages: true })
+  await clearTaint()
+  await waitFor(async () => !await probeTainted(), 'cleared taint before the exemption steps')
+  await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request') })
+  await page.goto(`${origin}/inner?local`)
+  succeed(await tool('browser_get_text', {}))
+  succeed(await tool('browser_snapshot', {}))
+  // Recorded before each result is returned: nothing to wait for.
+  assert.equal(await probeTainted(), false, 'a session that only read local pages must stay untainted')
+  // Untainted, so nothing is forced: the clipboard write and a data-carrying cross-origin navigation just run.
+  succeed(await tool('browser_clipboard', { action: 'write', text: 'local-only' }))
+  succeed(await tool('browser_navigate', { url: dataUrl('local') }))
+  assert.equal(await noCards(), true)
+  assert.equal(await probeTainted(), false, 'landing on another local page must not taint either')
+  // The same server under a host name that is not loopback taints, and the local pages read before are sources too.
+  await page.goto(`${externalOrigin}/inner?external`)
+  succeed(await tool('browser_get_text', {}))
+  await waitFor(async () => (await taintRecords())['(no-session)']?.sources.includes(externalOrigin), 'taint after reading a page that is not local')
+  assert.deepEqual((await taintRecords())['(no-session)'].sources, [origin, crossSiteOrigin, externalOrigin].sort())
+  // Tainted now: sending data to a loopback address asks like anywhere else.
+  ;[policyRequest, policyResult] = await answerApproval(tool('browser_navigate', { url: dataUrl('tainted') }), 'deny')
+  assert.equal(policyRequest.forced, true)
+  assert.equal(policyResult.isError, true)
+  assert.equal(await page.evaluate(() => location.hostname), EXTERNAL_HOST)
+  // Reading a local page again does not lift the taint.
+  await page.goto(`${origin}/inner?local-again`)
+  succeed(await tool('browser_get_text', {}))
+  assert.equal(await probeTainted(), true)
+  ;[policyRequest, policyResult] = await answerApproval(tool('browser_clipboard', { action: 'write', text: 'canary-456' }), 'deny')
+  assert.equal(policyRequest.forced, true)
+  assert.equal(policyResult.isError, true)
+  // A host name that only looks local taints.
+  await clearTaint()
+  await waitFor(async () => !await probeTainted(), 'cleared taint before the look-alike step')
+  await page.goto(`${lookalikeOrigin}/inner?lookalike`)
+  succeed(await tool('browser_get_text', {}))
+  await waitFor(async () => (await taintRecords())['(no-session)']?.sources.includes(lookalikeOrigin), 'a look-alike localhost host name taints')
+  results.push('local pages do not taint a session; a non-local or look-alike host does, the earlier local reads become sources, and a tainted session still asks before sending data to a loopback address')
+
+  // The banner's one-click "Trust <site>": the persistent trusted rule, and the taint lifted once every source is trusted.
+  await settings({ taintExemptTrustedSites: true })
+  await clearTaint()
+  await waitFor(async () => !await probeTainted(), 'cleared taint before the banner steps')
+  await page.goto(`${externalOrigin}/inner?trust`)
+  const trustPanel = await browser.newPage()
+  await trustPanel.goto(`chrome-extension://${extensionId}/panel/index.html`)
+  const trustBanner = trustPanel.getByTestId('taint-banner')
+  // The panel page is itself the active tab, so its new session follows a page with no web
+  // origin: an unknown source. That can never be trusted, so the banner offers only Clear.
+  await trustBanner.waitFor({ timeout: 15_000 })
+  await delay(2_000)
+  const panelSession = await waitFor(async () => Object.keys(await taintRecords()).find(key => key !== '(no-session)'), 'the panel session taint')
+  assert.deepEqual((await taintRecords())[panelSession].sources, ['(unknown)'])
+  assert.match(await trustBanner.textContent(), /This conversation read web pages \(an unknown origin\), so risky actions ask first/)
+  assert.equal(await trustBanner.getByRole('button', { name: /^Trust/ }).count(), 0)
+  await trustBanner.getByRole('button', { name: 'Clear', exact: true }).click()
+  await waitFor(async () => !(panelSession in await taintRecords()), 'banner Clear lifted the unknown-source taint')
+  // Hand that session the external page, as choosing "this page" in the side panel does, and
+  // let its follow snapshot be injected: now the session's only source is a site that can be trusted.
+  await page.bringToFront()
+  const rebound = await panel.evaluate(async sessionId => {
+    const id = crypto.randomUUID()
+    panelPort.postMessage({ type: 'tab-affinity.rebind', id, sessionId })
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const answer = messages.find(message => message.type === 'tab-affinity.rebind.result' && message.id === id)
+      if (answer !== undefined) return answer
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    return { ok: false, error: 'no tab-affinity.rebind.result' }
+  }, panelSession)
+  assert.equal(rebound.ok, true, JSON.stringify(rebound))
+  await panel.evaluate(sessionId => { panelPort.postMessage({ type: 'session.active', sessionId, isNew: true }) }, panelSession)
+  await waitFor(async () => (await taintRecords())[panelSession]?.sources.includes(externalOrigin), 'the followed external page taints the panel session')
+  assert.deepEqual((await taintRecords())[panelSession].sources, [externalOrigin])
+  await panel.evaluate(() => { panelPort.postMessage({ type: 'session.active' }) })
+  await trustBanner.waitFor({ timeout: 15_000 })
+  assert.match(await trustBanner.textContent(), new RegExp(`This conversation read web pages \\(${EXTERNAL_HOST.replaceAll('.', '\\.')}:\\d+\\), so risky actions ask first`))
+  // A real click (Playwright's is a trusted event; a scripted one is ignored by the banner).
+  await trustPanel.evaluate(name => { [...document.querySelectorAll('[data-testid="taint-banner"] button')].find(button => button.textContent === name)?.click() }, `Trust ${EXTERNAL_HOST}`)
+  await delay(300)
+  assert.equal(await trustPanel.getByTestId('taint-trust-confirm').count(), 0, 'a scripted click must not start trusting a site')
+  await trustBanner.getByRole('button', { name: `Trust ${EXTERNAL_HOST}`, exact: true }).click()
+  const trustConfirm = trustPanel.getByTestId('taint-trust-confirm')
+  assert.match(await trustConfirm.textContent(), /Pages from trusted sites are not treated as untrusted content\./)
+  // Nothing is saved before the confirmation.
+  const storedRules = () => panel.evaluate(async () => (await chrome.storage.local.get('dshSettings')).dshSettings.siteRules)
+  assert.deepEqual(await storedRules(), [])
+  await trustConfirm.getByRole('button', { name: 'Trust', exact: true }).click()
+  await waitFor(async () => (await storedRules()).some(entry => entry.pattern === EXTERNAL_HOST && entry.rule === 'trusted'), 'the trusted site rule was saved')
+  // Its only source is trusted now: the taint is gone, as after Clear.
+  await waitFor(async () => !(panelSession in await taintRecords()), 'trusting the only source lifted the taint')
+  await trustBanner.waitFor({ state: 'detached', timeout: 15_000 })
+  await trustPanel.close()
+  await page.bringToFront()
+  succeed(await tool('browser_follow_tab', { tabId }))
+  await clearTaint()
+  await waitFor(async () => !await probeTainted(), 'cleared taint before the trusted-site read')
+  succeed(await tool('browser_get_text', {}))
+  assert.equal(await probeTainted(), false, 'a site the user trusts must not taint')
+  // With the setting off the trusted site taints again.
+  await settings({ taintExemptTrustedSites: false })
+  succeed(await tool('browser_get_text', {}))
+  await waitFor(async () => (await taintRecords())['(no-session)']?.sources.includes(externalOrigin), 'a trusted site taints with the exemption off')
+  results.push('the banner offers "Trust <site>" for a taint source, saves the trusted site rule only after the confirmation, and lifts the taint; a trusted site then does not taint until the setting is turned off')
+  // Back to what the other sections rely on: both exemptions off, the fixture page, no taint.
+  await settings({ siteRules: [], taintExemptLocalPages: false, taintExemptTrustedSites: false })
+  await page.goto(`${origin}/reliability`)
+  await clearTaint()
+  succeed(await tool('browser_get_text', { selector: 'h1' }))
+  await waitFor(async () => (await taintRecords())['(no-session)']?.sources.includes(origin), 'with the exemption off a local page taints as before')
+  await clearTaint()
 
   await settings({ siteRules: [{ pattern: '127.0.0.1', rule: 'read-only' }] })
   succeed(await tool('browser_get_text', { selector: 'h1' }))
