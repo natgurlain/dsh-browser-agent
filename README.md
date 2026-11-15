@@ -1,21 +1,54 @@
 # dsh Browser Agent
 
-> Based on [dsh-browser](https://github.com/omdsh-dev/dsh-browser) by Yuxiang Lin and contributors (MIT). See [NOTICE](NOTICE).
-
 **English** | [中文](README.zh.md)
 
-<img width="1701" height="897" alt="dsh Browser Control" src="https://github.com/user-attachments/assets/3b1f3a25-f962-4e02-a9ef-d23e0d01fc8e" />
+Let [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) work in the browser you already use. The agent reads the page you are on, clicks, types, navigates and manages tabs, in your own Chrome, Brave or Firefox (other Chromium browsers should work too), with your logins and cookies, and you watch and approve what it does from a side panel.
 
-Connect [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) to the Chrome or Firefox tabs you are already using. The model can read page content, operate controls, navigate, and manage tabs while preserving your login state, session, and cookies. A side panel or sidebar provides the conversation UI.
+<img width="1836" height="1312" alt="The dsh Browser Agent side panel in Brave, answering a question about the GitHub page next to it" src="docs/images/dsh-browser-agent-dark.webp" />
 
-`dsh` is DeepSeek AI's open-source, plugin-based agent harness. This repository provides a companion browser bridge plugin and Chrome/Firefox MV3 extension as one standalone pnpm workspace.
+> Based on [dsh-browser](https://github.com/omdsh-dev/dsh-browser) by Yuxiang Lin and contributors (MIT). See [NOTICE](NOTICE).
 
-Pages become structured text with a numbered inventory of interactive elements. Tools address elements by number or selector; `browser_screenshot` captures the controlled tab's viewport after approval. The side panel also accepts PNG, JPEG, WebP, and GIF attachments when the host advertises image support.
+## What it is
 
-> [!IMPORTANT]
-> The bridge supports DSH 0.2.2-rc.1 through 0.2.2-rc.3 (tested; see [docs/dsh-matrix.md](docs/dsh-matrix.md)). The workspace installs 0.2.2-rc.2 by default. On 0.2.2-rc.1, the release the desktop app ships, Continue after a failed turn and the wait for worktree cleanup on delete are unavailable.
+Two parts that ship together in this repository:
 
-## Quick install
+- **A browser extension** (Manifest V3) with a side panel for the conversation. It turns the page into structured text with a numbered list of everything you can interact with, and carries out the agent's actions in the real tab.
+- **A DSH plugin** (the "bridge") that gives DSH the `browser_*` tools and talks to the extension over a local, authenticated connection.
+
+It works with the DeepSeek Harness desktop app and with `dsh web`, uses whatever models you have configured there, and can also be driven from Claude Code, Cursor or Codex through MCP.
+
+## Why this one
+
+- **Your real browser, not a robot browser.** No separate profile, no re-login, no headless window: the agent works in the tab you are looking at.
+- **You stay in charge.** Actions that change something show an approval card with exactly what will be clicked, typed or opened. You can pause, take over the page, or hit Stop, which cuts everything off at once.
+- **Built for hostile pages.** Once the agent has read a web page, sending data to another site, the clipboard or a file asks first, and shell and file tools are switched off for that conversation, so a page that tries to hijack the agent has nowhere to send what it finds. Banking, password and cloud-console sites are read-only by default.
+- **A locked front door.** The extension and DSH prove themselves to each other on every connection with a shared secret that never crosses the wire; other programs and other extensions on your machine cannot connect.
+- **A record of everything.** Every action, approval and stop is written to a tamper-evident audit log you can export.
+- **More than clicking.** Tables to CSV, PDFs, downloads, file uploads, hover and drag, dialogs, parallel reading across tabs, page watchers, and saved workflows you can replay or schedule.
+- **Comfortable to use.** Light and dark themes, English and Chinese, adjustable text size.
+
+## Quick start
+
+You need DeepSeek Harness (the desktop app, or `dsh` 0.2.2-rc.1 to rc.3) and a Chromium browser or Firefox.
+
+```sh
+git clone https://github.com/natgurlain/dsh-browser-agent.git
+cd dsh-browser-agent
+./scripts/install.sh
+```
+
+The installer builds the extension and the plugin, registers the plugin with the DeepSeek Harness desktop app and with the `web` profile, and opens your browser's extensions page. It uses a Node.js 24.9+ and pnpm that are already on your machine, including the ones bundled with the desktop app, and tells you what to install if it finds none. Then:
+
+1. On the extensions page, turn on **Developer mode**, click **Load unpacked** and choose `~/.dsh/browser-extension` (first time only; after an update, click **Reload**).
+2. Open DeepSeek Harness (restart it if it was running).
+3. Open any web page, click the whale icon in the toolbar and wait for **Connected**.
+
+No address or password to enter: the installer gives the extension what it needs to find and authenticate to DSH on your machine.
+
+> [!NOTE]
+> Status: early. macOS and Linux installs are exercised regularly; the Windows installer (`scripts/install.ps1`) exists but has not been run on a Windows machine yet. Supported DSH releases are listed in [docs/dsh-matrix.md](docs/dsh-matrix.md); on 0.2.2-rc.1, Continue after a failed turn and the wait for worktree cleanup on delete are unavailable.
+
+## Install from a release
 
 The installer installs the bridge plugin and Chrome extension. It downloads one tagged release, checks every downloaded file against that release's `SHA256SUMS`, and only then unpacks it and builds it from source. A digest mismatch, a missing `SHA256SUMS` or an incomplete download stops the install before anything is unpacked or run.
 
@@ -58,7 +91,7 @@ When the installer opens `chrome://extensions`, follow its instructions to load 
 
 ## Performance
 
-In a paired 60-run end-to-end benchmark on August 18, 2026, both backends completed all 30 assigned runs successfully, while dsh Browser Control required fewer model/tool round trips and finished faster:
+These numbers come from the upstream project, dsh-browser, and have not been re-measured on this fork. In its paired 60-run end-to-end benchmark on August 18, 2026, both backends completed all 30 assigned runs successfully, while dsh Browser Control required fewer model/tool round trips and finished faster:
 
 | Backend | Success | Mean end-to-end latency | Mean browser tool calls |
 |---|---:|---:|---:|
@@ -135,7 +168,7 @@ Requirements: Node.js `>=24.9.0`, Corepack/pnpm, and Chrome 125+ or Firefox 140+
 
 ### Install or update
 
-Run the [quick install commands](#quick-install) to install. It is one command on macOS and Linux; the installer does the rest:
+Run the [release install commands](#install-from-a-release), or `./scripts/install.sh` from a checkout, to install. It is one command on macOS and Linux; the installer does the rest:
 
 - **DeepSeek Harness desktop app.** When the app is installed (`/Applications` or `~/Applications` on macOS; `DSH_DESKTOP_APP=<path>` for another location, `DSH_DESKTOP_APP=none` to skip it), the bridge is registered with the app's own `desktop` profile through the CLI bundled in the app, in addition to the `web` profile. Quit and reopen the app afterwards. If the app's DSH version is outside the range the plugin supports, the installer says so, registers the `web` profile only, and asks you to update the app and run it again; it never overrides the version check.
 - **Node.js and pnpm.** When `node` on PATH is missing or older than 24.9.0, the installer uses one that is already installed: the app's bundled Node, then a suitable version from asdf, nvm, fnm, volta or mise. When `pnpm` on PATH does not run, it uses the app's bundled pnpm, then Corepack, then `npx`. Nothing is installed for you; if no suitable Node exists, the installer prints the command for the tools it found.
