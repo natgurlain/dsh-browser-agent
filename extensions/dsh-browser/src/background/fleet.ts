@@ -339,3 +339,33 @@ export class FleetRegistry {
     return this.fleets.size
   }
 }
+
+/** The extension's tab operations for a fleet; session binding is the caller's. */
+export function chromeFleetDeps(
+  signal: AbortSignal,
+  authorize: FleetDeps['authorize'],
+  hooks: {
+    /** The window of the session's tab, if it has one. */
+    sessionWindow: (sessionId: string | undefined) => Promise<number | undefined>
+    bindChild: FleetDeps['bindChild']
+    unbindChild: FleetDeps['unbindChild']
+  },
+): FleetDeps {
+  return {
+    signal,
+    authorize,
+    parentWindow: async (sessionId) => (await hooks.sessionWindow(sessionId)) ?? (await chrome.windows.getLastFocused().catch(() => undefined))?.id,
+    createTab: (url, windowId) => chrome.tabs.create({ url, active: false, ...(windowId === undefined ? {} : { windowId }) }),
+    groupTabs: async (tabIds, windowId) => {
+      if (typeof chrome.tabs.group !== 'function' || tabIds.length === 0) return false
+      const granted = await chrome.permissions.contains({ permissions: ['tabGroups'] }).catch(() => false)
+      if (!granted || chrome.tabGroups === undefined) return false
+      const groupId = await chrome.tabs.group({ tabIds, ...(windowId === undefined ? {} : { createProperties: { windowId } }) })
+      await chrome.tabGroups.update(groupId, { title: FLEET_GROUP_TITLE, color: 'blue', collapsed: false })
+      return true
+    },
+    bindChild: hooks.bindChild,
+    unbindChild: hooks.unbindChild,
+    closeTab: (tabId) => chrome.tabs.remove(tabId),
+  }
+}

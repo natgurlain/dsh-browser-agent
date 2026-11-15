@@ -103,7 +103,7 @@ import { AgentOverlayController } from './agent-overlay.ts'
 import { DialogController } from './dialogs.ts'
 import { approveProgram, coverByProgram, ProgramGrants } from './run-program.ts'
 import { PageWatcherRuntime } from './watcher-runtime.ts'
-import { FLEET_GROUP_TITLE, FLEETS_STORAGE_KEY, FleetRegistry, type FleetDeps } from './fleet.ts'
+import { chromeFleetDeps, FLEETS_STORAGE_KEY, FleetRegistry, type FleetDeps } from './fleet.ts'
 import {
   isApprovalDecision,
   type ApprovalAuthorization,
@@ -145,9 +145,6 @@ import type { BridgeClientIdentity } from '@natgurlain/dsh-bridge-browser/src/pr
 import { ExternalRequesters, isExternalSessionId } from './external-requesters.ts'
 import { chromeDevLoopBrowser, DevLoopController } from './dev-loop.ts'
 import {
-  BRIDGE_DEVLOOP_LINK_METHOD,
-  BRIDGE_DEVLOOP_LIST_METHOD,
-  BRIDGE_DEVLOOP_UNLINK_METHOD,
   DEFAULT_SNAPSHOT_MAX_CHARS as DEVLOOP_MAX_CHARS,
   DEVLOOP_CAPTURE_TOOL,
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
@@ -175,6 +172,7 @@ import {
 } from './session-continuity.ts'
 import { approvalFailureMessage } from './answers.ts'
 import { auditedAuthorize, auditedPolicy, auditNote, noteCallTarget, type AuditedCall } from './audit.ts'
+import { createDevLoopPanelRpc } from './dev-loop.ts'
 
 /** User settings persisted in chrome.storage.local. */
 export interface Settings {
@@ -2241,44 +2239,8 @@ const externalRequesters = new ExternalRequesters()
 /** Dev loop: localhost tabs the user linked to a DSH coding session (dev-loop.ts). */
 const devLoop = new DevLoopController(chromeDevLoopBrowser())
 
-/**
- * Panel dev-loop RPCs the background completes: `list` is answered here (and
- * re-asserts each link to the bridge, which forgets links on restart);
- * `link` resolves the tab the user chose and records the link only after the
- * bridge accepted it; `unlink` forgets it on both sides.
- */
-function devLoopPanelRpc(method: string, payload: unknown): Promise<unknown> | undefined {
-  const fields = typeof payload === 'object' && payload !== null ? payload as Record<string, unknown> : {}
-  const envelope = (value: unknown): unknown => ({ type: 'server-response', rpcId: 'devloop', result: { ok: true, value } })
-  if (method === BRIDGE_DEVLOOP_LIST_METHOD) {
-    return devLoop.list().then(async (links) => {
-      for (const link of links) {
-        await gatewayRpc(BRIDGE_DEVLOOP_LINK_METHOD, { sessionId: link.sessionId, url: `${link.origin}/` }).catch(() => undefined)
-      }
-      return envelope({ items: links })
-    })
-  }
-  if (method === BRIDGE_DEVLOOP_LINK_METHOD) {
-    return (async () => {
-      const sessionId = typeof fields.sessionId === 'string' ? fields.sessionId : ''
-      const tabId = typeof fields.tabId === 'number' ? fields.tabId : -1
-      const tab = await chrome.tabs.get(tabId).catch(() => undefined)
-      if (sessionId === '' || tab?.id === undefined) throw new Error('Pick a coding session and a tab to link.')
-      const answer = await gatewayRpc(BRIDGE_DEVLOOP_LINK_METHOD, { sessionId, url: tab.url ?? '' }) as
-        { result?: { ok?: boolean; value?: { link?: { origin?: unknown } } } } | undefined
-      const origin = answer?.result?.ok === true ? answer.result.value?.link?.origin : undefined
-      if (typeof origin === 'string' && devLoop.originOf(tab.url) === origin) {
-        await devLoop.link({ sessionId, tabId: tab.id, origin, ...(typeof fields.label === 'string' ? { label: fields.label.slice(0, 120) } : {}) })
-      }
-      return answer
-    })()
-  }
-  if (method === BRIDGE_DEVLOOP_UNLINK_METHOD) {
-    const sessionId = typeof fields.sessionId === 'string' ? fields.sessionId : ''
-    return devLoop.unlink(sessionId).then(() => gatewayRpc(BRIDGE_DEVLOOP_UNLINK_METHOD, { sessionId }))
-  }
-  return undefined
-}
+/** Panel dev-loop RPCs the background completes (dev-loop.ts). */
+const devLoopPanelRpc = createDevLoopPanelRpc(devLoop, gatewayRpc)
 
 /** Learning features (workflows, site drivers, Watch me, failure fixtures); all default off. */
 const learning = new LearningRuntime({
@@ -2572,24 +2534,12 @@ function routeToolCall(call: ToolCall): void {
   })
 }
 
-/** Browser operations for a tab fleet (fleet.ts). */
+/** Browser operations for a tab fleet (fleet.ts); tab affinity stays here. */
 function fleetDeps(signal: AbortSignal, authorize: FleetDeps['authorize']): FleetDeps {
-  return {
-    signal,
-    authorize,
-    parentWindow: async (sessionId) => {
+  return chromeFleetDeps(signal, authorize, {
+    sessionWindow: async (sessionId) => {
       const target = await resolveToolTab(sessionId)
-      if (!('ok' in target) && target.windowId !== undefined) return target.windowId
-      return (await chrome.windows.getLastFocused().catch(() => undefined))?.id
-    },
-    createTab: (url, windowId) => chrome.tabs.create({ url, active: false, ...(windowId === undefined ? {} : { windowId }) }),
-    groupTabs: async (tabIds, windowId) => {
-      if (typeof chrome.tabs.group !== 'function' || tabIds.length === 0) return false
-      const granted = await chrome.permissions.contains({ permissions: ['tabGroups'] }).catch(() => false)
-      if (!granted || chrome.tabGroups === undefined) return false
-      const groupId = await chrome.tabs.group({ tabIds, ...(windowId === undefined ? {} : { createProperties: { windowId } }) })
-      await chrome.tabGroups.update(groupId, { title: FLEET_GROUP_TITLE, color: 'blue', collapsed: false })
-      return true
+      return 'ok' in target ? undefined : target.windowId
     },
     bindChild: (childId, tab) => {
       const summary = summarizeTab(tab as chrome.tabs.Tab)
@@ -2604,8 +2554,7 @@ function fleetDeps(signal: AbortSignal, authorize: FleetDeps['authorize']): Flee
         broadcastTabAffinity()
       }
     },
-    closeTab: (tabId) => chrome.tabs.remove(tabId),
-  }
+  })
 }
 
 /** Hold the call while the user has paused the agent, then run it (or fail it closed). */

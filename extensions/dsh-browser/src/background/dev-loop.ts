@@ -26,7 +26,12 @@
  * @module
  */
 
-import { devLoopOrigin } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import {
+  BRIDGE_DEVLOOP_LINK_METHOD,
+  BRIDGE_DEVLOOP_LIST_METHOD,
+  BRIDGE_DEVLOOP_UNLINK_METHOD,
+  devLoopOrigin,
+} from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ToolAnswer } from './tools.ts'
 import { httpOrigin } from '../security/web-url.ts'
 
@@ -348,5 +353,50 @@ export function chromeDevLoopBrowser(): DevLoopBrowser {
     },
     load: async () => (await area()?.get(DEVLOOP_STORAGE_KEY))?.[DEVLOOP_STORAGE_KEY],
     save: async (value) => { await area()?.set({ [DEVLOOP_STORAGE_KEY]: value }) },
+  }
+}
+
+/**
+ * Panel dev-loop RPCs the background completes: `list` is answered here (and
+ * re-asserts each link to the bridge, which forgets links on restart);
+ * `link` resolves the tab the user chose and records the link only after the
+ * bridge accepted it; `unlink` forgets it on both sides.
+ */
+export function createDevLoopPanelRpc(
+  devLoop: DevLoopController,
+  gatewayRpc: (method: string, payload: unknown) => Promise<unknown>,
+  getTab: (tabId: number) => Promise<{ id?: number; url?: string } | undefined> = (tabId) => chrome.tabs.get(tabId),
+): (method: string, payload: unknown) => Promise<unknown> | undefined {
+  return (method, payload) => {
+    const fields = typeof payload === 'object' && payload !== null ? payload as Record<string, unknown> : {}
+    const envelope = (value: unknown): unknown => ({ type: 'server-response', rpcId: 'devloop', result: { ok: true, value } })
+    if (method === BRIDGE_DEVLOOP_LIST_METHOD) {
+      return devLoop.list().then(async (links) => {
+        for (const link of links) {
+          await gatewayRpc(BRIDGE_DEVLOOP_LINK_METHOD, { sessionId: link.sessionId, url: `${link.origin}/` }).catch(() => undefined)
+        }
+        return envelope({ items: links })
+      })
+    }
+    if (method === BRIDGE_DEVLOOP_LINK_METHOD) {
+      return (async () => {
+        const sessionId = typeof fields.sessionId === 'string' ? fields.sessionId : ''
+        const tabId = typeof fields.tabId === 'number' ? fields.tabId : -1
+        const tab = await getTab(tabId).catch(() => undefined)
+        if (sessionId === '' || tab?.id === undefined) throw new Error('Pick a coding session and a tab to link.')
+        const answer = await gatewayRpc(BRIDGE_DEVLOOP_LINK_METHOD, { sessionId, url: tab.url ?? '' }) as
+          { result?: { ok?: boolean; value?: { link?: { origin?: unknown } } } } | undefined
+        const origin = answer?.result?.ok === true ? answer.result.value?.link?.origin : undefined
+        if (typeof origin === 'string' && devLoop.originOf(tab.url) === origin) {
+          await devLoop.link({ sessionId, tabId: tab.id, origin, ...(typeof fields.label === 'string' ? { label: fields.label.slice(0, 120) } : {}) })
+        }
+        return answer
+      })()
+    }
+    if (method === BRIDGE_DEVLOOP_UNLINK_METHOD) {
+      const sessionId = typeof fields.sessionId === 'string' ? fields.sessionId : ''
+      return devLoop.unlink(sessionId).then(() => gatewayRpc(BRIDGE_DEVLOOP_UNLINK_METHOD, { sessionId }))
+    }
+    return undefined
   }
 }
