@@ -28,12 +28,12 @@ import { REPLAYABLE_TOOLS, ELEMENT_TOOLS } from '@natgurlain/dsh-bridge-browser/
 import { getUiLocale } from '../i18n.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import type { CallPolicyDecision, CallPolicyTargets } from '../security/call-policy.ts'
-import { approvalBinding, canonicalJson } from '../security/payload-binding.ts'
+import { approvalBinding, canonicalJson, sha256Hex } from '../security/payload-binding.ts'
 import { wrapUntrustedContent } from '../security/untrusted.ts'
 import { buildWorkflow, type RecordedLocator, type RecordedStep, type WorkflowChoices } from '../shared/workflow-build.ts'
-import { buildProgram, detectRepetition, nextSelectors, type ProgramStep, type RepetitionPattern, type WatchEvent } from '../shared/repetition.ts'
+import { buildProgram, detectRepetition, looksLikeStep, maxFinishRows, nextSelectors, parseStepTarget, rowsDistinct, RUN_BATCH_STEPS, type StepTarget, type ProgramStep, type RepetitionPattern, type WatchEvent } from '../shared/repetition.ts'
 import type { NetworkEntry } from './devtools-network.ts'
-import { listTabFrames } from './frames.ts'
+import { frameDocumentKey, listTabFrames } from './frames.ts'
 import { isExtensionPageSender } from './policy-runtime.ts'
 import type { CallPolicyHook, ToolAnswer, ToolCall } from './tools.ts'
 import { httpOrigin, isRecord } from '../security/web-url.ts'
@@ -86,9 +86,8 @@ const RETRY_WINDOW_MS = 120_000
 const STRAY_STOP_INTERVAL_MS = 30_000
 const MAX_STRAY_STOP_TABS = 50
 const NO_SESSION = '(no-session)'
+/** Bound on one whole "do the remaining N" run, batches included (the bridge holds the same). */
 const PROGRAM_RUN_TIMEOUT_MS = 30 * 60_000
-/** One `browser_run` holds at most this many steps. */
-const MAX_PROGRAM_STEPS = 25
 
 /** What the background index provides. */
 export interface LearningDeps {
@@ -134,13 +133,37 @@ export interface WatchSuggestion {
   origin: string
   period: number
   done: number
+  /** Rows this run would do (the whole program: `remaining × period` steps). */
   remaining: number
+  /** Further rows exist beyond what one run does (MAX_FINISH_STEPS). */
+  more: boolean
+  /**
+   * Further rows exist, but the offer stays within one program because the
+   * rows cannot be told apart (no row identity, or two rows share one).
+   */
+  limited?: 'indistinct'
   program: ProgramStep[]
   labels: string[]
 }
 
+/** What a card and the panel say about a row an earlier run left part-done. */
+function partDoneNote(row: string): string {
+  return zh()
+    ? `“${row}”在上一次运行中只完成了一部分，本次不会再处理它，请手动完成。`
+    : `“${row}” was left part-done by the earlier run and is skipped here; finish it by hand.`
+}
+
+/** Hash of a whole program: tool, canonical arguments and expected target of every step, in order. */
+function programDigest(steps: ReadonlyArray<{ tool: string; args: Record<string, unknown>; target?: StepTarget }>): string {
+  return sha256Hex(canonicalJson(steps.map((step) => ({ tool: step.tool, args: step.args, target: step.target ?? null }))))
+}
+
 function zh(): boolean {
   return getUiLocale() === 'zh'
+}
+
+function leftPage(): string {
+  return zh() ? '被观察的标签页已离开该页面。' : 'The watched tab left the page.'
 }
 
 /** Normalize stored learning settings. */
@@ -215,6 +238,16 @@ export class LearningRuntime {
   /** The user turned saved workflows off and the bridge has not acknowledged it yet. */
   private workflowsTurnedOff = false
   private suggestion: WatchSuggestion | undefined
+  /** The over-one-batch program a "do the remaining N" request is running (see claimSeries). */
+  private armedSeries: { sessionId: string | undefined; digest: string; tabId: number; documentKey: string } | undefined
+  /** Ends the wait of the series run in flight (kill switch). */
+  private seriesStopped: ((error: Error) => void) | undefined
+  /** A series run that stopped part-way: where to probe from for a new card. */
+  private resume: { tabId: number; origin: string; pattern: RepetitionPattern; rows: number; skipped?: string } | undefined
+  /** A note for the card of the continuation in flight (see cardNote). */
+  private runNote: { sessionId: string | undefined; digest: string; note: string } | undefined
+  /** The pattern behind the current suggestion, for the probe at run time. */
+  private suggestionPattern: RepetitionPattern | undefined
   private lastAgentActivity = new Map<number, number>()
   /** When each tab was last told to stop a recorder this worker does not know about. */
   private readonly strayStops = new Map<number, number>()
@@ -659,13 +692,14 @@ export class LearningRuntime {
   // ---- watch me ----
 
   async startWatching(tabId: number): Promise<void> {
-    if (!this.settings.watchMe) throw new Error('Watch me is turned off in the settings.')
+    if (!this.settings.watchMe) throw new Error(zh() ? '“看我操作”已在设置中关闭。' : 'Watch me is turned off in the settings.')
     await this.stopWatching()
     const tab = await chrome.tabs.get(tabId)
     const origin = httpOrigin(tab.url)
     if (origin === undefined) throw new Error(zh() ? '此页面无法观察。' : 'This page cannot be watched.')
     this.watch = { tabId, origin, events: [] }
     this.suggestion = undefined
+    this.resume = undefined
     await chrome.tabs.sendMessage(tabId, { type: 'DSH_WATCH', enabled: true }, { frameId: 0 })
     this.broadcast()
   }
@@ -707,6 +741,8 @@ export class LearningRuntime {
       kind: raw.kind,
       css: raw.css,
       ...(typeof raw.label === 'string' ? { label: raw.label.slice(0, 80) } : {}),
+      ...(typeof raw.tag === 'string' ? { tag: raw.tag.slice(0, 40) } : {}),
+      ...(typeof raw.role === 'string' ? { role: raw.role.slice(0, 40) } : {}),
       ...(raw.sensitive === true ? { sensitive: true } : typeof raw.value === 'string' ? { value: raw.value.slice(0, 2_000) } : {}),
       ...(Array.isArray(raw.cells) ? { cells: raw.cells.filter((cell): cell is string => typeof cell === 'string').slice(0, 20) } : {}),
     }
@@ -733,27 +769,59 @@ export class LearningRuntime {
       return
     }
     try {
-      const response = await chrome.tabs.sendMessage(watch.tabId, { type: 'DSH_WATCH_PROBE', selectors: nextSelectors(pattern, Math.floor(MAX_PROGRAM_STEPS / pattern.period)) }, { frameId: 0 }) as { ok?: boolean; result?: { rows?: string[][] } } | undefined
-      const rows = response?.result?.rows ?? []
-      // A cell-sourced value needs a non-empty cell in every remaining row.
-      const usable = rows.filter((cells) => pattern.steps.every((step) => step.value.kind !== 'cell' || (cells[step.value.cell] ?? '').trim() !== ''))
-      if (usable.length !== rows.length || rows.length === 0) {
-        this.suggestion = undefined
-      } else {
-        this.suggestion = {
-          tabId: watch.tabId,
-          origin: watch.origin,
-          period: pattern.period,
-          done: pattern.done,
-          remaining: rows.length,
-          program: buildProgram(pattern, rows),
-          labels: pattern.steps.map((step) => `${step.kind}${step.label === undefined ? '' : ` "${step.label}"`}${step.value.kind === 'cell' ? ` ← column ${String(step.value.cell + 1)}` : step.value.kind === 'constant' ? ` ← "${step.value.value}"` : ''}`),
-        }
-      }
+      this.suggestion = await this.offerFor(watch.tabId, watch.origin, pattern)
+      this.suggestionPattern = this.suggestion === undefined ? undefined : pattern
     } catch {
       this.suggestion = undefined
     }
     this.broadcast()
+  }
+
+  /**
+   * Probe the page for the rows after the user's own and build the offer.
+   * Only rows whose elements are visible and look like the ones the user
+   * acted on (same tag and role, same name once the row's own text and digits
+   * are taken out) count; the first row that does not ends the offer.
+   */
+  private async offerFor(tabId: number, origin: string, pattern: RepetitionPattern): Promise<WatchSuggestion | undefined> {
+    // One row more than a run may do, to know whether rows are left over.
+    const limit = maxFinishRows(pattern.period)
+    const response = await chrome.tabs.sendMessage(tabId, { type: 'DSH_WATCH_PROBE', selectors: limit === 0 ? [] : nextSelectors(pattern, limit + 1) }, { frameId: 0 }) as { ok?: boolean; result?: { rows?: string[][]; targets?: unknown } } | undefined
+    const probed = response?.result?.rows ?? []
+    const targets = Array.isArray(response?.result?.targets)
+      ? response.result.targets.map((row) => Array.isArray(row) ? row.map(parseStepTarget) : [])
+      : undefined
+    let alike = probed.length
+    if (targets !== undefined) {
+      alike = probed.findIndex((cells, at) => !pattern.steps.every((step, position) => {
+        const target = targets[at]?.[position]
+        return target !== undefined && looksLikeStep(step, target, cells)
+      }))
+      if (alike === -1) alike = probed.length
+    }
+    // One approval covers more rows than a single program only when every row can be told apart:
+    // each step's element is described, every row has an identity, and no two rows share one.
+    // Otherwise the offer stays within one program, as it always could, and says why.
+    const oneProgram = Math.min(limit, Math.floor(RUN_BATCH_STEPS / pattern.period))
+    const wanted = Math.min(alike, limit)
+    const distinct = targets !== undefined && rowsDistinct(targets.slice(0, wanted))
+    const rows = probed.slice(0, distinct ? wanted : Math.min(wanted, oneProgram))
+    // A cell-sourced value needs a non-empty cell in every remaining row.
+    const usable = rows.filter((cells) => pattern.steps.every((step) => step.value.kind !== 'cell' || (cells[step.value.cell] ?? '').trim() !== ''))
+    if (usable.length !== rows.length || rows.length === 0) return undefined
+    const limited = !distinct && wanted > rows.length
+    return {
+      tabId,
+      origin,
+      period: pattern.period,
+      done: pattern.done,
+      remaining: rows.length,
+      more: !limited && alike > rows.length,
+      ...(limited ? { limited: 'indistinct' as const } : {}),
+      // Every step says what its element looks like, whatever the length: the action checks it on the element it resolves.
+      program: targets === undefined ? buildProgram(pattern, rows) : buildProgram(pattern, rows, targets.slice(0, rows.length) as StepTarget[][]),
+      labels: pattern.steps.map((step) => `${step.kind}${step.label === undefined ? '' : ` "${step.label}"`}${step.value.kind === 'cell' ? ` ← column ${String(step.value.cell + 1)}` : step.value.kind === 'constant' ? ` ← "${step.value.value}"` : ''}`),
+    }
   }
 
   /**
@@ -762,15 +830,164 @@ export class LearningRuntime {
    * step's payload, bound to this page) and each step then claims that
    * approval through run-program.ts; forced, per-call and off-origin cards
    * still ask, and every step keeps the full dispatch path.
+   *
+   * A remainder longer than one `browser_run` goes as a series: the bridge
+   * runs it in batches under one card that states the true total and lists
+   * every step (run-program.ts). Only the exact program built here is
+   * accepted as a series ({@link claimSeries}).
    */
   async runSuggestion(sessionId: string | undefined): Promise<unknown> {
     const suggestion = this.suggestion
-    if (suggestion === undefined || !this.settings.watchMe) throw new Error('There is no suggestion to run.')
+    if (suggestion === undefined || !this.settings.watchMe) throw new Error(zh() ? '没有可执行的建议。' : 'There is no suggestion to run.')
     const tab = await chrome.tabs.get(suggestion.tabId)
-    if (httpOrigin(tab.url) !== suggestion.origin) throw new Error('The watched tab left the page.')
+    if (httpOrigin(tab.url) !== suggestion.origin) throw new Error(leftPage())
+    const pattern = this.suggestionPattern
     // The user's own input from here on is the program, not new teaching.
     await this.stopWatching()
-    return this.bridgeCall(METHODS.programRun, { ...(sessionId === undefined ? {} : { sessionId }), steps: suggestion.program }, PROGRAM_RUN_TIMEOUT_MS)
+    const session = sessionId === undefined ? {} : { sessionId }
+    this.resume = undefined
+    if (suggestion.program.length <= RUN_BATCH_STEPS) {
+      return this.bridgeCall(METHODS.programRun, { ...session, steps: suggestion.program }, PROGRAM_RUN_TIMEOUT_MS)
+    }
+    // Probe again now: the card must show the rows as they are when the user clicks, not when the offer appeared.
+    const fresh = pattern === undefined ? undefined : await this.offerFor(suggestion.tabId, suggestion.origin, pattern).catch(() => undefined)
+    if (fresh === undefined || pattern === undefined) throw new Error(zh() ? '这些行已经变化，未执行任何操作。请重新演示。' : 'The rows changed since the offer was made, so nothing was run. Show the action again.')
+    return this.runOffer(sessionId, fresh, pattern, tab.url)
+  }
+
+  /**
+   * Send a freshly probed offer to the bridge. One longer than a single
+   * `browser_run` goes as a series, bound to the tab and document it was
+   * probed on; when that run stops early, what is left can be continued
+   * ({@link continueRemaining}).
+   */
+  private async runOffer(sessionId: string | undefined, offer: WatchSuggestion, pattern: RepetitionPattern, url: string | undefined): Promise<unknown> {
+    const session = sessionId === undefined ? {} : { sessionId }
+    this.resume = undefined
+    if (offer.program.length <= RUN_BATCH_STEPS) {
+      return this.bridgeCall(METHODS.programRun, { ...session, steps: offer.program }, PROGRAM_RUN_TIMEOUT_MS)
+    }
+    const top = (await listTabFrames(offer.tabId, url)).find((frame) => frame.frameId === 0)
+    if (top === undefined || httpOrigin(top.url) !== offer.origin) throw new Error(leftPage())
+    const armed = { sessionId, digest: programDigest(offer.program), tabId: offer.tabId, documentKey: frameDocumentKey(top) }
+    this.armedSeries = armed
+    let stop: ((error: Error) => void) | undefined
+    try {
+      const result = await Promise.race([
+        this.bridgeCall(METHODS.programRun, { ...session, steps: offer.program, rowSteps: offer.period }, PROGRAM_RUN_TIMEOUT_MS),
+        // The kill switch ends the wait: the bridge is gone and would never answer.
+        new Promise<never>((_resolve, reject) => {
+          stop = reject
+          this.seriesStopped = reject
+        }),
+      ])
+      this.noteStoppedRun(result, offer, pattern)
+      return result
+    } finally {
+      if (this.armedSeries === armed) this.armedSeries = undefined
+      // Only this run's own wait: a later run may already have installed its own.
+      if (this.seriesStopped === stop) this.seriesStopped = undefined
+    }
+  }
+
+  /**
+   * A long run stopped part-way (a row changed, the page moved, a step
+   * failed): remember where, so the rest can be continued from the page as it
+   * then is. A row that was left part-done is not repeated: a continuation
+   * starts after it, and the panel and the next card say so.
+   */
+  private noteStoppedRun(result: unknown, offer: WatchSuggestion, pattern: RepetitionPattern): void {
+    const report = isRecord(result) && isRecord(result.report) ? result.report : undefined
+    const rows = report !== undefined && isRecord(report.rows) ? report.rows : undefined
+    const steps = Array.isArray(report?.steps) ? report.steps as unknown[] : []
+    if (rows === undefined || typeof rows.done !== 'number' || typeof rows.total !== 'number' || rows.done >= rows.total || steps.length === 0 || !this.settings.watchMe) return
+    const ran = steps.filter((step) => isRecord(step) && step.status === 'done').length
+    const partDone = ran > rows.done * offer.period
+    const skipped = partDone ? (offer.program[rows.done * offer.period]?.target?.row || (zh() ? `第 ${String(rows.done + 1)} 行` : `Row ${String(rows.done + 1)}`)) : undefined
+    const left = rows.total - rows.done - (partDone ? 1 : 0)
+    this.resume = {
+      tabId: offer.tabId,
+      origin: offer.origin,
+      pattern: { ...pattern, done: pattern.done + rows.done + (partDone ? 1 : 0) },
+      rows: left,
+      ...(skipped === undefined ? {} : { skipped }),
+    }
+    this.broadcast()
+  }
+
+  /**
+   * Continue a run that stopped part-way: probe the page as it is now, from
+   * the row that stopped it, and ask again with a new card. A row that no
+   * longer looks like the ones the user did is passed over (and said so);
+   * nothing runs on the old approval.
+   */
+  async continueRemaining(sessionId: string | undefined): Promise<unknown> {
+    const resume = this.resume
+    if (resume === undefined || resume.rows <= 0 || !this.settings.watchMe) throw new Error(zh() ? '没有可继续的操作。' : 'There is nothing to continue.')
+    const tab = await chrome.tabs.get(resume.tabId)
+    if (httpOrigin(tab.url) !== resume.origin) {
+      this.resume = undefined
+      this.broadcast()
+      throw new Error(leftPage())
+    }
+    let pattern = resume.pattern
+    let offer = await this.offerFor(resume.tabId, resume.origin, pattern).catch(() => undefined)
+    let skipped = false
+    if (offer === undefined) {
+      pattern = { ...pattern, done: pattern.done + 1 }
+      offer = await this.offerFor(resume.tabId, resume.origin, pattern).catch(() => undefined)
+      skipped = offer !== undefined
+    }
+    this.resume = undefined
+    this.broadcast()
+    if (offer === undefined) throw new Error(zh() ? '剩下的行与您演示的不再一致，未执行任何操作。' : 'The rows that are left no longer look like the ones you did, so nothing was run.')
+    // The new card says first which row the earlier run left part-done and this one does not touch.
+    const onCard = resume.skipped === undefined ? undefined : partDoneNote(resume.skipped)
+    const noted = onCard === undefined ? undefined : { sessionId, digest: programDigest(offer.program), note: onCard }
+    this.runNote = noted
+    let result: unknown
+    try {
+      result = await this.runOffer(sessionId, offer, pattern, tab.url)
+    } finally {
+      if (this.runNote === noted) this.runNote = undefined
+    }
+    if (!skipped || !isRecord(result) || typeof result.text !== 'string') return result
+    const note = zh() ? '已跳过一行：它与您演示的行不再一致。' : 'One row was passed over: it no longer looks like the rows you did.'
+    return { ...result, text: `${note}\n${result.text}` }
+  }
+
+  /**
+   * Whether `steps` is, step for step (targets included), the long program
+   * the user just asked this extension to run for this session, about to be
+   * approved on the very tab and document the user demonstrated on. One-shot:
+   * the series card may be raised once per request, and for nothing the
+   * extension did not build.
+   */
+  claimSeries(sessionId: string | undefined, steps: ReadonlyArray<{ tool: string; args: Record<string, unknown>; target?: StepTarget }>, tabId: number | undefined, documentKey: string | undefined): boolean {
+    const armed = this.armedSeries
+    if (armed === undefined || !this.settings.watchMe || armed.sessionId !== sessionId || armed.tabId !== tabId || armed.documentKey !== documentKey
+      || armed.digest !== programDigest(steps)) return false
+    this.armedSeries = undefined
+    return true
+  }
+
+  /**
+   * What the user must know before approving the program this extension is
+   * running right now: the row an earlier run left part-done, which this one
+   * skips. Undefined for any other program.
+   */
+  cardNote(sessionId: string | undefined, steps: ReadonlyArray<{ tool: string; args: Record<string, unknown>; target?: StepTarget }>): string | undefined {
+    const noted = this.runNote
+    return noted !== undefined && noted.sessionId === sessionId && noted.digest === programDigest(steps) ? noted.note : undefined
+  }
+
+  /** The kill switch: nothing may raise a series card any more, and a waiting run ends. */
+  disarmSeries(): void {
+    this.armedSeries = undefined
+    this.resume = undefined
+    this.runNote = undefined
+    this.seriesStopped?.(new Error(zh() ? '已停止。' : 'Stopped.'))
+    this.seriesStopped = undefined
   }
 
   // ---- panel port ----
@@ -782,6 +999,8 @@ export class LearningRuntime {
       steps: this.stepsFor(sessionId),
       watching: this.watch === undefined ? null : { tabId: this.watch.tabId, origin: this.watch.origin, events: this.watch.events.length },
       suggestion: this.suggestion ?? null,
+      // A long run that stopped part-way: the rows it left, which a new card can continue.
+      resume: this.resume === undefined ? null : { rows: this.resume.rows, ...(this.resume.skipped === undefined ? {} : { skipped: this.resume.skipped }) },
       proposals: this.proposals.map((proposal) => ({ driver: proposal.driver, droppedHeaders: proposal.droppedHeaders })),
       drivers: this.drivers,
     }
@@ -846,7 +1065,7 @@ export class LearningRuntime {
           return reply(await this.cancelSchedule(String(message.scheduleId)))
         case 'learning.watch.start': {
           const tab = await this.deps.activeTab()
-          if (tab?.id === undefined) throw new Error('No active tab.')
+          if (tab?.id === undefined) throw new Error(zh() ? '没有活动标签页。' : 'No active tab.')
           await this.startWatching(tab.id)
           return reply(true)
         }
@@ -855,6 +1074,8 @@ export class LearningRuntime {
           return reply(true)
         case 'learning.watch.run':
           return reply(await this.runSuggestion(sessionId))
+        case 'learning.watch.continue':
+          return reply(await this.continueRemaining(sessionId))
         case 'learning.driver.save':
           return reply(await this.saveDriver(Number(message.index), isRecord(message.edits) ? message.edits as { name?: string; description?: string } : {}))
         case 'learning.driver.discard':

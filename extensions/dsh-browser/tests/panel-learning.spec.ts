@@ -171,4 +171,33 @@ describe('learning panel UI', () => {
     await act(async () => { (host.querySelector('.learning-suggestion button') as HTMLButtonElement).click() })
     expect(posted.some((message) => message.type === 'learning.watch.run')).toBe(true)
   })
+
+  it('states the true total on a long offer, and offers to continue a run that stopped part-way', async () => {
+    const watching = { settings: { workflows: false, siteDrivers: false, siteDriverOrigins: [], watchMe: true, fixtures: false }, watching: null }
+    const long = { tabId: 1, origin: 'https://a.example', remaining: 38, more: false, done: 2, period: 3, program: Array.from({ length: 114 }, () => ({ tool: 'browser_click' as const, args: {} })), labels: [] }
+    const host = await mount(createElement(LearningPanel, { locale: 'en', connected: true }))
+    await act(async () => { push({ ...watching, suggestion: long }) })
+    expect(host.textContent).toContain('Do the remaining 38 like this (114 steps)')
+    await act(async () => { push({ ...watching, suggestion: { ...long, remaining: 83, more: true, program: long.program.concat(long.program, long.program).slice(0, 249) } }) })
+    expect(host.textContent).toContain('Do the next 83 like this (249 steps, the most one run does)')
+    // A run stopped after 20 of 38 rows: one button continues, with a new approval from the page as it is.
+    await act(async () => { push({ ...watching, suggestion: null, resume: { rows: 18 } }) })
+    expect(host.textContent).toContain('The run stopped with 18 rows left. Continuing looks at the page as it is now and asks you again.')
+    const button = host.querySelector('.learning-suggestion button') as HTMLButtonElement
+    expect(button.textContent).toBe('Continue with the 18 rows left')
+    await act(async () => { button.click() })
+    expect(posted.some((message) => message.type === 'learning.watch.continue')).toBe(true)
+    await act(async () => { push({ ...watching, suggestion: null, resume: null }) })
+    expect(host.querySelector('.learning-suggestion')).toBeNull()
+    // F7: a row the run left part-done is named and skipped; with nothing else left there is no button.
+    await act(async () => { push({ ...watching, suggestion: null, resume: { rows: 17, skipped: 'Person 23' } }) })
+    expect(host.textContent).toContain('The run stopped with 17 rows left. “Person 23” was left part-done and is skipped; do it by hand. Continuing looks at the page as it is now and asks you again.')
+    await act(async () => { push({ ...watching, suggestion: null, resume: { rows: 0, skipped: 'Person 40' } }) })
+    expect(host.textContent).toContain('The run stopped. “Person 40” was left part-done and is skipped; do it by hand.')
+    expect(host.querySelector('.learning-suggestion button')).toBeNull()
+    // F1: rows that cannot be told apart are offered one program at a time, and the panel says why.
+    await act(async () => { push({ ...watching, resume: null, suggestion: { ...long, remaining: 8, limited: 'indistinct' as const, program: long.program.slice(0, 24) } }) })
+    expect(host.textContent).toContain('Do the remaining 8 like this (24 steps)')
+    expect(host.textContent).toContain('These rows can\'t be told apart, so only 25 steps at a time.')
+  })
 })

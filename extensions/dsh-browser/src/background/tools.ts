@@ -24,6 +24,8 @@ import { approvalBinding } from '../security/payload-binding.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
+import type { StepTarget } from '../shared/repetition.ts'
+import { pageLocation } from './run-program.ts'
 import { DevToolsError } from './debugger-session.ts'
 import { InputStateStore } from './input-state.ts'
 import {
@@ -196,7 +198,46 @@ export interface TabManagementContext {
    * outside the managed allowlist): browser_list_tabs withholds its title and URL.
    */
   tabHidden?: (url: string) => boolean
+  /**
+   * A "do the remaining N" step: what its element must still look like and,
+   * for a series, the page it was approved on. The page is compared here, on
+   * the frames listed for this very step; the element is compared by the
+   * content script inside the action, on the element the action resolved. On
+   * any difference the step fails and nothing is done to the page.
+   */
+  expect?: StepExpectation
 }
+
+/** What a "do the remaining N" step must still find (see {@link TabManagementContext.expect}). */
+export interface StepExpectation {
+  target: StepTarget
+  /** A series only: the top document and its full location (query and fragment included). */
+  page?: { documentKey: string; location: string }
+}
+
+/** Expected targets of the calls being dispatched, read when their action message is built. */
+const stepExpectations = new WeakMap<ToolCall, StepTarget>()
+
+/**
+ * Whether a "do the remaining N" step may be dispatched at all: only a
+ * selector-targeted click, type or select on the content route carries the
+ * in-action element check, and a series step must still be on the document
+ * and location its card was approved on.
+ * @returns a failure answer in the user's words, or undefined when it may run.
+ */
+export function stepExpectationFailure(call: ToolCall, frames: TabFrame[], expect: StepExpectation): ToolAnswer | undefined {
+  const zh = getUiLocale() === 'zh'
+  if (!CHECKED_STEP_TOOLS.has(call.name) || inputRoute(call) !== 'content' || typeof call.args.selector !== 'string') {
+    return { ok: false, error: { code: 'action-failed', message: zh ? '此步骤无法与已批准的行核对，因此未执行。' : 'This step cannot be checked against an approved row, so it was not run.' } }
+  }
+  if (expect.page === undefined) return undefined
+  const top = frames.find((frame) => frame.frameId === 0)
+  if (top !== undefined && frameDocumentKey(top) === expect.page.documentKey && pageLocation(top.url) === expect.page.location) return undefined
+  return { ok: false, error: { code: 'action-failed', message: zh ? '页面已重新加载或已离开您批准时的页面。未执行任何操作。' : 'the page was reloaded or is no longer the one you approved this on. Nothing was done.' } }
+}
+
+/** Actions whose content-script implementation checks the element it resolved (content/actions.ts). */
+const CHECKED_STEP_TOOLS: ReadonlySet<string> = new Set(['browser_click', 'browser_type', 'browser_select'])
 
 /** Placeholder for the title and URL of a tab site policy hides. */
 const TAB_HIDDEN = '(hidden by site policy)'
@@ -370,6 +411,7 @@ async function sendAction(
   includePageDelta: boolean = false,
   shareContent: boolean = false,
 ): Promise<unknown> {
+  const expected = stepExpectations.get(call)
   return chrome.tabs.sendMessage(tabId, {
     type: 'DSH_ACTION',
     action: call.name,
@@ -377,6 +419,8 @@ async function sendAction(
     ...budget === undefined ? {} : { budget },
     ...includePageDelta ? { includePageDelta: true } : {},
     ...shareContent ? { shareContent: true } : {},
+    // A "do the remaining N" step: the content script compares the element this action resolves before acting on it.
+    ...expected === undefined ? {} : { expect: { target: expected, zh: getUiLocale() === 'zh' } },
   }, frame.documentId === undefined ? { frameId: frame.frameId } : { documentId: frame.documentId })
 }
 
@@ -2108,6 +2152,17 @@ export async function dispatchToolCall(
       if (targetStillAllowed?.() === false) return targetChanged()
     }
   }
+  if (tabManagement.expect !== undefined) {
+    // A series step: the page is read again right before the action is sent, not as it was when the call arrived or its card was answered.
+    if (tabManagement.expect.page !== undefined) {
+      executionFrames = await listTabFrames(tab.id, tab.url)
+      if (isCancelled(call, signal)) return cancelled()
+      if (targetStillAllowed?.() === false) return targetChanged()
+    }
+    const refusal = stepExpectationFailure(call, executionFrames, tabManagement.expect)
+    if (refusal !== undefined) return refusal
+    stepExpectations.set(call, tabManagement.expect.target)
+  }
   try {
     return await dispatchOnce(
       tab.id,
@@ -2147,6 +2202,9 @@ export async function dispatchToolCall(
       if (targetStillAllowed?.() === false) return targetChanged()
       const refreshedTargetError = validateElementTarget(call, tab.id, refreshedFrames)
       if (refreshedTargetError !== undefined) return refreshedTargetError
+      // A "do the remaining N" step is held to its page on this second dispatch too: the content script was reloaded in between.
+      const refreshedRefusal = tabManagement.expect === undefined ? undefined : stepExpectationFailure(call, refreshedFrames, tabManagement.expect)
+      if (refreshedRefusal !== undefined) return refreshedRefusal
       if (approval !== undefined) {
         const refreshedApproval = promptFor(refreshedFrames, approvalContext)
         if (refreshedApproval === undefined

@@ -34,6 +34,10 @@ export interface PanelCopy {
     reveal: string
     hide: string
     pathsLabel: (count: number) => string
+    /** Heading of a program series' folded row list. */
+    rowsLabel: (count: number) => string
+    rowsFirst: string
+    rowsLast: string
     urlLabel: string
     queryParams: string
     fragmentLabel: string
@@ -389,7 +393,13 @@ export interface PanelCopy {
     stopWatching: string
     repeated: (times: number) => string
     done: string
-    doRemaining: (remaining: number) => string
+    /** `steps`: the run's true total; `more`: rows are left beyond what one run does. */
+    doRemaining: (remaining: number, steps?: number, more?: boolean) => string
+    /** A long run stopped part-way with `rows` rows left; `skipped` names a row it left part-done. */
+    stoppedEarly: (rows: number, skipped?: string) => string
+    /** Why an offer stays within one program although more rows exist. */
+    rowsIndistinct: string
+    continueRemaining: (rows: number) => string
     proposedDriver: string
     parameters: string
     tokenSource: (kind: string, name: string) => string
@@ -554,6 +564,9 @@ const EN: PanelCopy = {
     reveal: 'Reveal',
     hide: 'Hide',
     pathsLabel: (count) => `Local files to attach (${count})`,
+    rowsLabel: (count) => `Show all ${count} rows (open a row for its exact steps)`,
+    rowsFirst: 'First row:',
+    rowsLast: 'Last row:',
     urlLabel: 'Full destination URL',
     queryParams: 'Decoded parameters',
     fragmentLabel: 'Fragment',
@@ -969,7 +982,14 @@ const EN: PanelCopy = {
     stopWatching: 'Stop watching',
     repeated: (times) => `You did this ${String(times)} times:`,
     done: 'Done.',
-    doRemaining: (remaining) => `Do the remaining ${String(remaining)} like this`,
+    doRemaining: (remaining, steps, more) => more === true
+      ? `Do the next ${String(remaining)} like this (${String(steps ?? remaining)} steps, the most one run does)`
+      : steps !== undefined && steps > remaining
+      ? `Do the remaining ${String(remaining)} like this (${String(steps)} steps)`
+      : `Do the remaining ${String(remaining)} like this`,
+    stoppedEarly: (rows, skipped) => `${rows > 0 ? `The run stopped with ${String(rows)} rows left.` : 'The run stopped.'}${skipped === undefined ? '' : ` “${skipped}” was left part-done and is skipped; do it by hand.`}${rows > 0 ? ' Continuing looks at the page as it is now and asks you again.' : ''}`,
+    rowsIndistinct: 'These rows can\'t be told apart, so only 25 steps at a time.',
+    continueRemaining: (rows) => `Continue with the ${String(rows)} rows left`,
     proposedDriver: 'Proposed site driver',
     parameters: 'Parameters',
     tokenSource: (kind, name) => `read from page ${kind} "${name}" each time (never stored)`,
@@ -1136,6 +1156,9 @@ const ZH: PanelCopy = {
     reveal: '显示',
     hide: '隐藏',
     pathsLabel: (count) => `将附加的本地文件（${count} 个）`,
+    rowsLabel: (count) => `显示全部 ${count} 行（展开某一行可查看具体步骤）`,
+    rowsFirst: '第一行：',
+    rowsLast: '最后一行：',
     urlLabel: '完整目标 URL',
     queryParams: '解码后的参数',
     fragmentLabel: '片段',
@@ -1551,7 +1574,14 @@ const ZH: PanelCopy = {
     stopWatching: '停止观察',
     repeated: (times) => `您已重复 ${String(times)} 次：`,
     done: '完成。',
-    doRemaining: (remaining) => `按同样方式完成剩余 ${String(remaining)} 项`,
+    doRemaining: (remaining, steps, more) => more === true
+      ? `按同样方式完成接下来的 ${String(remaining)} 项（共 ${String(steps ?? remaining)} 步，单次运行的上限）`
+      : steps !== undefined && steps > remaining
+      ? `按同样方式完成剩余 ${String(remaining)} 项（共 ${String(steps)} 步）`
+      : `按同样方式完成剩余 ${String(remaining)} 项`,
+    stoppedEarly: (rows, skipped) => `${rows > 0 ? `运行已停止，还剩 ${String(rows)} 行。` : '运行已停止。'}${skipped === undefined ? '' : `“${skipped}”只完成了一部分，已跳过；请手动完成。`}${rows > 0 ? '继续时会按页面当前的样子重新询问您。' : ''}`,
+    rowsIndistinct: '这些行无法相互区分，因此每次最多执行 25 步。',
+    continueRemaining: (rows) => `继续处理剩下的 ${String(rows)} 行`,
     proposedDriver: '建议的站点驱动',
     parameters: '参数',
     tokenSource: (kind, name) => `每次从页面 ${kind} "${name}" 读取（从不存储）`,

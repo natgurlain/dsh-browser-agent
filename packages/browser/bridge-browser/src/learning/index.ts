@@ -26,7 +26,7 @@ import { auditResultDigest, redactAuditUrl } from '../audit-log.ts'
 import { workspaceWriteTarget } from '../workspace-write.ts'
 import { parseFixtureInput, saveFixture } from './fixtures.ts'
 import { createSequentialExecutor, renderReplayReport, type BrowserProgramRunner, type ProgramStep, type ReplayReport, type StepCall, type WorkflowExecutor } from './replay.ts'
-import { MAX_PROGRAM_STEPS as BROWSER_RUN_MAX_STEPS, parseProgram as parseBrowserRunProgram, renderProgramOutcome, runProgram as runBrowserRun } from '../run-program.ts'
+import { MAX_PROGRAM_STEPS as BROWSER_RUN_MAX_STEPS, MAX_SERIES_STEPS, parseProgram as parseBrowserRunProgram, parseProgramSeries, renderProgramOutcome, renderSeriesOutcome, runProgram as runBrowserRun, runProgramSeries } from '../run-program.ts'
 import { parseScheduleTiming, WorkflowSchedules, type ScheduleServiceLike } from './schedules.ts'
 import { parseSiteDrivers, siteDriverToolName, type SiteDriverSummary } from './site-drivers.ts'
 import { listWorkflows, loadWorkflow, registerWorkflowSkills, saveWorkflow, workspaceRootOf, type SkillsServiceLike } from './store.ts'
@@ -45,7 +45,12 @@ export const LEARNING_METHODS = {
   saveFixture: 'bridge.learning.fixture.save',
 } as const
 
-/** Most steps a "Watch me" program may hold (one `browser_run`). */
+/**
+ * Most steps one `browser_run` holds. A "Watch me" program within it runs as
+ * that one `browser_run`; a longer one (up to MAX_SERIES_STEPS in total, whole
+ * repetitions of `rowSteps` steps) runs as a series of such batches under one
+ * card that states the true total (run-program.ts, runProgramSeries).
+ */
 const MAX_PROGRAM_STEPS = BROWSER_RUN_MAX_STEPS
 
 /** Tools a program step may call. */
@@ -131,12 +136,24 @@ export function bridgeStepCall(bridge: Pick<BridgeServer, 'requestTool'>, toolTi
  * A `browser_run`-backed program runner: one program card in the extension,
  * then each step claims it (run-program.ts), every step through the full path.
  */
-export function browserRunRunner(bridge: Pick<BridgeServer, 'requestTool'>, toolTimeoutMs: number, sessionId: string | undefined, toolCallId?: string): BrowserProgramRunner {
+export function browserRunRunner(bridge: Pick<BridgeServer, 'requestTool'>, toolTimeoutMs: number, sessionId: string | undefined, toolCallId?: string, rowSteps?: number): BrowserProgramRunner {
   return async (steps, signal) => {
-    const parsed = parseBrowserRunProgram(steps.map((step) => ({ tool: step.tool, args: step.args })))
-    const outcome = await runBrowserRun(bridge, parsed, {
-      signal, ...(sessionId === undefined ? {} : { sessionId }), ...(toolCallId === undefined ? {} : { toolCallId }),
-    }, { toolTimeoutMs })
+    const exec = { signal, ...(sessionId === undefined ? {} : { sessionId }), ...(toolCallId === undefined ? {} : { toolCallId }) }
+    if (steps.length > MAX_PROGRAM_STEPS) {
+      // More than one browser_run holds: batches under one card for the whole run.
+      const outcome = await runProgramSeries(bridge, parseProgramSeries(steps, rowSteps), rowSteps!, exec, { toolTimeoutMs })
+      const status: ReplayReport['status'] = outcome.stop === 'completed' ? 'completed' : outcome.stop === 'cancelled' ? 'cancelled' : 'failed'
+      return {
+        status,
+        steps: outcome.steps.map((step) => ({ step: step.step - 1, tool: step.tool, status: step.ok ? 'done' as const : 'failed' as const, message: step.text })),
+        ...(status === 'completed' ? {} : { stoppedAt: Math.max(0, outcome.steps.length - 1) }),
+        text: renderSeriesOutcome(outcome),
+        ...(outcome.rows === undefined ? {} : { rows: outcome.rows }),
+      } as ReplayReport
+    }
+    // A demonstrated program says what each step's element looks like; the extension checks it inside the action.
+    const parsed = parseBrowserRunProgram(steps.map((step) => ({ tool: step.tool, args: step.args, ...((step as { target?: unknown }).target === undefined ? {} : { target: (step as { target?: unknown }).target }) })), true)
+    const outcome = await runBrowserRun(bridge, parsed, exec, { toolTimeoutMs })
     const status: ReplayReport['status'] = outcome.stop === 'completed' ? 'completed' : outcome.stop === 'cancelled' ? 'cancelled' : 'failed'
     return {
       status,
@@ -147,9 +164,18 @@ export function browserRunRunner(bridge: Pick<BridgeServer, 'requestTool'>, tool
   }
 }
 
-/** Validate a "Watch me" program sent by the panel. */
-export function parseProgram(value: unknown): ProgramStep[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_PROGRAM_STEPS) {
+/**
+ * Validate a "Watch me" program sent by the panel.
+ * @param value - the steps.
+ * @param rowSteps - steps per repetition; required for (and only used by) a
+ *   program longer than one `browser_run`, which runs as a series of batches.
+ */
+export function parseProgram(value: unknown, rowSteps?: unknown): ProgramStep[] {
+  if (Array.isArray(value) && value.length > MAX_PROGRAM_STEPS) {
+    if (rowSteps === undefined) throw new Error(`a program needs 1–${String(MAX_PROGRAM_STEPS)} steps, or rowSteps and at most ${String(MAX_SERIES_STEPS)} steps of whole repetitions`)
+    return parseProgramSeries(value, rowSteps)
+  }
+  if (!Array.isArray(value) || value.length === 0) {
     throw new Error(`a program needs 1–${String(MAX_PROGRAM_STEPS)} steps`)
   }
   return value.map((step, index) => {
@@ -157,7 +183,7 @@ export function parseProgram(value: unknown): ProgramStep[] {
       throw new Error(`program step ${String(index + 1)} is not a supported browser action`)
     }
     if (step.args.index !== undefined) throw new Error(`program step ${String(index + 1)} must use a selector, not a snapshot index`)
-    return { tool: step.tool, args: { ...step.args } }
+    return { tool: step.tool, args: { ...step.args }, ...(step.target === undefined ? {} : { target: step.target }) }
   })
 }
 
@@ -398,13 +424,14 @@ export function mountLearning(
             return { ok: true, result: created }
           }
           case LEARNING_METHODS.programRun: {
-            const program = parseProgram(body.steps)
+            const program = parseProgram(body.steps, body.rowSteps)
+            const rowSteps = program.length > MAX_PROGRAM_STEPS ? body.rowSteps as number : undefined
             const controller = new AbortController()
             const timer = setTimeout(() => { controller.abort() }, REPLAY_TIMEOUT_MS)
             try {
               const report = await executorFor(
                 bridgeStepCall(bridge, options.toolTimeoutMs, sessionId),
-                browserRunRunner(bridge, options.toolTimeoutMs, sessionId),
+                browserRunRunner(bridge, options.toolTimeoutMs, sessionId, undefined, rowSteps),
               ).runProgram(program, { signal: controller.signal })
               return { ok: true, result: { report, text: report.text ?? renderReplayReport('watch-me program', report, program.length) } }
             } finally {

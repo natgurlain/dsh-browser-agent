@@ -121,7 +121,21 @@ describe('handleLearningMessage', () => {
     add.mockRestore()
     remove.mockRestore()
     const probe = handle({ type: 'DSH_WATCH_PROBE', selectors: [['#people > tbody > tr:nth-child(2) > td:nth-child(4) > button'], 'junk', [1]] })
-    expect(probe.responses[0]).toEqual({ ok: true, result: { rows: [['2', 'Grace', '', 'Invite']] } })
+    // Each row comes with what its step's element looks like and which row it sits in (learning-row-identity.spec.ts).
+    expect(probe.responses[0]).toEqual({ ok: true, result: { rows: [['2', 'Grace', '', 'Invite']], targets: [[{ tag: 'button', role: 'button', name: 'Invite', row: '2 · Grace', rowKey: expect.stringMatching(/^[0-9a-f]{32}$/u) }]] } })
+  })
+
+  it('does not count a hidden row: the probe stops at the first element the user cannot see', () => {
+    const button = (row: number) => `#people > tbody > tr:nth-child(${String(row)}) > td:nth-child(4) > button`
+    expect(probeRows([[button(1)], [button(2)], [button(3)]])).toHaveLength(3)
+    document.querySelector('#people tr:nth-child(2)')!.setAttribute('hidden', '')
+    expect(probeRows([[button(1)], [button(2)], [button(3)]])).toHaveLength(1)
+    document.querySelector('#people tr:nth-child(2)')!.removeAttribute('hidden')
+    ;(document.querySelector(button(3)) as HTMLElement).style.display = 'none'
+    expect(probeRows([[button(1)], [button(2)], [button(3)]])).toHaveLength(2)
+    ;(document.querySelector(button(3)) as HTMLElement).style.display = ''
+    ;(document.querySelector('#people') as HTMLElement).style.visibility = 'hidden'
+    expect(probeRows([[button(1)]])).toHaveLength(0)
   })
 
   it('runs a site-driver fetch asynchronously and refuses another origin', async () => {
