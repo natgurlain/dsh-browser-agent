@@ -151,7 +151,7 @@ import { splitSelectionMessage } from '../panel/selection.ts'
 import { callPolicyTargets, forcedApprovalPrompt, originFromUrl } from './authorization.ts'
 import { normalizeSitePattern, normalizeSiteRules, type SiteRuleEntry } from '../security/site-policy.ts'
 import { CommitGate, STRICT_MODE_UNAVAILABLE } from './commit-gate.ts'
-import { LearningRuntime } from './learning.ts'
+import { fixtureAllowedFor, LearningRuntime } from './learning.ts'
 import { applyManagedOverrides, loadManagedPolicy } from '../security/managed-policy.ts'
 import {
   LEGACY_RECENT_SESSION_STORAGE_KEY,
@@ -2260,11 +2260,12 @@ const learning = new LearningRuntime({
   bridgeConnected: () => bridge?.state === 'connected',
   agentActiveOnTab: (tabId) => [...unsettledToolCalls].some((active) => active.tabId === tabId),
   halted: () => killSwitchEngaged || pauseGate.state().mode !== 'running',
-  fixtureAllowed: (sessionId, url) => {
-    const origin = originFromUrl(url)
-    if (origin === undefined || (!unrestrictedAccessEnabled() && settings.sharePageContent === 'off')) return false
-    return policyRuntime.evaluate({ name: 'browser_snapshot', args: {}, ...(sessionId === undefined ? {} : { sessionId }) }, { reads: [origin], acts: [], pageOrigin: origin }).kind !== 'deny'
-  },
+  // A fixture saves the page to disk without a card: only where page reads are
+  // automatic (sharing "auto") and the policy layer neither denies nor forces
+  // a fresh decision (blocked, read-only/ask site, taint).
+  fixtureAllowed: (sessionId, url) => fixtureAllowedFor(settings.sharePageContent, (origin) => policyRuntime.evaluate(
+    { name: 'browser_snapshot', args: {}, ...(sessionId === undefined ? {} : { sessionId }) }, { reads: [origin], acts: [], pageOrigin: origin, urls: [url] },
+  ).kind, url),
   capturedRequests: (tabId) => devTools.capturedRequests?.(tabId),
   siteDriversSupported: devToolsCapability,
   activeTab: async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0],

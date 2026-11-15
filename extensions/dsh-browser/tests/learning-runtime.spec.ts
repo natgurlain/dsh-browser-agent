@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { classifyFailure, LearningRuntime, normalizeLearningSettings, rpcValue, type LearningDeps } from '../src/background/learning.ts'
+import { classifyFailure, fixtureAllowedFor, LearningRuntime, normalizeLearningSettings, rpcValue, type LearningDeps } from '../src/background/learning.ts'
 import type { ApprovalPrompt } from '../src/security/approval.ts'
 import type { ToolCall } from '../src/background/tools.ts'
 
@@ -147,13 +147,50 @@ describe('learning runtime', () => {
   it('classifies failures for the flywheel and skips blocked or cancelled calls', () => {
     const fail = (message: string) => ({ ok: false, error: { code: 'action-failed' as const, message } })
     expect(classifyFailure(fail('No element matched selector: #x'), undefined, undefined, false)).toBe('not-found')
-    expect(classifyFailure(fail('The user denied this action'), 'denied', undefined, false)).toBe('denied')
+    // Denied or timed-out steps are never captured (review finding 5).
+    expect(classifyFailure(fail('The user denied this action'), 'denied', undefined, false)).toBeUndefined()
+    expect(classifyFailure(fail('Approval timed out'), 'timed-out', undefined, false)).toBeUndefined()
+    expect(classifyFailure({ ok: false, error: { code: 'timeout', message: 'x' } }, undefined, undefined, false)).toBeUndefined()
+    expect(classifyFailure(fail('The user declined the tab fleet.'), undefined, undefined, false)).toBeUndefined()
     expect(classifyFailure(fail('Click target is covered by #modal'), undefined, undefined, false)).toBe('guard')
     expect(classifyFailure(fail('boom'), undefined, undefined, true)).toBe('retried')
     expect(classifyFailure(fail('blocked'), undefined, 'blocked', false)).toBeUndefined()
     expect(classifyFailure(fail('Tool call was cancelled'), undefined, undefined, false)).toBeUndefined()
     expect(normalizeLearningSettings({ siteDriverOrigins: ['https://a.example/path', 'nope'] }).siteDriverOrigins).toEqual(['https://a.example'])
     expect(rpcValue({ type: 'server-response', result: { ok: true, value: 3 } })).toBe(3)
+  })
+
+  it('accepts the panel port only from extension pages, never a content script (review finding 7)', async () => {
+    const chromeGlobal = (globalThis as unknown as { chrome: Record<string, unknown> }).chrome
+    chromeGlobal.runtime = { id: 'ext', getURL: (path: string) => `chrome-extension://ext/${path}` }
+    const { learning } = runtime()
+    const port = (url: string) => ({
+      name: 'dsh-learning',
+      sender: { id: 'ext', url },
+      disconnect: vi.fn(),
+      postMessage: vi.fn(),
+      onDisconnect: { addListener: vi.fn() },
+      onMessage: { addListener: vi.fn() },
+    })
+    const content = port('https://evil.example/page')
+    expect(learning.connect(content as unknown as chrome.runtime.Port)).toBe(true)
+    expect(content.disconnect).toHaveBeenCalled()
+    expect(content.onMessage.addListener).not.toHaveBeenCalled()
+    const panel = port('chrome-extension://ext/panel/index.html')
+    expect(learning.connect(panel as unknown as chrome.runtime.Port)).toBe(true)
+    expect(panel.disconnect).not.toHaveBeenCalled()
+    expect(panel.onMessage.addListener).toHaveBeenCalled()
+  })
+
+  it('captures fixtures only with sharing auto and a non-force, non-deny policy for the page', () => {
+    const url = 'https://shop.example/cart'
+    expect(fixtureAllowedFor('auto', () => 'default', url)).toBe(true)
+    expect(fixtureAllowedFor('auto', () => 'trust', url)).toBe(true)
+    expect(fixtureAllowedFor('ask', () => 'default', url)).toBe(false)
+    expect(fixtureAllowedFor('off', () => 'trust', url)).toBe(false)
+    expect(fixtureAllowedFor('auto', () => 'force', url)).toBe(false)
+    expect(fixtureAllowedFor('auto', () => 'deny', url)).toBe(false)
+    expect(fixtureAllowedFor('auto', () => 'default', 'chrome://settings')).toBe(false)
   })
 
   it('saves a fixture through the bridge with a sanitized DOM when the page has sensitive fields', async () => {

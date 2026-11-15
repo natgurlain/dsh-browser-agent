@@ -34,6 +34,7 @@ import { buildWorkflow, type RecordedLocator, type RecordedStep, type WorkflowCh
 import { buildProgram, detectRepetition, nextSelectors, type ProgramStep, type RepetitionPattern, type WatchEvent } from '../shared/repetition.ts'
 import type { NetworkEntry } from './devtools-network.ts'
 import { listTabFrames } from './frames.ts'
+import { isExtensionPageSender } from './policy-runtime.ts'
 import type { CallPolicyHook, ToolAnswer, ToolCall } from './tools.ts'
 
 /** Storage key of the learning switches. */
@@ -168,17 +169,34 @@ export function rpcValue(answer: unknown): unknown {
   return answer
 }
 
-/** Classify a failed step for the flywheel; undefined means "do not capture". */
-export function classifyFailure(answer: ToolAnswer, decision: string | undefined, policy: string | undefined, retried: boolean): 'denied' | 'not-found' | 'guard' | 'retried' | 'error' | undefined {
+/**
+ * Classify a failed step for the flywheel; undefined means "do not capture".
+ * A step the user denied or let time out is never captured: the user said no
+ * to that page action, so its page must not be saved either.
+ */
+export function classifyFailure(answer: ToolAnswer, decision: string | undefined, policy: string | undefined, retried: boolean): 'not-found' | 'guard' | 'retried' | 'error' | undefined {
   if (answer.ok) return undefined
   if (policy === 'blocked' || decision === 'held-expired') return undefined
   const message = answer.error?.message ?? ''
   if (/cancelled|kill switch|stopped/iu.test(message)) return undefined
-  if (decision === 'denied' || decision === 'timed-out' || /denied|declined/iu.test(message)) return 'denied'
+  if (decision === 'denied' || decision === 'timed-out' || answer.error?.code === 'timeout' || /denied|declined|not approved|timed out/iu.test(message)) return undefined
   if (retried) return 'retried'
   if (/does not exist|no element matched|not found|no .*matching/iu.test(message)) return 'not-found'
   if (/covered by|changed|guard|strict mode|refused/iu.test(message)) return 'guard'
   return 'error'
+}
+
+/**
+ * Whether a failure fixture may capture this page: page sharing is `auto`
+ * (reads need no card) and the policy decision for reading it is neither
+ * `deny` nor `force`.
+ */
+export function fixtureAllowedFor(sharePageContent: 'ask' | 'auto' | 'off', decide: (origin: string) => 'deny' | 'force' | 'trust' | 'default', url: string | undefined): boolean {
+  if (sharePageContent !== 'auto') return false
+  const origin = originOf(url)
+  if (origin === undefined) return false
+  const kind = decide(origin)
+  return kind !== 'deny' && kind !== 'force'
 }
 
 /**
@@ -705,6 +723,12 @@ export class LearningRuntime {
   /** Attach a panel port; returns false when it is not ours. */
   connect(port: chrome.runtime.Port): boolean {
     if (port.name !== LEARNING_PORT_NAME) return false
+    // Content scripts run beside untrusted pages: only extension pages may
+    // save workflows, approve drivers, or read the learning state.
+    if (!isExtensionPageSender(port.sender)) {
+      port.disconnect()
+      return true
+    }
     this.ports.add(port)
     port.onDisconnect.addListener(() => { this.ports.delete(port) })
     port.onMessage.addListener((message: unknown) => { void this.onPortMessage(port, message) })
