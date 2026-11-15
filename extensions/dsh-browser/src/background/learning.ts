@@ -28,10 +28,10 @@ import { REPLAYABLE_TOOLS, ELEMENT_TOOLS } from '@natgurlain/dsh-bridge-browser/
 import { getUiLocale } from '../i18n.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import type { CallPolicyDecision, CallPolicyTargets } from '../security/call-policy.ts'
-import { approvalBinding, canonicalJson } from '../security/payload-binding.ts'
+import { approvalBinding, canonicalJson, sha256Hex } from '../security/payload-binding.ts'
 import { wrapUntrustedContent } from '../security/untrusted.ts'
 import { buildWorkflow, type RecordedLocator, type RecordedStep, type WorkflowChoices } from '../shared/workflow-build.ts'
-import { buildProgram, detectRepetition, nextSelectors, type ProgramStep, type RepetitionPattern, type WatchEvent } from '../shared/repetition.ts'
+import { buildProgram, detectRepetition, maxFinishRows, nextSelectors, RUN_BATCH_STEPS, type ProgramStep, type RepetitionPattern, type WatchEvent } from '../shared/repetition.ts'
 import type { NetworkEntry } from './devtools-network.ts'
 import { listTabFrames } from './frames.ts'
 import { isExtensionPageSender } from './policy-runtime.ts'
@@ -86,9 +86,8 @@ const RETRY_WINDOW_MS = 120_000
 const STRAY_STOP_INTERVAL_MS = 30_000
 const MAX_STRAY_STOP_TABS = 50
 const NO_SESSION = '(no-session)'
+/** Bound on one whole "do the remaining N" run, batches included (the bridge holds the same). */
 const PROGRAM_RUN_TIMEOUT_MS = 30 * 60_000
-/** One `browser_run` holds at most this many steps. */
-const MAX_PROGRAM_STEPS = 25
 
 /** What the background index provides. */
 export interface LearningDeps {
@@ -134,9 +133,17 @@ export interface WatchSuggestion {
   origin: string
   period: number
   done: number
+  /** Rows this run would do (the whole program: `remaining × period` steps). */
   remaining: number
+  /** Further rows exist beyond what one run does (MAX_FINISH_STEPS). */
+  more: boolean
   program: ProgramStep[]
   labels: string[]
+}
+
+/** Hash of a whole program: tool and canonical arguments of every step, in order. */
+function programDigest(steps: ReadonlyArray<{ tool: string; args: Record<string, unknown> }>): string {
+  return sha256Hex(canonicalJson(steps.map((step) => ({ tool: step.tool, args: step.args }))))
 }
 
 function zh(): boolean {
@@ -215,6 +222,8 @@ export class LearningRuntime {
   /** The user turned saved workflows off and the bridge has not acknowledged it yet. */
   private workflowsTurnedOff = false
   private suggestion: WatchSuggestion | undefined
+  /** The over-one-batch program a "do the remaining N" request is running (see claimSeries). */
+  private armedSeries: { sessionId: string | undefined; digest: string } | undefined
   private lastAgentActivity = new Map<number, number>()
   /** When each tab was last told to stop a recorder this worker does not know about. */
   private readonly strayStops = new Map<number, number>()
@@ -733,8 +742,11 @@ export class LearningRuntime {
       return
     }
     try {
-      const response = await chrome.tabs.sendMessage(watch.tabId, { type: 'DSH_WATCH_PROBE', selectors: nextSelectors(pattern, Math.floor(MAX_PROGRAM_STEPS / pattern.period)) }, { frameId: 0 }) as { ok?: boolean; result?: { rows?: string[][] } } | undefined
-      const rows = response?.result?.rows ?? []
+      // One row more than a run may do, to know whether rows are left over.
+      const limit = maxFinishRows(pattern.period)
+      const response = await chrome.tabs.sendMessage(watch.tabId, { type: 'DSH_WATCH_PROBE', selectors: limit === 0 ? [] : nextSelectors(pattern, limit + 1) }, { frameId: 0 }) as { ok?: boolean; result?: { rows?: string[][] } } | undefined
+      const probed = response?.result?.rows ?? []
+      const rows = probed.slice(0, limit)
       // A cell-sourced value needs a non-empty cell in every remaining row.
       const usable = rows.filter((cells) => pattern.steps.every((step) => step.value.kind !== 'cell' || (cells[step.value.cell] ?? '').trim() !== ''))
       if (usable.length !== rows.length || rows.length === 0) {
@@ -746,6 +758,7 @@ export class LearningRuntime {
           period: pattern.period,
           done: pattern.done,
           remaining: rows.length,
+          more: probed.length > rows.length,
           program: buildProgram(pattern, rows),
           labels: pattern.steps.map((step) => `${step.kind}${step.label === undefined ? '' : ` "${step.label}"`}${step.value.kind === 'cell' ? ` ← column ${String(step.value.cell + 1)}` : step.value.kind === 'constant' ? ` ← "${step.value.value}"` : ''}`),
         }
@@ -762,6 +775,11 @@ export class LearningRuntime {
    * step's payload, bound to this page) and each step then claims that
    * approval through run-program.ts; forced, per-call and off-origin cards
    * still ask, and every step keeps the full dispatch path.
+   *
+   * A remainder longer than one `browser_run` goes as a series: the bridge
+   * runs it in batches under one card that states the true total and lists
+   * every step (run-program.ts). Only the exact program built here is
+   * accepted as a series ({@link claimSeries}).
    */
   async runSuggestion(sessionId: string | undefined): Promise<unknown> {
     const suggestion = this.suggestion
@@ -770,7 +788,29 @@ export class LearningRuntime {
     if (httpOrigin(tab.url) !== suggestion.origin) throw new Error('The watched tab left the page.')
     // The user's own input from here on is the program, not new teaching.
     await this.stopWatching()
-    return this.bridgeCall(METHODS.programRun, { ...(sessionId === undefined ? {} : { sessionId }), steps: suggestion.program }, PROGRAM_RUN_TIMEOUT_MS)
+    const session = sessionId === undefined ? {} : { sessionId }
+    if (suggestion.program.length <= RUN_BATCH_STEPS) {
+      return this.bridgeCall(METHODS.programRun, { ...session, steps: suggestion.program }, PROGRAM_RUN_TIMEOUT_MS)
+    }
+    const armed = { sessionId, digest: programDigest(suggestion.program) }
+    this.armedSeries = armed
+    try {
+      return await this.bridgeCall(METHODS.programRun, { ...session, steps: suggestion.program, rowSteps: suggestion.period }, PROGRAM_RUN_TIMEOUT_MS)
+    } finally {
+      if (this.armedSeries === armed) this.armedSeries = undefined
+    }
+  }
+
+  /**
+   * Whether `steps` is, step for step, the long program the user just asked
+   * this extension to run for this session. One-shot: the series card may be
+   * raised once per request, and for nothing the extension did not build.
+   */
+  claimSeries(sessionId: string | undefined, steps: ReadonlyArray<{ tool: string; args: Record<string, unknown> }>): boolean {
+    const armed = this.armedSeries
+    if (armed === undefined || !this.settings.watchMe || armed.sessionId !== sessionId || armed.digest !== programDigest(steps)) return false
+    this.armedSeries = undefined
+    return true
   }
 
   // ---- panel port ----

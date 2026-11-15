@@ -30,8 +30,20 @@ import { sessionIdOfExec } from './external-caller.ts'
 import { UNTRUSTED_CONTENT_TAG, UNTRUSTED_NOTICE_LEAD } from './protocol.ts'
 import { errorMessage, isRecord } from './host-api.ts'
 
-/** Most steps one program may hold. */
+/** Most steps one program (one `browser_run` approval call) may hold. */
 export const MAX_PROGRAM_STEPS = 25
+
+/**
+ * Most steps a program series may hold in total. A series exists only for
+ * the user's own "do the remaining N" request (learning/index.ts): the same
+ * few selector-targeted steps repeated over rows. It runs as batches of at
+ * most {@link MAX_PROGRAM_STEPS} steps under one card that lists every step
+ * of every batch; see {@link runProgramSeries}.
+ */
+export const MAX_SERIES_STEPS = 250
+
+/** Actions a series step may run: selector-targeted input only, never navigation or reads. */
+export const SERIES_STEP_TOOLS: ReadonlySet<string> = new Set(['browser_click', 'browser_type', 'browser_select'])
 
 /** Actions a program step may run. No tab management, uploads, clipboard, devtools, or nested programs. */
 export const PROGRAM_STEP_TOOLS = [
@@ -98,6 +110,8 @@ export interface ProgramOutcome {
   /** Snapshot delta at the stop point, already inside the untrusted boundary. */
   delta?: string
   message?: string
+  /** A series only: whole repetitions (rows) done, of the rows and steps approved. */
+  rows?: { done: number; total: number; steps: number }
 }
 
 /** The bridge surface the runner uses. */
@@ -286,6 +300,151 @@ export async function runProgram(
     delta = `(No snapshot delta: ${errorMessage(error)})`
   }
   return { stop, steps: results, delta, ...(message === undefined ? {} : { message }) }
+}
+
+/**
+ * Validate the steps of a program series (the same `rowSteps` steps repeated
+ * over rows). A series spans more than one `browser_run`, so the rules are
+ * narrower than a program's: selector-targeted input only, no guards.
+ * @throws ProgramError naming the first problem.
+ */
+export function parseProgramSeries(raw: unknown, rowSteps: unknown): ProgramStep[] {
+  if (typeof rowSteps !== 'number' || !Number.isInteger(rowSteps) || rowSteps < 1 || rowSteps > MAX_PROGRAM_STEPS) {
+    throw new ProgramError(`rowSteps must be a whole number from 1 to ${String(MAX_PROGRAM_STEPS)}`)
+  }
+  if (!Array.isArray(raw) || raw.length === 0) throw new ProgramError('steps must be a non-empty array')
+  if (raw.length > MAX_SERIES_STEPS) throw new ProgramError(`one run does at most ${String(MAX_SERIES_STEPS)} steps in total`)
+  if (raw.length % rowSteps !== 0) throw new ProgramError('steps must be whole repetitions of rowSteps steps')
+  return raw.map((entry, index) => {
+    const where = `steps[${String(index)}]`
+    if (!isRecord(entry) || typeof entry.tool !== 'string' || !SERIES_STEP_TOOLS.has(entry.tool)) {
+      throw new ProgramError(`${where}.tool must be one of ${[...SERIES_STEP_TOOLS].join(', ')}`)
+    }
+    if (!isRecord(entry.args) || typeof entry.args.selector !== 'string' || entry.args.selector === '' || entry.args.index !== undefined) {
+      throw new ProgramError(`${where} must target its element by selector`)
+    }
+    if (entry.expect !== undefined) throw new ProgramError(`${where} must not carry an expect`)
+    return { tool: entry.tool as ProgramStep['tool'], args: { ...entry.args } }
+  })
+}
+
+/**
+ * Execute a program series: one approval for the whole run, executed as
+ * batches that each fit one `browser_run`.
+ *
+ * The first `browser_run` call carries the first batch plus every later step
+ * (`series`), so the extension's single card lists and binds the true total.
+ * Each further batch is announced with its own `browser_run` call that names
+ * the series (`continues`); the extension lets it stand only when it is
+ * exactly the next approved steps, and that call waits at the pause gate like
+ * any other, so pause / take over / the kill switch act between batches as
+ * well as before every step. A batch starts only after the one before it
+ * completed; the first failed step ends the run.
+ * @param bridge - the bridge server.
+ * @param steps - validated series steps ({@link parseProgramSeries}).
+ * @param rowSteps - steps per repetition; batches hold whole repetitions.
+ * @param exec - the caller's signal plus its session and tool-call ids.
+ * @param options - per-step budget.
+ */
+export async function runProgramSeries(
+  bridge: RunnerBridge,
+  steps: ProgramStep[],
+  rowSteps: number,
+  exec: { signal: AbortSignal; sessionId?: string; toolCallId?: string },
+  options: RunProgramOptions,
+): Promise<ProgramOutcome> {
+  const request = (name: string, args: Record<string, unknown>, program?: { id: string; step: number }): Promise<unknown> =>
+    bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, exec.sessionId, exec.toolCallId, program)
+  const batchSteps = Math.floor(MAX_PROGRAM_STEPS / rowSteps) * rowSteps
+  const total = { total: steps.length / rowSteps, steps: steps.length }
+  const programIdOf = (approval: unknown): string | undefined =>
+    isRecord(approval) && typeof approval.programId === 'string' && approval.programId !== '' ? approval.programId : undefined
+  let seriesId: string | undefined
+  try {
+    seriesId = programIdOf(await request('browser_run', { steps: steps.slice(0, batchSteps), series: { rowSteps, later: steps.slice(batchSteps) } }))
+  } catch (error: unknown) {
+    return { stop: 'not-approved', steps: [], message: errorMessage(error), rows: { done: 0, ...total } }
+  }
+  if (seriesId === undefined) return { stop: 'not-approved', steps: [], message: 'The extension did not approve the program.', rows: { done: 0, ...total } }
+  const results: ProgramStepResult[] = []
+  let stop: ProgramStop = 'completed'
+  let reachable = true
+  let message: string | undefined
+  let programId = seriesId
+  run: for (let offset = 0; offset < steps.length; offset += batchSteps) {
+    const batch = steps.slice(offset, offset + batchSteps)
+    if (exec.signal.aborted) {
+      stop = 'cancelled'
+      reachable = false
+      break
+    }
+    if (offset > 0) {
+      // Held at the pause gate while the user has paused or taken over; refused unless it is exactly the next approved steps.
+      let refusal: string | undefined
+      try {
+        const next = programIdOf(await request('browser_run', { steps: batch, continues: seriesId }))
+        if (next === undefined) refusal = 'the extension did not continue the program'
+        else programId = next
+      } catch (error: unknown) {
+        refusal = errorMessage(error)
+        reachable = !isTerminal(error, exec.signal)
+      }
+      if (refusal !== undefined) {
+        stop = exec.signal.aborted ? 'cancelled' : 'error'
+        message = `Stopped before step ${String(offset + 1)}: ${refusal}`
+        break
+      }
+    }
+    for (const [index, step] of batch.entries()) {
+      if (exec.signal.aborted) {
+        stop = 'cancelled'
+        reachable = false
+        break run
+      }
+      try {
+        const text = resultText(await request(step.tool, step.args, { id: programId, step: index }))
+        results.push({ step: offset + index + 1, tool: step.tool, ok: true, text: statusOf(text) })
+      } catch (error: unknown) {
+        results.push({ step: offset + index + 1, tool: step.tool, ok: false, text: errorMessage(error) })
+        stop = exec.signal.aborted ? 'cancelled' : 'error'
+        reachable = !isTerminal(error, exec.signal)
+        message = `Stopped at step ${String(offset + index + 1)}.`
+        break run
+      }
+    }
+  }
+  const done = Math.floor(results.filter((step) => step.ok).length / rowSteps)
+  const outcome: ProgramOutcome = { stop, steps: results, rows: { done, ...total }, ...(message === undefined ? {} : { message }) }
+  if (!reachable) return outcome
+  try {
+    outcome.delta = resultText(await request('browser_snapshot', { delta: true }))
+  } catch (error: unknown) {
+    outcome.delta = `(No snapshot delta: ${errorMessage(error)})`
+  }
+  return outcome
+}
+
+/**
+ * Render a series outcome: rows done of rows approved, and the step that
+ * stopped it (a full run would otherwise list hundreds of near-identical lines).
+ */
+export function renderSeriesOutcome(outcome: ProgramOutcome): string {
+  const rows = outcome.rows ?? { done: 0, total: 0, steps: 0 }
+  const ran = outcome.steps.filter((step) => step.ok).length
+  const progress = `${String(rows.done)} of ${String(rows.total)} rows done (${String(ran)} of ${String(rows.steps)} steps ran)`
+  const headline: Record<ProgramStop, string> = {
+    completed: `Program completed: all ${String(rows.total)} rows done (${String(rows.steps)} steps).`,
+    error: `Program stopped by an error: ${progress}.`,
+    guard: `Program stopped by a failed guard: ${progress}.`,
+    cancelled: `Program cancelled: ${progress}.`,
+    'not-approved': `Program not run: ${outcome.message ?? 'it was not approved'}.`,
+  }
+  const lines = [headline[outcome.stop]]
+  if (outcome.stop !== 'not-approved' && outcome.message !== undefined) lines.push(outcome.message)
+  const failed = outcome.steps.find((step) => !step.ok)
+  if (failed !== undefined) lines.push(`${String(failed.step)}. ${failed.tool} FAILED: ${failed.text}`)
+  if (outcome.delta !== undefined) lines.push('', 'Page changes at the stop point:', outcome.delta)
+  return lines.join('\n')
 }
 
 /** Render the outcome as the tool's text result. */

@@ -355,7 +355,8 @@ export interface PanelCopy {
     stopWatching: string
     repeated: (times: number) => string
     done: string
-    doRemaining: (remaining: number) => string
+    /** `steps`: the run's true total; `more`: rows are left beyond what one run does. */
+    doRemaining: (remaining: number, steps?: number, more?: boolean) => string
     proposedDriver: string
     parameters: string
     tokenSource: (kind: string, name: string) => string
@@ -886,7 +887,11 @@ const EN: PanelCopy = {
     stopWatching: 'Stop watching',
     repeated: (times) => `You did this ${String(times)} times:`,
     done: 'Done.',
-    doRemaining: (remaining) => `Do the remaining ${String(remaining)} like this`,
+    doRemaining: (remaining, steps, more) => more === true
+      ? `Do the next ${String(remaining)} like this (${String(steps ?? remaining)} steps, the most one run does)`
+      : steps !== undefined && steps > remaining
+      ? `Do the remaining ${String(remaining)} like this (${String(steps)} steps)`
+      : `Do the remaining ${String(remaining)} like this`,
     proposedDriver: 'Proposed site driver',
     parameters: 'Parameters',
     tokenSource: (kind, name) => `read from page ${kind} "${name}" each time (never stored)`,
@@ -1419,7 +1424,11 @@ const ZH: PanelCopy = {
     stopWatching: '停止观察',
     repeated: (times) => `您已重复 ${String(times)} 次：`,
     done: '完成。',
-    doRemaining: (remaining) => `按同样方式完成剩余 ${String(remaining)} 项`,
+    doRemaining: (remaining, steps, more) => more === true
+      ? `按同样方式完成接下来的 ${String(remaining)} 项（共 ${String(steps ?? remaining)} 步，单次运行的上限）`
+      : steps !== undefined && steps > remaining
+      ? `按同样方式完成剩余 ${String(remaining)} 项（共 ${String(steps)} 步）`
+      : `按同样方式完成剩余 ${String(remaining)} 项`,
     proposedDriver: '建议的站点驱动',
     parameters: '参数',
     tokenSource: (kind, name) => `每次从页面 ${kind} "${name}" 读取（从不存储）`,

@@ -25,6 +25,7 @@ import { roleOfElement, uniqueSelectorFor } from './find.ts'
 import type { ElementIds } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
 import { resolveActionTarget } from './actions.ts'
+import { MAX_FINISH_STEPS } from '../shared/repetition.ts'
 
 /** A recorded locator for one element. */
 export interface LocatorDescriptor {
@@ -280,7 +281,7 @@ export function handleLearningMessage(message: { type?: string } & Record<string
       return false
     case 'DSH_WATCH_PROBE': {
       const selectors = Array.isArray(message.selectors) ? message.selectors.filter((set): set is string[] => Array.isArray(set) && set.every((s) => typeof s === 'string')) : []
-      sendResponse({ ok: true, result: { rows: probeRows(selectors.slice(0, 100)) } })
+      sendResponse({ ok: true, result: { rows: probeRows(selectors.slice(0, MAX_FINISH_STEPS + 1)) } })
       return false
     }
     case 'DSH_SITE_DRIVER_FETCH':
