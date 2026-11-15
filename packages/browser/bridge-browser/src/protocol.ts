@@ -1063,3 +1063,48 @@ export function sanitizeRequesterLabel(raw: unknown): string {
   const label = text.slice(0, MAX_REQUESTER_LABEL).trim()
   return label === '' ? 'unknown client' : label
 }
+
+/**
+ * Dev loop (Phase 3.5): RPCs the panel uses to link a localhost tab to one of
+ * the user's DSH coding sessions. Answered by the bridge (candidates, link,
+ * unlink) and, for `list`, by the extension's background itself. Linking is
+ * an explicit user action; it never lets the browser prompt that session.
+ */
+export const BRIDGE_DEVLOOP_CANDIDATES_METHOD = 'bridge.devloop.candidates'
+export const BRIDGE_DEVLOOP_LINK_METHOD = 'bridge.devloop.link'
+export const BRIDGE_DEVLOOP_UNLINK_METHOD = 'bridge.devloop.unlink'
+export const BRIDGE_DEVLOOP_LIST_METHOD = 'bridge.devloop.list'
+
+/**
+ * Reserved wire action the bridge sends after a linked coding session's turn
+ * edited files: read console errors, failed requests and a DOM delta from the
+ * linked tab. Never registered as a model tool and never served over MCP; the
+ * extension refuses it for a session without a link made in its panel.
+ */
+export const DEVLOOP_CAPTURE_TOOL = 'browser_devloop_capture'
+
+/** Host names a dev-loop link accepts by default (loopback only). */
+export const DEVLOOP_LOOPBACK_HOSTS: readonly string[] = ['localhost', '127.0.0.1', '[::1]']
+
+/**
+ * The origin of a URL when it may be linked into a dev loop: http(s) on a
+ * loopback host by default, or one of `extraOrigins` (exact origins).
+ * @returns the origin, or undefined when it is not linkable.
+ */
+export function devLoopOrigin(url: string | undefined, extraOrigins: readonly string[] = []): string | undefined {
+  if (url === undefined) return undefined
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return undefined
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined
+  if (DEVLOOP_LOOPBACK_HOSTS.includes(parsed.hostname)) return parsed.origin
+  return extraOrigins.includes(parsed.origin) ? parsed.origin : undefined
+}
+
+/** Whether an origin is a loopback (default dev-loop) origin. */
+export function isLoopbackDevOrigin(origin: string): boolean {
+  return devLoopOrigin(origin) === origin
+}

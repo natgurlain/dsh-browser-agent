@@ -15,6 +15,7 @@ import { isExternalSessionId } from '@natgurlain/dsh-bridge-browser/src/protocol
 import type { BridgeFailure, BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
 import { SitePolicySettings } from './SitePolicySettings.tsx'
+import { DevLoopSettings } from './DevLoopSettings.tsx'
 import { TaintBanner } from './TaintBanner.tsx'
 import { WatchersCard } from './WatchersCard.tsx'
 import { connectPanel, PanelRpcError, type AgentPauseState, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type PanelApi, type PanelSettings } from './api.ts'
@@ -3158,6 +3159,11 @@ export function App(): React.JSX.Element {
             onChange={(next) => setSettings((current) => current === null ? current : { ...current, ...next })}
           />
         )}
+        <DevLoopSettings
+          api={api}
+          locale={locale}
+          activeTab={async () => (await chrome.tabs.query({ active: true, currentWindow: true }))[0]}
+        />
         <div className="settings-actions">
           <button className="primary" onClick={saveSettings}>{copy.settings.save}</button>
           <button className="secondary" onClick={() => setShowSettings(false)}>{copy.settings.cancel}</button>

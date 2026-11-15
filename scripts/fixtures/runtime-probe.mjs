@@ -37,6 +37,27 @@ export async function apply(ctx, config) {
       })
     },
   }), 'runtime-smoke-probe: session placement route')
+  // Owner-side gateway calls (another owner client, such as the DSH Desktop
+  // UI driving a coding session the bridge must not be able to drive).
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: '/smoke/owner-invoke',
+    handler: (req, res) => {
+      let body = ''
+      req.on('data', chunk => { body += chunk })
+      req.on('end', async () => {
+        try {
+          const { namespace, method, args } = JSON.parse(body)
+          const value = await ctx.typertGateway.invoke({ namespace, method, args, peer })
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(value ?? null))
+        } catch (error) {
+          res.writeHead(500)
+          res.end(String(error))
+        }
+      })
+    },
+  }), 'runtime-smoke-probe: owner invoke route')
   // Stand-in for another owner client (the DSH web UI or CLI) answering
   // approvals: browser approvals forwarded by the bridge reach dsh's real
   // approval service, which asks every answerer. Only browser tools are

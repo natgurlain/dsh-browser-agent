@@ -13,6 +13,7 @@ import { createServer } from 'node:net'
 import { createServer as createHttpServer } from 'node:http'
 import { zstdCompressSync } from 'node:zlib'
 import { smokeMcp } from './smoke-mcp.mjs'
+import { smokeDevLoop } from './smoke-devloop.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const bridge = join(root, 'packages/browser/bridge-browser')
@@ -25,6 +26,7 @@ const {
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_SESSION_PURGE_METHOD, BEACON_PORTS, BRIDGE_CONFIG_PATH,
   BRIDGE_CLOSE_CODES, BRIDGE_PROTOCOL_VERSION, PINNED_CHROME_EXTENSION_ID, computeBridgeProof, createBridgeNonce,
   BridgeFrameChannel, bridgeEndpointOfUrl, BRIDGE_APPROVAL_ASK_METHOD, BRIDGE_TOOL_HOLD_METHOD, BRIDGE_WATCH_FIRE_METHOD,
+  BRIDGE_DEVLOOP_CANDIDATES_METHOD, BRIDGE_DEVLOOP_LINK_METHOD, BRIDGE_DEVLOOP_UNLINK_METHOD,
 } = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
 const { phase3Reply, streamReply } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-model.mjs')).href)
 /** What the Phase 3 conversations (watcher wake, fleet workers) showed the model. */
@@ -69,6 +71,7 @@ await new Promise(resolve => unavailableServer.close(resolve))
 // turn it calls `browser_press`; after the tool result it answers in text.
 // It drives a real Agent turn so a real browser tool call reaches the bridge.
 let presetProbeTools
+const devLoopProbe = {}
 const scriptedModel = createHttpServer((req, res) => {
   let body = ''
   req.on('data', chunk => { body += chunk })
@@ -95,15 +98,26 @@ const scriptedModel = createHttpServer((req, res) => {
       res.end('data: [DONE]\n\n')
       return
     }
+    // Dev loop: an editing turn writes a file; the check turn records what it was given.
+    const userText = JSON.stringify(messages.filter(message => message.role === 'user').map(message => message.content))
+    if (Array.isArray(request.tools) && userText.includes('DEVLOOP-CHECK')) {
+      devLoopProbe.checkMessages = JSON.stringify(messages)
+    }
+    const devLoopEdit = Array.isArray(request.tools) && userText.includes('DEVLOOP-EDIT') && !userText.includes('DEVLOOP-CHECK')
+    const devLoopCheck = Array.isArray(request.tools) && userText.includes('DEVLOOP-CHECK')
     const chunk = (delta, finish) => `data: ${JSON.stringify({
       id: 'scripted-1', object: 'chat.completion.chunk', created: 0, model: 'scripted',
       choices: [{ index: 0, delta, finish_reason: finish }],
     })}\n\n`
     res.writeHead(200, { 'content-type': 'text/event-stream' })
-    res.write(afterTool
+    const textOnly = afterTool || devLoopCheck
+    const toolCall = devLoopEdit
+      ? { name: 'write', arguments: JSON.stringify({ file_path: join(temp, 'devloop-edit.txt'), content: 'edited by the coding agent\n' }) }
+      : { name: 'browser_press', arguments: '{"key":"Enter"}' }
+    res.write(textOnly
       ? chunk({ role: 'assistant', content: 'Done.' }, null)
-      : chunk({ role: 'assistant', tool_calls: [{ index: 0, id: `call_${randomUUID().slice(0, 8)}`, type: 'function', function: { name: 'browser_press', arguments: '{"key":"Enter"}' } }] }, null))
-    res.write(chunk({}, afterTool ? 'stop' : 'tool_calls'))
+      : chunk({ role: 'assistant', tool_calls: [{ index: 0, id: `call_${randomUUID().slice(0, 8)}`, type: 'function', function: toolCall }] }, null))
+    res.write(chunk({}, textOnly ? 'stop' : 'tool_calls'))
     res.end('data: [DONE]\n\n')
   })
 })
@@ -678,6 +692,29 @@ try {
     await waitFor(async () => (await rpc('session.state', { sessionId: browserAgentSessionId })).running === false, 'browser agent turn end', 60_000)
   }
 
+  // ---- Closed dev loop: a linked localhost tab reports back to a coding session ----
+  await smokeDevLoop({
+    place,
+    owner: async (namespace, method, args) => {
+      const response = await fetch(`${rpc.base}/smoke/owner-invoke`, {
+        method: 'POST', body: JSON.stringify({ namespace, method, args }), signal: AbortSignal.timeout(30_000),
+      })
+      assert.equal(response.status, 200, await response.clone().text())
+      return response.json()
+    },
+    rpc,
+    wsUrl: rpc.base.replace('http:', 'ws:') + '/ext/bridge',
+    connectClient,
+    waitFor,
+    temp,
+    home,
+    probe: devLoopProbe,
+    methods: {
+      BRIDGE_DEVLOOP_CANDIDATES_METHOD, BRIDGE_DEVLOOP_LINK_METHOD, BRIDGE_DEVLOOP_UNLINK_METHOD,
+      BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
+    },
+  })
+
   // ---- MCP clients drive the same browser path through an external session ----
   await smokeMcp({
     root,
@@ -860,7 +897,7 @@ try {
   assert.equal((await rpc('session.permissions', { sessionId: retrySession })).current, 'read-only',
     'prompt text must never act as a /permission command')
 
-  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), multi-client bridge with per-install replacement and session routing, browser approvals forwarded to dsh and answered by another owner client (allow and deny), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, MCP clients through the stdio shim on an external session (requester-labelled cards answered in the browser, audit log, Host methods refused), the browser agent preset (browser_* tools only) and bundled skills, browser context, a page watcher waking only its owned session (untrusted boundary, rate limit), a tab fleet of real subagents restricted to read tools with structured results, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
+  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), multi-client bridge with per-install replacement and session routing, browser approvals forwarded to dsh and answered by another owner client (allow and deny), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, MCP clients through the stdio shim on an external session (requester-labelled cards answered in the browser, audit log, Host methods refused), the browser agent preset (browser_* tools only) and bundled skills, the closed dev loop (localhost link, capture after an editing turn, read-only injection without prompting), browser context, a page watcher waking only its owned session (untrusted boundary, rate limit), a tab fleet of real subagents restricted to read tools with structured results, continuation after a real transport failure, and session deletion including worktree cleanup failure and retry')
   succeeded = true
 } catch (error) {
   console.error(hostLog)

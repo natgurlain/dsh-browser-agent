@@ -21,6 +21,7 @@ Page snapshots contain structured text with numbered controls and masked form fi
 | `beaconPorts` | `number[]` | `43189…43198` | Candidate beacon ports, tried in order until one binds; the first free port wins, which keeps several local instances discoverable. Ignored when `beacon` is false. |
 | `mcp.enabled` | `boolean` | `false` | Serve a loopback MCP endpoint (Streamable HTTP) so Claude Code, Cursor, Codex and other MCP clients can drive the browser. See [MCP clients](#mcp-clients). |
 | `mcp.port` | `number` | `0` | Loopback port of the MCP endpoint (`0`: any free port; the URL is written to `~/.dsh/browser-mcp.json`). |
+| `devLoop.allowedOrigins` | `string[]` | `[]` | Extra exact origins (beyond localhost / 127.0.0.1 / [::1]) a tab may have to be linked to a coding session. See [Dev loop](#dev-loop-coding-sessions). |
 
 Workspace grouping is best-effort. If the composition has no workspace domain, directory creation fails, or `workspace.create` rejects the path, the plugin logs one warning and sends every session creation without an injected workspace so browser chat remains usable.
 
@@ -141,6 +142,26 @@ With `mcp.enabled: true` the plugin serves an MCP endpoint at `http://127.0.0.1:
   - Accepts JSON bodies only, with a 1 MB cap. JSON-RPC batches are not supported.
   - Allows at most 16 sessions and expires them after 1 h idle. `DELETE` ends a session, and a dropped HTTP request cancels its call and withdraws its card.
 - **Refusals.** Tools that write into a DSH workspace (`browser_save_pdf`, `browser_extract { saveTo }`) refuse MCP callers. `browser_screenshot` returns an MCP image block.
+
+## Dev loop (coding sessions)
+
+In **Settings → Dev loop**, open a localhost page (`localhost`, `127.0.0.1` or `[::1]`) in the panel's window. Click "Link this tab to a coding session…" and pick one of your DSH coding sessions. Bridge sessions are never offered, nor are subagent or MCP sessions. After each turn of that session that edited files (a successful `edit`, `write`, `apply_patch`, `str_replace_editor` or `notebook_edit`), the following happens:
+
+1. The bridge sends the reserved `browser_devloop_capture` action to the extension. It is an ordinary `tool.call`, so the pause gate, kill switch, site policy, taint rules, read-approval settings and the audit log all apply. It is not a model tool, and it is never served over MCP.
+2. The extension refuses the action unless that session has a link made in this browser, and unless the linked tab is still on the linked origin.
+3. Otherwise it answers with:
+   - the console errors, uncaught exceptions and failed `fetch`/XHR requests that a small main-world collector recorded since the previous turn;
+   - a `browser_snapshot { delta: true }` of the page.
+
+   If that page read is refused, nothing from the page is shared.
+4. The bridge injects the answer into the session as read-only browser context, inside the untrusted boundary. The injection does not wake the session. The model sees it with the user's next message.
+
+Rules that still hold:
+
+- **Linking is not prompting.** The session still cannot be prompted, steered, re-permissioned or snapshot-injected from the browser (`bridge-policy.ts`).
+- **Origins.** Only loopback origins by default. `devLoop.allowedOrigins` (exact `http(s)://host[:port]`) adds others.
+- **Taint.** A loopback injection does **not** taint the coding session on the Host. That taint would make its edit tools read-only and break the loop. The source is the user's own dev server, and the payload is fenced as untrusted text. An injection from an allowed non-loopback origin **does** taint it. On the browser side, the capture taints that session's browser actions like any other page read.
+- **Lifetime.** Links live in the bridge's memory and in the extension's session storage. After DSH restarts, opening the panel's settings re-asserts them. A link ends when its tab closes.
 
 ## Browser subagent and skills
 

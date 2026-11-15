@@ -89,6 +89,7 @@ describe('config', () => {
       forwardedPorts: [],
       allowForwardedPorts: false,
       mcp: { enabled: false, port: 0 },
+      devLoop: { allowedOrigins: [] },
     })
   })
 
@@ -125,6 +126,7 @@ describe('config', () => {
       forwardedPorts: [],
       allowForwardedPorts: false,
       mcp: { enabled: false, port: 0 },
+      devLoop: { allowedOrigins: [] },
     })
   })
 
@@ -138,6 +140,12 @@ describe('config', () => {
     expect(new Config({ mcp: { enabled: true } }).mcp).toEqual({ enabled: true, port: 0 })
     expect(new Config({ mcp: { port: 4100 } }).mcp).toEqual({ enabled: false, port: 4100 })
     expect(() => new Config({ mcp: { port: 70000 } })).toThrow()
+  })
+
+  it('accepts only bare http(s) origins as extra dev-loop origins', () => {
+    expect(new Config({ devLoop: { allowedOrigins: ['http://myapp.test:3000'] } }).devLoop).toEqual({ allowedOrigins: ['http://myapp.test:3000'] })
+    expect(() => new Config({ devLoop: { allowedOrigins: ['http://myapp.test:3000/path'] } })).toThrow()
+    expect(() => new Config({ devLoop: { allowedOrigins: ['*'] } })).toThrow()
   })
 
   it('keeps an empty port list when the beacon is disabled', () => {

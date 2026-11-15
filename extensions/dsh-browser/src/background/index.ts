@@ -128,6 +128,15 @@ import { RUNTIME_LEASE_STORAGE_KEY, RuntimeKeeper, RuntimeLease } from './runtim
 import { loadClientIdentity } from './client-identity.ts'
 import type { BridgeClientIdentity } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { ExternalRequesters, isExternalSessionId } from './external-requesters.ts'
+import { chromeDevLoopBrowser, DevLoopController } from './dev-loop.ts'
+import {
+  BRIDGE_DEVLOOP_LINK_METHOD,
+  BRIDGE_DEVLOOP_LIST_METHOD,
+  BRIDGE_DEVLOOP_UNLINK_METHOD,
+  DEFAULT_SNAPSHOT_MAX_CHARS as DEVLOOP_MAX_CHARS,
+  DEVLOOP_CAPTURE_TOOL,
+} from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import { wrapUntrustedContent as wrapDevLoopContent } from '../security/untrusted.ts'
 import { DevToolsError, devToolsSupported } from './debugger-session.ts'
 import { createDevToolsController } from './devtools-controller.ts'
 import {
@@ -2201,6 +2210,48 @@ async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> 
 /** Requester labels of external (MCP client) sessions, for their approval cards. */
 const externalRequesters = new ExternalRequesters()
 
+/** Dev loop: localhost tabs the user linked to a DSH coding session (dev-loop.ts). */
+const devLoop = new DevLoopController(chromeDevLoopBrowser())
+
+/**
+ * Panel dev-loop RPCs the background completes: `list` is answered here (and
+ * re-asserts each link to the bridge, which forgets links on restart);
+ * `link` resolves the tab the user chose and records the link only after the
+ * bridge accepted it; `unlink` forgets it on both sides.
+ */
+function devLoopPanelRpc(method: string, payload: unknown): Promise<unknown> | undefined {
+  const fields = typeof payload === 'object' && payload !== null ? payload as Record<string, unknown> : {}
+  const envelope = (value: unknown): unknown => ({ type: 'server-response', rpcId: 'devloop', result: { ok: true, value } })
+  if (method === BRIDGE_DEVLOOP_LIST_METHOD) {
+    return devLoop.list().then(async (links) => {
+      for (const link of links) {
+        await gatewayRpc(BRIDGE_DEVLOOP_LINK_METHOD, { sessionId: link.sessionId, url: `${link.origin}/` }).catch(() => undefined)
+      }
+      return envelope({ items: links })
+    })
+  }
+  if (method === BRIDGE_DEVLOOP_LINK_METHOD) {
+    return (async () => {
+      const sessionId = typeof fields.sessionId === 'string' ? fields.sessionId : ''
+      const tabId = typeof fields.tabId === 'number' ? fields.tabId : -1
+      const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+      if (sessionId === '' || tab?.id === undefined) throw new Error('Pick a coding session and a tab to link.')
+      const answer = await gatewayRpc(BRIDGE_DEVLOOP_LINK_METHOD, { sessionId, url: tab.url ?? '' }) as
+        { result?: { ok?: boolean; value?: { link?: { origin?: unknown } } } } | undefined
+      const origin = answer?.result?.ok === true ? answer.result.value?.link?.origin : undefined
+      if (typeof origin === 'string' && devLoop.originOf(tab.url) === origin) {
+        await devLoop.link({ sessionId, tabId: tab.id, origin, ...(typeof fields.label === 'string' ? { label: fields.label.slice(0, 120) } : {}) })
+      }
+      return answer
+    })()
+  }
+  if (method === BRIDGE_DEVLOOP_UNLINK_METHOD) {
+    const sessionId = typeof fields.sessionId === 'string' ? fields.sessionId : ''
+    return devLoop.unlink(sessionId).then(() => gatewayRpc(BRIDGE_DEVLOOP_UNLINK_METHOD, { sessionId }))
+  }
+  return undefined
+}
+
 /** Route one tool.call frame to the user-approved controlled tab. */
 function routeToolCall(call: ToolCall): void {
   if (bridge === null) return
@@ -2294,6 +2345,22 @@ function routeToolCall(call: ToolCall): void {
     if (call.tainted === true) policyRuntime.markHostTaint(call.sessionId)
   }).then(() => fleetRefusal !== undefined
     ? { ok: false, error: { code: 'action-failed', message: fleetRefusal } } satisfies ToolAnswer
+    : call.name === DEVLOOP_CAPTURE_TOOL
+    // Dev loop: a read of the user-linked localhost tab only, under this
+    // call's site policy, taint rules and read-approval settings.
+    ? devLoop.capture(call, (target) => {
+        policyTabOrigin = originFromUrl(target.url ?? '')
+        return dispatchToolCall(
+          { id: call.id, name: 'browser_snapshot', args: { delta: true }, ...(call.sessionId === undefined ? {} : { sessionId: call.sessionId }) },
+          sharePageContent,
+          budget,
+          auditedAuthorize(activeCall, (prompt, onPrompt) => authorizeToolCall(prompt, controller.signal, target.windowId ?? 0, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt)),
+          controller.signal,
+          target,
+          () => devLoop.allowsTarget(call.sessionId, target.id),
+          { unrestrictedAccess, policy },
+        )
+      }, (text) => wrapDevLoopContent(text, budget?.maxChars ?? DEVLOOP_MAX_CHARS))
     : call.name === 'browser_fanout'
     ? fleets.open(call, fleetDeps(controller.signal, (prompt, windowId) => auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(shown, controller.signal, windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt))(prompt)))
     : call.name === 'browser_fleet_release'
@@ -2961,6 +3028,18 @@ chrome.runtime.onConnect.addListener((port) => {
         const refresh = rpcSessionId === undefined
           ? Promise.resolve()
           : sessionSnapshotRefreshes.get(rpcSessionId) ?? Promise.resolve()
+        const devLoopAnswer = devLoopPanelRpc(rpcMsg.method, rpcMsg.payload)
+        if (devLoopAnswer !== undefined) {
+          void devLoopAnswer.then(
+            (result) => { try { port.postMessage({ type: 'rpc.result', id: rpcMsg.id, ok: true, result }) } catch { /* port closed */ } },
+            (error: unknown) => {
+              try {
+                port.postMessage({ type: 'rpc.result', id: rpcMsg.id, ok: false, error: { code: 'bridge-unavailable', message: error instanceof Error ? error.message : String(error) } })
+              } catch { /* port closed */ }
+            },
+          )
+          break
+        }
         // A session prompted from this browser keeps its panel-free runtime
         // alive while it works, even after the panel closes.
         if (rpcMsg.method === 'session.prompt' && typeof rpcSessionId === 'string') noteRuntimeSession(rpcSessionId)
@@ -3550,3 +3629,10 @@ disarmBridgeKeepalive()
 
 // `settingsReady` intentionally has no bridge-start continuation: opening a
 // side panel is the first action allowed to claim the bridge connection.
+
+// Dev loop: keep the error collector installed across navigations of a
+// linked tab, and end links when their tab closes.
+chrome.webNavigation.onCommitted.addListener(({ tabId, frameId, url }) => {
+  if (frameId === 0) void devLoop.onCommitted(tabId, url)
+})
+chrome.tabs.onRemoved.addListener((tabId) => { void devLoop.onRemoved(tabId) })

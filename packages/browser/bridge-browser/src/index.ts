@@ -67,6 +67,8 @@ import { isRecord, type BrowserHostApi } from './host-api.ts'
 import { mountMcpEndpoint, type McpConfig } from './mcp-mount.ts'
 import { createMcpToolHost, type ToolRegistryLike } from './mcp-tools.ts'
 import { registerBrowserPreset, registerBrowserSkills } from './browser-agent.ts'
+import { DEVLOOP_CAPTURE_TIMEOUT_MS, DevLoop, withDevLoopMethods } from './dev-loop.ts'
+import { DEVLOOP_CAPTURE_TOOL } from './protocol.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'bridge-browser'
@@ -179,10 +181,20 @@ export interface Config {
    * `<dsh home>/browser-mcp.json` (0600) for the `dsh-browser-mcp` shim.
    */
   mcp?: McpConfig
+  /**
+   * Dev loop (link a localhost tab to a DSH coding session from the panel):
+   * `allowedOrigins` adds exact non-loopback origins (e.g.
+   * `http://myapp.test:3000`) to the default localhost / 127.0.0.1 / [::1].
+   * Injections from such origins taint the session like other web content.
+   */
+  devLoop?: { allowedOrigins?: string[] }
 }
 
 /** The shape after schemastery applies its defaults to every field. */
-type ResolvedConfig = Required<Omit<Config, 'token' | 'mcp'>> & Pick<Config, 'token'> & { mcp: Required<McpConfig> }
+type ResolvedConfig = Required<Omit<Config, 'token' | 'mcp' | 'devLoop'>> & Pick<Config, 'token'> & {
+  mcp: Required<McpConfig>
+  devLoop: { allowedOrigins: string[] }
+}
 
 export const Config: z<Config, ResolvedConfig> = z.object({
   token: z.string(),
@@ -204,6 +216,9 @@ export const Config: z<Config, ResolvedConfig> = z.object({
     enabled: z.boolean().default(false),
     port: z.number().step(1).min(0).max(65535).default(0),
   }).default({ enabled: false, port: 0 }),
+  devLoop: z.object({
+    allowedOrigins: z.array(z.string().pattern(/^https?:\/\/[^/\s]+$/)).default([]),
+  }).default({ allowedOrigins: [] }),
 }) as unknown as z<Config, ResolvedConfig>
 
 /**
@@ -382,11 +397,32 @@ function mountBridge(
         limiter: wakeLimiter,
       })
     : undefined
-  const server = new BridgeServer({
+  // Closed dev loop (Phase 3.5): a linked localhost tab reports back to a
+  // coding session after each turn that edited files. `server` is assigned
+  // below; captures only start after a link and a finished turn.
+  let server: BridgeServer
+  const devLoop = new DevLoop({
+    listSessions: async (signal) => {
+      const listed = await api.call({ rpcId: randomUUID(), method: 'session.list', payload: {}, signal })
+      return listed.ok ? listed.value : undefined
+    },
+    isBridgeSession: (sessionId) => ledger.has(sessionId) || ledger.external(sessionId) !== undefined,
+    capture: (sessionId, origin, signal) =>
+      server.requestTool(DEVLOOP_CAPTURE_TOOL, { origin }, signal, DEVLOOP_CAPTURE_TIMEOUT_MS, sessionId),
+    inject: (sessionId, text) => browserContext.inject(sessionId, text, 'devloop'),
+    taint: (sessionId) => { taint.mark(sessionId, 'devloop-injection') },
+    extraOrigins: resolved.devLoop.allowedOrigins,
+    log: (message) => { ctx.logger.warn(message) },
+  })
+  ctx.on('tools/result', (exec, result) => {
+    devLoop.noteToolResult(exec.agent === undefined ? undefined : String(exec.agent.id), exec.name, result.isError)
+  })
+  ctx.on('agent/status', ({ agent, status }) => { void devLoop.noteStatus(String(agent.id), status) })
+  server = new BridgeServer({
     token: tokenRes.token,
     // An MCP client's external session is the bridge's own: the panel may clear its taint too.
-    api: withTaintMethods(fenced, taint, async (sessionId, signal) =>
-      ledger.external(sessionId) !== undefined || fenced.allowsSession(sessionId, signal, 'own')),
+    api: withDevLoopMethods(withTaintMethods(fenced, taint, async (sessionId, signal) =>
+      ledger.external(sessionId) !== undefined || fenced.allowsSession(sessionId, signal, 'own')), devLoop),
     sessionScope: fenced,
     sessionLineage: taint,
     allowedChromeExtensionIds: resolved.allowedChromeExtensionIds,
