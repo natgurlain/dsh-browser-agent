@@ -1279,6 +1279,58 @@ try {
   assert.equal(await page.evaluate(() => window.executed), executedBefore, 'the JavaScript never ran')
   await waitFor(async () => (await currentWorker().evaluate(() => chrome.notifications.getAll()))[shown.id] === undefined,
     'approval notification cleared')
+
+  // ---- Standing work: a watcher still fires with no panel after the idle window ----
+  // A watcher needs its (forced) card, so a panel creates it; then every panel closes again.
+  await settingsDone(await openPanel())
+  await waitFor(() => panel.evaluate(() => messages.some(message => message.type === 'status' && message.state === 'connected')), 'panel reconnected')
+  await settings({ allowPageWatchers: true, trustedActionOrigins: [origin] })
+  await page.goto(`${origin}/stock`)
+  await page.bringToFront()
+  const watchSession = phase3State.sessionId
+  assert.ok(watchSession, 'the Phase 3 session')
+  await panel.evaluate(sessionId => { panelPort.postMessage({ type: 'session.active', sessionId, isNew: false }) }, watchSession)
+  delete phase3State.watchResult
+  const wakesBefore = phase3State.wakes?.length ?? 0
+  await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request') })
+  await bridgeRpc('session.prompt', {
+    sessionId: watchSession, mode: 'queue',
+    content: [{ type: 'text', text: 'PHASE3-WATCH tell me when item 42 is back in stock, even with the panel closed.' }],
+  })
+  const standingCard = await waitFor(() => panel.evaluate(() => messages.find(message => message.type === 'approval.request')?.request), 'standing watcher card', 60_000)
+  assert.equal(standingCard.action, 'browser_watch')
+  await panel.evaluate(id => { panelPort.postMessage({ type: 'approval.response', id, decision: 'allow-once' }) }, standingCard.id)
+  await waitFor(() => phase3State.watchResult, 'standing watcher created', 60_000)
+  assert.match(phase3State.watchResult, /Watcher w-[0-9a-f]+ wakes this session/)
+  const standingWatchId = /Watcher (w-[0-9a-f]+)/u.exec(phase3State.watchResult)[1]
+  await waitFor(() => panel.evaluate(() => messages.findLast(message => message.type === 'status')?.standing?.watchers === 1),
+    'the status reports one watcher keeping the browser connected')
+  await waitFor(async () => !(await hostRpc('session', 'state', { sessionId: watchSession })).running, 'watch turn finished', 60_000)
+  await panel.evaluate(() => panelPort.disconnect())
+
+  // Simulate the 5-minute idle window having passed without waiting for it:
+  // age the lease the worker mirrors to storage.session, then stop the worker.
+  // The restarted worker restores an expired lease, so only standing work
+  // (the live watcher) can make it reconnect. Before this feature it stayed
+  // asleep and the hit below was recorded as a miss.
+  const connectedTools = async () => (await (await fetch(probe, { headers })).json()).includes('browser_console_eval')
+  await waitFor(async () => (await currentWorker()?.evaluate(() => chrome.storage.session.get('dshRuntimeLease')))?.dshRuntimeLease, 'runtime lease before ageing')
+  await currentWorker().evaluate(async () => {
+    const { dshRuntimeLease } = await chrome.storage.session.get('dshRuntimeLease')
+    await chrome.storage.session.set({ dshRuntimeLease: { ...dshRuntimeLease, activeUntil: Date.now() - 60_000 } })
+  })
+  await cdp.send('ServiceWorker.stopAllWorkers')
+  await waitFor(async () => !(await connectedTools()) || undefined, 'bridge saw the worker stop', 15_000)
+    .catch(() => { /* the reconnect may be quicker than this poll; the lease check below still holds */ })
+  await waitFor(connectedTools, 'headless reconnect for standing work', 120_000)
+  const agedLease = (await currentWorker().evaluate(() => chrome.storage.session.get('dshRuntimeLease'))).dshRuntimeLease
+  assert.ok(agedLease.activeUntil < Date.now(), 'the idle window has passed: only the watcher holds the lease')
+  await page.evaluate(() => { document.querySelector('#stock').textContent = 'Back in stock, at last.' })
+  const standingWake = await waitFor(() => phase3State.wakes?.[wakesBefore], 'the watcher woke the session with no panel open', 60_000)
+  assert.match(standingWake, new RegExp(`^\\[Page watcher ${standingWatchId} fired\\]`, 'u'))
+  const leaseAfterWake = (await currentWorker().evaluate(() => chrome.storage.session.get('dshRuntimeLease'))).dshRuntimeLease
+  assert.ok(leaseAfterWake.activeUntil < Date.now(), 'a watcher fire is not activity: the lease is still held by standing work alone')
+  results.push('with no panel open and the idle window passed, a live watcher reconnects the restarted worker headlessly and still wakes its session')
   await writeFile(join(directory, 'results.json'), JSON.stringify(results, null, 2))
   await writeFile(join(directory, 'screenshots.json'), JSON.stringify(screenshots, null, 2))
   console.log(`Browser smoke passed: ${results.join('; ')}`)

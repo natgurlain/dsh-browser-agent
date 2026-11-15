@@ -1590,9 +1590,10 @@ function setHostStanding(work: StandingWork): void {
   const area = (chrome.storage as { local?: chrome.storage.StorageArea }).local
   if (area !== undefined && (stored !== undefined || hostStandingStored)) {
     hostStandingStored = stored !== undefined
-    void Promise.resolve(stored === undefined
-      ? area.remove(STANDING_HOST_STORAGE_KEY)
-      : area.set({ [STANDING_HOST_STORAGE_KEY]: stored })).catch(() => {})
+    // Never throws: the kill switch calls this in the middle of stopping everything.
+    void (async () => {
+      await (stored === undefined ? area.remove(STANDING_HOST_STORAGE_KEY) : area.set({ [STANDING_HOST_STORAGE_KEY]: stored }))
+    })().catch(() => {})
   }
   if (changed) onStandingWorkChanged()
 }
@@ -1601,9 +1602,9 @@ function persistStandingRetry(): void {
   const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
   if (area === undefined) return
   const state = standingRetry.snapshot()
-  void Promise.resolve(state === undefined
-    ? area.remove(STANDING_RETRY_STORAGE_KEY)
-    : area.set({ [STANDING_RETRY_STORAGE_KEY]: state })).catch(() => {})
+  void (async () => {
+    await (state === undefined ? area.remove(STANDING_RETRY_STORAGE_KEY) : area.set({ [STANDING_RETRY_STORAGE_KEY]: state }))
+  })().catch(() => {})
 }
 
 /**
