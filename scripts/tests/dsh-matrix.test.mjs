@@ -137,6 +137,13 @@ test('recordRow: cells for passed, failed, skipped and not-run steps, and the no
     + 'typecheck: src/a.ts(1,2): error TS2339: no \\| pipe; extension unit tests: AssertionError: nope')
 })
 
+test('recordRow notes what a passing step said it did not exercise', () => {
+  const results = passing.map(result => result.name === 'smoke-runtime' ? { ...result, caveat: 'DSH 0.2.2-rc.1 has no archive-cleanup report: the wait was NOT exercised' } : result)
+  const cells = row('0.2.2-rc.1', { results })
+  assert.equal(cells[12], 'pass')
+  assert.equal(cells[13], 'smoke-runtime passed with a gap: DSH 0.2.2-rc.1 has no archive-cleanup report: the wait was NOT exercised')
+})
+
 test('updateRecord replaces the row for a version, keeps the others and the surrounding text', () => {
   const empty = `# Title\n\nintro\n\n${RECORD_BEGIN}\n${RECORD_END}\n\ntrailer\n`
   const first = updateRecord(empty, [row('0.2.2-rc.2'), row('0.2.2-rc.1')])

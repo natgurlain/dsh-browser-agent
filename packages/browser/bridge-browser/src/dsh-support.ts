@@ -21,13 +21,18 @@ import { dirname, join } from 'node:path'
 export const DSH_DEFAULT_VERSION = '0.2.2-rc.2'
 
 /** Releases with an all-pass row in docs/dsh-matrix.md, oldest first. */
-export const TESTED_DSH_VERSIONS: readonly string[] = ['0.2.2-rc.2']
+export const TESTED_DSH_VERSIONS: readonly string[] = ['0.2.2-rc.1', '0.2.2-rc.2', '0.2.2-rc.3']
 
-/** `engines.dsh` in package.json: the range DSH enforces before it loads the plugin. */
-export const SUPPORTED_DSH_RANGE = '^0.2.2-rc.2'
+/**
+ * `engines.dsh` in package.json: the range DSH enforces before it loads the
+ * plugin. The lower bound is the oldest tested release. The upper bound
+ * (below 0.3.0) is wider than the tested list on purpose: a newer 0.2.x loads
+ * and gets the warning below instead of being refused until the matrix reruns.
+ */
+export const SUPPORTED_DSH_RANGE = '^0.2.2-rc.1'
 
 /** The range of every `@deepseek-ai/dsh-*` peer dependency in package.json. */
-export const DSH_PEER_RANGE = '0.2.2-rc.2'
+export const DSH_PEER_RANGE = SUPPORTED_DSH_RANGE
 
 const DSH_HOST_PACKAGE = '@deepseek-ai/dsh'
 

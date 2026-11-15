@@ -280,6 +280,7 @@ export function recordRow({ version, labels, date, commit, inRange, declaredRang
   if (probed) notes.push(`outside the declared \`engines.dsh\` (\`${declaredRange}\`): probed with it rewritten to \`${version}\` in the copy`)
   for (const result of results) {
     if (!result.ok && !result.skipped && result.error) notes.push(`${result.name}: ${result.error}`)
+    if (result.ok && result.caveat) notes.push(`${result.name} passed with a gap: ${result.caveat}`)
   }
   return [
     version,
@@ -425,6 +426,8 @@ async function runRow(row, options, pinned) {
       name, ok, note: outcome.note, seconds: outcome.seconds,
       tests: /tests$/u.test(name) ? parseTestCounts(outcome.output) : undefined,
       error: ok ? '' : firstErrorLine(outcome.output),
+      // A step that passed while saying it left something out, e.g. the smoke on a host without a feature.
+      caveat: ok ? /\(([^()\n]*NOT exercised)\)/u.exec(outcome.output)?.[1] : undefined,
     })
     if (!ok && ci) console.log(`::warning title=DSH ${version}::${name} failed`)
   }
