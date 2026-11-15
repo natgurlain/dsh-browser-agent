@@ -31,6 +31,8 @@ import { approvalBinding, canonicalJson, sha256Hex } from '../security/payload-b
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { frameDocumentKey, frameOrigin, type TabFrame } from './frames.ts'
 import type { ToolCall } from './tools.ts'
+import { httpOrigin, isRecord } from '../security/web-url.ts'
+import { cancelledAnswer, notApprovedAnswer, type SettledAnswer } from './answers.ts'
 
 /** Mirrors the bridge's PROGRAM_STEP_TOOLS (a spec keeps the two equal). */
 export const PROGRAM_STEP_TOOLS: ReadonlySet<string> = new Set([
@@ -62,10 +64,6 @@ export interface ProgramStepInput {
   expect?: Record<string, unknown>
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 /**
  * Validate a `browser_run` call's steps (the bridge validated them too).
  * @returns the steps, or an error message.
@@ -91,16 +89,6 @@ export function stepDigest(tool: string, args: Record<string, unknown>): string 
   return sha256Hex(canonicalJson({ tool, args }))
 }
 
-function urlOrigin(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined
-  try {
-    const url = new URL(value)
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : undefined
-  } catch {
-    return undefined
-  }
-}
-
 /**
  * Origins a program may act on: the controlled page's, plus every page a
  * navigate step names (shown on the card).
@@ -111,7 +99,7 @@ export function programOrigins(steps: ProgramStepInput[], frames: TabFrame[]): s
   if (top !== undefined) origins.add(frameOrigin(top))
   for (const step of steps) {
     if (step.tool !== 'browser_navigate') continue
-    const origin = urlOrigin(step.args.url)
+    const origin = httpOrigin(step.args.url)
     if (origin !== undefined) origins.add(origin)
   }
   return [...origins]
@@ -234,7 +222,7 @@ export class ProgramGrants {
     }
   }
 
-  /** Drop every grant (kill switch, bridge loss). */
+  /** Drop every grant (the kill switch). */
   clear(): void {
     this.grants.clear()
   }
@@ -284,11 +272,7 @@ export interface ProgramApprovalDeps {
 }
 
 /** The wire answer shape (structurally a ToolAnswer). */
-export type ProgramAnswer =
-  | { ok: true; result: unknown }
-  | { ok: false; error: { code: 'bad-args' | 'action-failed' | 'timeout' | 'no-active-tab'; message: string } }
-
-const CANCELLED: ProgramAnswer = { ok: false, error: { code: 'action-failed', message: 'Tool call was cancelled' } }
+export type ProgramAnswer = SettledAnswer
 
 /**
  * Show the program card and, once approved for this exact page, record the
@@ -300,19 +284,11 @@ export async function approveProgram(call: ToolCall, deps: ProgramApprovalDeps):
   const tab = await deps.resolveTab()
   if ('ok' in tab) return { ok: false, error: { code: 'no-active-tab', message: tab.error?.message ?? 'No controlled tab for the program.' } }
   if (tab.id === undefined) return { ok: false, error: { code: 'no-active-tab', message: 'No controlled tab for the program.' } }
-  if (deps.signal.aborted) return CANCELLED
+  if (deps.signal.aborted) return cancelledAnswer()
   const prompt = programApprovalPrompt(steps, await deps.listFrames(tab.id, tab.url))
   const authorization = await deps.authorize(prompt, tab.windowId ?? 0)
-  if (deps.signal.aborted) return CANCELLED
-  if (authorization !== 'approved') {
-    return {
-      ok: false,
-      error: {
-        code: authorization === 'timed-out' ? 'timeout' : 'action-failed',
-        message: authorization === 'denied' ? 'The user denied the browser program.' : `The browser program was not approved (${authorization}).`,
-      },
-    }
-  }
+  if (deps.signal.aborted) return cancelledAnswer()
+  if (authorization !== 'approved') return notApprovedAnswer('The user denied the browser program.', 'The browser program', authorization)
   // The card is bound to the page it was approved on.
   const current = await deps.resolveTab()
   if ('ok' in current || current.id !== tab.id) {

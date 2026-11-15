@@ -33,10 +33,6 @@ export interface DownloadsApi {
     addListener(listener: (delta: chrome.downloads.DownloadDelta) => void): void
     removeListener(listener: (delta: chrome.downloads.DownloadDelta) => void): void
   }
-  onCreated?: {
-    addListener(listener: (item: chrome.downloads.DownloadItem) => void): void
-    removeListener(listener: (item: chrome.downloads.DownloadItem) => void): void
-  }
 }
 
 /** Failure with a stable code for tool answers. */
@@ -55,6 +51,7 @@ const MAX_PATTERN_CHARS = 200
 const WAIT_LOOKBACK_MS = 15_000
 /** Downloads a wait already reported, so a second wait finds the next one. */
 const reportedDownloads = new Set<number>()
+const MAX_REPORTED_DOWNLOADS = 200
 
 /** Whether the optional downloads permission is granted. */
 export async function hasDownloadsPermission(): Promise<boolean> {
@@ -140,6 +137,8 @@ export async function waitForDownload(
         if (!matches(item)) continue
         if (item.state === 'complete') {
           reportedDownloads.add(item.id)
+          // Only recent downloads matter (WAIT_LOOKBACK_MS); keep the set bounded.
+          if (reportedDownloads.size > MAX_REPORTED_DOWNLOADS) reportedDownloads.delete(reportedDownloads.values().next().value!)
           finish({ record: toRecord(item) })
           return
         }
@@ -161,6 +160,10 @@ export async function waitForDownload(
       finish({ error: new DownloadsError('timeout', `No matching download completed within ${options.timeoutMs} ms.`) })
     }, options.timeoutMs)
     api.onChanged.addListener(onChanged)
+    if (options.signal?.aborted === true) {
+      onAbort()
+      return
+    }
     options.signal?.addEventListener('abort', onAbort, { once: true })
     void check().catch(() => undefined)
   })

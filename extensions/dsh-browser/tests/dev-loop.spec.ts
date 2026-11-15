@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { BRIDGE_DEVLOOP_LINK_METHOD, BRIDGE_DEVLOOP_LIST_METHOD, BRIDGE_DEVLOOP_UNLINK_METHOD } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import {
+  createDevLoopPanelRpc,
   DevLoopController,
   devLoopCollector,
   devLoopDrain,
@@ -165,3 +167,27 @@ describe('page collector', () => {
     expect(devLoopDrain()).toEqual({ console: [], network: [], dropped: 0 })
   })
 })
+
+describe('dev-loop panel RPCs', () => {
+  it('records a link only after the bridge accepts its origin, and unlinks on both sides', async () => {
+    const { browser } = fakeBrowser({ 1: { id: 1, url: 'http://localhost:3000/app' }, 2: { id: 2, url: 'http://localhost:4000/' } })
+    const controller = new DevLoopController(browser)
+    const gateway = vi.fn(async (method: string, payload: unknown) => method === BRIDGE_DEVLOOP_LINK_METHOD && (payload as { url: string }).url.startsWith('http://localhost:3000')
+      ? { type: 'server-response', result: { ok: true, value: { link: { origin: 'http://localhost:3000' } } } }
+      : { type: 'server-response', result: { ok: false } })
+    const rpc = createDevLoopPanelRpc(controller, gateway, browser.getTab)
+    expect(rpc('bridge.other', {})).toBeUndefined()
+    await rpc(BRIDGE_DEVLOOP_LINK_METHOD, { sessionId: 's1', tabId: 1, label: 'web' })
+    await rpc(BRIDGE_DEVLOOP_LINK_METHOD, { sessionId: 's2', tabId: 2 })
+    await expect(rpc(BRIDGE_DEVLOOP_LINK_METHOD, { sessionId: '', tabId: 1 })).rejects.toThrow(/Pick a coding session/)
+    expect(await controller.list()).toEqual([{ sessionId: 's1', tabId: 1, origin: 'http://localhost:3000', label: 'web' }])
+    // list re-asserts every link to the bridge (it forgets links on restart).
+    gateway.mockClear()
+    expect(await rpc(BRIDGE_DEVLOOP_LIST_METHOD, {})).toMatchObject({ result: { ok: true, value: { items: [expect.objectContaining({ sessionId: 's1' })] } } })
+    expect(gateway).toHaveBeenCalledWith(BRIDGE_DEVLOOP_LINK_METHOD, { sessionId: 's1', url: 'http://localhost:3000/' })
+    await rpc(BRIDGE_DEVLOOP_UNLINK_METHOD, { sessionId: 's1' })
+    expect(gateway).toHaveBeenLastCalledWith(BRIDGE_DEVLOOP_UNLINK_METHOD, { sessionId: 's1' })
+    expect(await controller.list()).toEqual([])
+  })
+})
+

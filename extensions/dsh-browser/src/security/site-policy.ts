@@ -23,6 +23,7 @@
  */
 
 import { getDomain } from 'tldts'
+import { parseHttpUrl } from './web-url.ts'
 
 export type SiteRule = 'blocked' | 'read-only' | 'ask' | 'trusted'
 
@@ -171,7 +172,7 @@ export function matchSitePattern(pattern: string, url: URL): boolean {
   } catch {
     path = url.pathname.toLowerCase()
   }
-  if (pathPattern.includes('*')) return globRegExp(pathPattern, '.', true).test(path)
+  if (pathPattern.includes('*')) return globRegExp(pathPattern, true).test(path)
   return path === pathPattern || path.startsWith(`${pathPattern}/`)
 }
 
@@ -181,23 +182,14 @@ function hostMatches(pattern: string, host: string): boolean {
       const base = pattern.slice(2)
       return host === base || host.endsWith(`.${base}`)
     }
-    return globRegExp(pattern, '.', false).test(host)
+    return globRegExp(pattern, false).test(host)
   }
   return host === pattern || host.endsWith(`.${pattern}`)
 }
 
-function globRegExp(pattern: string, _any: string, prefix: boolean): RegExp {
+function globRegExp(pattern: string, prefix: boolean): RegExp {
   const source = pattern.split('*').map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')
   return new RegExp(`^${source}${prefix ? '(?:/.*)?' : ''}$`)
-}
-
-function parseWebUrl(value: string | URL): URL | undefined {
-  try {
-    const url = typeof value === 'string' ? new URL(value) : value
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url : undefined
-  } catch {
-    return undefined
-  }
 }
 
 function layerVerdict(entries: readonly SiteRuleEntry[], url: URL, source: SiteRuleSource): SiteVerdict | undefined {
@@ -218,7 +210,7 @@ function layerVerdict(entries: readonly SiteRuleEntry[], url: URL, source: SiteR
  * unrestricted access is off (ordinary approval flow). Non-web URLs have none.
  */
 export function resolveSiteRule(value: string | URL, policy: SitePolicy): SiteVerdict | undefined {
-  const url = parseWebUrl(value)
+  const url = parseHttpUrl(typeof value === 'string' ? value : value.href)
   if (url === undefined) return undefined
   const managed = layerVerdict(policy.managed, url, 'managed')
   if (managed !== undefined) return managed

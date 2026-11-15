@@ -2,22 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PAGE_SESSION_CONTEXT_STORAGE_KEY } from '../src/background/session-continuity.ts'
-
-function chromeEvent<T extends unknown[]>() {
-  const listeners = new Set<(...args: T) => void>()
-  return {
-    addListener: vi.fn((listener: (...args: T) => void) => { listeners.add(listener) }),
-    emit: (...args: T) => { for (const listener of listeners) listener(...args) },
-  }
-}
-
-function panelPort() {
-  const onMessage = chromeEvent<[unknown]>()
-  const onDisconnect = chromeEvent<[]>()
-  const postMessage = vi.fn()
-  const port = { name: 'dsh-panel', postMessage, onMessage, onDisconnect } as unknown as chrome.runtime.Port
-  return { onDisconnect, onMessage, port, postMessage }
-}
+import { chromeEvent, panelPort } from './support/chrome.ts'
 
 function tab(id: number, url: string, windowId = 1): chrome.tabs.Tab {
   return {

@@ -3,17 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { classifyFailure, fixtureAllowedFor, LearningRuntime, normalizeLearningSettings, rpcValue, type LearningDeps } from '../src/background/learning.ts'
 import type { ApprovalPrompt } from '../src/security/approval.ts'
 import type { ToolCall } from '../src/background/tools.ts'
+import { memoryStorage } from './support/chrome.ts'
 
-function fakeStorage(initial: Record<string, unknown> = {}) {
-  const data: Record<string, unknown> = { ...initial }
-  return {
-    data,
-    area: {
-      get: vi.fn(async (keys: string[]) => Object.fromEntries(keys.filter((key) => key in data).map((key) => [key, data[key]]))),
-      set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(data, items) }),
-    } as unknown as chrome.storage.StorageArea,
-  }
-}
+const fakeStorage = memoryStorage
 
 let tabUrl = 'https://crm.example/new'
 const sendMessage = vi.fn()
@@ -139,6 +131,26 @@ describe('learning runtime', () => {
     expect(learning.stepsFor('s1')).toEqual([])
   })
 
+  it('probes once, before the action: the landed-page policy re-check of a navigating click is not re-probed (H1)', async () => {
+    const { learning } = runtime({}, { dshLearningSettings: { workflows: true } })
+    await learning.ready
+    sendMessage.mockImplementation(async (_tab: number, message: { args: { index?: number } }) => message.args.index === 4
+      ? { ok: true, result: { role: 'link', name: 'Next page', css: 'a.next' } }
+      : { ok: false, error: { message: 'No element at that index' } })
+    const click = call('browser_click', { index: 4 })
+    const hook = learning.wrapPolicy(click, { id: 7, url: tabUrl }, policy)!
+    hook(click, { reads: [], acts: [] })
+    // tools.ts judges the page the click landed on with a snapshot-shaped copy of the call.
+    hook({ ...click, name: 'browser_snapshot', args: {} }, { reads: [], acts: [] })
+    // A second policy pass for the same call (content-script recovery) does not re-probe either.
+    hook(click, { reads: [], acts: [] })
+    learning.recordResult(click, { ok: true, result: { text: 'ok' } }, { tabId: 7, url: tabUrl })
+    await flush()
+    await flush()
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(learning.stepsFor('s1')).toEqual([expect.objectContaining({ tool: 'browser_click', locator: { role: 'link', name: 'Next page', css: 'a.next' } })])
+  })
+
   it('hands "Do the remaining N" to the bridge as one browser_run program, with no card of its own', async () => {
     const { learning, request } = runtime({}, { dshLearningSettings: { watchMe: true } })
     await learning.ready
@@ -164,7 +176,7 @@ describe('learning runtime', () => {
     expect(JSON.stringify(prompts[0]!.details)).toContain('POST https://crm.example/api/add')
     expect(JSON.stringify(prompts[0]!.details)).toContain('x-csrf: <from page meta')
     expect(sendMessage).toHaveBeenCalledWith(7, expect.objectContaining({ type: 'DSH_SITE_DRIVER_FETCH' }), { frameId: 0 })
-    // Wrong origin, denied policy, refused card, HTTP error: all fall back to the UI.
+    // Wrong origin, denied policy, HTTP error: all fall back to the UI (refused cards: next test).
     const off = await learning.dispatchSiteDriver(call('browser_site_driver', { origin: driver.origin, driver: 'add', params: { name: 'x' } }), { id: 7, url: 'https://other.example/' }, policy, authorize, new AbortController().signal)
     expect(off.error?.message).toMatch(/not on https:\/\/crm.example/)
     const denied = await learning.dispatchSiteDriver(call('browser_site_driver', { origin: driver.origin, driver: 'add', params: { name: 'x' } }), { id: 7, url: tabUrl }, () => ({ kind: 'deny', message: 'read-only site' }), authorize, new AbortController().signal)
@@ -195,6 +207,9 @@ describe('learning runtime', () => {
     expect(classifyFailure(fail('boom'), undefined, undefined, true)).toBe('retried')
     expect(classifyFailure(fail('blocked'), undefined, 'blocked', false)).toBeUndefined()
     expect(classifyFailure(fail('Tool call was cancelled'), undefined, undefined, false)).toBeUndefined()
+    // The approval outcome decides even when the message says nothing about it (M3).
+    for (const decision of ['denied', 'timed-out', 'cancelled', 'unavailable']) expect(classifyFailure(fail('No element matched selector: #x'), decision, undefined, false)).toBeUndefined()
+    expect(classifyFailure(fail('No element matched selector: #x'), 'allowed', undefined, false)).toBe('not-found')
     expect(normalizeLearningSettings({ siteDriverOrigins: ['https://a.example/path', 'nope'] }).siteDriverOrigins).toEqual(['https://a.example'])
     expect(rpcValue({ type: 'server-response', result: { ok: true, value: 3 } })).toBe(3)
   })
@@ -275,4 +290,166 @@ describe('learning runtime', () => {
     await learning.stopWatching()
     expect(learning.watchMeReady(7, 0, 'https://crm.example/next')).toBe(false)
   })
+
+  it('tells a tab still recording for a forgotten Watch me (worker restart) to stop, once per tab (M1)', async () => {
+    let now = 10_000
+    const { learning } = runtime({ now: () => now }, { dshLearningSettings: { watchMe: true } })
+    await learning.ready
+    sendMessage.mockResolvedValue({ ok: true })
+    await learning.onWatchEvent(7, 0, { kind: 'click', css: '#a' })
+    await learning.onWatchEvent(7, 0, { kind: 'click', css: '#b' })
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(sendMessage).toHaveBeenCalledWith(7, { type: 'DSH_WATCH', enabled: false }, { frameId: 0 })
+    now += 60_000
+    await learning.onWatchEvent(7, 0, { kind: 'click', css: '#c' })
+    expect(sendMessage).toHaveBeenCalledTimes(2)
+  })
+
+  describe('site driver approval (G5)', () => {
+    const driver = { format: 'dsh-site-driver/v1', origin: 'https://crm.example', name: 'add', description: '', method: 'POST', path: '/api/add', body: { type: 'json', template: '{"name":"{{name}}"}' }, headers: { 'content-type': 'application/json' }, tokens: [], params: [{ name: 'name' }] }
+    const driverCall = () => call('browser_site_driver', { origin: driver.origin, driver: 'add', params: { name: 'Ada' } })
+    const fetched = () => sendMessage.mock.calls.some(([, message]) => (message as { type?: string }).type === 'DSH_SITE_DRIVER_FETCH')
+
+    async function ready() {
+      const { learning } = runtime({}, { dshLearningSettings: { siteDrivers: true, siteDriverOrigins: [driver.origin] }, dshSiteDrivers: [driver] })
+      await learning.ready
+      sendMessage.mockResolvedValue({ ok: true, result: { status: 200, ok: true, contentType: 'application/json', body: '{}' } })
+      return learning
+    }
+
+    it.each(['denied', 'timed-out', 'unavailable'] as const)('sends nothing when the card is %s', async (authorization) => {
+      const learning = await ready()
+      const answer = await learning.dispatchSiteDriver(driverCall(), { id: 7, url: tabUrl }, policy, async () => authorization, new AbortController().signal)
+      expect(answer.ok).toBe(false)
+      expect(answer.error?.message).toContain(authorization)
+      expect(fetched()).toBe(false)
+    })
+
+    it('sends nothing when the tab left the origin while the card waited', async () => {
+      const learning = await ready()
+      const answer = await learning.dispatchSiteDriver(driverCall(), { id: 7, url: tabUrl }, policy, async () => {
+        tabUrl = 'https://evil.example/'
+        return 'approved'
+      }, new AbortController().signal)
+      expect(answer.error?.message).toMatch(/left https:\/\/crm.example/)
+      expect(fetched()).toBe(false)
+    })
+
+    it('sends nothing when the call was cancelled while the card waited', async () => {
+      const learning = await ready()
+      const controller = new AbortController()
+      const answer = await learning.dispatchSiteDriver(driverCall(), { id: 7, url: tabUrl }, policy, async () => {
+        controller.abort()
+        return 'approved'
+      }, controller.signal)
+      expect(answer.error?.message).toBe('Tool call was cancelled')
+      expect(fetched()).toBe(false)
+    })
+  })
+
+  it('captures nothing while the kill switch is engaged or the agent is paused (G6)', async () => {
+    const { learning, request } = runtime({ halted: () => true }, { dshLearningSettings: { workflows: true, fixtures: true } })
+    await learning.ready
+    sendMessage.mockResolvedValue({ ok: true, result: { role: 'button', name: 'Save', css: '#save' } })
+    const click = call('browser_click', { index: 1 })
+    learning.wrapPolicy(click, { id: 7, url: tabUrl }, policy)!(click, { reads: [], acts: [] })
+    learning.recordResult(click, { ok: true, result: { text: 'ok' } }, { tabId: 7, url: tabUrl })
+    learning.recordResult(call('browser_click', { selector: '#gone' }), { ok: false, error: { code: 'action-failed', message: 'No element matched selector: #gone' } }, { tabId: 7, url: tabUrl })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(learning.stepsFor('s1')).toEqual([])
+    expect(request.mock.calls.some(([method]) => method === 'bridge.learning.fixture.save')).toBe(false)
+  })
+
+  describe('Watch me switch (G7)', () => {
+    it('refuses to watch or run a suggestion while the switch is off', async () => {
+      const { learning, request } = runtime()
+      await learning.ready
+      await expect(learning.startWatching(7)).rejects.toThrow(/turned off/)
+      ;(learning as unknown as { suggestion: unknown }).suggestion = { tabId: 7, origin: 'https://crm.example', period: 1, done: 2, remaining: 1, program: [{ tool: 'browser_click', args: { selector: '#x' } }], labels: [] }
+      await expect(learning.runSuggestion('s1')).rejects.toThrow()
+      expect(sendMessage).not.toHaveBeenCalled()
+      expect(request).not.toHaveBeenCalled()
+    })
+
+    it('turning the switch off stops the page recorder', async () => {
+      const { learning } = runtime({}, { dshLearningSettings: { watchMe: true } })
+      await learning.ready
+      sendMessage.mockResolvedValue({ ok: true })
+      await learning.startWatching(7)
+      expect(sendMessage).toHaveBeenLastCalledWith(7, { type: 'DSH_WATCH', enabled: true }, { frameId: 0 })
+      await learning.updateSettings({ watchMe: false })
+      expect(sendMessage).toHaveBeenLastCalledWith(7, { type: 'DSH_WATCH', enabled: false }, { frameId: 0 })
+      expect(learning.snapshot().watching).toBeNull()
+    })
+  })
+
+  describe('fixture page kind (G8)', () => {
+    function withPageCapture(frames: number) {
+      const chromeGlobal = (globalThis as unknown as { chrome: Record<string, unknown> }).chrome
+      const saveAsMHTML = vi.fn(async () => ({ text: async () => 'MHTML' }) as unknown as Blob)
+      chromeGlobal.pageCapture = { saveAsMHTML }
+      chromeGlobal.permissions = { contains: vi.fn(async () => true) }
+      chromeGlobal.webNavigation = {
+        getAllFrames: vi.fn(async () => Array.from({ length: frames }, (_, index) => ({ frameId: index, parentFrameId: index - 1, url: tabUrl, documentId: `d${String(index)}` }))),
+      }
+      return saveAsMHTML
+    }
+
+    async function captured(sensitiveCount: number): Promise<string> {
+      const { learning, request } = runtime({}, { dshLearningSettings: { fixtures: true } })
+      await learning.ready
+      sendMessage.mockImplementation(async (_tab: number, message: { probe?: boolean }) => message.probe === true
+        ? { ok: true, result: { sensitiveCount } }
+        : { ok: true, result: { html: '<html>masked</html>' } })
+      learning.recordResult(call('browser_click', { selector: '#gone' }), { ok: false, error: { code: 'action-failed', message: 'No element matched selector: #gone' } }, { tabId: 7, url: tabUrl })
+      await vi.waitFor(() => { expect(request).toHaveBeenCalledWith('bridge.learning.fixture.save', expect.anything(), 60_000) })
+      const payload = request.mock.calls.find(([method]) => method === 'bridge.learning.fixture.save')![1] as { fixture: { page: { kind: string } } }
+      return payload.fixture.page.kind
+    }
+
+    it('uses MHTML only for a single-frame page with no sensitive field', async () => {
+      const save = withPageCapture(1)
+      expect(await captured(0)).toBe('mhtml')
+      expect(save).toHaveBeenCalledWith({ tabId: 7 })
+    })
+
+    it('falls back to the sanitized DOM when a sensitive field is present', async () => {
+      const save = withPageCapture(1)
+      expect(await captured(1)).toBe('dom')
+      expect(save).not.toHaveBeenCalled()
+    })
+
+    it('falls back to the sanitized DOM when the page has several frames', async () => {
+      const save = withPageCapture(2)
+      expect(await captured(0)).toBe('dom')
+      expect(save).not.toHaveBeenCalled()
+    })
+  })
+
+  it('forgets the probe of a call whose dispatch threw (M9)', async () => {
+    const { learning } = runtime({}, { dshLearningSettings: { workflows: true } })
+    await learning.ready
+    sendMessage.mockResolvedValue({ ok: true, result: { role: 'button', name: 'Save', css: '#save' } })
+    const click = call('browser_click', { index: 1 })
+    learning.wrapPolicy(click, { id: 7, url: tabUrl }, policy)!(click, { reads: [], acts: [] })
+    learning.forgetCall(click.id)
+    // A late result for the same id finds no probe: no locator, so no element step.
+    learning.recordResult(click, { ok: true, result: { text: 'ok' } }, { tabId: 7, url: tabUrl })
+    await flush()
+    expect(learning.stepsFor('s1')).toEqual([])
+  })
+
+  it('a closed tab takes its pending probes with it (M9)', async () => {
+    const { learning } = runtime({}, { dshLearningSettings: { workflows: true } })
+    await learning.ready
+    sendMessage.mockResolvedValue({ ok: true, result: { role: 'button', name: 'Save', css: '#save' } })
+    const click = call('browser_click', { index: 1 })
+    learning.wrapPolicy(click, { id: 7, url: tabUrl }, policy)!(click, { reads: [], acts: [] })
+    learning.forgetTab(7)
+    learning.recordResult(click, { ok: true, result: { text: 'ok' } }, { tabId: 7, url: tabUrl })
+    await flush()
+    expect(learning.stepsFor('s1')).toEqual([])
+  })
 })
+

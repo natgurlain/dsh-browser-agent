@@ -5,7 +5,8 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { dispatchToolCall, type InputRuntime, type ToolAnswer, type ToolCall } from '../src/background/tools.ts'
+import type { InputRuntime, ToolAnswer, ToolCall } from '../src/background/tools.ts'
+import { dispatchOnTab } from './support/dispatch.ts'
 import { resolveApprovalGate } from '../src/background/authorization.ts'
 import { runDownloadsTool, waitForDownload, type DownloadsApi } from '../src/background/downloads.ts'
 import { readTabPdfText } from '../src/background/page-documents.ts'
@@ -59,13 +60,16 @@ async function run(call: ToolCall, options: {
   input?: InputRuntime
   share?: 'ask' | 'auto' | 'off'
 } = {}): Promise<ToolAnswer> {
-  return dispatchToolCall(
-    call, options.share ?? 'auto', { maxItems: 60, maxChars: 12_000 }, options.authorize ?? (async () => 'approved'), undefined, TAB, () => true,
-    { unrestrictedAccess: options.unrestricted ?? false, followTab: async () => undefined, ...(options.input === undefined ? {} : { input: options.input }) },
-  )
+  return dispatchOnTab(call, {
+    tab: TAB,
+    ...(options.share === undefined ? {} : { share: options.share }),
+    ...(options.authorize === undefined ? {} : { authorize: options.authorize }),
+    context: { unrestrictedAccess: options.unrestricted ?? false, ...(options.input === undefined ? {} : { input: options.input }) },
+  })
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -129,9 +133,22 @@ describe('browser_downloads', () => {
     await expect(again).rejects.toThrow(/\(NETWORK_FAILED\)/)
   })
 
-  it('times out and validates arguments', async () => {
+  it('ends at once for a wait whose call was already cancelled (M9)', async () => {
     const api = fakeDownloads([])
-    await expect(runDownloadsTool({ action: 'wait', timeoutMs: 1_000 }, api)).rejects.toThrow(/No matching download/)
+    const controller = new AbortController()
+    controller.abort()
+    const started = Date.now()
+    await expect(waitForDownload(api, { timeoutMs: 1_000, since: 0, signal: controller.signal })).rejects.toThrow(/cancelled/)
+    expect(Date.now() - started).toBeLessThan(500)
+  })
+
+  it('times out and validates arguments', async () => {
+    vi.useFakeTimers()
+    const api = fakeDownloads([])
+    const timedOut = expect(runDownloadsTool({ action: 'wait', timeoutMs: 1_000 }, api)).rejects.toThrow(/No matching download/)
+    await vi.advanceTimersByTimeAsync(1_000)
+    await timedOut
+    vi.useRealTimers()
     await expect(runDownloadsTool({ action: 'wait', filenameRegex: '(' }, api)).rejects.toThrow(/not a valid regular expression/)
     await expect(runDownloadsTool({ action: 'list', limit: 0 }, api)).rejects.toThrow(/limit/)
   })

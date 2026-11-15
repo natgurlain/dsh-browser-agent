@@ -124,6 +124,7 @@ export class PageWatchObserver {
   constructor(
     private readonly report: (watchId: string, matched: string | undefined) => Promise<{ accepted?: unknown; reason?: unknown } | undefined>,
     private readonly now: () => number = () => Date.now(),
+    private readonly onInvalid: (watchId: string) => void = () => undefined,
   ) {}
 
   /** Replace the armed set. */
@@ -158,6 +159,7 @@ export class PageWatchObserver {
       if (result.invalid === true) {
         // Polling an unparseable selector forever would never fire, not even with `gone`.
         this.states.delete(state.watch.id)
+        this.onInvalid(state.watch.id)
         if (this.states.size === 0) this.stop()
         continue
       }
@@ -244,6 +246,9 @@ export function armPageWatch(watches: unknown): void {
     const observer = new PageWatchObserver(async (watchId, matched) => {
       const answer = await chrome.runtime.sendMessage({ type: 'DSH_WATCH_HIT', watchId, ...(matched === undefined ? {} : { matched }) }) as unknown
       return typeof answer === 'object' && answer !== null ? answer as { accepted?: unknown; reason?: unknown } : undefined
+    }, undefined, (watchId) => {
+      // Tell the background so the watcher leaves the panel instead of lingering until it expires.
+      void chrome.runtime.sendMessage({ type: 'DSH_WATCH_INVALID', watchId }).catch(() => undefined)
     })
     current = { observer, owner: armPageWatch }
     contentGlobal[WATCH_GLOBAL] = current

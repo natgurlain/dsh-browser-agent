@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { isExtensionPageSender, PolicyRuntime, POLICY_PORT_NAME } from '../src/background/policy-runtime.ts'
+import { memoryStorage } from './support/chrome.ts'
 
 beforeEach(() => {
   vi.stubGlobal('chrome', {
@@ -68,4 +69,36 @@ describe('PolicyRuntime', () => {
     expect(policy.get('s1')).toBeUndefined()
     expect(policy.get('s2')).toBeDefined()
   })
+
+  it('keeps per-session strict mode across a worker restart (M1)', async () => {
+    const storage = memoryStorage()
+    const options = { settings: () => ({ siteRules: [], siteDefaultsEnabled: true }), unrestricted: () => false, clearBridgeTaint: vi.fn(async () => {}), storage: storage.area }
+    const before = new PolicyRuntime(options)
+    await before.ready
+    before.setStrictSession('s1', true)
+    await vi.waitFor(() => { expect(storage.area.set).toHaveBeenCalled() })
+    const after = new PolicyRuntime(options)
+    await after.ready
+    expect(after.strictFor('s1', undefined)).toBe(true)
+    expect(after.strictFor('s2', undefined)).toBe(false)
+    after.setStrictSession('s1', false)
+    const third = new PolicyRuntime(options)
+    await third.ready
+    expect(third.strictFor('s1', undefined)).toBe(false)
+  })
+
+  it('forgets the call record of a dispatch that threw, so nothing is left to taint from (M9)', () => {
+    const policy = runtime()
+    const call = { id: 'c1', name: 'browser_snapshot', args: {}, sessionId: 's1' }
+    policy.hook('c1', 's1', false)(call, { reads: ['https://a.example'], acts: [] })
+    policy.forgetCall('c1')
+    // A failed call taints only when it reached a page (its record says so).
+    policy.recordResult(call, false)
+    expect(policy.get('s1')).toBeUndefined()
+    // Without the forget the same sequence taints.
+    policy.hook('c2', 's1', false)({ ...call, id: 'c2' }, { reads: ['https://a.example'], acts: [] })
+    policy.recordResult({ ...call, id: 'c2' }, false)
+    expect(policy.get('s1')).toBeDefined()
+  })
 })
+

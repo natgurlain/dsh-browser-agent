@@ -5,7 +5,8 @@
  * a watcher always shows its own card (forced: no trusted origin, session
  * grant, or unrestricted access skips it) naming the page, the condition, the
  * prompt, the lifetime, and the number of fires. Approved watchers persist in
- * `chrome.storage.local`, so they survive worker restarts, and are re-armed in
+ * `chrome.storage.session` (watcher-runtime.ts), so they survive worker
+ * restarts but not the browser session their tab ids belong to, and are re-armed in
  * their tab's content script (content/watch.ts) after every navigation.
  *
  * When a condition is met the content script reports it; the background
@@ -21,6 +22,8 @@
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { approvalBinding } from '../security/payload-binding.ts'
 import type { ToolCall } from './tools.ts'
+import { httpOrigin, isRecord } from '../security/web-url.ts'
+import { cancelledAnswer, fail, notApprovedAnswer, type SettledAnswer } from './answers.ts'
 
 /** Storage key of the persisted watchers. */
 export const WATCHERS_STORAGE_KEY = 'dshPageWatchers'
@@ -62,6 +65,7 @@ export interface PageWatcher {
   expiresAt: number
   maxFires: number
   fires: number
+  /** Last fire or missed wake attempt (cooldown clock). */
   lastFiredAt?: number
   /** Set when a wake could not be delivered (session not running, rate limit). */
   lastMiss?: string
@@ -72,10 +76,6 @@ export interface ArmedWatch {
   id: string
   condition: WatchCondition
   createdAt: number
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function nonEmpty(value: unknown): value is string {
@@ -355,10 +355,8 @@ function parseWatchConditionShape(value: unknown): WatchCondition | undefined {
   }
 }
 
-/** A tool answer (structurally a ToolAnswer). */
-export type WatchAnswer =
-  | { ok: true; result: unknown }
-  | { ok: false; error: { code: 'bad-args' | 'action-failed' | 'timeout' | 'no-active-tab'; message: string } }
+/** A tool answer (watchers.ts lanes always settle one way or the other). */
+export type WatchAnswer = SettledAnswer
 
 /** What the tool handlers need from the background worker. */
 export interface WatchToolDeps {
@@ -376,24 +374,36 @@ export interface WatchToolDeps {
   changed: () => void
   /** Site policy hides the page from the agent (blocked / managed-disallowed). */
   pageHidden?: (url: string) => boolean
+  /**
+   * Check a selector's syntax in the tab's page (the worker has no DOM):
+   * resolves an error message for one that can never match, else undefined.
+   */
+  validateSelector?: (tabId: number, selector: string) => Promise<string | undefined>
   newId?: () => string
   now?: () => number
   signal: AbortSignal
 }
 
-function failed(message: string, code: 'bad-args' | 'action-failed' | 'no-active-tab' = 'action-failed'): WatchAnswer {
-  return { ok: false, error: { code, message } }
+/**
+ * Page-side syntax check of a watcher selector (run through
+ * chrome.scripting in the watched tab). Accepts the shadow-piercing
+ * `host >>> inner` form the locator hands out: every part must parse.
+ * Must stay self-contained (serialized into the page).
+ */
+export function selectorSyntaxError(selector: string): string | undefined {
+  const parts = selector.split('>>>').map((part) => part.trim())
+  if (parts.some((part) => part === '')) return 'has an empty part around >>>'
+  for (const part of parts) {
+    try {
+      document.createDocumentFragment().querySelector(part)
+    } catch {
+      return `is not a valid CSS selector (${part})`
+    }
+  }
+  return undefined
 }
 
-function originOf(url: string | undefined): string | undefined {
-  if (url === undefined) return undefined
-  try {
-    const parsed = new URL(url)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.origin : undefined
-  } catch {
-    return undefined
-  }
-}
+const failed = fail
 
 /** `browser_watch`: approve and record one watcher. */
 export async function createWatcher(call: ToolCall, deps: WatchToolDeps): Promise<WatchAnswer> {
@@ -417,17 +427,20 @@ export async function createWatcher(call: ToolCall, deps: WatchToolDeps): Promis
     if ('ok' in resolved) return failed(resolved.error?.message ?? 'No controlled tab to watch.', 'no-active-tab')
     tab = resolved
   }
-  const origin = originOf(tab.url)
+  const origin = httpOrigin(tab.url)
   if (tab.id === undefined || tab.url === undefined || origin === undefined) return failed('Only http and https pages can be watched.')
   // A page site policy hides cannot be watched; its address is not echoed back.
   if (deps.pageHidden?.(tab.url) === true) return failed('This page is blocked by site policy, so it cannot be watched.')
+  // A selector that can never parse would show a dead watcher until it expires: refuse it before the card.
+  if (request.condition.kind === 'selector' && deps.validateSelector !== undefined) {
+    const invalid = await deps.validateSelector(tab.id, request.condition.selector)
+    if (invalid !== undefined) return failed(`condition.selector ${invalid}.`, 'bad-args')
+  }
   const page = { url: tab.url, origin, ...(tab.title === undefined ? {} : { title: tab.title }) }
   const prompt = watchApprovalPrompt(request, page)
   const authorization = await deps.authorize(prompt, tab.windowId ?? 0)
-  if (deps.signal.aborted) return failed('Tool call was cancelled')
-  if (authorization !== 'approved') {
-    return { ok: false, error: { code: authorization === 'timed-out' ? 'timeout' : 'action-failed', message: authorization === 'denied' ? 'The user declined the page watcher.' : `The page watcher was not approved (${authorization}).` } }
-  }
+  if (deps.signal.aborted) return cancelledAnswer()
+  if (authorization !== 'approved') return notApprovedAnswer('The user declined the page watcher.', 'The page watcher', authorization)
   if (!deps.registry.hasRoom()) return failed(`At most ${String(MAX_ACTIVE_WATCHERS)} page watchers can be active.`)
   const now = (deps.now ?? Date.now)()
   const watcher: PageWatcher = {
@@ -524,7 +537,7 @@ export async function handleWatchHit(
   if (sender.tabId !== watcher.tabId || (sender.frameId !== undefined && sender.frameId !== 0)) return { accepted: false, reason: 'wrong-tab' }
   // A URL watcher reports from the background and may follow the tab to another site;
   // every other watcher fires only on the origin the user approved.
-  if (sender.urlWatcher === true ? watcher.condition.kind !== 'url' : (watcher.condition.kind === 'url' || originOf(sender.url) !== watcher.origin)) {
+  if (sender.urlWatcher === true ? watcher.condition.kind !== 'url' : (watcher.condition.kind === 'url' || httpOrigin(sender.url) !== watcher.origin)) {
     return { accepted: false, reason: 'other-origin' }
   }
   if (!deps.enabled()) return { accepted: false, reason: 'disabled' }
@@ -572,7 +585,7 @@ export async function handleWatchHit(
 
 /** The watchers a tab's content script should observe (URL watchers run in the background). */
 export function armedFor(registry: WatcherRegistry, tabId: number, url: string | undefined): ArmedWatch[] {
-  const origin = originOf(url)
+  const origin = httpOrigin(url)
   return registry.forTab(tabId)
     .filter((watcher) => watcher.origin === origin && watcher.condition.kind !== 'url')
     .map((watcher) => ({ id: watcher.id, condition: watcher.condition, createdAt: watcher.createdAt }))

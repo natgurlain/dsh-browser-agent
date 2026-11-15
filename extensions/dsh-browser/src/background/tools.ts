@@ -9,7 +9,7 @@
  */
 
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import type { ToolError, ToolErrorCode } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import type { ToolErrorCode } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import {
   allocateFrameBudgets,
   frameDocumentKey,
@@ -24,7 +24,7 @@ import { approvalBinding } from '../security/payload-binding.ts'
 import { waitForNextDocumentReady } from './navigation.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale } from '../i18n.ts'
-import { DevToolsError, type CdpClient } from './debugger-session.ts'
+import { DevToolsError } from './debugger-session.ts'
 import { InputStateStore } from './input-state.ts'
 import {
   InputError,
@@ -35,7 +35,6 @@ import {
   setInputFiles,
   withFocusEmulation,
 } from './input-actions.ts'
-import { isModifierName, type ModifierName } from './keys.ts'
 import type { InputSetupRequest, InputSetupResult } from '../shared/input-setup.ts'
 import { writeClipboard } from './clipboard-write.ts'
 import type { ClipboardWriteOutcome } from '../shared/clipboard.ts'
@@ -57,6 +56,9 @@ import {
   trustedClick,
   type PointerContext,
 } from './pointer-tools.ts'
+import { parseHttpUrl } from '../security/web-url.ts'
+import { approvalFailure, type ToolAnswer } from './answers.ts'
+import { requestedModifiers, usableInput, type InputRuntime } from './input-actions.ts'
 
 /** A tool call from the bridge. */
 export interface ToolCall {
@@ -75,12 +77,8 @@ export interface ToolCall {
   requester?: string
 }
 
-/** The wire answer for one tool call. */
-export interface ToolAnswer {
-  ok: boolean
-  result?: unknown
-  error?: ToolError
-}
+/** The wire answer for one tool call (answers.ts). */
+export type { ToolAnswer } from './answers.ts'
 
 /** Snapshot limits negotiated with the bridge and forwarded after lazy injection. */
 export interface ContentBudget {
@@ -166,13 +164,8 @@ export function isTabManagementTool(name: string): boolean {
   return TAB_MANAGEMENT_TOOL_NAMES.has(name)
 }
 
-/** Trusted input channel owned by the background entry point (debugger broker). */
-export interface InputRuntime {
-  /** Whether the platform can dispatch real browser input. */
-  supported: boolean
-  /** Run one operation against the tab's shared debugger attachment. */
-  run<T>(tabId: number, operation: (client: CdpClient) => Promise<T>): Promise<T>
-}
+/** Trusted input channel owned by the background entry point (input-actions.ts). */
+export type { InputRuntime } from './input-actions.ts'
 
 /** Tab-affinity services owned by the background entry point. */
 export interface TabManagementContext {
@@ -495,34 +488,6 @@ function cancelled(): ToolAnswer {
 }
 
 /** Preserve the factual approval outcome for the model without prescribing a response. */
-function approvalFailure(approval: ApprovalPrompt, authorization: Exclude<ApprovalAuthorization, 'approved'>): ToolAnswer {
-  switch (authorization) {
-    case 'denied':
-      return {
-        ok: false,
-        error: { code: 'action-failed', message: `The user denied the browser approval request for "${approval.action}".` },
-      }
-    case 'unavailable':
-      return {
-        ok: false,
-        error: {
-          code: 'action-failed',
-          message: `No browser side panel was available to receive or complete the approval request for "${approval.action}".`,
-        },
-      }
-    case 'timed-out':
-      return {
-        ok: false,
-        error: { code: 'timeout', message: `The browser approval request for "${approval.action}" timed out before the user responded.` },
-      }
-    case 'cancelled':
-      return {
-        ok: false,
-        error: { code: 'bridge-closed', message: `The browser approval request for "${approval.action}" was cancelled.` },
-      }
-  }
-}
-
 function targetChanged(): ToolAnswer {
   return unavailable('The controlled tab changed during the operation. Confirm the page in the side panel before retrying.')
 }
@@ -612,21 +577,6 @@ async function sendInputSetup(tabId: number, frame: TabFrame, request: InputSetu
 }
 
 /** Validate the model-supplied modifier list. */
-function requestedModifiers(args: Record<string, unknown>): ModifierName[] {
-  if (args.modifiers === undefined) return []
-  if (!Array.isArray(args.modifiers)) {
-    throw new InputError('bad-args', 'modifiers must be a list of Alt, Control, Meta, or Shift.')
-  }
-  const modifiers: ModifierName[] = []
-  for (const value of args.modifiers) {
-    if (typeof value !== 'string' || !isModifierName(value)) {
-      throw new InputError('bad-args', 'modifiers must be a list of Alt, Control, Meta, or Shift.')
-    }
-    modifiers.push(value)
-  }
-  return modifiers
-}
-
 /** Report what the clipboard actually holds, including derived plain text. */
 function describeClipboardWrite(outcome: ClipboardWriteOutcome): string {
   if (!outcome.rich) return `Wrote ${outcome.plainText.length} character(s) to the system clipboard.`
@@ -741,10 +691,6 @@ function inputUnavailable(message: string): ToolAnswer {
 }
 
 /** Whether a runtime is present and supported. */
-function usableInput(runtime: InputRuntime | undefined): runtime is InputRuntime {
-  return runtime !== undefined && runtime.supported
-}
-
 /** A token that only marks one file input for one upload call. */
 function uploadToken(): string {
   return crypto.randomUUID()
@@ -1097,7 +1043,7 @@ async function dispatchTrustedInput(
       case 'browser_type':
         return await trustedType(tabId, frame, call, budget, runtime, includePageDelta)
       case 'browser_click':
-        return await trustedClick(pointerContext(tabId, frame, call, budget, runtime, includePageDelta)) as ToolAnswer
+        return await trustedClick(pointerContext(tabId, frame, call, budget, runtime, includePageDelta))
       default:
         return undefined
     }
@@ -1171,7 +1117,7 @@ async function dispatchOnceArmed(
     commitAction?.()
     const run = async (): Promise<ToolAnswer> => {
       try {
-        return (call.name === 'browser_hover' ? await dispatchHover(pointer) : await dispatchDrag(pointer)) as ToolAnswer
+        return (call.name === 'browser_hover' ? await dispatchHover(pointer) : await dispatchDrag(pointer))
       } catch (error: unknown) {
         const mapped = trustedFailure(error)
         if (mapped !== undefined) return mapped
@@ -1186,7 +1132,7 @@ async function dispatchOnceArmed(
   let clickCheck: Awaited<ReturnType<typeof precheckClick>> | undefined
   if (call.name === 'browser_click' && route === 'content') {
     clickCheck = await precheckClick(pointer, clickMayRetry(call.args, inputRuntime))
-    if (clickCheck.kind === 'refuse') return clickCheck.answer as ToolAnswer
+    if (clickCheck.kind === 'refuse') return clickCheck.answer
   }
   if (route !== 'content') {
     // Commit before dispatching: a trusted gesture cannot be withdrawn once the
@@ -1254,9 +1200,8 @@ async function dispatchOnceArmed(
     : undefined
   let response: unknown
   let dialogDuringAction: OpenDialog | undefined
-  const stateChanging = STATE_CHANGING_PAGE_TOOLS.has(call.name)
   try {
-    if (stateChanging) commitAction?.()
+    if (stateChangingAction) commitAction?.()
     const guarded = await guardPage(dialogs, tabId, frame, sendAction(
       tabId,
       call,
@@ -1274,7 +1219,7 @@ async function dispatchOnceArmed(
     response = guarded.value
     dialogDuringAction = guarded.dialog
   } catch (error: unknown) {
-    if (stateChanging && contentScriptReceiverMissing(error)) rollbackActionCommit?.()
+    if (stateChangingAction && contentScriptReceiverMissing(error)) rollbackActionCommit?.()
     navigationWait?.cancel()
     tabWatch?.stop()
     endPendingWatch()
@@ -2134,8 +2079,8 @@ export async function dispatchToolCall(
     if (targetStillAllowed?.() === false) return targetChanged()
     try {
       return call.name === 'browser_save_pdf'
-        ? await savePagePdf({ ...tab, id: tab.id }, call.args, tabManagement.input) as ToolAnswer
-        : await readTabPdfText({ ...tab, id: tab.id }, call.args, effectiveBudget.maxChars, signal) as ToolAnswer
+        ? await savePagePdf({ ...tab, id: tab.id }, call.args, tabManagement.input)
+        : await readTabPdfText({ ...tab, id: tab.id }, call.args, effectiveBudget.maxChars, signal)
     } catch (error: unknown) {
       const mapped = devToolsFailure(error)
       if (mapped !== undefined) return mapped
@@ -2310,17 +2255,6 @@ function sameTargetDocument(call: ToolCall, before: TabFrame[], after: TabFrame[
   return beforeFrame !== undefined
     && afterFrame !== undefined
     && frameDocumentKey(beforeFrame) === frameDocumentKey(afterFrame)
-}
-
-/** Parse a model-supplied http(s) URL for tab creation / navigation. */
-export function parseHttpUrl(value: unknown): URL | undefined {
-  if (typeof value !== 'string' || value.trim() === '') return undefined
-  try {
-    const parsed = new URL(value)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed : undefined
-  } catch {
-    return undefined
-  }
 }
 
 async function removeCreatedTab(tabId: number): Promise<void> {

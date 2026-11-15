@@ -10,6 +10,7 @@
 import type { CdpClient } from './debugger-session.ts'
 import { resolveFrameNode } from './debugger-frame.ts'
 import {
+  isModifierName,
   MODIFIER_BITS,
   modifierMask,
   strokeForKey,
@@ -31,6 +32,35 @@ export class InputError extends Error {
     super(message)
     this.name = 'InputError'
   }
+}
+
+/** Trusted input channel owned by the background entry point (debugger broker). */
+export interface InputRuntime {
+  /** Whether the platform can dispatch real browser input. */
+  supported: boolean
+  /** Run one operation against the tab's shared debugger attachment. */
+  run<T>(tabId: number, operation: (client: CdpClient) => Promise<T>): Promise<T>
+}
+
+/** Whether trusted input is present and usable on this platform. */
+export function usableInput(runtime: InputRuntime | undefined): runtime is InputRuntime {
+  return runtime !== undefined && runtime.supported
+}
+
+/** Validated `modifiers` of a click-like call. */
+export function requestedModifiers(args: Record<string, unknown>): ModifierName[] {
+  if (args.modifiers === undefined) return []
+  if (!Array.isArray(args.modifiers)) {
+    throw new InputError('bad-args', 'modifiers must be a list of Alt, Control, Meta, or Shift.')
+  }
+  const modifiers: ModifierName[] = []
+  for (const value of args.modifiers) {
+    if (typeof value !== 'string' || !isModifierName(value)) {
+      throw new InputError('bad-args', 'modifiers must be a list of Alt, Control, Meta, or Shift.')
+    }
+    modifiers.push(value)
+  }
+  return modifiers
 }
 
 /** Largest single `Input.insertText` payload; longer text is chunked. */

@@ -18,12 +18,15 @@ import { evaluateCallPolicy, type CallPolicyDecision, type CallPolicyTargets, ty
 import { EMPTY_MANAGED_POLICY, loadManagedPolicy, type ManagedPolicy } from '../security/managed-policy.ts'
 import { matchSitePattern, type SitePolicy, type SiteRuleEntry } from '../security/site-policy.ts'
 import { resultTaintsSession, TaintTracker, taintKey, type TaintRecord } from '../security/taint.ts'
+import { httpOrigin, parseHttpUrl } from '../security/web-url.ts'
 import type { CallPolicyHook, ToolCall } from './tools.ts'
 import { isDevToolsTool } from './authorization.ts'
 
 export const POLICY_PORT_NAME = 'dsh-policy'
 export const TAINT_STORAGE_KEY = 'dshSessionTaint'
-/** Bridge RPC that clears the Host-side taint guard for one session. */
+/** Sessions the user put in strict mode (same storage area as taint: the browser session). */
+export const STRICT_SESSIONS_STORAGE_KEY = 'dshStrictSessions'
+/** Bridge RPCs that clear and mark the Host-side taint guard of one session. */
 export { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 
 /** The settings fields the policy layer reads. */
@@ -63,7 +66,10 @@ export class PolicyRuntime {
   readonly taint: TaintTracker
   readonly ready: Promise<void>
   private readonly calls = new Map<string, CallRecord>()
-  /** Agent sessions the user put in strict mode from the panel (this worker's lifetime). */
+  /**
+   * Agent sessions the user put in strict mode from the panel. Persisted next
+   * to taint: a worker restart must not silently turn the commit gate off.
+   */
   private readonly strictSessions = new Set<string>()
   private readonly ports = new Set<chrome.runtime.Port>()
 
@@ -78,8 +84,20 @@ export class PolicyRuntime {
     this.taint.onChange(() => { this.broadcast() })
     this.ready = Promise.all([
       this.taint.ready,
+      this.loadStrictSessions(),
       loadManagedPolicy().then((policy) => { this.setManaged(policy) }),
     ]).then(() => undefined)
+  }
+
+  private async loadStrictSessions(): Promise<void> {
+    const storage = this.options.storage
+    if (storage === undefined) return
+    try {
+      const stored = (await storage.get(STRICT_SESSIONS_STORAGE_KEY))[STRICT_SESSIONS_STORAGE_KEY]
+      if (Array.isArray(stored)) for (const key of stored) if (typeof key === 'string') this.strictSessions.add(key)
+    } catch {
+      // Storage unavailable: strict sites from settings still apply.
+    }
   }
 
   setManaged(policy: ManagedPolicy): void {
@@ -129,14 +147,8 @@ export class PolicyRuntime {
    * withheld (tab lists, resume summaries). Non-web pages are not judged.
    */
   pageHidden(url: string, unrestricted?: boolean): boolean {
-    let origin: string
-    try {
-      const parsed = new URL(url)
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
-      origin = parsed.origin
-    } catch {
-      return false
-    }
+    const origin = httpOrigin(url)
+    if (origin === undefined) return false
     return evaluateCallPolicy({
       name: 'browser_list_tabs',
       args: {},
@@ -189,14 +201,17 @@ export class PolicyRuntime {
     this.taint.mark(call.sessionId, call.name, origins.length === 0 && fallbackOrigin !== undefined ? [fallbackOrigin] : origins, pageOrigin ?? fallbackOrigin)
   }
 
+  /** A call's dispatch threw before it settled: drop its record without judging taint. */
+  forgetCall(callId: string): void {
+    this.calls.delete(callId)
+  }
+
   /** Whether strict mode (commit gate) covers a call in this session on this page. */
   strictFor(sessionId: string | undefined, pageUrl: string | undefined): boolean {
     if (this.strictSessions.has(taintKey(sessionId))) return true
     const patterns = this.options.settings().strictSites ?? []
-    if (patterns.length === 0 || pageUrl === undefined) return false
-    let url: URL
-    try { url = new URL(pageUrl) } catch { return false }
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+    const url = patterns.length === 0 ? undefined : parseHttpUrl(pageUrl)
+    if (url === undefined) return false
     return patterns.some((pattern) => matchSitePattern(pattern, url))
   }
 
@@ -204,6 +219,7 @@ export class PolicyRuntime {
     const key = taintKey(sessionId)
     if (enabled) this.strictSessions.add(key)
     else this.strictSessions.delete(key)
+    void this.options.storage?.set({ [STRICT_SESSIONS_STORAGE_KEY]: [...this.strictSessions] }).catch(() => {})
     this.broadcast()
   }
 

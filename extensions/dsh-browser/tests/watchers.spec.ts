@@ -14,6 +14,7 @@ import {
   watchApprovalPrompt,
   WATCHERS_STORAGE_KEY,
   type PageWatcher,
+  selectorSyntaxError,
   type WatchStorage,
 } from '../src/background/watchers.ts'
 import { evaluateCondition, PageWatchObserver } from '../src/content/watch.ts'
@@ -150,6 +151,41 @@ describe('browser_watch / browser_watches', () => {
       .toMatchObject({ ok: false, error: { message: expect.stringMatching(/not controlled by this session/) } })
     expect(registry.list()).toEqual([])
   })
+
+  it('refuses a watcher on a page site policy hides, without a card or its address (G10)', async () => {
+    const registry = new WatcherRegistry(memoryStorage())
+    const deps = toolDeps(registry, { pageHidden: () => true })
+    const answer = await createWatcher({ id: 'c', name: 'browser_watch', args: { condition: { text: 'x' }, prompt: 'p' }, sessionId: 's1' }, deps)
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringMatching(/blocked by site policy/) } })
+    expect(JSON.stringify(answer)).not.toContain(PAGE)
+    expect(deps.authorize).not.toHaveBeenCalled()
+    expect(registry.list()).toEqual([])
+  })
+
+  it('refuses a selector that can never parse before showing a card, accepting the shadow >>> form', async () => {
+    expect(selectorSyntaxError('#cart > .badge')).toBeUndefined()
+    expect(selectorSyntaxError('my-app >>> #cart .badge')).toBeUndefined()
+    expect(selectorSyntaxError('div[')).toMatch(/not a valid CSS selector/)
+    expect(selectorSyntaxError('my-app >>> ')).toMatch(/empty part/)
+    expect(selectorSyntaxError('my-app >>> a[')).toMatch(/not a valid CSS selector \(a\[\)/)
+    const registry = new WatcherRegistry(memoryStorage())
+    const validateSelector = vi.fn(async (_tabId: number, selector: string) => selectorSyntaxError(selector))
+    const deps = toolDeps(registry, { validateSelector })
+    const answer = await createWatcher({ id: 'c', name: 'browser_watch', args: { condition: { selector: 'div[' }, prompt: 'p' }, sessionId: 's1' }, deps)
+    expect(answer).toMatchObject({ ok: false, error: { code: 'bad-args', message: expect.stringMatching(/condition.selector is not a valid CSS selector/) } })
+    expect(deps.authorize).not.toHaveBeenCalled()
+    expect(await createWatcher({ id: 'c', name: 'browser_watch', args: { condition: { selector: 'my-app >>> .badge' }, prompt: 'p' }, sessionId: 's1' }, deps)).toMatchObject({ ok: true })
+    expect(validateSelector).toHaveBeenCalledWith(7, 'my-app >>> .badge')
+  })
+
+  it('lists a watcher whose page became hidden without printing its URL (G10)', async () => {
+    const registry = new WatcherRegistry(memoryStorage())
+    await registry.add(watcher())
+    const listed = await manageWatchers({ id: 'l', name: 'browser_watches', args: {}, sessionId: 's1' }, toolDeps(registry, { pageHidden: () => true }))
+    const text = (listed as { result: { text: string } }).result.text
+    expect(text).toContain('blocked by site policy (suspended)')
+    expect(text).not.toContain(watcher().url)
+  })
 })
 
 describe('handleWatchHit', () => {
@@ -246,13 +282,15 @@ describe('content observer', () => {
   it('stops polling a watcher whose selector is invalid instead of never firing', () => {
     document.body.innerHTML = '<p>x</p>'
     const report = vi.fn(async () => ({ accepted: true }))
-    const observer = new PageWatchObserver(report, () => 0)
+    const invalid = vi.fn()
+    const observer = new PageWatchObserver(report, () => 0, invalid)
     observer.arm([
       { id: 'bad', condition: { kind: 'selector', selector: '[[bad', gone: true } },
       { id: 'ok', condition: { kind: 'text', text: 'never', gone: false } },
     ])
     expect(observer.size).toBe(1)
     expect(report).not.toHaveBeenCalled()
+    expect(invalid).toHaveBeenCalledExactlyOnceWith('bad')
     observer.stop()
   })
 

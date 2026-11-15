@@ -30,13 +30,30 @@ interface HandshakeSocket {
   dispatchEvent(event: Event): boolean
 }
 
-interface HelloFrame {
+export interface HelloFrame {
   t: 'hello'
   v: number
   nonce: string
   mac: string
   endpoint: BridgeEndpoint
   caps: unknown
+}
+
+/**
+ * Send the server challenge until the client answers it; returns the client's
+ * hello. The client attaches its listener a few ticks after `open`; repeating
+ * the same challenge until it answers is harmless (later copies are ignored).
+ * @param socket - fake socket the client opened.
+ * @param nonce - server nonce to challenge with.
+ */
+export async function challengeUntilHello(socket: HandshakeSocket, nonce: string): Promise<HelloFrame> {
+  let hello: HelloFrame | undefined
+  await vi.waitFor(() => {
+    hello = socket.sent.find((frame): frame is HelloFrame => (frame as { t?: unknown }).t === 'hello')
+    if (hello === undefined) socket.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce })
+    expect(hello).toBeDefined()
+  }, { interval: 5 })
+  return hello!
 }
 
 /**
@@ -54,23 +71,16 @@ export async function completeHandshake(
 ): Promise<BridgeFrameChannel> {
   const token = options.token ?? TEST_BRIDGE_TOKEN
   const serverNonce = createBridgeNonce()
-  let hello: HelloFrame | undefined
-  await vi.waitFor(() => {
-    hello = socket.sent.find((frame): frame is HelloFrame => (frame as { t?: unknown }).t === 'hello')
-    // The client attaches its listener a few ticks after `open`; repeating the
-    // same challenge until it answers is harmless (later copies are ignored).
-    if (hello === undefined) socket.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: serverNonce })
-    expect(hello).toBeDefined()
-  }, { interval: 5 })
-  expect(hello!.endpoint).toEqual(bridgeEndpointOfUrl(socket.url))
-  expect(hello!.mac).toBe(await computeBridgeProof(token, 'client', serverNonce, hello!.nonce, hello!.endpoint, { client: hello!.caps }))
-  const channel = BridgeFrameChannel.derive(token, 'server', serverNonce, hello!.nonce, hello!.endpoint)
+  const hello = await challengeUntilHello(socket, serverNonce)
+  expect(hello.endpoint).toEqual(bridgeEndpointOfUrl(socket.url))
+  expect(hello.mac).toBe(await computeBridgeProof(token, 'client', serverNonce, hello.nonce, hello.endpoint, { client: hello.caps }))
+  const channel = BridgeFrameChannel.derive(token, 'server', serverNonce, hello.nonce, hello.endpoint)
   sealSocket(socket, channel)
   socket.dispatchEvent(new MessageEvent('message', {
     data: JSON.stringify({
       t: 'hello.ok',
       caps: options.caps ?? DEFAULT_CAPS,
-      mac: await computeBridgeProof(token, 'server', hello!.nonce, serverNonce, hello!.endpoint, { client: hello!.caps, server: options.caps ?? DEFAULT_CAPS }),
+      mac: await computeBridgeProof(token, 'server', hello.nonce, serverNonce, hello.endpoint, { client: hello.caps, server: options.caps ?? DEFAULT_CAPS }),
     }),
   }))
   if (options.until !== undefined) await vi.waitFor(options.until)

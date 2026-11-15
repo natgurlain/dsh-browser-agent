@@ -4,7 +4,8 @@
  * through the debugger-backed channel, and how both degrade.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { dispatchToolCall, type InputRuntime, type ToolAnswer, type ToolCall } from '../src/background/tools.ts'
+import type { InputRuntime, ToolAnswer, ToolCall } from '../src/background/tools.ts'
+import { dispatchOnTab } from './support/dispatch.ts'
 
 const TAB: chrome.tabs.Tab = {
   id: 42,
@@ -124,20 +125,7 @@ function fakeRuntime(harness: Harness, supported = true): InputRuntime {
 }
 
 async function run(call: ToolCall, _harness: Harness, input?: InputRuntime): Promise<ToolAnswer> {
-  return dispatchToolCall(
-    call,
-    'auto',
-    { maxItems: 60, maxChars: 12_000 },
-    async () => 'approved',
-    undefined,
-    TAB,
-    () => true,
-    {
-      unrestrictedAccess: true,
-      followTab: async () => undefined,
-      ...(input === undefined ? {} : { input }),
-    },
-  )
+  return dispatchOnTab(call, { tab: TAB, context: { unrestrictedAccess: true, ...(input === undefined ? {} : { input }) } })
 }
 
 afterEach(() => {

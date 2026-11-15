@@ -1,63 +1,10 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { BRIDGE_PROTOCOL_VERSION, createBridgeNonce } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import { completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
-
-class FakeWebSocket extends EventTarget {
-  static readonly CONNECTING = 0
-  static readonly OPEN = 1
-  static readonly CLOSED = 3
-  static instances: FakeWebSocket[] = []
-
-  readyState = FakeWebSocket.CONNECTING
-  readonly sent: unknown[] = []
-
-  constructor(readonly url: string) {
-    super()
-    FakeWebSocket.instances.push(this)
-  }
-
-  send(value: string): void {
-    this.sent.push(JSON.parse(value))
-  }
-
-  open(): void {
-    this.readyState = FakeWebSocket.OPEN
-    this.dispatchEvent(new Event('open'))
-  }
-
-  receive(frame: unknown): void {
-    this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(frame) }))
-  }
-
-  close(code = 1000, reason = ''): void {
-    if (this.readyState === FakeWebSocket.CLOSED) return
-    this.readyState = FakeWebSocket.CLOSED
-    this.dispatchEvent(new CloseEvent('close', { code, reason }))
-  }
-}
-
-function chromeEvent<T extends unknown[]>() {
-  const listeners = new Set<(...args: T) => void>()
-  return {
-    addListener: vi.fn((listener: (...args: T) => void) => { listeners.add(listener) }),
-    emit: (...args: T) => { for (const listener of listeners) listener(...args) },
-  }
-}
-
-function panelPort() {
-  const onMessage = chromeEvent<[unknown]>()
-  const onDisconnect = chromeEvent<[]>()
-  const postMessage = vi.fn()
-  const port = {
-    name: 'dsh-panel',
-    postMessage,
-    onMessage,
-    onDisconnect,
-  } as unknown as chrome.runtime.Port
-  return { onDisconnect, onMessage, port, postMessage }
-}
+import { createBridgeNonce } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import { challengeUntilHello, completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
+import { FakeWebSocket } from './support/fake-websocket.ts'
+import { chromeEvent, panelPort } from './support/chrome.ts'
 
 function mockChrome(options: {
   localGet?: () => Promise<Record<string, unknown>>
@@ -793,7 +740,7 @@ describe('background bridge lifecycle', () => {
     expect(actionMessages).toHaveLength(1)
   })
 
-  it('applies a managed "disable unrestricted" before the first call, whatever loads first', async () => {
+  it('applies a managed "disable unrestricted" before the first call, even when the managed area answers after the user settings', async () => {
     const tab = { id: 1, windowId: 1, title: 'Tab', url: 'https://example.com/' } as chrome.tabs.Tab
     const chromeMock = mockChrome({
       localGet: async () => ({
@@ -1061,12 +1008,7 @@ describe('background bridge lifecycle', () => {
     squatter.open()
     // The squatter does not know the token, so its server proof is wrong.
     const squatterNonce = createBridgeNonce()
-    await vi.waitFor(() => {
-      if (!squatter.sent.some((frame) => (frame as { t?: unknown }).t === 'hello')) {
-        squatter.receive({ t: 'challenge', v: BRIDGE_PROTOCOL_VERSION, nonce: squatterNonce })
-      }
-      expect(squatter.sent.some((frame) => (frame as { t?: unknown }).t === 'hello')).toBe(true)
-    }, { interval: 5 })
+    await challengeUntilHello(squatter, squatterNonce)
     squatter.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }, mac: 'f'.repeat(64) })
     await vi.waitFor(() => { expect(chrome.storage.local.remove).toHaveBeenCalledWith('dshLastBridgeUrl') })
 
@@ -1178,7 +1120,51 @@ describe('background bridge lifecycle', () => {
       expect(panel.postMessage).toHaveBeenCalledWith({ type: 'kill-switch', engaged: false })
     })
 
-    it('engages from the keyboard command and survives a worker restart', async () => {
+    it('revokes standing grants and pending cards: watchers, dev-loop links, fleets, approvals (G2)', async () => {
+      const chromeMock = mockChrome({
+        localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge', allowPageWatchers: true } }),
+      })
+      const now = Date.now()
+      chromeMock.sessionStore.dshPageWatchers = [{
+        id: 'w-1', sessionId: 's1', tabId: 1, origin: 'https://example.com', url: 'https://example.com/',
+        condition: { kind: 'selector', selector: '#x', gone: false }, prompt: 'p', createdAt: now, expiresAt: now + 60_000, maxFires: 1, fires: 0,
+      }]
+      chromeMock.sessionStore.devLoopLinks = [{ sessionId: 's1', tabId: 1, origin: 'http://localhost:3000' }]
+      chromeMock.sessionStore.dshFleets = [{ fleetId: 'fleet-1', parentSessionId: 's1', children: ['c1'], tabIds: [1], allowActions: false }]
+      const { panel, socket } = await connected(chromeMock)
+      panel.onMessage.emit({ type: 'session.active', sessionId: 's1', isNew: true })
+      // A call that needs the user's approval: its card is pending when the switch engages.
+      socket.receive({ t: 'tool.call', id: 'needs-card', name: 'browser_click', args: { selector: 'h1' }, expiresAt: Date.now() + 30_000, sessionId: 's1' })
+      let cardId: string | undefined
+      await vi.waitFor(() => {
+        const request = panel.postMessage.mock.calls.map(([message]) => message as { type?: string; request?: { id: string } }).find((message) => message.type === 'approval.request')
+        expect(request).toBeDefined()
+        cardId = request!.request!.id
+      })
+      panel.onMessage.emit({ type: 'kill-switch.engage' })
+      await vi.waitFor(() => {
+        expect(socket.readyState).toBe(FakeWebSocket.CLOSED)
+        expect(panel.postMessage).toHaveBeenCalledWith({ type: 'approval.resolved', id: cardId })
+        expect(chromeMock.sessionStore.dshPageWatchers).toEqual([])
+        expect(chromeMock.sessionStore.devLoopLinks).toEqual([])
+        expect(chromeMock.sessionStore.dshFleets).toEqual([])
+      })
+    })
+
+    it('answers request-status with the full status: discovery and the connected address included (M5)', async () => {
+      const chromeMock = mockChrome({
+        localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }),
+      })
+      const { panel } = await connected(chromeMock)
+      const pushed = panel.postMessage.mock.calls.map(([message]) => message as { type?: string }).filter((message) => message.type === 'status').at(-1)
+      panel.postMessage.mockClear()
+      panel.onMessage.emit({ type: 'request-status' })
+      const pulled = panel.postMessage.mock.calls.map(([message]) => message as { type?: string }).find((message) => message.type === 'status')
+      expect(pulled).toEqual(pushed)
+      expect(pulled).toMatchObject({ state: 'connected', discovery: expect.any(String), killSwitch: false })
+    })
+
+    it('engages from the keyboard command and persists the switch in session storage', async () => {
       const chromeMock = mockChrome({
         localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }),
       })

@@ -1,19 +1,19 @@
 /**
- * Phase 3 learning features, extension side. All default OFF behind
+ * Learning features, extension side. All default OFF behind
  * `dshLearningSettings`; with a feature off this module records nothing.
  *
- * - Workflows (3.8): records successful agent steps with a robust locator per
+ * - Workflows: records successful agent steps with a robust locator per
  *   element, for "Save as workflow"; values typed into sensitive fields are
  *   dropped on the spot. Saving, replay and scheduling happen on the bridge.
- * - Site drivers (3.6): for origins the user enabled, learns a proposal from
+ * - Site drivers: for origins the user enabled, learns a proposal from
  *   the same-origin XHR/fetch request behind an agent action (developer-tools
  *   network capture), shows it to the user, stores approved drivers, and runs
  *   them with a forced, per-call approval card showing the exact request.
- * - Watch me (3.7): records the user's own trusted input on the current tab,
+ * - Watch me: records the user's own trusted input on the current tab,
  *   detects a repetition over rows and offers "Do the remaining N like this":
  *   one card approves the whole program, which then runs step by step through
  *   the bridge; each step is pre-approved only for its exact tool + args, once.
- * - Failure flywheel (3.9): a failed step leaves a local fixture (MHTML when
+ * - Failure flywheel: a failed step leaves a local fixture (MHTML when
  *   the page has no sensitive field and the optional permission is granted,
  *   else a sanitized DOM) in the session workspace via the bridge.
  *
@@ -36,6 +36,8 @@ import type { NetworkEntry } from './devtools-network.ts'
 import { listTabFrames } from './frames.ts'
 import { isExtensionPageSender } from './policy-runtime.ts'
 import type { CallPolicyHook, ToolAnswer, ToolCall } from './tools.ts'
+import { httpOrigin, isRecord } from '../security/web-url.ts'
+import { cancelledAnswer } from './answers.ts'
 
 /** Storage key of the learning switches. */
 export const LEARNING_SETTINGS_KEY = 'dshLearningSettings'
@@ -79,6 +81,10 @@ const MAX_RECORDED_STEPS = 100
 const MAX_WATCH_EVENTS = 60
 const MAX_PROPOSALS = 10
 const AGENT_QUIET_MS = 1_500
+/** A failure of the same call within this window counts as a retry. */
+const RETRY_WINDOW_MS = 120_000
+const STRAY_STOP_INTERVAL_MS = 30_000
+const MAX_STRAY_STOP_TABS = 50
 const NO_SESSION = '(no-session)'
 const PROGRAM_RUN_TIMEOUT_MS = 30 * 60_000
 /** One `browser_run` holds at most this many steps. */
@@ -133,20 +139,6 @@ export interface WatchSuggestion {
   labels: string[]
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function originOf(url: string | undefined): string | undefined {
-  if (url === undefined) return undefined
-  try {
-    const parsed = new URL(url)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.origin : undefined
-  } catch {
-    return undefined
-  }
-}
-
 function zh(): boolean {
   return getUiLocale() === 'zh'
 }
@@ -155,7 +147,7 @@ function zh(): boolean {
 export function normalizeLearningSettings(value: unknown): LearningSettings {
   const raw = isRecord(value) ? value : {}
   const origins = Array.isArray(raw.siteDriverOrigins)
-    ? [...new Set(raw.siteDriverOrigins.map((entry) => originOf(typeof entry === 'string' ? entry : undefined)).filter((entry): entry is string => entry !== undefined))].sort()
+    ? [...new Set(raw.siteDriverOrigins.map((entry) => httpOrigin(typeof entry === 'string' ? entry : undefined)).filter((entry): entry is string => entry !== undefined))].sort()
     : []
   return {
     workflows: raw.workflows === true,
@@ -172,6 +164,9 @@ export function rpcValue(answer: unknown): unknown {
   return answer
 }
 
+/** Approval outcomes (audit `decision`) after which the user's page is never captured. */
+const NO_CAPTURE_DECISIONS: ReadonlySet<string> = new Set(['denied', 'timed-out', 'cancelled', 'unavailable'])
+
 /**
  * Classify a failed step for the flywheel; undefined means "do not capture".
  * A step the user denied or let time out is never captured: the user said no
@@ -180,9 +175,12 @@ export function rpcValue(answer: unknown): unknown {
 export function classifyFailure(answer: ToolAnswer, decision: string | undefined, policy: string | undefined, retried: boolean): 'not-found' | 'guard' | 'retried' | 'error' | undefined {
   if (answer.ok) return undefined
   if (policy === 'blocked' || decision === 'held-expired') return undefined
+  // The approval outcome is the fact; the message patterns below only add
+  // cases that reach here without one (they can only skip a capture).
+  if (decision !== undefined && NO_CAPTURE_DECISIONS.has(decision)) return undefined
   const message = answer.error?.message ?? ''
   if (/cancelled|kill switch|stopped/iu.test(message)) return undefined
-  if (decision === 'denied' || decision === 'timed-out' || answer.error?.code === 'timeout' || /denied|declined|not approved|timed out/iu.test(message)) return undefined
+  if (answer.error?.code === 'timeout' || /denied|declined|not approved|timed out|approval request/iu.test(message)) return undefined
   if (retried) return 'retried'
   if (/does not exist|no element matched|not found|no .*matching/iu.test(message)) return 'not-found'
   if (/covered by|changed|guard|strict mode|refused/iu.test(message)) return 'guard'
@@ -196,7 +194,7 @@ export function classifyFailure(answer: ToolAnswer, decision: string | undefined
  */
 export function fixtureAllowedFor(sharePageContent: 'ask' | 'auto' | 'off', decide: (origin: string) => 'deny' | 'force' | 'trust' | 'default', url: string | undefined): boolean {
   if (sharePageContent !== 'auto') return false
-  const origin = originOf(url)
+  const origin = httpOrigin(url)
   if (origin === undefined) return false
   const kind = decide(origin)
   return kind !== 'deny' && kind !== 'force'
@@ -218,6 +216,8 @@ export class LearningRuntime {
   private workflowsTurnedOff = false
   private suggestion: WatchSuggestion | undefined
   private lastAgentActivity = new Map<number, number>()
+  /** When each tab was last told to stop a recorder this worker does not know about. */
+  private readonly strayStops = new Map<number, number>()
   readonly ready: Promise<void>
   private readonly storage: chrome.storage.StorageArea
   private readonly now: () => number
@@ -300,9 +300,16 @@ export class LearningRuntime {
    */
   wrapPolicy(call: ToolCall, target: { id?: number; url?: string; windowId?: number }, hook: CallPolicyHook | undefined): CallPolicyHook | undefined {
     if (hook === undefined) return hook
+    let probed = false
     return (policyCall, targets) => {
       const decision = hook(policyCall, targets)
-      if (decision.kind !== 'deny' && target.id !== undefined && !this.deps.halted()) this.startProbes(call, target.id, target.url, target.windowId)
+      // Probe only for this call's own policy pass, and only once: the same
+      // hook later judges the page a navigation landed on (a snapshot-shaped
+      // copy of the call), where the old index/selector means nothing.
+      if (!probed && policyCall.name === call.name && decision.kind !== 'deny' && target.id !== undefined && !this.deps.halted()) {
+        probed = true
+        this.startProbes(call, target.id, target.url, target.windowId)
+      }
       return decision
     }
   }
@@ -314,7 +321,7 @@ export class LearningRuntime {
   }
 
   private wantsNetwork(call: ToolCall, url: string | undefined): boolean {
-    const origin = originOf(url)
+    const origin = httpOrigin(url)
     return this.settings.siteDrivers && this.deps.siteDriversSupported && origin !== undefined
       && this.settings.siteDriverOrigins.includes(origin)
       && ['browser_click', 'browser_press', 'browser_select', 'browser_type'].includes(call.name)
@@ -353,6 +360,18 @@ export class LearningRuntime {
     }
   }
 
+  /** A call's dispatch threw (internal error): drop its probe, record nothing. */
+  forgetCall(callId: string): void {
+    this.probes.delete(callId)
+  }
+
+  /** A tab closed: drop its per-tab state. */
+  forgetTab(tabId: number): void {
+    this.lastAgentActivity.delete(tabId)
+    this.strayStops.delete(tabId)
+    for (const [id, probe] of this.probes) if (probe.tabId === tabId) this.probes.delete(id)
+  }
+
   /** Record one settled call (success → workflow step; failure → fixture). */
   recordResult(call: ToolCall, answer: ToolAnswer, meta: { tabId?: number; url?: string; decision?: string; policy?: string }): void {
     const probe = this.probes.get(call.id)
@@ -366,8 +385,10 @@ export class LearningRuntime {
     if (this.settings.fixtures && !this.deps.halted() && meta.tabId !== undefined) {
       const key = `${call.name}:${canonicalJson(call.args)}`
       const previous = this.recentFailures.get(key)
+      // Only failures within the retry window matter: keep the map that small.
+      for (const [seen, at] of this.recentFailures) if (this.now() - at >= RETRY_WINDOW_MS) this.recentFailures.delete(seen)
       this.recentFailures.set(key, this.now())
-      const failure = classifyFailure(answer, meta.decision, meta.policy, previous !== undefined && this.now() - previous < 120_000)
+      const failure = classifyFailure(answer, meta.decision, meta.policy, previous !== undefined && this.now() - previous < RETRY_WINDOW_MS)
       if (failure !== undefined) void this.captureFixture(call, answer, failure, meta.tabId)
     }
   }
@@ -408,7 +429,7 @@ export class LearningRuntime {
         },
       }),
       ...(sensitive ? { sensitive: true } : {}),
-      ...(originOf(url) === undefined ? {} : { origin: originOf(url)! }),
+      ...(httpOrigin(url) === undefined ? {} : { origin: httpOrigin(url)! }),
       at: this.now(),
     }
     const key = call.sessionId ?? NO_SESSION
@@ -464,7 +485,7 @@ export class LearningRuntime {
   private async captureFixture(call: ToolCall, answer: ToolAnswer, failure: NonNullable<ReturnType<typeof classifyFailure>>, tabId: number): Promise<void> {
     try {
       const tab = await chrome.tabs.get(tabId)
-      if (originOf(tab.url) === undefined || this.deps.halted() || !this.deps.fixtureAllowed(call.sessionId, tab.url!)) return
+      if (httpOrigin(tab.url) === undefined || this.deps.halted() || !this.deps.fixtureAllowed(call.sessionId, tab.url!)) return
       const probe = await chrome.tabs.sendMessage(tabId, { type: 'DSH_LEARN_FIXTURE', probe: true }, { frameId: 0 }) as { ok?: boolean; result?: { sensitiveCount?: number } } | undefined
       let page: { kind: 'mhtml' | 'dom'; content: string } | undefined
       // MHTML serializes every frame and form value: only a single-frame page
@@ -497,12 +518,12 @@ export class LearningRuntime {
   // ---- site drivers ----
 
   private async learnDriver(call: ToolCall, probe: PendingProbe): Promise<void> {
-    const origin = originOf(probe.url)
+    const origin = httpOrigin(probe.url)
     if (origin === undefined || !this.wantsNetwork(call, probe.url)) return
     // Let the request settle in the capture.
     await new Promise((resolve) => setTimeout(resolve, 400))
     const entries = (this.deps.capturedRequests(probe.tabId) ?? []).filter((entry) => entry.index > (probe.networkMark ?? 0)
-      && /^(xhr|fetch)$/iu.test(entry.resourceType ?? '') && originOf(entry.url) === origin)
+      && /^(xhr|fetch)$/iu.test(entry.resourceType ?? '') && httpOrigin(entry.url) === origin)
     const request = entries.find((entry) => entry.method.toUpperCase() !== 'GET') ?? entries[0]
     if (request === undefined) return
     try {
@@ -530,12 +551,6 @@ export class LearningRuntime {
     } catch {
       // Not every request can become a driver (credential in the URL, other origin).
     }
-  }
-
-  /** Add a proposal directly (panel-provided capture, tests). */
-  addProposal(proposal: SiteDriverProposal): void {
-    this.proposals.push(proposal)
-    this.broadcast()
   }
 
   async saveDriver(index: number, edits: { name?: string; description?: string } = {}): Promise<SiteDriver> {
@@ -594,7 +609,7 @@ export class LearningRuntime {
     const origin = typeof call.args.origin === 'string' ? call.args.origin : ''
     const driver = this.drivers.find((candidate) => candidate.origin === origin && candidate.name === call.args.driver)
     if (driver === undefined) return fail('That site driver is not saved in this browser. Use the page UI.')
-    if (tab.id === undefined || originOf(tab.url) !== driver.origin) return fail(`The controlled tab is not on ${driver.origin}. Use the page UI instead.`)
+    if (tab.id === undefined || httpOrigin(tab.url) !== driver.origin) return fail(`The controlled tab is not on ${driver.origin}. Use the page UI instead.`)
     const params = isRecord(call.args.params) ? call.args.params : {}
     let request
     try {
@@ -625,11 +640,11 @@ export class LearningRuntime {
       binding: approvalBinding({ action: 'browser_site_driver', args: { request: described }, origins: [driver.origin] }),
     }
     const authorization = await authorize(prompt)
-    if (signal.aborted) return fail('Tool call was cancelled')
+    if (signal.aborted) return cancelledAnswer()
     if (authorization !== 'approved') return fail(`The user did not approve the site driver request (${authorization}). Use the page UI only if the user asks.`)
     // The tab may have moved while the card waited.
     const now = await chrome.tabs.get(tab.id).catch(() => undefined)
-    if (originOf(now?.url) !== driver.origin) return fail(`The tab left ${driver.origin} while approval was pending. Use the page UI.`)
+    if (httpOrigin(now?.url) !== driver.origin) return fail(`The tab left ${driver.origin} while approval was pending. Use the page UI.`)
     try {
       const response = await chrome.tabs.sendMessage(tab.id, { type: 'DSH_SITE_DRIVER_FETCH', request }, { frameId: 0 }) as { ok?: boolean; result?: { status: number; ok: boolean; contentType: string; body: string }; error?: { message?: string } } | undefined
       if (response?.ok !== true || response.result === undefined) return fail(`The site driver failed: ${response?.error?.message ?? 'no answer from the page'}. Fall back to the page UI.`)
@@ -647,7 +662,7 @@ export class LearningRuntime {
     if (!this.settings.watchMe) throw new Error('Watch me is turned off in the settings.')
     await this.stopWatching()
     const tab = await chrome.tabs.get(tabId)
-    const origin = originOf(tab.url)
+    const origin = httpOrigin(tab.url)
     if (origin === undefined) throw new Error(zh() ? '此页面无法观察。' : 'This page cannot be watched.')
     this.watch = { tabId, origin, events: [] }
     this.suggestion = undefined
@@ -669,13 +684,20 @@ export class LearningRuntime {
    */
   watchMeReady(tabId: number, frameId: number | undefined, url: string | undefined): boolean {
     const watch = this.watch
-    return this.settings.watchMe && watch !== undefined && watch.tabId === tabId && (frameId ?? 0) === 0 && originOf(url) === watch.origin
+    return this.settings.watchMe && watch !== undefined && watch.tabId === tabId && (frameId ?? 0) === 0 && httpOrigin(url) === watch.origin
   }
 
   /** One trusted user event from the watched tab. */
   async onWatchEvent(tabId: number, frameId: number, raw: unknown): Promise<void> {
     const watch = this.watch
-    if (watch === undefined || watch.tabId !== tabId || frameId !== 0 || !isRecord(raw)) return
+    if (watch === undefined || watch.tabId !== tabId) {
+      // The page-side recorder outlived this worker's Watch me state (worker
+      // restart, or a stop that never reached the tab): tell it to stop
+      // instead of waking the worker on every user event.
+      this.stopStrayRecorder(tabId)
+      return
+    }
+    if (frameId !== 0 || !isRecord(raw)) return
     // Trusted events the agent causes (debugger input) are not the user's.
     const last = this.lastAgentActivity.get(tabId)
     if (this.deps.agentActiveOnTab(tabId) || (last !== undefined && this.now() - last < AGENT_QUIET_MS)) return
@@ -691,6 +713,14 @@ export class LearningRuntime {
     watch.events.push(event)
     if (watch.events.length > MAX_WATCH_EVENTS) watch.events.splice(0, watch.events.length - MAX_WATCH_EVENTS)
     await this.refreshSuggestion()
+  }
+
+  private stopStrayRecorder(tabId: number): void {
+    const last = this.strayStops.get(tabId)
+    if (last !== undefined && this.now() - last < STRAY_STOP_INTERVAL_MS) return
+    this.strayStops.set(tabId, this.now())
+    if (this.strayStops.size > MAX_STRAY_STOP_TABS) this.strayStops.delete(this.strayStops.keys().next().value!)
+    void chrome.tabs.sendMessage(tabId, { type: 'DSH_WATCH', enabled: false }, { frameId: 0 }).catch(() => {})
   }
 
   private async refreshSuggestion(): Promise<void> {
@@ -737,7 +767,7 @@ export class LearningRuntime {
     const suggestion = this.suggestion
     if (suggestion === undefined || !this.settings.watchMe) throw new Error('There is no suggestion to run.')
     const tab = await chrome.tabs.get(suggestion.tabId)
-    if (originOf(tab.url) !== suggestion.origin) throw new Error('The watched tab left the page.')
+    if (httpOrigin(tab.url) !== suggestion.origin) throw new Error('The watched tab left the page.')
     // The user's own input from here on is the program, not new teaching.
     await this.stopWatching()
     return this.bridgeCall(METHODS.programRun, { ...(sessionId === undefined ? {} : { sessionId }), steps: suggestion.program }, PROGRAM_RUN_TIMEOUT_MS)
