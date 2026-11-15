@@ -20,6 +20,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { BridgeServer } from '../server.ts'
+import { sessionIdOfExec } from '../external-caller.ts'
 import { BridgeToolError, toolCallIdArg } from '../server.ts'
 import { auditResultDigest, redactAuditUrl } from '../audit-log.ts'
 import { workspaceWriteTarget } from '../workspace-write.ts'
@@ -193,7 +194,7 @@ export function mountLearning(
   let skills: { dispose: () => void; invalidate: () => void } | undefined
   const driverDisposers = new Map<string, () => void>()
 
-  const sessionOf = (exec: Pick<ToolRunContext, 'agent'>): string | undefined => exec.agent === undefined ? undefined : String(exec.agent.id)
+  const sessionOf = (exec: Pick<ToolRunContext, 'agent'>): string | undefined => sessionIdOfExec(exec)
   const rootOf = (exec: Pick<ToolRunContext, 'agent'>): string => {
     const root = workspaceRootOf(exec.agent, options.workspacePath)
     if (root === undefined) throw new WorkflowError('this session has no workspace directory, so it has no saved workflows.')

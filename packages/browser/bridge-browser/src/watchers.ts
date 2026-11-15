@@ -22,10 +22,10 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type { BridgeServer } from './server.ts'
-import { toolCallIdArg } from './server.ts'
+import { bridgeCallArgs, sessionIdOfExec } from './external-caller.ts'
 import { errorMessage } from './host-api.ts'
 import { readTrustedJson, serialQueue, writePrivateFile } from './private-file.ts'
 
@@ -269,10 +269,6 @@ interface WatchToolOptions {
   toolTimeoutMs: number
 }
 
-function sessionOf(exec: Pick<ToolRunContext, 'agent'>): string | undefined {
-  return exec.agent === undefined ? undefined : String(exec.agent.id)
-}
-
 function textOf(result: unknown, fallback: string): string {
   return typeof result === 'object' && result !== null && typeof (result as { text?: unknown }).text === 'string'
     ? (result as { text: string }).text
@@ -311,7 +307,7 @@ export function defineWatchTools(bridge: Pick<BridgeServer, 'requestTool'>, reco
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
     execute: async (args, exec) => {
-      const sessionId = sessionOf(exec)
+      const sessionId = sessionIdOfExec(exec)
       if (sessionId === undefined) throw new Error('browser_watch needs an agent session to wake.')
       const a = args as { prompt: string; expiresInMinutes?: number; maxFires?: number }
       if (a.prompt.trim() === '') throw new Error('browser_watch needs a non-empty prompt.')
@@ -321,7 +317,7 @@ export function defineWatchTools(bridge: Pick<BridgeServer, 'requestTool'>, reco
       if (a.maxFires !== undefined && !(Number.isInteger(a.maxFires) && a.maxFires >= 1 && a.maxFires <= 10)) {
         throw new Error('maxFires must be an integer between 1 and 10.')
       }
-      const result = await bridge.requestTool('browser_watch', args as Record<string, unknown>, exec.signal, options.toolTimeoutMs, sessionId, ...toolCallIdArg(exec))
+      const result = await bridge.requestTool('browser_watch', args as Record<string, unknown>, exec.signal, options.toolTimeoutMs, ...bridgeCallArgs(exec))
       const watched = result as { watchId?: unknown; expiresAt?: unknown }
       if (typeof watched.watchId === 'string' && typeof watched.expiresAt === 'number') {
         await records.add(watched.watchId, { sessionId, expiresAt: watched.expiresAt })
@@ -339,12 +335,10 @@ export function defineWatchTools(bridge: Pick<BridgeServer, 'requestTool'>, reco
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
     execute: async (args, exec) => {
-      const sessionId = sessionOf(exec)
+      const sessionId = sessionIdOfExec(exec)
       const a = args as { action?: 'list' | 'cancel'; id?: string }
       if (a.action === 'cancel' && (a.id === undefined || a.id === '')) throw new Error('cancel needs the watcher id.')
-      const result = sessionId === undefined
-        ? await bridge.requestTool('browser_watches', args as Record<string, unknown>, exec.signal, options.toolTimeoutMs)
-        : await bridge.requestTool('browser_watches', args as Record<string, unknown>, exec.signal, options.toolTimeoutMs, sessionId, ...toolCallIdArg(exec))
+      const result = await bridge.requestTool('browser_watches', args as Record<string, unknown>, exec.signal, options.toolTimeoutMs, ...bridgeCallArgs(exec))
       // Only the owning session's cancel drops the record; another session's
       // (or an unknown id) must not orphan a live watcher.
       if (a.action === 'cancel' && a.id !== undefined && sessionId !== undefined && records.get(a.id)?.sessionId === sessionId) {

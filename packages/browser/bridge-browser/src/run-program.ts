@@ -26,6 +26,7 @@ import { defineTool, type ToolDefinition, type ToolRunContext } from '@deepseek-
 import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeServer } from './server.ts'
 import { toolCallIdArg } from './server.ts'
+import { sessionIdOfExec } from './external-caller.ts'
 import { UNTRUSTED_CONTENT_TAG, UNTRUSTED_NOTICE_LEAD } from './protocol.ts'
 import { errorMessage, isRecord } from './host-api.ts'
 
@@ -375,7 +376,7 @@ export function defineRunProgramTool(bridge: RunnerBridge, options: RunProgramOp
     },
     execute: async (args, exec: Pick<ToolRunContext, 'agent' | 'signal'>) => {
       const steps = parseProgram((args as { steps?: unknown }).steps)
-      const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
+      const sessionId = sessionIdOfExec(exec)
       const [toolCallId] = toolCallIdArg(exec)
       const outcome = await runProgram(bridge, steps, {
         signal: exec.signal,
