@@ -263,8 +263,11 @@ export async function runFanout(
     for (const childId of childIds) deps.children.forget(childId)
     await Promise.allSettled(activations.map((activation) => activation.dispose()))
     // Release even when the caller gave up: a fresh signal, the parent's session.
-    await deps.bridge.requestTool(FLEET_RELEASE_ACTION, { fleetId, closeTabs: args.closeTabs }, new AbortController().signal, options.toolTimeoutMs, parentId)
-      .catch(() => {})
+    // Best effort; requestTool throws synchronously when the extension is gone,
+    // so a `.catch` would not see it and the throw would replace the result.
+    try {
+      await deps.bridge.requestTool(FLEET_RELEASE_ACTION, { fleetId, closeTabs: args.closeTabs }, new AbortController().signal, options.toolTimeoutMs, parentId)
+    } catch { /* release is best effort */ }
   }
 }
 

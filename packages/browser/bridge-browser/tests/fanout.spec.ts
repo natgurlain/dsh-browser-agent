@@ -138,6 +138,32 @@ describe('runFanout', () => {
     expect(h.requests.at(-1)!.name).toBe('browser_fleet_release')
   })
 
+  it('returns the fleet answers when the release throws synchronously (extension gone)', async () => {
+    const h = harness()
+    const requestTool = h.deps.bridge.requestTool as unknown as ReturnType<typeof vi.fn>
+    const original = requestTool.getMockImplementation()!
+    // BridgeServer.requestTool throws (not rejects) when no extension is connected.
+    requestTool.mockImplementation((name: string, ...rest: unknown[]) => {
+      if (name === 'browser_fleet_release') throw new Error('no browser extension is connected to the bridge')
+      return original(name, ...rest)
+    })
+    const text = await runFanout(parent, { tasks, allowActions: false, closeTabs: true }, { signal }, h.deps, { toolTimeoutMs: 1000, provider: 'spawn' })
+    expect(text).toMatch(/2 of 2 tasks completed/)
+  })
+
+  it('counts a rejected child start as one failed task and still releases the tabs', async () => {
+    let calls = 0
+    const start = vi.fn(async (spec: Parameters<FleetSubagents['startActivation']>[0]) => {
+      if (calls++ === 0) throw new Error('spawn refused')
+      return { childId: spec.childId, result: Promise.resolve({ output: [{ type: 'text', text: 'ok' }], stopReason: 'completed' }) as never, dispose: async () => {} }
+    })
+    const h = harness({ start })
+    const text = await runFanout(parent, { tasks, allowActions: false, closeTabs: true }, { signal }, h.deps, { toolTimeoutMs: 1000, provider: 'spawn' })
+    expect(text).toMatch(/1 of 2 tasks completed/)
+    expect(text).toContain('spawn refused')
+    expect(h.requests.at(-1)!.name).toBe('browser_fleet_release')
+  })
+
   it('starts nothing when the fleet card is declined', async () => {
     const h = harness()
     const deps = { ...h.deps, bridge: { requestTool: vi.fn(async () => { throw new Error('The user declined the tab fleet.') }) } as never }
