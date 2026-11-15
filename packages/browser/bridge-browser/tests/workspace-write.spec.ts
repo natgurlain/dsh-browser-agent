@@ -84,14 +84,22 @@ process.chdir(${JSON.stringify(ws)}); symlinkSync(${JSON.stringify(outside)}, 'l
 const t = (f) => { try { f() } catch {} }
 for (;;) { t(() => renameSync('d', 'd.real' + Math.random())); t(() => renameSync('l', 'd')); for (let i = 0; i < 2000; i++); t(() => renameSync('d', 'l')); t(() => mkdirSync('d')); for (let i = 0; i < 2000; i++); }`)
     const swap = spawn(process.execPath, [script], { stdio: 'ignore' })
+    let written = 0
+    let refused = 0
     try {
       await new Promise((resolve) => setTimeout(resolve, 150))
       for (let i = 0; i < 300; i++) {
-        await writeWorkspaceFile({ mode: 'workspace-write', root: ws }, `d/r${String(i)}.csv`, 'x', { allowedExt: ['.csv'] }).catch(() => {})
+        await writeWorkspaceFile({ mode: 'workspace-write', root: ws }, `d/r${String(i)}.csv`, 'x', { allowedExt: ['.csv'] })
+          // A refusal, or an fs error from a directory vanishing mid-walk: both write nothing.
+          .then(() => { written += 1 }, () => { refused += 1 })
       }
+      // The swapper was alive for the whole run, so the race really happened.
+      expect(swap.exitCode).toBeNull()
     } finally {
       swap.kill('SIGKILL')
     }
     expect(readdirSync(outside)).toEqual([])
+    expect(written + refused).toBe(300)
+    expect(refused).toBeGreaterThan(0)
   }, 30_000)
 })
