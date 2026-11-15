@@ -13,6 +13,12 @@
  * policy, taint rules and approval settings; when that read is refused,
  * nothing from the page is returned.
  *
+ * The answer is `{ text, origins }`: the raw rendered capture (the bridge
+ * fences it with its own nonce; no boundary written here is relied on) and
+ * every origin the capture read, the linked page's and each of its frames'.
+ * The bridge leaves the coding session untainted only when all of them are
+ * loopback; a frame whose origin cannot be judged is reported as such.
+ *
  * Refused: a session without a link made in this browser, a linked tab that
  * is gone or has left its linked origin, and any non-loopback origin the
  * bridge did not allow.
@@ -154,6 +160,27 @@ export interface DevLoopBrowser {
   runInPage<T>(tabId: number, func: (...args: never[]) => T, args: unknown[]): Promise<T | undefined>
   load(): Promise<unknown>
   save(value: unknown): Promise<void>
+  /** URLs of every frame of the tab (top included), for the origins report. */
+  frameUrls?(tabId: number): Promise<string[]>
+}
+
+/**
+ * The origin a frame URL's content comes from, for the taint decision:
+ * http(s) and blob: URLs by their origin, about:blank/srcdoc frames by their
+ * parent (skipped), anything else (data:, file:, opaque) as its scheme, which
+ * is never loopback.
+ */
+export function frameContentOrigin(url: string): string | undefined {
+  if (url === '' || url === 'about:blank' || url === 'about:srcdoc') return undefined
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:' || parsed.protocol === 'blob:') {
+      return parsed.origin === 'null' ? parsed.protocol : parsed.origin
+    }
+    return parsed.protocol
+  } catch {
+    return 'unknown:'
+  }
 }
 
 /** Links, collector installation and the capture action. */
@@ -236,12 +263,12 @@ export class DevLoopController {
    * Answer one `browser_devloop_capture` call.
    * @param call - the bridge call (its sessionId names the coding session).
    * @param readDelta - the DOM delta read through the call's policy and approval path.
-   * @param wrap - fence page-derived text as untrusted.
+   * @param clip - budget the page-derived text (the bridge fences it).
    */
   async capture(
     call: { sessionId?: string; args: Record<string, unknown> },
     readDelta: (tab: { id?: number; url?: string; title?: string; windowId?: number }) => Promise<ToolAnswer>,
-    wrap: (text: string) => string,
+    clip: (text: string) => string,
   ): Promise<ToolAnswer & { origin?: string }> {
     await this.ready
     const link = this.linkOf(call.sessionId)
@@ -255,10 +282,18 @@ export class DevLoopController {
     if (!delta.ok) return { ...delta, origin: link.origin }
     const collected = await this.browser.runInPage(link.tabId, devLoopDrain, []).catch(() => null) ?? null
     const text = (delta.result as { text?: unknown } | undefined)?.text
+    // Every origin the read could have quoted: the page and all of its frames.
+    const frameUrls = await this.browser.frameUrls?.(link.tabId).catch(() => undefined)
+    const origins = new Set<string>([link.origin])
+    if (frameUrls === undefined) origins.add('unknown:')
+    for (const url of frameUrls ?? []) {
+      const origin = frameContentOrigin(url)
+      if (origin !== undefined) origins.add(origin)
+    }
     return {
       ok: true,
       origin: link.origin,
-      result: { text: wrap(renderDevLoopCapture(link.origin, collected, typeof text === 'string' ? text : undefined)) },
+      result: { text: clip(renderDevLoopCapture(link.origin, collected, typeof text === 'string' ? text : undefined)), origins: [...origins] },
     }
   }
 
@@ -295,6 +330,11 @@ export function chromeDevLoopBrowser(): DevLoopBrowser {
         args,
       } as chrome.scripting.ScriptInjection<unknown[], unknown>)
       return first?.result as never
+    },
+    frameUrls: async (tabId) => {
+      const frames = await chrome.webNavigation.getAllFrames({ tabId })
+      if (frames === null || frames === undefined || frames.length === 0) throw new Error('no frame list')
+      return frames.map(frame => frame.url)
     },
     load: async () => (await area()?.get(DEVLOOP_STORAGE_KEY))?.[DEVLOOP_STORAGE_KEY],
     save: async (value) => { await area()?.set({ [DEVLOOP_STORAGE_KEY]: value }) },

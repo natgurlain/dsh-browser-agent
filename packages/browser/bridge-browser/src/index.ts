@@ -188,6 +188,9 @@ export interface Config {
   mcp?: McpConfig
   /**
    * Dev loop (link a localhost tab to a DSH coding session from the panel):
+   * off unless `enabled` is true (default false). Only coding sessions on a
+   * restricted permission preset can be linked (never full access), and the
+   * panel's picker sees only their id and title.
    * `allowedOrigins` adds exact non-loopback origins (e.g.
    * `http://myapp.test:3000`) to the default localhost / 127.0.0.1 / [::1].
    * Injections from such origins taint the session like other web content.
@@ -196,13 +199,13 @@ export interface Config {
    * the local dev server renders untrusted data (user content, scraped or
    * proxied pages), which could otherwise inject text into the session.
    */
-  devLoop?: { allowedOrigins?: string[]; trustLoopback?: boolean }
+  devLoop?: { enabled?: boolean; allowedOrigins?: string[]; trustLoopback?: boolean }
 }
 
 /** The shape after schemastery applies its defaults to every field. */
 type ResolvedConfig = Required<Omit<Config, 'token' | 'mcp' | 'devLoop'>> & Pick<Config, 'token'> & {
   mcp: Required<McpConfig>
-  devLoop: { allowedOrigins: string[]; trustLoopback: boolean }
+  devLoop: { enabled: boolean; allowedOrigins: string[]; trustLoopback: boolean }
 }
 
 export const Config: z<Config, ResolvedConfig> = z.object({
@@ -226,9 +229,10 @@ export const Config: z<Config, ResolvedConfig> = z.object({
     port: z.number().step(1).min(0).max(65535).default(0),
   }).default({ enabled: false, port: 0 }),
   devLoop: z.object({
+    enabled: z.boolean().default(false),
     allowedOrigins: z.array(z.string().pattern(/^https?:\/\/[^/\s]+$/)).default([]),
     trustLoopback: z.boolean().default(true),
-  }).default({ allowedOrigins: [], trustLoopback: true }),
+  }).default({ enabled: false, allowedOrigins: [], trustLoopback: true }),
 }) as unknown as z<Config, ResolvedConfig>
 
 /**
@@ -414,6 +418,8 @@ function mountBridge(
   // below; captures only start after a link and a finished turn.
   let server: BridgeServer
   const devLoop = new DevLoop({
+    enabled: resolved.devLoop.enabled,
+    unsafePreset: (sessionId, signal) => fenced.unsafePreset(sessionId, signal),
     listSessions: async (signal) => {
       const listed = await api.call({ rpcId: randomUUID(), method: 'session.list', payload: {}, signal })
       return listed.ok ? listed.value : undefined

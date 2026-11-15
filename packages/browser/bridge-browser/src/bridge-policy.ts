@@ -173,6 +173,13 @@ export interface BridgePolicyApi extends BrowserHostApi {
    * for bridge-created sessions not running a full-access preset.
    */
   allowsSession(sessionId: string, signal: AbortSignal, access?: SessionAccess): Promise<boolean>
+  /**
+   * The session's current permission preset when it is not a restricted one
+   * (full access, `auto`, unknown), else undefined. Unlike the write gate this
+   * ignores `allowDangerFullAccess`: standing grants such as the dev loop
+   * never attach to a full-access session.
+   */
+  unsafePreset(sessionId: string, signal: AbortSignal): Promise<string | undefined>
 }
 
 function forbidden(message: string): HostRpcResult {
@@ -274,6 +281,11 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
   /** The session's current preset when it is not safe, else undefined. */
   const unsafePresetOf = async (sessionId: string, signal: AbortSignal): Promise<string | undefined> => {
     if (options.allowDangerFullAccess) return undefined
+    return strictUnsafePresetOf(sessionId, signal)
+  }
+
+  /** The session's current preset when it is not safe, whatever `allowDangerFullAccess` says. */
+  const strictUnsafePresetOf = async (sessionId: string, signal: AbortSignal): Promise<string | undefined> => {
     const permissions = await inner('session.permissions', { sessionId }, signal)
     const current = permissions.ok && isRecord(permissions.value) && typeof permissions.value.current === 'string'
       ? permissions.value.current
@@ -476,6 +488,7 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
 
   return {
     allowsSession,
+    unsafePreset: strictUnsafePresetOf,
     events: (signal) => api.events(signal),
     respond: (rpcId, result, signal) => api.respond(rpcId, result, signal),
     call,

@@ -185,6 +185,8 @@ async function start(reopen) {
     '    deferSessionCreate: false',
     '    mcp:',
     '      enabled: true',
+    '    devLoop:',
+    '      enabled: true',
     '- id: llm-pi-ai',
     '  config:',
     '    providers:',

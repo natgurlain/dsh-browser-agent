@@ -73,7 +73,7 @@ export async function smokeDevLoop({ place, owner, rpc, wsUrl, connectClient, wa
     assert.equal(capture.sessionId, coding)
     assert.deepEqual(capture.args, { origin: 'http://localhost:5173' })
     assert.equal(await readFile(join(temp, 'devloop-edit.txt'), 'utf8'), 'edited by the coding agent\n')
-    panel.send({ t: 'tool.result', id: capture.id, ok: true, result: { text: 'Linked tab: http://localhost:5173\nConsole errors since the last turn (1):\n- [exception] DEVLOOP-MARKER TypeError: user is undefined' } })
+    panel.send({ t: 'tool.result', id: capture.id, ok: true, result: { text: 'Linked tab: http://localhost:5173\nConsole errors since the last turn (1):\n- [exception] DEVLOOP-MARKER TypeError: user is undefined', origins: ['http://localhost:5173'] } })
 
     // Injected, not prompted: the session stays idle until the user's next message.
     await new Promise(resolve => setTimeout(resolve, 1_000))
@@ -82,6 +82,8 @@ export async function smokeDevLoop({ place, owner, rpc, wsUrl, connectClient, wa
     const seen = await waitFor(() => probe.checkMessages, 'the next model request', 60_000)
     assert.match(seen, /Browser dev loop/u)
     assert.match(seen, /DEVLOOP-MARKER/u)
+    // The bridge fenced the capture itself with a fresh nonce.
+    assert.match(seen, /UNTRUSTED_PAGE_CONTENT nonce=\\"[0-9a-f-]{36}\\"/u)
     await waitFor(async () => (await owner('session', 'state', { request: { sessionId: coding } })).running === false, 'check turn end', 60_000)
     // A turn without edits asks for nothing.
     await new Promise(resolve => setTimeout(resolve, 500))

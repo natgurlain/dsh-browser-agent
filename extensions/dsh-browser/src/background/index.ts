@@ -136,7 +136,6 @@ import {
   DEFAULT_SNAPSHOT_MAX_CHARS as DEVLOOP_MAX_CHARS,
   DEVLOOP_CAPTURE_TOOL,
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import { wrapUntrustedContent as wrapDevLoopContent } from '../security/untrusted.ts'
 import { DevToolsError, devToolsSupported } from './debugger-session.ts'
 import { createDevToolsController } from './devtools-controller.ts'
 import {
@@ -2387,7 +2386,7 @@ function routeToolCall(call: ToolCall): void {
           () => devLoop.allowsTarget(call.sessionId, target.id),
           { unrestrictedAccess, policy },
         )
-      }, (text) => wrapDevLoopContent(text, budget?.maxChars ?? DEVLOOP_MAX_CHARS))
+      }, (text) => text.slice(0, budget?.maxChars ?? DEVLOOP_MAX_CHARS))
     : call.name === 'browser_fanout'
     ? fleets.open(call, {
         ...fleetDeps(controller.signal, (prompt, windowId) => auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(shown, controller.signal, windowId, call.sessionId, unrestrictedAccess, undefined, call.id, onPrompt))(prompt)),

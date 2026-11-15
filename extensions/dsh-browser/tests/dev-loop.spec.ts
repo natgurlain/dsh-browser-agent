@@ -10,7 +10,7 @@ import {
 } from '../src/background/dev-loop.ts'
 import type { ToolAnswer } from '../src/background/tools.ts'
 
-function fakeBrowser(tabs: Record<number, { id: number; url: string; title?: string }>, collected: DevLoopCollected | null = null) {
+function fakeBrowser(tabs: Record<number, { id: number; url: string; title?: string }>, collected: DevLoopCollected | null = null, frames: Record<number, string[]> = {}) {
   let stored: unknown
   const ran: string[] = []
   const browser: DevLoopBrowser = {
@@ -21,11 +21,12 @@ function fakeBrowser(tabs: Record<number, { id: number; url: string; title?: str
     },
     load: async () => stored,
     save: async (value) => { stored = value },
+    frameUrls: async (tabId) => frames[tabId] ?? [tabs[tabId]?.url ?? ''],
   }
   return { browser, ran, stored: () => stored }
 }
 
-const wrap = (text: string): string => `<UNTRUSTED>${text}</UNTRUSTED>`
+const wrap = (text: string): string => text
 const okDelta = async (): Promise<ToolAnswer> => ({ ok: true, result: { text: '+ [3] button "Retry"' } })
 
 describe('DevLoopController', () => {
@@ -90,12 +91,28 @@ describe('DevLoopController', () => {
     const answer = await controller.capture({ sessionId: 'coding', args: { origin: 'http://localhost:3000' } }, okDelta, wrap)
     expect(answer.ok).toBe(true)
     const text = (answer.result as { text: string }).text
-    expect(text.startsWith('<UNTRUSTED>')).toBe(true)
+    // Raw text: the bridge fences it with its own nonce.
+    expect(text.startsWith('Linked tab: http://localhost:3000')).toBe(true)
+    expect((answer.result as { origins: string[] }).origins).toEqual(['http://localhost:3000'])
     expect(text).toContain('Console errors since the last turn (1):')
     expect(text).toContain('- POST http://localhost:3000/api/login → 500')
     expect(text).toContain('- GET http://localhost:4000/x → TypeError: Failed to fetch')
     expect(text).toContain('(2 more entries were dropped.)')
     expect(text).toContain('DOM changes:\n+ [3] button "Retry"')
+  })
+
+  it('reports every frame origin the capture read, so a third-party iframe taints on the bridge', async () => {
+    const { browser } = fakeBrowser({ 1: { id: 1, url: 'http://localhost:3000/' } }, null, {
+      1: ['http://localhost:3000/', 'about:blank', 'https://ads.example/frame', 'data:text/html,hi', 'blob:http://localhost:3000/abc'],
+    })
+    const controller = new DevLoopController(browser)
+    await controller.link({ sessionId: 'coding', tabId: 1, origin: 'http://localhost:3000' })
+    const answer = await controller.capture({ sessionId: 'coding', args: {} }, okDelta, wrap)
+    expect((answer.result as { origins: string[] }).origins).toEqual(['http://localhost:3000', 'https://ads.example', 'data:'])
+    // No frame list: the origins cannot be vouched for.
+    const blind = new DevLoopController({ ...browser, frameUrls: async () => { throw new Error('gone') } })
+    await blind.link({ sessionId: 'coding', tabId: 1, origin: 'http://localhost:3000' })
+    expect((await blind.capture({ sessionId: 'coding', args: {} }, okDelta, wrap)).result).toMatchObject({ origins: ['http://localhost:3000', 'unknown:'] })
   })
 
   it('renders an empty capture plainly', () => {
