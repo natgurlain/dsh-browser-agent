@@ -426,6 +426,11 @@ function effectiveFrameOrigin(frame: TabFrame, frames: TabFrame[], visited = new
   return parent === undefined ? undefined : effectiveFrameOrigin(parent, frames, visited)
 }
 
+/**
+ * The web origin a URL's content belongs to, for cards and frame origins.
+ * Unlike `httpOrigin` (security/web-url.ts) this also accepts `blob:` URLs of
+ * a web origin, which carry their creator's origin; opaque origins are none.
+ */
 export function originFromUrl(value: string): string | undefined {
   try {
     const url = new URL(value)

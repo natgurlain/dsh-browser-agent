@@ -23,6 +23,7 @@
  */
 
 import { getDomain } from 'tldts'
+import { parseHttpUrl } from './web-url.ts'
 
 export type SiteRule = 'blocked' | 'read-only' | 'ask' | 'trusted'
 
@@ -191,15 +192,6 @@ function globRegExp(pattern: string, _any: string, prefix: boolean): RegExp {
   return new RegExp(`^${source}${prefix ? '(?:/.*)?' : ''}$`)
 }
 
-function parseWebUrl(value: string | URL): URL | undefined {
-  try {
-    const url = typeof value === 'string' ? new URL(value) : value
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url : undefined
-  } catch {
-    return undefined
-  }
-}
-
 function layerVerdict(entries: readonly SiteRuleEntry[], url: URL, source: SiteRuleSource): SiteVerdict | undefined {
   let verdict: SiteVerdict | undefined
   for (const entry of entries) {
@@ -218,7 +210,7 @@ function layerVerdict(entries: readonly SiteRuleEntry[], url: URL, source: SiteR
  * unrestricted access is off (ordinary approval flow). Non-web URLs have none.
  */
 export function resolveSiteRule(value: string | URL, policy: SitePolicy): SiteVerdict | undefined {
-  const url = parseWebUrl(value)
+  const url = parseHttpUrl(value)
   if (url === undefined) return undefined
   const managed = layerVerdict(policy.managed, url, 'managed')
   if (managed !== undefined) return managed

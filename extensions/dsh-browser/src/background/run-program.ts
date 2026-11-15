@@ -31,6 +31,7 @@ import { approvalBinding, canonicalJson, sha256Hex } from '../security/payload-b
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { frameDocumentKey, frameOrigin, type TabFrame } from './frames.ts'
 import type { ToolCall } from './tools.ts'
+import { httpOrigin, isRecord } from '../security/web-url.ts'
 
 /** Mirrors the bridge's PROGRAM_STEP_TOOLS (a spec keeps the two equal). */
 export const PROGRAM_STEP_TOOLS: ReadonlySet<string> = new Set([
@@ -62,10 +63,6 @@ export interface ProgramStepInput {
   expect?: Record<string, unknown>
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
 /**
  * Validate a `browser_run` call's steps (the bridge validated them too).
  * @returns the steps, or an error message.
@@ -91,16 +88,6 @@ export function stepDigest(tool: string, args: Record<string, unknown>): string 
   return sha256Hex(canonicalJson({ tool, args }))
 }
 
-function urlOrigin(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined
-  try {
-    const url = new URL(value)
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : undefined
-  } catch {
-    return undefined
-  }
-}
-
 /**
  * Origins a program may act on: the controlled page's, plus every page a
  * navigate step names (shown on the card).
@@ -111,7 +98,7 @@ export function programOrigins(steps: ProgramStepInput[], frames: TabFrame[]): s
   if (top !== undefined) origins.add(frameOrigin(top))
   for (const step of steps) {
     if (step.tool !== 'browser_navigate') continue
-    const origin = urlOrigin(step.args.url)
+    const origin = httpOrigin(step.args.url)
     if (origin !== undefined) origins.add(origin)
   }
   return [...origins]

@@ -18,6 +18,7 @@ import { evaluateCallPolicy, type CallPolicyDecision, type CallPolicyTargets, ty
 import { EMPTY_MANAGED_POLICY, loadManagedPolicy, type ManagedPolicy } from '../security/managed-policy.ts'
 import { matchSitePattern, type SitePolicy, type SiteRuleEntry } from '../security/site-policy.ts'
 import { resultTaintsSession, TaintTracker, taintKey, type TaintRecord } from '../security/taint.ts'
+import { httpOrigin, parseHttpUrl } from '../security/web-url.ts'
 import type { CallPolicyHook, ToolCall } from './tools.ts'
 import { isDevToolsTool } from './authorization.ts'
 
@@ -146,14 +147,8 @@ export class PolicyRuntime {
    * withheld (tab lists, resume summaries). Non-web pages are not judged.
    */
   pageHidden(url: string, unrestricted?: boolean): boolean {
-    let origin: string
-    try {
-      const parsed = new URL(url)
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
-      origin = parsed.origin
-    } catch {
-      return false
-    }
+    const origin = httpOrigin(url)
+    if (origin === undefined) return false
     return evaluateCallPolicy({
       name: 'browser_list_tabs',
       args: {},
@@ -215,10 +210,8 @@ export class PolicyRuntime {
   strictFor(sessionId: string | undefined, pageUrl: string | undefined): boolean {
     if (this.strictSessions.has(taintKey(sessionId))) return true
     const patterns = this.options.settings().strictSites ?? []
-    if (patterns.length === 0 || pageUrl === undefined) return false
-    let url: URL
-    try { url = new URL(pageUrl) } catch { return false }
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return false
+    const url = patterns.length === 0 ? undefined : parseHttpUrl(pageUrl)
+    if (url === undefined) return false
     return patterns.some((pattern) => matchSitePattern(pattern, url))
   }
 

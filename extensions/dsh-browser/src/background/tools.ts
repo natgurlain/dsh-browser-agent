@@ -57,6 +57,7 @@ import {
   trustedClick,
   type PointerContext,
 } from './pointer-tools.ts'
+import { parseHttpUrl } from '../security/web-url.ts'
 
 /** A tool call from the bridge. */
 export interface ToolCall {
@@ -2310,17 +2311,6 @@ function sameTargetDocument(call: ToolCall, before: TabFrame[], after: TabFrame[
   return beforeFrame !== undefined
     && afterFrame !== undefined
     && frameDocumentKey(beforeFrame) === frameDocumentKey(afterFrame)
-}
-
-/** Parse a model-supplied http(s) URL for tab creation / navigation. */
-export function parseHttpUrl(value: unknown): URL | undefined {
-  if (typeof value !== 'string' || value.trim() === '') return undefined
-  try {
-    const parsed = new URL(value)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed : undefined
-  } catch {
-    return undefined
-  }
 }
 
 async function removeCreatedTab(tabId: number): Promise<void> {

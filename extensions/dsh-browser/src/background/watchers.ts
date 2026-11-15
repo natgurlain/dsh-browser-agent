@@ -22,6 +22,7 @@
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { approvalBinding } from '../security/payload-binding.ts'
 import type { ToolCall } from './tools.ts'
+import { httpOrigin, isRecord } from '../security/web-url.ts'
 
 /** Storage key of the persisted watchers. */
 export const WATCHERS_STORAGE_KEY = 'dshPageWatchers'
@@ -73,10 +74,6 @@ export interface ArmedWatch {
   id: string
   condition: WatchCondition
   createdAt: number
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function nonEmpty(value: unknown): value is string {
@@ -386,16 +383,6 @@ function failed(message: string, code: 'bad-args' | 'action-failed' | 'no-active
   return { ok: false, error: { code, message } }
 }
 
-function originOf(url: string | undefined): string | undefined {
-  if (url === undefined) return undefined
-  try {
-    const parsed = new URL(url)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.origin : undefined
-  } catch {
-    return undefined
-  }
-}
-
 /** `browser_watch`: approve and record one watcher. */
 export async function createWatcher(call: ToolCall, deps: WatchToolDeps): Promise<WatchAnswer> {
   if (!deps.enabled()) {
@@ -418,7 +405,7 @@ export async function createWatcher(call: ToolCall, deps: WatchToolDeps): Promis
     if ('ok' in resolved) return failed(resolved.error?.message ?? 'No controlled tab to watch.', 'no-active-tab')
     tab = resolved
   }
-  const origin = originOf(tab.url)
+  const origin = httpOrigin(tab.url)
   if (tab.id === undefined || tab.url === undefined || origin === undefined) return failed('Only http and https pages can be watched.')
   // A page site policy hides cannot be watched; its address is not echoed back.
   if (deps.pageHidden?.(tab.url) === true) return failed('This page is blocked by site policy, so it cannot be watched.')
@@ -525,7 +512,7 @@ export async function handleWatchHit(
   if (sender.tabId !== watcher.tabId || (sender.frameId !== undefined && sender.frameId !== 0)) return { accepted: false, reason: 'wrong-tab' }
   // A URL watcher reports from the background and may follow the tab to another site;
   // every other watcher fires only on the origin the user approved.
-  if (sender.urlWatcher === true ? watcher.condition.kind !== 'url' : (watcher.condition.kind === 'url' || originOf(sender.url) !== watcher.origin)) {
+  if (sender.urlWatcher === true ? watcher.condition.kind !== 'url' : (watcher.condition.kind === 'url' || httpOrigin(sender.url) !== watcher.origin)) {
     return { accepted: false, reason: 'other-origin' }
   }
   if (!deps.enabled()) return { accepted: false, reason: 'disabled' }
@@ -573,7 +560,7 @@ export async function handleWatchHit(
 
 /** The watchers a tab's content script should observe (URL watchers run in the background). */
 export function armedFor(registry: WatcherRegistry, tabId: number, url: string | undefined): ArmedWatch[] {
-  const origin = originOf(url)
+  const origin = httpOrigin(url)
   return registry.forTab(tabId)
     .filter((watcher) => watcher.origin === origin && watcher.condition.kind !== 'url')
     .map((watcher) => ({ id: watcher.id, condition: watcher.condition, createdAt: watcher.createdAt }))

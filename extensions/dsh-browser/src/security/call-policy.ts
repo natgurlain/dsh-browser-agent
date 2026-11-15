@@ -13,6 +13,7 @@
 import { originMatchesTrusted } from './trusted-origins.ts'
 import { resolveSiteRule, SITE_RULES, type SitePolicy, type SiteVerdict } from './site-policy.ts'
 import { taintForcedReasons, type TaintRecord } from './taint.ts'
+import { httpOrigin } from './web-url.ts'
 
 /** Which origins one call reads, changes, or navigates to. */
 export interface CallPolicyTargets {
@@ -80,16 +81,6 @@ export type CallPolicyDecision =
 
 const SETTINGS_HINT = 'The user can change this in Settings > Site policy.'
 
-function originOf(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined
-  try {
-    const url = new URL(value)
-    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : undefined
-  } catch {
-    return undefined
-  }
-}
-
 function describe(verdict: SiteVerdict): string {
   const source = verdict.source === 'managed' ? 'managed policy' : verdict.source === 'default' ? 'built-in default' : 'your site policy'
   return `${verdict.pattern} (${source})`
@@ -115,7 +106,7 @@ export function evaluateCallPolicy(input: CallPolicyInput): CallPolicyDecision {
     return { kind: 'deny', message: 'Developer tools are disabled by your administrator (managed policy).' }
   }
   const destination = input.targets.destination
-  const destinationOrigin = originOf(destination)
+  const destinationOrigin = httpOrigin(destination)
   const involved = [...new Set([
     ...input.targets.reads,
     ...input.targets.acts,
@@ -134,7 +125,7 @@ export function evaluateCallPolicy(input: CallPolicyInput): CallPolicyDecision {
   // touches there (path-scoped rules), or by the origin alone when none is known.
   const verdictFor = (origin: string): SiteVerdict | undefined => {
     if (!verdicts.has(origin)) {
-      const urls = (input.targets.urls ?? []).filter((url) => originOf(url) === origin)
+      const urls = (input.targets.urls ?? []).filter((url) => httpOrigin(url) === origin)
       verdicts.set(origin, urls.length === 0
         ? resolveSiteRule(origin, input.site)
         : urls.map((url) => resolveSiteRule(url, input.site)).reduce(stricterVerdict))

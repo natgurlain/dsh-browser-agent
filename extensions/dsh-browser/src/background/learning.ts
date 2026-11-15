@@ -36,6 +36,7 @@ import type { NetworkEntry } from './devtools-network.ts'
 import { listTabFrames } from './frames.ts'
 import { isExtensionPageSender } from './policy-runtime.ts'
 import type { CallPolicyHook, ToolAnswer, ToolCall } from './tools.ts'
+import { httpOrigin, isRecord } from '../security/web-url.ts'
 
 /** Storage key of the learning switches. */
 export const LEARNING_SETTINGS_KEY = 'dshLearningSettings'
@@ -137,20 +138,6 @@ export interface WatchSuggestion {
   labels: string[]
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function originOf(url: string | undefined): string | undefined {
-  if (url === undefined) return undefined
-  try {
-    const parsed = new URL(url)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.origin : undefined
-  } catch {
-    return undefined
-  }
-}
-
 function zh(): boolean {
   return getUiLocale() === 'zh'
 }
@@ -159,7 +146,7 @@ function zh(): boolean {
 export function normalizeLearningSettings(value: unknown): LearningSettings {
   const raw = isRecord(value) ? value : {}
   const origins = Array.isArray(raw.siteDriverOrigins)
-    ? [...new Set(raw.siteDriverOrigins.map((entry) => originOf(typeof entry === 'string' ? entry : undefined)).filter((entry): entry is string => entry !== undefined))].sort()
+    ? [...new Set(raw.siteDriverOrigins.map((entry) => httpOrigin(typeof entry === 'string' ? entry : undefined)).filter((entry): entry is string => entry !== undefined))].sort()
     : []
   return {
     workflows: raw.workflows === true,
@@ -206,7 +193,7 @@ export function classifyFailure(answer: ToolAnswer, decision: string | undefined
  */
 export function fixtureAllowedFor(sharePageContent: 'ask' | 'auto' | 'off', decide: (origin: string) => 'deny' | 'force' | 'trust' | 'default', url: string | undefined): boolean {
   if (sharePageContent !== 'auto') return false
-  const origin = originOf(url)
+  const origin = httpOrigin(url)
   if (origin === undefined) return false
   const kind = decide(origin)
   return kind !== 'deny' && kind !== 'force'
@@ -333,7 +320,7 @@ export class LearningRuntime {
   }
 
   private wantsNetwork(call: ToolCall, url: string | undefined): boolean {
-    const origin = originOf(url)
+    const origin = httpOrigin(url)
     return this.settings.siteDrivers && this.deps.siteDriversSupported && origin !== undefined
       && this.settings.siteDriverOrigins.includes(origin)
       && ['browser_click', 'browser_press', 'browser_select', 'browser_type'].includes(call.name)
@@ -441,7 +428,7 @@ export class LearningRuntime {
         },
       }),
       ...(sensitive ? { sensitive: true } : {}),
-      ...(originOf(url) === undefined ? {} : { origin: originOf(url)! }),
+      ...(httpOrigin(url) === undefined ? {} : { origin: httpOrigin(url)! }),
       at: this.now(),
     }
     const key = call.sessionId ?? NO_SESSION
@@ -497,7 +484,7 @@ export class LearningRuntime {
   private async captureFixture(call: ToolCall, answer: ToolAnswer, failure: NonNullable<ReturnType<typeof classifyFailure>>, tabId: number): Promise<void> {
     try {
       const tab = await chrome.tabs.get(tabId)
-      if (originOf(tab.url) === undefined || this.deps.halted() || !this.deps.fixtureAllowed(call.sessionId, tab.url!)) return
+      if (httpOrigin(tab.url) === undefined || this.deps.halted() || !this.deps.fixtureAllowed(call.sessionId, tab.url!)) return
       const probe = await chrome.tabs.sendMessage(tabId, { type: 'DSH_LEARN_FIXTURE', probe: true }, { frameId: 0 }) as { ok?: boolean; result?: { sensitiveCount?: number } } | undefined
       let page: { kind: 'mhtml' | 'dom'; content: string } | undefined
       // MHTML serializes every frame and form value: only a single-frame page
@@ -530,12 +517,12 @@ export class LearningRuntime {
   // ---- site drivers ----
 
   private async learnDriver(call: ToolCall, probe: PendingProbe): Promise<void> {
-    const origin = originOf(probe.url)
+    const origin = httpOrigin(probe.url)
     if (origin === undefined || !this.wantsNetwork(call, probe.url)) return
     // Let the request settle in the capture.
     await new Promise((resolve) => setTimeout(resolve, 400))
     const entries = (this.deps.capturedRequests(probe.tabId) ?? []).filter((entry) => entry.index > (probe.networkMark ?? 0)
-      && /^(xhr|fetch)$/iu.test(entry.resourceType ?? '') && originOf(entry.url) === origin)
+      && /^(xhr|fetch)$/iu.test(entry.resourceType ?? '') && httpOrigin(entry.url) === origin)
     const request = entries.find((entry) => entry.method.toUpperCase() !== 'GET') ?? entries[0]
     if (request === undefined) return
     try {
@@ -627,7 +614,7 @@ export class LearningRuntime {
     const origin = typeof call.args.origin === 'string' ? call.args.origin : ''
     const driver = this.drivers.find((candidate) => candidate.origin === origin && candidate.name === call.args.driver)
     if (driver === undefined) return fail('That site driver is not saved in this browser. Use the page UI.')
-    if (tab.id === undefined || originOf(tab.url) !== driver.origin) return fail(`The controlled tab is not on ${driver.origin}. Use the page UI instead.`)
+    if (tab.id === undefined || httpOrigin(tab.url) !== driver.origin) return fail(`The controlled tab is not on ${driver.origin}. Use the page UI instead.`)
     const params = isRecord(call.args.params) ? call.args.params : {}
     let request
     try {
@@ -662,7 +649,7 @@ export class LearningRuntime {
     if (authorization !== 'approved') return fail(`The user did not approve the site driver request (${authorization}). Use the page UI only if the user asks.`)
     // The tab may have moved while the card waited.
     const now = await chrome.tabs.get(tab.id).catch(() => undefined)
-    if (originOf(now?.url) !== driver.origin) return fail(`The tab left ${driver.origin} while approval was pending. Use the page UI.`)
+    if (httpOrigin(now?.url) !== driver.origin) return fail(`The tab left ${driver.origin} while approval was pending. Use the page UI.`)
     try {
       const response = await chrome.tabs.sendMessage(tab.id, { type: 'DSH_SITE_DRIVER_FETCH', request }, { frameId: 0 }) as { ok?: boolean; result?: { status: number; ok: boolean; contentType: string; body: string }; error?: { message?: string } } | undefined
       if (response?.ok !== true || response.result === undefined) return fail(`The site driver failed: ${response?.error?.message ?? 'no answer from the page'}. Fall back to the page UI.`)
@@ -680,7 +667,7 @@ export class LearningRuntime {
     if (!this.settings.watchMe) throw new Error('Watch me is turned off in the settings.')
     await this.stopWatching()
     const tab = await chrome.tabs.get(tabId)
-    const origin = originOf(tab.url)
+    const origin = httpOrigin(tab.url)
     if (origin === undefined) throw new Error(zh() ? '此页面无法观察。' : 'This page cannot be watched.')
     this.watch = { tabId, origin, events: [] }
     this.suggestion = undefined
@@ -776,7 +763,7 @@ export class LearningRuntime {
     const suggestion = this.suggestion
     if (suggestion === undefined || !this.settings.watchMe) throw new Error('There is no suggestion to run.')
     const tab = await chrome.tabs.get(suggestion.tabId)
-    if (originOf(tab.url) !== suggestion.origin) throw new Error('The watched tab left the page.')
+    if (httpOrigin(tab.url) !== suggestion.origin) throw new Error('The watched tab left the page.')
     // The user's own input from here on is the program, not new teaching.
     await this.stopWatching()
     return this.bridgeCall(METHODS.programRun, { ...(sessionId === undefined ? {} : { sessionId }), steps: suggestion.program }, PROGRAM_RUN_TIMEOUT_MS)

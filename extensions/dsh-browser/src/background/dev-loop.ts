@@ -28,6 +28,7 @@
 
 import { devLoopOrigin } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ToolAnswer } from './tools.ts'
+import { httpOrigin } from '../security/web-url.ts'
 
 /** One recorded link. */
 export interface DevLoopTabLink {
@@ -347,14 +348,5 @@ export function chromeDevLoopBrowser(): DevLoopBrowser {
     },
     load: async () => (await area()?.get(DEVLOOP_STORAGE_KEY))?.[DEVLOOP_STORAGE_KEY],
     save: async (value) => { await area()?.set({ [DEVLOOP_STORAGE_KEY]: value }) },
-  }
-}
-
-function httpOrigin(url: string | undefined): string | undefined {
-  try {
-    const parsed = new URL(url ?? '')
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.origin : undefined
-  } catch {
-    return undefined
   }
 }
