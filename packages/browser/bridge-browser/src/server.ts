@@ -913,7 +913,7 @@ export class BridgeServer {
     }
     const forbidden = PRIVILEGED_METHODS.has(frame.method) && !isLoopbackAddress(conn.remoteAddress)
     if (forbidden) {
-      sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'forbidden', message: 'method is loopback-only' } })
+      this.rpcError(conn, frame.id, 'forbidden', 'method is loopback-only')
       return
     }
     const audited = handleAuditRpc(frame.method, frame.payload, {
@@ -930,9 +930,8 @@ export class BridgeServer {
     const internal = audited ?? this.deps.extraRpc?.(frame.method, frame.payload, { connection: conn.key, signal: conn.abort.signal })
     if (internal !== undefined) {
       const answer = await internal.catch((error: unknown) => ({ ok: false as const, error: { code: 'internal', message: errorMessage(error) } }))
-      sendFrame(conn, answer.ok
-        ? { t: 'rpc.result', id: frame.id, ok: true, result: { type: 'server-response', rpcId: frame.id, result: { ok: true, value: answer.result } } }
-        : { t: 'rpc.result', id: frame.id, ok: false, error: answer.error })
+      if (answer.ok) sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { type: 'server-response', rpcId: frame.id, result: { ok: true, value: answer.result } } })
+      else this.rpcError(conn, frame.id, answer.error.code, answer.error.message)
       return
     }
     if (frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD || frame.method === BRIDGE_SESSION_PURGE_METHOD) {
@@ -947,24 +946,14 @@ export class BridgeServer {
           conn.abort.signal,
           frame.method === BRIDGE_SESSION_PURGE_METHOD ? 'own' : 'write',
         ).catch(() => false)) {
-        sendFrame(conn, {
-          t: 'rpc.result',
-          id: frame.id,
-          ok: false,
-          error: { code: 'forbidden', message: `session ${JSON.stringify(sessionId)} is not available to the browser bridge` },
-        })
+        this.rpcError(conn, frame.id, 'forbidden', `session ${JSON.stringify(sessionId)} is not available to the browser bridge`)
         return
       }
     }
     if (frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD) {
       const payload = browserSnapshotPayload(frame.payload)
       if (payload === undefined) {
-        sendFrame(conn, {
-          t: 'rpc.result',
-          id: frame.id,
-          ok: false,
-          error: { code: 'bad-request', message: 'sessionId and snapshot must be non-empty strings' },
-        })
+        this.rpcError(conn, frame.id, 'bad-request', 'sessionId and snapshot must be non-empty strings')
         return
       }
       try {
@@ -974,33 +963,21 @@ export class BridgeServer {
         this.sessionAffinity.set(payload.sessionId, conn.key)
         sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { accepted: true } })
       } catch (error: unknown) {
-        sendFrame(conn, {
-          t: 'rpc.result',
-          id: frame.id,
-          ok: false,
-          error: { code: 'internal', message: String(error) },
-        })
+        this.rpcError(conn, frame.id, 'internal', String(error))
       }
       return
     }
     if (frame.method === BRIDGE_SESSION_PURGE_METHOD) {
       const sessionId = purgeSessionPayload(frame.payload)
       if (sessionId === undefined) {
-        sendFrame(conn, {
-          t: 'rpc.result',
-          id: frame.id,
-          ok: false,
-          error: { code: 'bad-request', message: 'sessionId must be a non-empty string' },
-        })
+        this.rpcError(conn, frame.id, 'bad-request', 'sessionId must be a non-empty string')
         return
       }
       try {
         await this.deps.purgeSession(sessionId)
         sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { purged: true } })
       } catch (error: unknown) {
-        const code = error instanceof SessionPurgeError ? error.code : 'internal'
-        const message = errorMessage(error)
-        sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: false, error: { code, message } })
+        this.rpcError(conn, frame.id, error instanceof SessionPurgeError ? error.code : 'internal', errorMessage(error))
       }
       return
     }
@@ -1022,7 +999,7 @@ export class BridgeServer {
         result: { type: 'server-response', rpcId: frame.id, result },
       })
     } catch (error: unknown) {
-      sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: false, error: { code: 'internal', message: String(error) } })
+      this.rpcError(conn, frame.id, 'internal', String(error))
     }
   }
 
