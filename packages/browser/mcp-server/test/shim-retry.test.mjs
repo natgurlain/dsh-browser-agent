@@ -107,9 +107,9 @@ test('after DSH restarts on another port the call goes to the new endpoint once'
   const dir = await home(t, 'http://127.0.0.1:9/mcp')
   const bridge = scripted(async (message, init_, url) => {
     if (url.includes(':9/')) {
-      // The old DSH went away mid-call (any error) and the new one rewrote the endpoint file.
+      // The old DSH is gone (nothing listens) and the new one rewrote the endpoint file.
       await writeFile(join(dir, 'browser-mcp.json'), JSON.stringify({ url: 'http://127.0.0.1:10/mcp', pid: process.pid }), { mode: 0o600 })
-      throw fetchError('UND_ERR_SOCKET')
+      throw fetchError('ECONNREFUSED')
     }
     return undefined
   })
@@ -124,8 +124,53 @@ test('after DSH restarts on another port the call goes to the new endpoint once'
   await client.done
 })
 
-test('a call that fails the same way twice is reported, not retried again', async (t) => {
-  const bridge = scripted(() => { throw fetchError('ECONNRESET') })
+for (const code of ['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET']) {
+  test(`a tools/call cut off mid-flight (${code}) is not re-sent, even if the endpoint moved`, async (t) => {
+    // A plugin reload or a dying DSH resets a held call that may already have acted.
+    const dir = await home(t, 'http://127.0.0.1:9/mcp')
+    const bridge = scripted(async () => {
+      await writeFile(join(dir, 'browser-mcp.json'), JSON.stringify({ url: 'http://127.0.0.1:10/mcp', pid: process.pid }), { mode: 0o600 })
+      throw fetchError(code)
+    })
+    const client = inProcess(t, { DSH_HOME: dir }, bridge.fetch)
+    client.send(init)
+    await until(() => answerTo(client, 1))
+    client.send(call(2))
+    await until(() => answerTo(client, 2))
+    assert.equal(bridge.count('tools/call'), 1, 'the call was posted exactly once')
+    assert.equal(bridge.count('initialize'), 1, 'no replayed initialize')
+    assert.match(answerTo(client, 2).error.message, /not re-sent/u)
+    client.end()
+    await client.done
+  })
+}
+
+test('a message without side effects is re-sent after a reset', async (t) => {
+  let reset = true
+  const posts = []
+  const inner = scripted(() => undefined)
+  const fetch = async (url, init_) => {
+    const message = init_.body === undefined ? undefined : JSON.parse(init_.body)
+    if (message?.method === 'tools/list') {
+      posts.push(message)
+      if (reset) { reset = false; throw fetchError('ECONNRESET') }
+    }
+    return inner.fetch(url, init_)
+  }
+  const dir = await home(t, 'http://127.0.0.1:9/mcp')
+  const client = inProcess(t, { DSH_HOME: dir }, fetch)
+  client.send(init)
+  await until(() => answerTo(client, 1))
+  client.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' })
+  await until(() => answerTo(client, 2))
+  assert.equal(posts.length, 2)
+  assert.equal(answerTo(client, 2).result.session, 's-2')
+  client.end()
+  await client.done
+})
+
+test('a call that is refused twice is reported, not retried again', async (t) => {
+  const bridge = scripted(() => { throw fetchError('ECONNREFUSED') })
   const dir = await home(t, 'http://127.0.0.1:9/mcp')
   const client = inProcess(t, { DSH_HOME: dir }, bridge.fetch)
   client.send(init)

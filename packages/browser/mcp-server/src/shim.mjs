@@ -11,9 +11,11 @@
  *
  * When DSH restarts (new port, new session table) the shim re-reads the
  * endpoint file and replays the client's `initialize` once, transparently.
- * A message is re-sent only when it cannot have reached a bridge (connection
- * refused or reset) or the endpoint moved: a tool call that is still waiting
- * on an approval is never posted twice. Requests use `node:http`, which has
+ * A `tools/call` is re-sent only when the connection was refused, so it cannot
+ * have reached a bridge: one that was cut off for any other reason (a reset, a
+ * timeout, DSH dying mid-call) may already have acted and is reported instead.
+ * Other messages have no side effects in the browser and are also re-sent after
+ * a reset or when the endpoint moved. Requests use `node:http`, which has
  * no client-side header timeout (Node's `fetch` gives up after 300 s, shorter
  * than an approval may wait), and are aborted when stdin ends.
  *
@@ -155,16 +157,31 @@ export function httpFetch(url, { method = 'GET', headers = {}, body, signal } = 
 
 const RETRYABLE = new Set(['ECONNREFUSED', 'ECONNRESET', 'EPIPE'])
 
+const hasCode = (error, codes) => {
+  for (let current = error, depth = 0; current !== null && typeof current === 'object' && depth < 4; current = current.cause, depth += 1) {
+    if (typeof current.code === 'string' && codes.has(current.code)) return true
+  }
+  return false
+}
+
 /**
  * Whether a failed post certainly or very likely never reached a live bridge
  * call handler (nothing listening, or the connection dropped by a dying DSH).
  * Timeouts and anything else are not retried: the call may still be running.
  */
 export function isConnectionFailure(error) {
-  for (let current = error, depth = 0; current !== null && typeof current === 'object' && depth < 4; current = current.cause, depth += 1) {
-    if (typeof current.code === 'string' && RETRYABLE.has(current.code)) return true
-  }
-  return false
+  return hasCode(error, RETRYABLE)
+}
+
+const REFUSED = new Set(['ECONNREFUSED'])
+
+/**
+ * Whether a failed post certainly never reached a bridge: nothing accepted the
+ * connection. A reset or a broken pipe can also follow a request the bridge
+ * already acted on (a plugin reload closes held connections).
+ */
+export function isConnectionRefused(error) {
+  return hasCode(error, REFUSED)
 }
 
 const isAbort = (error) => error !== null && typeof error === 'object' && (error.name === 'AbortError' || error.code === 'ABORT_ERR')
@@ -242,18 +259,20 @@ export async function runShim(io) {
       answer = message.method === 'initialize' ? await initialize(target, message) : await post(target, message)
     } catch (error) {
       if (closing.signal.aborted || isAbort(error)) return
-      // DSH may have restarted on another port: re-read the endpoint. Re-send
-      // only if the message cannot have reached a bridge or the endpoint moved;
-      // a tools/call that was cut off while waiting may still be running.
+      // DSH may have restarted on another port: re-read the endpoint. A
+      // tools/call is re-sent only if the connection was refused: cut off any
+      // other way it may still be running, or have acted already. Other
+      // messages are re-sent if they likely never arrived or the endpoint moved.
       const previous = target.url
       target = await endpoint(true)
       if ('error' in target) {
         fail(message, target.error)
         return
       }
-      if (!isConnectionFailure(error) && target.url === previous) {
+      const resend = message.method === 'tools/call' ? isConnectionRefused(error) : isConnectionFailure(error) || target.url !== previous
+      if (!resend) {
         log(`lost the answer to ${message.method ?? 'a message'}: ${error instanceof Error ? (error.cause?.message ?? error.message) : String(error)}`)
-        fail(message, 'the connection to the DSH browser bridge failed before it answered; the request was not re-sent because it may still be running. Check the browser, then retry if needed.')
+        fail(message, 'the connection to the DSH browser bridge failed before it answered; the request was not re-sent because it may still be running or have already acted. Check the browser, then retry if needed.')
         return
       }
       try {
