@@ -53,7 +53,7 @@ export function createMcpToolHost(
   bridge: BridgeLike,
   toolTimeoutMs: number,
   /** Record Host-side taint for the external session (session-taint.ts lineage). */
-  taint: (sessionId: string, tool: string) => void = () => {},
+  taint: (sessionId: string, tool: string, callId: string) => void = () => {},
 ): McpToolHost {
   const served = (name: string): boolean => MCP_TOOL_NAMES.has(name) && tools()?.get(name) !== undefined
   return {
@@ -87,7 +87,8 @@ export function createMcpToolHost(
         return failure(errorText(error))
       } finally {
         // Same rule as DSH sessions: page-quoting results (errors included) taint.
-        if (resultTaintsSession(name)) taint(caller.sessionId, name)
+        // `callId` lets the plugin skip a result the extension vouched exempt (session-taint.ts).
+        if (resultTaintsSession(name)) taint(caller.sessionId, name, callId)
       }
     },
   }

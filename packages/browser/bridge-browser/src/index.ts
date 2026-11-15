@@ -547,7 +547,7 @@ function mountBridge(
     tools: createMcpToolHost(() => ctx.get('tools') as unknown as ToolRegistryLike | undefined, server, resolved.toolTimeoutMs,
       // MCP calls bypass the DSH executor, so record their taint here: later
       // frames of that external session then carry `tainted: true`.
-      (sessionId, tool) => { taint.mark(sessionId, tool) }),
+      (sessionId, tool, callId) => { if (!taint.takeExempt(sessionId, callId)) taint.mark(sessionId, tool) }),
     version: BRIDGE_PACKAGE_VERSION,
   })
 

@@ -3644,8 +3644,13 @@ textarea:focus-visible {
 }
 
 /* Session taint banner (TaintBanner.tsx) and site policy settings. */
-.taint-banner { display: flex; gap: 8px; align-items: center; padding: 6px 10px; font-size: calc(12px * var(--ui-scale)); background: var(--security-soft); color: var(--security); border-bottom: 1px solid var(--security-border); }
-.taint-banner span { flex: 1; }
+.taint-banner { display: flex; flex-direction: column; gap: 4px; padding: 6px 10px; font-size: calc(12px * var(--ui-scale)); background: var(--security-soft); color: var(--security); border-bottom: 1px solid var(--security-border); }
+.taint-banner-row { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.taint-banner-row > span { flex: 1 1 12em; }
+.taint-banner .taint-more { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
+.taint-banner .taint-sources { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.taint-banner .taint-sources li { display: flex; gap: 8px; align-items: center; justify-content: space-between; overflow-wrap: anywhere; }
+.site-policy .trusted-note { display: block; }
 .site-policy .trusted-origin span { margin-left: auto; margin-right: 8px; font-size: calc(12px * var(--ui-scale)); }
 .site-policy .managed-policy { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
 

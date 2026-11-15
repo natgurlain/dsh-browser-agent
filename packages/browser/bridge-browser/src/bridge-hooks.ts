@@ -42,15 +42,17 @@ export function createKillSwitchHandler(deps: KillSwitchDeps): () => Promise<voi
 
 /**
  * The server's `injectBrowserSnapshot`: queue the snapshot for the session
- * and taint it (the snapshot is page-controlled text).
+ * and taint it (the snapshot is page-controlled text), unless the extension
+ * vouched that every frame in it is exempt from taint (`exempt`, see
+ * session-taint.ts).
  */
 export function createSnapshotInjector(
   inject: (sessionId: string, snapshot: string, reason?: BrowserContextReason) => unknown,
   taint: Pick<SessionTaintRegistry, 'mark'>,
-): (sessionId: string, snapshot: string, reason?: BrowserContextReason) => void {
-  return (sessionId, snapshot, reason) => {
+): (sessionId: string, snapshot: string, reason?: BrowserContextReason, exempt?: boolean) => void {
+  return (sessionId, snapshot, reason, exempt) => {
     inject(sessionId, snapshot, reason)
-    taint.mark(sessionId, 'snapshot-injection')
+    if (exempt !== true) taint.mark(sessionId, 'snapshot-injection')
   }
 }
 

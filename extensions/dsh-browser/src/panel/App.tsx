@@ -1091,8 +1091,10 @@ export function App(): React.JSX.Element {
     setLocale(getUiLocale())
   }
 
-  // Settings: seed from storage, then let the panel own the form.
-  useEffect(() => {
+  // Settings: seed from storage, then let the panel own the form. Read again
+  // after the background changed them on its own (the taint banner's "Trust"),
+  // so a later Save cannot write a stale copy over that change.
+  const loadStoredSettings = useCallback((): void => {
     void chrome.storage.local.get('dshSettings').then((stored) => {
       const raw = stored.dshSettings as Partial<PanelSettings> | undefined
       setSettings({
@@ -1113,9 +1115,12 @@ export function App(): React.JSX.Element {
         settingsVersion: raw?.settingsVersion ?? 1,
         showAgentOverlay: raw?.showAgentOverlay ?? true,
         allowPageWatchers: raw?.allowPageWatchers ?? false,
+        taintExemptLocalPages: raw?.taintExemptLocalPages ?? true,
+        taintExemptTrustedSites: raw?.taintExemptTrustedSites ?? true,
       })
     })
   }, [])
+  useEffect(() => { loadStoredSettings() }, [loadStoredSettings])
 
   // Developer-tools state lives in the background: it owns the debugger
   // attachment and reports every change here.
@@ -3074,7 +3079,7 @@ export function App(): React.JSX.Element {
         <section className="trusted-origins" aria-labelledby="trusted-origins-title">
           <div>
             <span id="trusted-origins-title">{copy.settings.trustedOrigins}</span>
-            <small>{copy.settings.trustedOriginsHelp}</small>
+            <small>{copy.settings.trustedOriginsHelp} {copy.sitePolicy.trustedNote}</small>
           </div>
           <div className="trusted-origin-add">
             <input
@@ -3100,7 +3105,13 @@ export function App(): React.JSX.Element {
         {settings !== null && (
           <SitePolicySettings
             locale={locale}
-            value={{ siteRules: settings.siteRules, siteDefaultsEnabled: settings.siteDefaultsEnabled, strictSites: settings.strictSites }}
+            value={{
+              siteRules: settings.siteRules,
+              siteDefaultsEnabled: settings.siteDefaultsEnabled,
+              strictSites: settings.strictSites,
+              taintExemptLocalPages: settings.taintExemptLocalPages,
+              taintExemptTrustedSites: settings.taintExemptTrustedSites,
+            }}
             onChange={(next) => setSettings((current) => current === null ? current : { ...current, ...next })}
           />
         )}
@@ -3155,7 +3166,7 @@ export function App(): React.JSX.Element {
             aria-label={copy.app.openSettings} title={copy.app.settings}><SettingsIcon /></button>
         </div>
       </header>
-      <TaintBanner sessionId={sessionRef.current} locale={locale} />
+      <TaintBanner sessionId={sessionRef.current} locale={locale} onTrusted={loadStoredSettings} />
       <WatchersCard locale={locale} />
       {showTextSize && (
         <TextSizePanel scale={uiScale} copy={copy}

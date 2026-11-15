@@ -193,6 +193,9 @@ export async function runBenchmark(options) {
         benchmarkRoot,
         bridgeUrl: `ws://127.0.0.1:${options.extensionPort}/ext/bridge`,
         trustedOrigin: site.origin,
+        // Task pages are served from loopback and always-allowed, which would
+        // exempt them from session taint; the injection tasks measure taint.
+        settings: { taintExemptLocalPages: false, taintExemptTrustedSites: false },
       })
     }
     for (let trial = 1; trial <= options.trials; trial += 1) {

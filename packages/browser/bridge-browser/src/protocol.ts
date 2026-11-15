@@ -784,9 +784,16 @@ export type ClientFrame =
   | { t: 'rpc'; id: string; method: string; payload: unknown }
   /** Answer or cancel a pending Host interaction waterfall. */
   | { t: 'respond'; id: string; rpcId: string; result: RespondResult }
-  /** Result of a previously dispatched tool call. */
-  | { t: 'tool.result'; id: string; ok: true; result: unknown }
-  | { t: 'tool.result'; id: string; ok: false; error: ToolError }
+  /**
+   * Result of a previously dispatched tool call. `taintExempt: true` is the
+   * extension vouching that everything this result quotes came from pages
+   * exempt from session taint (the user's own loopback pages, or sites the
+   * user marked trusted) and that its own record of the session is untainted;
+   * absent means "taint as usual". It sits on the frame, never inside
+   * `result`, so neither a page nor the agent can set it.
+   */
+  | { t: 'tool.result'; id: string; ok: true; result: unknown; taintExempt?: true }
+  | { t: 'tool.result'; id: string; ok: false; error: ToolError; taintExempt?: true }
   /** Liveness reply. */
   | { t: 'pong' }
 
@@ -918,10 +925,10 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
     case 'tool.result':
       if (typeof frame.id !== 'string') return undefined
       if (frame.ok === true && 'result' in frame) {
-        return { t: 'tool.result', id: frame.id, ok: true, result: frame.result }
+        return { t: 'tool.result', id: frame.id, ok: true, result: frame.result, ...(frame.taintExempt === true ? { taintExempt: true as const } : {}) }
       }
       return isToolError(frame.error)
-        ? { t: 'tool.result', id: frame.id, ok: false, error: frame.error }
+        ? { t: 'tool.result', id: frame.id, ok: false, error: frame.error, ...(frame.taintExempt === true ? { taintExempt: true as const } : {}) }
         : undefined
     case 'pong':
       return { t: 'pong' }
@@ -1188,4 +1195,24 @@ export function devLoopOrigin(url: string | undefined, extraOrigins: readonly st
 /** Whether an origin is a loopback (default dev-loop) origin. */
 export function isLoopbackDevOrigin(origin: string): boolean {
   return devLoopOrigin(origin) === origin
+}
+
+/**
+ * Whether `origin` is a page served from this machine: an http(s) origin
+ * whose host is `localhost`, a `*.localhost` name (browsers resolve those to
+ * loopback without DNS), `127.0.0.1` or `[::1]`, on any port. The host is
+ * compared exactly after URL parsing, so `localhost.evil.com`,
+ * `127.0.0.1.nip.io` or `localhost@evil.com` are not loopback. Only a bare
+ * origin qualifies (no path), which is what taint records hold.
+ */
+export function isLoopbackPageOrigin(origin: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(origin)
+  } catch {
+    return false
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+  if (parsed.origin !== origin) return false
+  return DEVLOOP_LOOPBACK_HOSTS.includes(parsed.hostname) || parsed.hostname.endsWith('.localhost')
 }

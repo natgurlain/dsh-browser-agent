@@ -294,12 +294,27 @@ export interface PanelCopy {
     managedNoDevTools: string
     managedNoScreenshots: string
     managedAllowedOnly: (origins: readonly string[]) => string
+    /** The one sentence shown wherever a site is marked trusted (Settings and the banner's "Trust"). */
+    trustedNote: string
+    exemptLocal: string
+    exemptLocalHelp: string
+    exemptTrusted: string
+    exemptTrustedHelp: string
+    managedNoLocalExemption: string
+    managedNoTrustedExemption: string
   }
   /** Session taint banner (security/taint.ts). */
   taint: {
-    body: (sources: string) => string
+    /** `sites`: host names, comma-separated (at most three). */
+    body: (sites: string) => string
     unknownSource: string
+    more: (count: number) => string
     clear: string
+    trust: (site: string) => string
+    trustMany: string
+    trustConfirm: (site: string) => string
+    confirmTrust: string
+    cancel: string
   }
   /** Active page watchers card. */
   watchers: {
@@ -829,11 +844,24 @@ const EN: PanelCopy = {
     managedNoDevTools: 'Developer tools are disabled.',
     managedNoScreenshots: 'Screenshots are disabled.',
     managedAllowedOnly: (origins) => `Only these sites are allowed: ${origins.join(', ') || '(none)'}`,
+    trustedNote: 'Pages from trusted sites are not treated as untrusted content.',
+    exemptLocal: 'Don\'t restrict sessions that only read local pages',
+    exemptLocalHelp: 'Pages served from this computer (localhost, 127.0.0.1) do not make a conversation ask before risky actions or turn its shell and file tools off. Once it reads any other page it is restricted as usual, and sending data to a local address then still asks.',
+    exemptTrusted: 'Don\'t restrict sessions that only read sites I trust',
+    exemptTrustedHelp: 'Sites with a Trusted rule here or in "Always-allowed domains" do not restrict a conversation either. A trusted site that shows other people\'s content (comments, tickets, mail) can still carry instructions aimed at the agent.',
+    managedNoLocalExemption: 'Local pages restrict a session like any other page.',
+    managedNoTrustedExemption: 'Trusted sites restrict a session like any other page.',
   },
   taint: {
-    body: (sources) => `This session has read untrusted page content (${sources}). Cross-site typing, clipboard and file writes, and data-carrying navigation need your approval; shell and file-writing tools are off.`,
+    body: (sites) => `This conversation read web pages (${sites}), so risky actions ask first and shell and file tools are off.`,
     unknownSource: 'an unknown origin',
+    more: (count) => `+${String(count)} more`,
     clear: 'Clear',
+    trust: (site) => `Trust ${site}`,
+    trustMany: 'Trust these sites…',
+    trustConfirm: (site) => `Trust ${site}?`,
+    confirmTrust: 'Trust',
+    cancel: 'Cancel',
   },
   watchers: {
     label: 'Page watchers',
@@ -1362,11 +1390,24 @@ const ZH: PanelCopy = {
     managedNoDevTools: '已禁用开发者工具。',
     managedNoScreenshots: '已禁用截图。',
     managedAllowedOnly: (origins) => `仅允许以下站点：${origins.join('、') || '（无）'}`,
+    trustedNote: '受信任站点的页面不会被当作不受信任的内容。',
+    exemptLocal: '只读取本地页面的会话不受限制',
+    exemptLocalHelp: '本机提供的页面（localhost、127.0.0.1）不会让对话在高风险操作前询问，也不会停用命令行与文件工具。一旦读取其他页面，会话照常受限，此后向本地地址发送数据仍需询问。',
+    exemptTrusted: '只读取受信任站点的会话不受限制',
+    exemptTrustedHelp: '在此处设为「信任」或列入「永久免确认域名」的站点同样不会限制对话。显示他人内容（评论、工单、邮件）的受信任站点仍可能带有针对助手的指令。',
+    managedNoLocalExemption: '本地页面与其他页面一样会限制会话。',
+    managedNoTrustedExemption: '受信任站点与其他页面一样会限制会话。',
   },
   taint: {
-    body: (sources) => `本会话已读取不受信任的网页内容（${sources}）。跨站输入、剪贴板写入、文件写入和带数据的跳转需要您批准；命令行与文件写入工具已停用。`,
+    body: (sites) => `本对话读取了网页（${sites}），因此高风险操作会先询问，命令行与文件工具已停用。`,
     unknownSource: '未知来源',
+    more: (count) => `另有 ${String(count)} 个`,
     clear: '清除',
+    trust: (site) => `信任 ${site}`,
+    trustMany: '信任这些站点…',
+    trustConfirm: (site) => `信任 ${site}？`,
+    confirmTrust: '信任',
+    cancel: '取消',
   },
   watchers: {
     label: '页面监视',

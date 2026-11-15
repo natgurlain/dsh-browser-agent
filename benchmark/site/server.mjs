@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
-import { INJECTION_TASK_IDS, makeTaskInstance, TASK_IDS } from '../lib/tasks.mjs'
+import { INJECTION_TASK_IDS, makeTaskInstance, SINK_HOSTS, TASK_IDS } from '../lib/tasks.mjs'
 
 function readJson(request) {
   return new Promise((resolve, reject) => {
@@ -528,7 +528,12 @@ export async function startBenchmarkSite({ host = '127.0.0.1', port = 4173, fixt
           return
         }
         states.set(runId, states.get(runId) ?? initialState(taskId))
-        const instance = makeTaskInstance(taskId, seed, runId, origin)
+        const sinkHost = url.searchParams.get('sink') ?? undefined
+        if (sinkHost !== undefined && !SINK_HOSTS.includes(sinkHost)) {
+          json(response, 400, { error: 'invalid sink host' })
+          return
+        }
+        const instance = makeTaskInstance(taskId, seed, runId, origin, { sinkHost })
         response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
         response.end(renderTask(instance))
         return

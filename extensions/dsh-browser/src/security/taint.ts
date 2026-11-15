@@ -10,7 +10,11 @@
  * (see {@link taintForcedReasons}).
  *
  * Fail closed: every successful browser tool result taints except the few
- * whose output never quotes a page ({@link CONTENT_FREE_TOOLS}).
+ * whose output never quotes a page ({@link CONTENT_FREE_TOOLS}), and reads
+ * that only quoted exempt pages (the user's own loopback pages, sites the
+ * user marked trusted: taint-exempt.ts). Exempt reads are still remembered
+ * ({@link TaintTracker.noteExemptRead}) and become sources the moment the
+ * session is tainted, so the exemption never widens where tainted data may go.
  *
  * @module
  */
@@ -92,18 +96,68 @@ export function taintKey(sessionId: string | undefined): string {
 export interface TaintStore {
   read(): Promise<unknown>
   write(value: Record<string, TaintRecord>): Promise<void>
+  /** Exempt reads of untainted sessions ({@link TaintTracker.noteExemptRead}). */
+  readExempt?(): Promise<unknown>
+  writeExempt?(value: Record<string, string[]>): Promise<void>
 }
+
+/** Most exempt origins remembered for one untainted session; past it the set counts as unknown. */
+export const MAX_EXEMPT_READS = 64
 
 /** Tracks taint per agent session. */
 export class TaintTracker {
   private records = new Map<string, TaintRecord>()
+  /** Origins untainted sessions read under an exemption, kept so they become sources once tainted. */
+  private exemptReads = new Map<string, string[]>()
   private readonly listeners = new Set<(key: string) => void>()
   readonly ready: Promise<void>
 
   constructor(private readonly store?: TaintStore, private readonly now: () => number = Date.now) {
     this.ready = store === undefined
       ? Promise.resolve()
-      : store.read().then((value) => { this.restore(value) }, () => {})
+      : Promise.all([
+          store.read().then((value) => { this.restore(value) }, () => {}),
+          store.readExempt === undefined
+            ? undefined
+            : store.readExempt().then((value) => { this.restoreExempt(value) }, () => {}),
+        ]).then(() => undefined)
+  }
+
+  private restoreExempt(value: unknown): void {
+    if (typeof value !== 'object' || value === null) return
+    for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+      if (!Array.isArray(raw) || this.exemptReads.has(key)) continue
+      this.exemptReads.set(key, raw.filter((origin): origin is string => typeof origin === 'string'))
+    }
+  }
+
+  private persistExempt(): void {
+    void this.store?.writeExempt?.(Object.fromEntries(this.exemptReads)).catch(() => {})
+  }
+
+  /**
+   * An untainted session read pages that are exempt from taint. Nothing is
+   * restricted, but the origins are kept: if the session is tainted later
+   * they join its sources, so an attacker page read afterwards is never the
+   * "only source" and cannot become the exempt sink for what the local or
+   * trusted pages showed. A tainted session records its reads through
+   * {@link mark} as before, not here.
+   */
+  noteExemptRead(sessionId: string | undefined, origins: readonly string[]): void {
+    const key = taintKey(sessionId)
+    if (this.records.has(key)) return
+    const known = this.exemptReads.get(key) ?? []
+    if (known.includes(UNKNOWN_SOURCE)) return
+    const merged = new Set(known)
+    for (const origin of origins) merged.add(origin)
+    if (merged.size === known.length) return
+    this.exemptReads.set(key, merged.size > MAX_EXEMPT_READS ? [UNKNOWN_SOURCE] : [...merged].sort())
+    this.persistExempt()
+  }
+
+  /** Origins an untainted session read under an exemption (empty once tainted or cleared). */
+  exemptReadsOf(sessionId: string | undefined): string[] {
+    return [...this.exemptReads.get(taintKey(sessionId)) ?? []]
   }
 
   private restore(value: unknown): void {
@@ -130,6 +184,13 @@ export class TaintTracker {
     const existing = this.records.get(key)
     const sources = new Set(existing?.sources ?? [])
     for (const origin of origins) sources.add(origin)
+    // Pages read while the session was still untainted are sources from now on.
+    const earlier = this.exemptReads.get(key)
+    if (earlier !== undefined) {
+      for (const origin of earlier) sources.add(origin)
+      this.exemptReads.delete(key)
+      this.persistExempt()
+    }
     const lastReadOrigin = pageOrigin ?? existing?.lastReadOrigin
     const next: TaintRecord = {
       sources: [...sources].sort(),
@@ -147,6 +208,7 @@ export class TaintTracker {
   /** The user cleared the session's taint in the panel. */
   clear(sessionId: string | undefined): boolean {
     const key = taintKey(sessionId)
+    if (this.exemptReads.delete(key)) this.persistExempt()
     if (!this.records.delete(key)) return false
     this.changed(key)
     return true
@@ -156,6 +218,10 @@ export class TaintTracker {
   clearAll(): void {
     const keys = [...this.records.keys()]
     this.records.clear()
+    if (this.exemptReads.size > 0) {
+      this.exemptReads.clear()
+      this.persistExempt()
+    }
     for (const key of keys) this.changed(key)
   }
 

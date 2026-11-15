@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from 'react'
 import type { UiLocale } from '../i18n.ts'
-import { DEFAULT_SITE_RULES, normalizeSitePattern, SITE_RULES, type SiteRule, type SiteRuleEntry } from '../security/site-policy.ts'
+import { DEFAULT_SITE_RULES, normalizeSitePattern, SITE_RULES, withSiteRule, type SiteRule, type SiteRuleEntry } from '../security/site-policy.ts'
 import { parseManagedPolicy, type ManagedPolicy } from '../security/managed-policy.ts'
 import { SettingToggle } from './SettingToggle.tsx'
 import { PANEL_COPY } from './strings.ts'
@@ -15,6 +15,10 @@ export interface SitePolicyValue {
   siteRules: SiteRuleEntry[]
   siteDefaultsEnabled: boolean
   strictSites: string[]
+  /** Pages served from this machine do not taint a session (security/taint-exempt.ts). */
+  taintExemptLocalPages: boolean
+  /** Pages from sites the user trusts do not taint a session. */
+  taintExemptTrustedSites: boolean
 }
 
 /** Firefox has no debugger API, so the commit gate cannot run there. */
@@ -44,7 +48,7 @@ export function SitePolicySettings({ value, onChange, locale }: {
   const normalized = normalizeSitePattern(pattern)
   const add = (): void => {
     if (normalized === undefined) return
-    onChange({ ...value, siteRules: [...value.siteRules.filter((entry) => entry.pattern !== normalized), { pattern: normalized, rule }].sort((a, b) => a.pattern.localeCompare(b.pattern)) })
+    onChange({ ...value, siteRules: withSiteRule(value.siteRules, normalized, rule) })
     setPattern('')
   }
   return (
@@ -73,6 +77,7 @@ export function SitePolicySettings({ value, onChange, locale }: {
         </select>
         <button disabled={normalized === undefined} onClick={add}>{copy.add}</button>
       </div>
+      <small className="trusted-note">{copy.trustedNote}</small>
       {value.siteRules.map((entry) => (
         <div className="trusted-origin" key={entry.pattern}>
           <code>{entry.pattern}</code>
@@ -82,6 +87,20 @@ export function SitePolicySettings({ value, onChange, locale }: {
           </button>
         </div>
       ))}
+      <SettingToggle
+        title={copy.exemptLocal}
+        help={copy.exemptLocalHelp}
+        checked={value.taintExemptLocalPages && managed?.disableLocalTaintExemption !== true}
+        disabled={managed?.disableLocalTaintExemption === true}
+        onChange={(checked) => onChange({ ...value, taintExemptLocalPages: checked })}
+      />
+      <SettingToggle
+        title={copy.exemptTrusted}
+        help={copy.exemptTrustedHelp}
+        checked={value.taintExemptTrustedSites && managed?.disableTrustedTaintExemption !== true}
+        disabled={managed?.disableTrustedTaintExemption === true}
+        onChange={(checked) => onChange({ ...value, taintExemptTrustedSites: checked })}
+      />
       <div className="strict-mode">
         <strong>{copy.strictTitle}</strong>
         <small>{STRICT_AVAILABLE ? copy.strictHelp : copy.strictUnavailable}</small>
@@ -117,6 +136,8 @@ export function SitePolicySettings({ value, onChange, locale }: {
           {managed.disableUnrestricted && <small>{copy.managedNoUnrestricted}</small>}
           {managed.disableDevTools && <small>{copy.managedNoDevTools}</small>}
           {managed.disableScreenshots && <small>{copy.managedNoScreenshots}</small>}
+          {managed.disableLocalTaintExemption && <small>{copy.managedNoLocalExemption}</small>}
+          {managed.disableTrustedTaintExemption && <small>{copy.managedNoTrustedExemption}</small>}
           {managed.allowedOrigins !== undefined && <small>{copy.managedAllowedOnly(managed.allowedOrigins)}</small>}
         </div>
       )}

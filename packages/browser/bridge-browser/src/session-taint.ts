@@ -28,6 +28,17 @@
  * {@link SessionTaintRegistry}). Any browser result taints, failed ones
  * included: error text can quote the page.
  *
+ * Exemption: the one browser result that does not taint is one the extension
+ * vouched for on its `tool.result` frame (`taintExempt: true`): everything it
+ * quotes came from the user's own loopback pages or from sites the user
+ * marked trusted, and the extension holds the session untainted. The
+ * extension decides because only it knows which frames a result read; the
+ * bridge only matches the voucher to the exact tool call
+ * ({@link SessionTaintRegistry.takeExempt}) and taints whenever it is missing.
+ * The trust direction is the one Clear already uses: the paired extension may
+ * lower this bridge's restriction, the agent and pages cannot (the flag is on
+ * the authenticated frame, not in the result the model or a page shapes).
+ *
  * State is in memory: a Host restart forgets the taint (the extension's own
  * taint, persisted in chrome.storage.session, still applies on the browser
  * side). Fail-closed alternatives would brick every session after a restart.
@@ -162,6 +173,13 @@ export interface TaintEntry {
 /** Longest parent chain followed (cycles, runaway delegation). */
 const MAX_LINEAGE_DEPTH = 32
 
+/** In-flight tool calls whose extension results are tracked at once. */
+const MAX_VOUCHERS = 2048
+
+function voucherKey(sessionId: string, callId: string): string {
+  return `${sessionId}\u0000${callId}`
+}
+
 /**
  * In-memory taint per agent session id, plus session lineage (child → parent)
  * so taint cannot be laundered through subagents or forks:
@@ -176,6 +194,8 @@ const MAX_LINEAGE_DEPTH = 32
 export class SessionTaintRegistry {
   private readonly entries = new Map<string, TaintEntry>()
   private readonly parents = new Map<string, string>()
+  /** Extension results per in-flight tool call: how many were requested, how many came back vouched exempt. */
+  private readonly vouchers = new Map<string, { expected: number; exempt: number }>()
 
   constructor(private readonly now: () => number = Date.now) {}
 
@@ -217,6 +237,42 @@ export class SessionTaintRegistry {
       current = this.parents.get(current)
     }
     return chain
+  }
+
+  /** A tool call is about to ask the extension for one result. */
+  expectResult(sessionId: string, callId: string): void {
+    const key = voucherKey(sessionId, callId)
+    const entry = this.vouchers.get(key)
+    if (entry !== undefined) {
+      entry.expected += 1
+      return
+    }
+    // Calls whose `tools/result` never fires must not pile up: drop the oldest.
+    if (this.vouchers.size >= MAX_VOUCHERS) {
+      const oldest = this.vouchers.keys().next()
+      if (oldest.done !== true) this.vouchers.delete(oldest.value)
+    }
+    this.vouchers.set(key, { expected: 1, exempt: 0 })
+  }
+
+  /** The extension answered one requested result; `exempt` is its `taintExempt` flag. */
+  noteResult(sessionId: string, callId: string, exempt: boolean): void {
+    const entry = this.vouchers.get(voucherKey(sessionId, callId))
+    if (entry !== undefined && exempt) entry.exempt += 1
+  }
+
+  /**
+   * Whether the extension vouched for every result this tool call asked it
+   * for (at least one). Consumes the record: a voucher covers one tool
+   * result, once. No call id, no request, an unanswered or unvouched request
+   * all answer false, so the caller taints.
+   */
+  takeExempt(sessionId: string, callId: string | undefined): boolean {
+    if (callId === undefined) return false
+    const key = voucherKey(sessionId, callId)
+    const entry = this.vouchers.get(key)
+    this.vouchers.delete(key)
+    return entry !== undefined && entry.expected > 0 && entry.exempt === entry.expected
   }
 
   /** Clear only this session's own taint (a tainted ancestor still applies). */
@@ -273,6 +329,8 @@ interface AgentLike {
 
 interface GuardExec {
   name: string
+  /** The tool call id (`tools/result`), matched to the extension's voucher. */
+  callId?: unknown
   arguments?: unknown
   agent?: AgentLike
 }
@@ -308,7 +366,10 @@ export function installSessionTaint(ctx: Context, registry: SessionTaintRegistry
   disposers.push(ctx.on('tools/result', (exec: GuardExec) => {
     linkFromHeader(registry, exec.agent)
     const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
-    if (sessionId !== undefined && resultTaintsSession(exec.name)) registry.mark(sessionId, exec.name)
+    if (sessionId === undefined || !exec.name.startsWith('browser_')) return undefined
+    // Always consumed, so a voucher can never outlive its own tool call.
+    const exempt = registry.takeExempt(sessionId, typeof exec.callId === 'string' ? exec.callId : undefined)
+    if (resultTaintsSession(exec.name) && !exempt) registry.mark(sessionId, exec.name)
     return undefined
   }))
   const denial = (exec: GuardExec): string | undefined => {

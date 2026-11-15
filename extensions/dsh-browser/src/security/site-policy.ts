@@ -149,6 +149,12 @@ export function normalizeSiteRules(value: unknown, source: SiteRuleSource = 'use
   return [...byPattern].map(([pattern, rule]) => ({ pattern, rule })).sort((a, b) => a.pattern.localeCompare(b.pattern))
 }
 
+/** A rule list with `pattern` set to `rule`, replacing any rule for the same pattern (Settings and the taint banner's "Trust" both add rules this way). */
+export function withSiteRule(rules: readonly SiteRuleEntry[], pattern: string, rule: SiteRule): SiteRuleEntry[] {
+  return [...rules.filter((entry) => entry.pattern !== pattern), { pattern, rule }]
+    .sort((a, b) => a.pattern.localeCompare(b.pattern))
+}
+
 /** The more restrictive of two rules. */
 export function mostRestrictive(left: SiteRule, right: SiteRule): SiteRule {
   return SITE_RULES.indexOf(left) <= SITE_RULES.indexOf(right) ? left : right

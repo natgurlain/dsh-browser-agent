@@ -248,7 +248,7 @@ export interface BridgeServerDeps {
    */
   onCapsChange?: (clientCaps: BridgeCaps) => void
   /** Seed a followed-page snapshot into a live or deferred Agent session. */
-  injectBrowserSnapshot: (sessionId: string, snapshot: string, reason?: 'follow' | 'resume') => void | Promise<void>
+  injectBrowserSnapshot: (sessionId: string, snapshot: string, reason?: 'follow' | 'resume', taintExempt?: boolean) => void | Promise<void>
   /**
    * Permanently delete one session's durable storage. Callers archive the
    * session through the gateway first; this only removes files.
@@ -312,6 +312,10 @@ export interface BridgeServerDeps {
   sessionLineage?: {
     parentOf(sessionId: string): string | undefined
     isTainted(sessionId: string): boolean
+    /** A tool call is about to ask the extension for one result (taint exemption, session-taint.ts). */
+    expectResult?(sessionId: string, callId: string): void
+    /** The extension answered it; `exempt` is the frame's `taintExempt` flag. */
+    noteResult?(sessionId: string, callId: string, exempt: boolean): void
   }
   /** Told when an authenticated connection goes away (learning features drop its switches). */
   onDisconnect?: (connection: string) => void
@@ -570,6 +574,7 @@ export class BridgeServer {
       }
       signal.addEventListener('abort', onAbort, { once: true })
       this.pendingTools.set(id, entry)
+      if (sessionId !== undefined && callId !== undefined) this.noteLineage(lineage => { lineage.expectResult?.(sessionId, callId) })
       conn.ws.send(conn.channel.seal({
         t: 'tool.call',
         id,
@@ -638,6 +643,14 @@ export class BridgeServer {
       if (isDevToolsCaps(conn.clientCaps.devTools)) return true
     }
     return false
+  }
+
+  /** Tell the lineage about a result; a failure there only costs the exemption. */
+  private noteLineage(note: (lineage: NonNullable<BridgeServerDeps['sessionLineage']>) => void): void {
+    if (this.deps.sessionLineage === undefined) return
+    try {
+      note(this.deps.sessionLineage)
+    } catch { /* no voucher recorded: the result taints */ }
   }
 
   /** Whether the session (or an ancestor) is tainted; fails closed when the lineage throws. */
@@ -1006,9 +1019,11 @@ export class BridgeServer {
         return
       }
       try {
-        await (payload.reason === undefined
-          ? this.deps.injectBrowserSnapshot(payload.sessionId, payload.snapshot)
-          : this.deps.injectBrowserSnapshot(payload.sessionId, payload.snapshot, payload.reason))
+        await (payload.taintExempt
+          ? this.deps.injectBrowserSnapshot(payload.sessionId, payload.snapshot, payload.reason, true)
+          : payload.reason === undefined
+            ? this.deps.injectBrowserSnapshot(payload.sessionId, payload.snapshot)
+            : this.deps.injectBrowserSnapshot(payload.sessionId, payload.snapshot, payload.reason))
         this.sessionAffinity.set(payload.sessionId, conn.key)
         sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { accepted: true } })
       } catch (error: unknown) {
@@ -1174,6 +1189,11 @@ export class BridgeServer {
     if (pending === undefined || pending.conn !== conn) return
     clearTimeout(pending.timer)
     this.dropPendingTool(frame.id)
+    // Only an answer from the extension can vouch for a result (never a timeout or cancel).
+    const { sessionId, callId } = pending
+    if (sessionId !== undefined && callId !== undefined) {
+      this.noteLineage(lineage => { lineage.noteResult?.(sessionId, callId, frame.taintExempt === true) })
+    }
     if (frame.ok) {
       // An unbound session that a browser served is bound there from now on
       // (never rebinds: a bound session is only ever routed to its install).
@@ -1245,13 +1265,14 @@ function localEndpointOf(socket: Socket): BridgeEndpoint | undefined {
   return { host: localAddress, port: localPort }
 }
 
-function browserSnapshotPayload(payload: unknown): { sessionId: string; snapshot: string; reason?: 'follow' | 'resume' } | undefined {
+function browserSnapshotPayload(payload: unknown): { sessionId: string; snapshot: string; reason?: 'follow' | 'resume'; taintExempt: boolean } | undefined {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return undefined
-  const { sessionId, snapshot, reason } = payload as Record<string, unknown>
+  const { sessionId, snapshot, reason, taintExempt } = payload as Record<string, unknown>
   if (typeof sessionId !== 'string' || sessionId.trim() === '') return undefined
   if (typeof snapshot !== 'string' || snapshot.trim() === '') return undefined
   if (reason !== undefined && reason !== 'follow' && reason !== 'resume') return undefined
-  return { sessionId, snapshot, ...(reason === undefined ? {} : { reason }) }
+  // `taintExempt`: the extension vouches that every frame in the snapshot is exempt from taint (session-taint.ts).
+  return { sessionId, snapshot, ...(reason === undefined ? {} : { reason }), taintExempt: taintExempt === true }
 }
 
 function purgeSessionPayload(payload: unknown): string | undefined {
