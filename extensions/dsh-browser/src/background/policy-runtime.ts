@@ -206,6 +206,11 @@ export class PolicyRuntime {
     this.taint.mark(call.sessionId, call.name, origins.length === 0 && fallbackOrigin !== undefined ? [fallbackOrigin] : origins, pageOrigin ?? fallbackOrigin)
   }
 
+  /** A call's dispatch threw before it settled: drop its record without judging taint. */
+  forgetCall(callId: string): void {
+    this.calls.delete(callId)
+  }
+
   /** Whether strict mode (commit gate) covers a call in this session on this page. */
   strictFor(sessionId: string | undefined, pageUrl: string | undefined): boolean {
     if (this.strictSessions.has(taintKey(sessionId))) return true

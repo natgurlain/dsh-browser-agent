@@ -136,6 +136,9 @@ describe('audit notes and the pause gate', () => {
 
   it('holds the next call after "pause after this step", injects a delta on resume, then runs it', async () => {
     const env = await boot()
+    // The resume read is judged by policy but is not an agent call: it must not leave a call record (M9).
+    const { PolicyRuntime } = await import('../src/background/policy-runtime.ts')
+    const hook = vi.spyOn(PolicyRuntime.prototype, 'hook')
     env.panel.emit({ type: 'agent.pause', mode: 'after-step' })
     await vi.waitFor(() => { expect(env.pauseStates().at(-1)?.mode).toBe('paused') })
     env.socket.receive({ t: 'tool.call', id: 'click', name: 'browser_click', args: { selector: 'h1' }, expiresAt: Date.now() + 30_000, sessionId: 'session-live' })
@@ -163,6 +166,7 @@ describe('audit notes and the pause gate', () => {
       .toMatchObject({ heldMs: expect.any(Number) })
     expect(env.pauseStates().at(-1)).toMatchObject({ mode: 'running', held: [] })
     expect(env.sessionData.dshAgentPause).toBeNull()
+    expect(hook.mock.calls.map(([callId]) => callId)).toEqual(['click'])
   })
 
   it('shows the takeover banner on the controlled tab; its Resume opens the panel, which resumes', async () => {

@@ -69,6 +69,7 @@ async function run(call: ToolCall, options: {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -132,9 +133,22 @@ describe('browser_downloads', () => {
     await expect(again).rejects.toThrow(/\(NETWORK_FAILED\)/)
   })
 
-  it('times out and validates arguments', async () => {
+  it('ends at once for a wait whose call was already cancelled (M9)', async () => {
     const api = fakeDownloads([])
-    await expect(runDownloadsTool({ action: 'wait', timeoutMs: 1_000 }, api)).rejects.toThrow(/No matching download/)
+    const controller = new AbortController()
+    controller.abort()
+    const started = Date.now()
+    await expect(waitForDownload(api, { timeoutMs: 1_000, since: 0, signal: controller.signal })).rejects.toThrow(/cancelled/)
+    expect(Date.now() - started).toBeLessThan(500)
+  })
+
+  it('times out and validates arguments', async () => {
+    vi.useFakeTimers()
+    const api = fakeDownloads([])
+    const timedOut = expect(runDownloadsTool({ action: 'wait', timeoutMs: 1_000 }, api)).rejects.toThrow(/No matching download/)
+    await vi.advanceTimersByTimeAsync(1_000)
+    await timedOut
+    vi.useRealTimers()
     await expect(runDownloadsTool({ action: 'wait', filenameRegex: '(' }, api)).rejects.toThrow(/not a valid regular expression/)
     await expect(runDownloadsTool({ action: 'list', limit: 0 }, api)).rejects.toThrow(/limit/)
   })

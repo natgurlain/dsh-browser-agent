@@ -1187,7 +1187,7 @@ function resumeFlowDeps(): ResumeFlowDeps {
           target,
           () => tabAffinity.allowsTarget(tabId, sessionId),
           // Site rules and managed policy apply to the resume read like any other.
-          { unrestrictedAccess, policy: policyRuntime.hook(crypto.randomUUID(), sessionId, unrestrictedAccess) },
+          { unrestrictedAccess, policy: policyRuntime.evaluator(sessionId, unrestrictedAccess) },
         )
         const text = answer.ok && typeof answer.result === 'object' && answer.result !== null
           ? (answer.result as { text?: unknown }).text
@@ -2532,6 +2532,9 @@ function routeToolCall(call: ToolCall): void {
       }
     },
     (error: unknown) => {
+      // An internal error: nothing reached a verdict, so drop the per-call records unjudged.
+      policyRuntime.forgetCall(call.id)
+      learning.forgetCall(call.id)
       if (activeToolCalls.get(call.id) !== activeCall) return
       if (controller.signal.aborted) {
         if (activeToolCalls.get(call.id) === activeCall) {
@@ -3633,6 +3636,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   resetInputState(tabId)
   devTools.releaseTab(tabId)
   commitGateCallers.delete(tabId)
+  resetTabSnapshot(tabId)
+  learning.forgetTab(tabId)
   void commitGate.forget(tabId)
 })
 

@@ -86,4 +86,19 @@ describe('PolicyRuntime', () => {
     await third.ready
     expect(third.strictFor('s1', undefined)).toBe(false)
   })
+
+  it('forgets the call record of a dispatch that threw, so nothing is left to taint from (M9)', () => {
+    const policy = runtime()
+    const call = { id: 'c1', name: 'browser_snapshot', args: {}, sessionId: 's1' }
+    policy.hook('c1', 's1', false)(call, { reads: ['https://a.example'], acts: [] })
+    policy.forgetCall('c1')
+    // A failed call taints only when it reached a page (its record says so).
+    policy.recordResult(call, false)
+    expect(policy.get('s1')).toBeUndefined()
+    // Without the forget the same sequence taints.
+    policy.hook('c2', 's1', false)({ ...call, id: 'c2' }, { reads: ['https://a.example'], acts: [] })
+    policy.recordResult({ ...call, id: 'c2' }, false)
+    expect(policy.get('s1')).toBeDefined()
+  })
 })
+

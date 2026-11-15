@@ -409,4 +409,18 @@ describe('learning runtime', () => {
       expect(save).not.toHaveBeenCalled()
     })
   })
+
+  it('forgets the probe of a call whose dispatch threw (M9)', async () => {
+    const { learning } = runtime({}, { dshLearningSettings: { workflows: true } })
+    await learning.ready
+    sendMessage.mockResolvedValue({ ok: true, result: { role: 'button', name: 'Save', css: '#save' } })
+    const click = call('browser_click', { index: 1 })
+    learning.wrapPolicy(click, { id: 7, url: tabUrl }, policy)!(click, { reads: [], acts: [] })
+    learning.forgetCall(click.id)
+    // A late result for the same id finds no probe: no locator, so no element step.
+    learning.recordResult(click, { ok: true, result: { text: 'ok' } }, { tabId: 7, url: tabUrl })
+    await flush()
+    expect(learning.stepsFor('s1')).toEqual([])
+  })
 })
+

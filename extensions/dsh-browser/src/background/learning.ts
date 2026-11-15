@@ -79,6 +79,8 @@ const MAX_RECORDED_STEPS = 100
 const MAX_WATCH_EVENTS = 60
 const MAX_PROPOSALS = 10
 const AGENT_QUIET_MS = 1_500
+/** A failure of the same call within this window counts as a retry. */
+const RETRY_WINDOW_MS = 120_000
 const STRAY_STOP_INTERVAL_MS = 30_000
 const MAX_STRAY_STOP_TABS = 50
 const NO_SESSION = '(no-session)'
@@ -364,6 +366,18 @@ export class LearningRuntime {
     }
   }
 
+  /** A call's dispatch threw (internal error): drop its probe, record nothing. */
+  forgetCall(callId: string): void {
+    this.probes.delete(callId)
+  }
+
+  /** A tab closed: drop its per-tab state. */
+  forgetTab(tabId: number): void {
+    this.lastAgentActivity.delete(tabId)
+    this.strayStops.delete(tabId)
+    for (const [id, probe] of this.probes) if (probe.tabId === tabId) this.probes.delete(id)
+  }
+
   /** Record one settled call (success → workflow step; failure → fixture). */
   recordResult(call: ToolCall, answer: ToolAnswer, meta: { tabId?: number; url?: string; decision?: string; policy?: string }): void {
     const probe = this.probes.get(call.id)
@@ -377,8 +391,10 @@ export class LearningRuntime {
     if (this.settings.fixtures && !this.deps.halted() && meta.tabId !== undefined) {
       const key = `${call.name}:${canonicalJson(call.args)}`
       const previous = this.recentFailures.get(key)
+      // Only failures within the retry window matter: keep the map that small.
+      for (const [seen, at] of this.recentFailures) if (this.now() - at >= RETRY_WINDOW_MS) this.recentFailures.delete(seen)
       this.recentFailures.set(key, this.now())
-      const failure = classifyFailure(answer, meta.decision, meta.policy, previous !== undefined && this.now() - previous < 120_000)
+      const failure = classifyFailure(answer, meta.decision, meta.policy, previous !== undefined && this.now() - previous < RETRY_WINDOW_MS)
       if (failure !== undefined) void this.captureFixture(call, answer, failure, meta.tabId)
     }
   }
