@@ -479,6 +479,7 @@ function mountBridge(
       workspacePath: resolved.sessionWorkspacePath,
       scheduleFile: dshHomePath(LEARNING_SCHEDULE_FILE_NAME),
       ownsSession: (sessionId) => fenced.allowsSession(sessionId, new AbortController().signal, 'own'),
+      markTainted: (sessionId) => { taint.mark(sessionId, 'browser_failure_fixture') },
     })
     return () => {
       learning?.dispose()

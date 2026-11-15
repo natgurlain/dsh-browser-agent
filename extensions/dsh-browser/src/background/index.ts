@@ -2260,6 +2260,11 @@ const learning = new LearningRuntime({
   bridgeConnected: () => bridge?.state === 'connected',
   agentActiveOnTab: (tabId) => [...unsettledToolCalls].some((active) => active.tabId === tabId),
   halted: () => killSwitchEngaged || pauseGate.state().mode !== 'running',
+  fixtureAllowed: (sessionId, url) => {
+    const origin = originFromUrl(url)
+    if (origin === undefined || (!unrestrictedAccessEnabled() && settings.sharePageContent === 'off')) return false
+    return policyRuntime.evaluate({ name: 'browser_snapshot', args: {}, ...(sessionId === undefined ? {} : { sessionId }) }, { reads: [origin], acts: [], pageOrigin: origin }).kind !== 'deny'
+  },
   authorize: (prompt, sessionId, windowId, signal) => authorizeToolCall(prompt, signal, windowId, sessionId),
   capturedRequests: (tabId) => devTools.capturedRequests?.(tabId),
   siteDriversSupported: devToolsCapability,

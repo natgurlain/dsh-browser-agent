@@ -25,6 +25,11 @@ export const SITE_DRIVER_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as 
 export type SiteDriverMethod = typeof SITE_DRIVER_METHODS[number]
 
 /** Plain headers a driver may carry verbatim. */
+function bodyTypeOf(headers: Record<string, string>): 'json' | 'form' | 'text' {
+  const contentType = Object.entries(headers).find(([name]) => name.toLowerCase() === 'content-type')?.[1] ?? ''
+  return /json/iu.test(contentType) ? 'json' : /x-www-form-urlencoded/iu.test(contentType) ? 'form' : 'text'
+}
+
 const KEPT_HEADERS = new Set(['content-type', 'accept', 'x-requested-with'])
 /** Headers never stored and never sent from a token source. */
 const FORBIDDEN_HEADERS = new Set(['cookie', 'authorization', 'proxy-authorization', 'host', 'origin', 'referer', 'content-length'])
@@ -182,6 +187,8 @@ export function validateSiteDriver(value: unknown): SiteDriver {
     if (!known.has(name)) throw new SiteDriverError(`placeholder {{${name}}} names no parameter.`)
   }
   if (placeholders(value.path).some((name) => name.startsWith('@'))) throw new SiteDriverError('tokens cannot be placed in the URL.')
+  const literal = sensitiveLiterals(value.path, body)
+  if (literal.length > 0) throw new SiteDriverError(`sensitive fields (${literal.join(', ')}) cannot hold stored values in a driver.`)
   const headers: Record<string, string> = {}
   if (value.headers !== undefined) {
     if (!isRecord(value.headers)) throw new SiteDriverError('headers must be an object.')
@@ -226,6 +233,49 @@ export function parseSiteDrivers(value: unknown): SiteDriverSummary[] {
     const driver = validateSiteDriver(raw)
     return { origin: driver.origin, name: driver.name, description: driver.description, method: driver.method, params: driver.params }
   })
+}
+
+/** Field names whose literal value must never be stored in a driver. */
+const SENSITIVE_FIELD = /pass(?:word|wd|code|phrase)?|pwd|secret|token|otp|totp|\bpin\b|cvv|cvc|card|ssn|iban|api[_-]?key|private|mnemonic|seed|recovery|auth|credential|session/iu
+
+const ONLY_PLACEHOLDER = /^\s*\{\{[^}]+\}\}\s*$/u
+
+/**
+ * Names of fields that still carry a literal value under a sensitive name
+ * (query, JSON or form body). A driver with any of them is refused: the value
+ * would be stored in extension storage and in exports.
+ */
+export function sensitiveLiterals(path: string, body: SiteDriver['body'] | undefined): string[] {
+  const found = new Set<string>()
+  const check = (key: string, value: unknown): void => {
+    if (!SENSITIVE_FIELD.test(key)) return
+    if (typeof value === 'string' && (value === '' || ONLY_PLACEHOLDER.test(value))) return
+    if (value === null || value === undefined || typeof value === 'boolean') return
+    found.add(key)
+  }
+  const query = path.includes('?') ? path.slice(path.indexOf('?') + 1) : ''
+  for (const [key, value] of new URLSearchParams(query)) check(key, value)
+  if (body !== undefined) {
+    if (body.type === 'form') {
+      for (const [key, value] of new URLSearchParams(body.template)) check(key, value)
+    } else if (body.type === 'json') {
+      const walk = (value: unknown, depth: number): void => {
+        if (depth > 6 || typeof value !== 'object' || value === null) return
+        for (const [key, child] of Object.entries(value)) {
+          if (typeof child === 'object' && child !== null) walk(child, depth + 1)
+          else check(key, child)
+        }
+      }
+      try {
+        walk(JSON.parse(body.template), 0)
+      } catch {
+        if (SENSITIVE_FIELD.test(body.template)) found.add('body')
+      }
+    } else {
+      for (const match of body.template.matchAll(/([A-Za-z_][\w-]*)\s*[=:]\s*("?)([^"&\s,}]*)\2/gu)) check(match[1]!, match[3]!)
+    }
+  }
+  return [...found]
 }
 
 function escapeRegExp(text: string): string {
@@ -312,6 +362,10 @@ export function proposeSiteDriver(
   const bodyType: 'json' | 'form' | 'text' = /json/iu.test(contentType) ? 'json' : /x-www-form-urlencoded/iu.test(contentType) ? 'form' : 'text'
   const segment = url.pathname.split('/').filter((part) => part !== '' && !/^\d+$/u.test(part)).at(-1)
   const name = driverIdent(`${method.toLowerCase()}_${segment ?? 'root'}`)
+  const literal = sensitiveLiterals(path, body === undefined || body === '' || method === 'GET' ? undefined : { type: bodyTypeOf(request.headers), template: body })
+  if (literal.length > 0) {
+    throw new SiteDriverError(`the request carries sensitive fields (${literal.join(', ')}); it cannot become a driver because their values would be stored.`)
+  }
   const driver = validateSiteDriver({
     format: SITE_DRIVER_FORMAT,
     origin: pageOrigin,

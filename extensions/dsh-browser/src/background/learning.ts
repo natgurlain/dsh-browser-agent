@@ -33,6 +33,7 @@ import { wrapUntrustedContent } from '../security/untrusted.ts'
 import { buildWorkflow, type RecordedLocator, type RecordedStep, type WorkflowChoices } from '../shared/workflow-build.ts'
 import { buildProgram, detectRepetition, nextSelectors, type ProgramStep, type RepetitionPattern, type WatchEvent } from '../shared/repetition.ts'
 import type { NetworkEntry } from './devtools-network.ts'
+import { listTabFrames } from './frames.ts'
 import type { CallPolicyHook, ToolAnswer, ToolCall } from './tools.ts'
 
 /** Storage key of the learning switches. */
@@ -87,6 +88,11 @@ export interface LearningDeps {
   agentActiveOnTab: (tabId: number) => boolean
   /** Kill switch engaged or agent paused: never capture then. */
   halted: () => boolean
+  /**
+   * Whether a failure fixture may capture this page: page sharing is not off
+   * and site policy does not block reads of it.
+   */
+  fixtureAllowed: (sessionId: string | undefined, url: string) => boolean
   /** The full approval path (gate, panel card, notification / Host fallback). */
   authorize: (prompt: ApprovalPrompt, sessionId: string | undefined, windowId: number, signal: AbortSignal) => Promise<ApprovalAuthorization>
   /** Developer-tools network capture for a tab, when attached. */
@@ -241,7 +247,7 @@ export class LearningRuntime {
     const rpc = this.deps.rpc()
     if (rpc === null || !this.deps.bridgeConnected()) return
     const drivers = this.settings.siteDrivers && this.deps.siteDriversSupported ? this.drivers : []
-    await rpc.request(METHODS.state, { workflows: this.settings.workflows, fixtures: this.settings.fixtures, siteDrivers: drivers }).catch(() => {})
+    await rpc.request(METHODS.state, { workflows: this.settings.workflows, fixtures: this.settings.fixtures, watchMe: this.settings.watchMe, siteDrivers: drivers }).catch(() => {})
   }
 
   /** The bridge connection changed state. */
@@ -434,10 +440,13 @@ export class LearningRuntime {
   private async captureFixture(call: ToolCall, answer: ToolAnswer, failure: NonNullable<ReturnType<typeof classifyFailure>>, tabId: number): Promise<void> {
     try {
       const tab = await chrome.tabs.get(tabId)
-      if (originOf(tab.url) === undefined || this.deps.halted()) return
+      if (originOf(tab.url) === undefined || this.deps.halted() || !this.deps.fixtureAllowed(call.sessionId, tab.url!)) return
       const probe = await chrome.tabs.sendMessage(tabId, { type: 'DSH_LEARN_FIXTURE', probe: true }, { frameId: 0 }) as { ok?: boolean; result?: { sensitiveCount?: number } } | undefined
       let page: { kind: 'mhtml' | 'dom'; content: string } | undefined
-      const mhtmlAllowed = probe?.ok === true && probe.result?.sensitiveCount === 0
+      // MHTML serializes every frame and form value: only a single-frame page
+      // with no sensitive field qualifies (the probe sees the top frame only).
+      const frames = await listTabFrames(tabId, tab.url).catch(() => [])
+      const mhtmlAllowed = probe?.ok === true && probe.result?.sensitiveCount === 0 && frames.length === 1
         && typeof chrome.pageCapture?.saveAsMHTML === 'function'
         && await chrome.permissions.contains({ permissions: ['pageCapture'] }).catch(() => false)
       if (mhtmlAllowed) {
@@ -473,7 +482,10 @@ export class LearningRuntime {
     const request = entries.find((entry) => entry.method.toUpperCase() !== 'GET') ?? entries[0]
     if (request === undefined) return
     try {
-      const tokens = await chrome.tabs.sendMessage(probe.tabId, { type: 'DSH_LEARN_TOKENS' }, { frameId: 0 }) as { ok?: boolean; result?: { cookies?: Array<{ name: string; value: string }>; metas?: Array<{ name: string; value: string }> } } | undefined
+      const tokens = await chrome.tabs.sendMessage(probe.tabId, { type: 'DSH_LEARN_TOKENS' }, { frameId: 0 }) as { ok?: boolean; result?: { cookies?: Array<{ name: string; value: string }>; metas?: Array<{ name: string; value: string }>; filledSensitive?: number } } | undefined
+      // A filled password/OTP field means the request may carry a secret the
+      // recorder never saw (and so cannot recognize): learn nothing.
+      if (tokens?.ok !== true || (tokens.result?.filledSensitive ?? 1) > 0) return
       const typed: TypedValue[] = this.stepsFor(call.sessionId)
         .filter((step) => step.tool === 'browser_type' && step.sensitive !== true && typeof step.args.text === 'string')
         .slice(-5)

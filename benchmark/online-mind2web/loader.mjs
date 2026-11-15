@@ -38,7 +38,9 @@ export function normalizeTask(raw) {
   if (typeof taskId !== 'string' || taskId === '') throw new Error('task row has no task_id')
   if (typeof task !== 'string' || task.trim() === '') throw new Error(`task ${taskId} has no description`)
   if (typeof website !== 'string' || !/^https?:\/\//u.test(website)) throw new Error(`task ${taskId} has no website URL`)
-  return { taskId, task: task.trim(), website, referenceLength: Number.isFinite(referenceLength) ? referenceLength : undefined, level: levelOf(referenceLength) }
+  // Prefer the dataset's own difficulty label when a release carries one.
+  const level = LEVELS.includes(String(raw.level ?? '').toLowerCase()) ? String(raw.level).toLowerCase() : levelOf(referenceLength)
+  return { taskId, task: task.trim(), website, referenceLength: Number.isFinite(referenceLength) ? referenceLength : undefined, level }
 }
 
 /**

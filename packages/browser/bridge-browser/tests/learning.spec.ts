@@ -315,6 +315,17 @@ describe('site drivers', () => {
     expect(() => resolveDriverTokens(request, () => undefined)).toThrow(/stale/)
   })
 
+  it('refuses to learn or store a driver whose request carries a sensitive literal', () => {
+    const login = { method: 'POST', url: 'https://shop.example/api/login', headers: { 'content-type': 'application/json' }, postData: '{"user":"ada","password":"hunter2"}' }
+    expect(() => proposeSiteDriver('https://shop.example', login, [{ field: 'user', value: 'ada' }], tokens)).toThrow(/sensitive fields \(password\)/)
+    const form = { method: 'POST', url: 'https://shop.example/api/x?otp=123456', headers: { 'content-type': 'application/x-www-form-urlencoded' }, postData: 'a=b' }
+    expect(() => proposeSiteDriver('https://shop.example', form, [], tokens)).toThrow(/otp/)
+    // A token sourced from the page is a placeholder, not a stored value.
+    expect(proposeSiteDriver('https://shop.example', { ...login, postData: '{"user":"ada","csrf_token":"tok-123456789"}' }, [{ field: 'user', value: 'ada' }], tokens).driver.body?.template).toBe('{"user":"{{user}}","csrf_token":"{{@cookie:csrftoken}}"}')
+    const stored = { format: 'dsh-site-driver/v1', origin: 'https://shop.example', name: 'login', description: '', method: 'POST', path: '/api/login', body: { type: 'json', template: '{"password":"hunter2"}' }, headers: {}, tokens: [], params: [] }
+    expect(() => validateSiteDriver(stored)).toThrow(/sensitive fields/)
+  })
+
   it('binds drivers to their origin at proposal, import, and execution', () => {
     expect(() => proposeSiteDriver('https://shop.example', { method: 'POST', url: 'https://evil.example/x', headers: {} }, [], tokens)).toThrow(/same-origin/)
     const good = { format: 'dsh-site-driver/v1', origin: 'https://shop.example', name: 'search', description: '', method: 'GET', path: '/s?q={{q}}', headers: {}, tokens: [], params: [{ name: 'q' }] }
@@ -364,8 +375,14 @@ describe('learning mount', () => {
     expect((listed as { text: string }).text).toMatch(/add-contact \(4 steps/)
     await registered.get('site_shop_example_search')!.execute({ q: 'x' }, { signal: new AbortController().signal })
     expect(requestTool).toHaveBeenCalledWith('browser_site_driver', { origin: 'https://shop.example', driver: 'search', params: { q: 'x' } }, expect.anything(), 1000)
-    const program = await rpc(LEARNING_METHODS.programRun, { steps: [{ tool: 'browser_click', args: { selector: '#a' } }] })
+    const steps = [{ tool: 'browser_click', args: { selector: '#a' } }]
+    expect(await rpc(LEARNING_METHODS.programRun, { steps })).toMatchObject({ ok: false, error: { code: 'disabled' } })
+    await rpc(LEARNING_METHODS.state, { watchMe: true }, 'c2')
+    const program = await rpc(LEARNING_METHODS.programRun, { steps }, 'c2')
     expect(program).toMatchObject({ ok: true, result: { report: { status: 'completed' } } })
+    // Watch me alone does not open the workflow methods.
+    expect(await rpc(LEARNING_METHODS.listWorkflows, {}, 'c2')).toMatchObject({ ok: false, error: { code: 'disabled' } })
+    mount.disconnected('c2')
     mount.disconnected('c1')
     expect(registered.size).toBe(0)
   })

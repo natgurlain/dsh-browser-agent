@@ -93,6 +93,15 @@ export function sensitiveFieldCount(): number {
   return count
 }
 
+/** Sensitive fields that currently hold a value (a site driver is not learned then). */
+export function filledSensitiveCount(): number {
+  let count = 0
+  for (const el of document.querySelectorAll('input, textarea')) {
+    if ((el as HTMLInputElement).value !== '' && isSensitiveField(el)) count += 1
+  }
+  return count
+}
+
 /**
  * A sanitized copy of the page for a failure fixture: scripts, inline
  * handlers and `javascript:` URLs removed; values of sensitive fields masked;
@@ -251,7 +260,7 @@ export function handleLearningMessage(message: { type?: string } & Record<string
       return false
     }
     case 'DSH_LEARN_TOKENS':
-      sendResponse({ ok: true, result: pageTokens() })
+      sendResponse({ ok: true, result: { ...pageTokens(), filledSensitive: filledSensitiveCount() } })
       return false
     case 'DSH_LEARN_FIXTURE':
       try {

@@ -71,7 +71,7 @@ ${PEOPLE.map((person, index) => `<tr><td>${person}</td><td><input aria-label="Em
  * @param {object} ctx - handles from smoke-browser.mjs.
  */
 export async function runLearningSmoke(ctx) {
-  const { page, panel, origin, workspace, tool, succeed, settings, waitFor, delay, results, tabId, toolNames, root, knownSessions } = ctx
+  const { page, panel, origin, workspace, tool, succeed, settings, waitFor, delay, results, tabId, toolNames, hostSkill, root, knownSessions } = ctx
   const { importFixtures } = await import(pathToFileURL(join(root, 'benchmark/lib/fixture-tasks.mjs')).href)
 
   await settings({ unrestrictedBrowserAccess: true })
@@ -126,7 +126,11 @@ export async function runLearningSmoke(ctx) {
   assert.equal(file.includes('hunter2'), false)
   assert.equal(/"index"|"selector"/u.test(file), false)
   assert.match(file, /"text": "\{\{password\}\}"/u)
-  results.push('Save as workflow writes robust locators and variables to the session workspace and never the sensitive value')
+  // The real host's skill registry exposes the saved workflow (agentless lookups use the bridge workspace).
+  const skill = await hostSkill({ name: 'browser-workflow-smoke-login', cwd: workspace })
+  assert.equal(skill?.name, 'browser-workflow-smoke-login', JSON.stringify(skill))
+  assert.match(skill.content, /browser_workflow_run \{ "name": "smoke-login"/u)
+  results.push('Save as workflow writes robust locators and variables to the session workspace and never the sensitive value; it is served as a DSH skill')
 
   await page.goto(`${origin}/learn?v=2`)
   const before = learningSubmissions.length
@@ -210,7 +214,8 @@ export async function runLearningSmoke(ctx) {
   results.push('a site driver is proposed from captured traffic, saved only on approval, registered as a tool, and runs behind a forced card with the exact request')
 
   // ---- 3.7 Watch me ----
-  await learn('learning.settings', { settings: { siteDrivers: false, watchMe: true } })
+  // Watch me alone: workflows off proves the program path does not depend on them.
+  await learn('learning.settings', { settings: { siteDrivers: false, workflows: false, fixtures: false, watchMe: true } })
   await settings({ trustedActionOrigins: [] })
   await page.goto(`${origin}/learn?v=1`)
   await page.bringToFront()

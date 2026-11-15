@@ -63,6 +63,7 @@ export type LearningRpcAnswer = { ok: true; result: unknown } | { ok: false; err
 interface ConnectionState {
   workflows: boolean
   fixtures: boolean
+  watchMe: boolean
   drivers: SiteDriverSummary[]
 }
 
@@ -73,6 +74,8 @@ export interface LearningOptions {
   scheduleFile: string
   /** Session ownership check (the bridge's ledger, `own` access). */
   ownsSession: (sessionId: string) => Promise<boolean>
+  /** Mark a session tainted: a fixture puts page content where its file tools can read it. */
+  markTainted?: (sessionId: string) => void
 }
 
 /** The handle `index.ts` wires into the server. */
@@ -248,7 +251,7 @@ export function mountLearning(
     sessionId === undefined ? undefined : (ctx.agents as unknown as { get?: (id: string) => unknown }).get?.(sessionId),
     options.workspacePath,
   )
-  const featureOn = (connection: string, feature: 'workflows' | 'fixtures'): boolean => states.get(connection)?.[feature] === true
+  const featureOn = (connection: string, feature: 'workflows' | 'fixtures' | 'watchMe'): boolean => states.get(connection)?.[feature] === true
   const ownedSession = async (payload: Record<string, unknown>, context: LearningRpcContext): Promise<string | undefined> => {
     const sessionId = payload.sessionId
     if (sessionId === undefined) return undefined
@@ -266,6 +269,7 @@ export function mountLearning(
           states.set(context.connection, {
             workflows: body.workflows === true,
             fixtures: body.fixtures === true,
+            watchMe: body.watchMe === true,
             drivers: body.siteDrivers === undefined ? [] : parseSiteDrivers(body.siteDrivers),
           })
           sync()
@@ -275,9 +279,14 @@ export function mountLearning(
           if (!featureOn(context.connection, 'fixtures')) return { ok: false, error: { code: 'disabled', message: 'failure fixtures are turned off' } }
           const sessionId = await ownedSession(body, context)
           const saved = await saveFixture(sessionWriteTarget(sessionId), parseFixtureInput(body.fixture))
+          if (sessionId !== undefined) options.markTainted?.(sessionId)
           return { ok: true, result: saved }
         }
-        if (!featureOn(context.connection, 'workflows')) return { ok: false, error: { code: 'disabled', message: 'saved workflows are turned off in the extension settings' } }
+        if (method === LEARNING_METHODS.programRun) {
+          if (!featureOn(context.connection, 'watchMe')) return { ok: false, error: { code: 'disabled', message: 'Watch me is turned off in the extension settings' } }
+        } else if (!featureOn(context.connection, 'workflows')) {
+          return { ok: false, error: { code: 'disabled', message: 'saved workflows are turned off in the extension settings' } }
+        }
         const sessionId = await ownedSession(body, context)
         switch (method) {
           case LEARNING_METHODS.saveWorkflow: {

@@ -20,7 +20,14 @@ export async function apply(ctx, config) {
     assert.equal(request.method, 'POST')
     const chunks = []
     for await (const chunk of request) chunks.push(chunk)
-    const { name, args, cancelAfterMs, rpc } = JSON.parse(Buffer.concat(chunks).toString())
+    const { name, args, cancelAfterMs, rpc, skill } = JSON.parse(Buffer.concat(chunks).toString())
+    if (skill !== undefined) {
+      // The host's real skill registry (learning smoke: saved workflows as skills).
+      const skills = ctx.get('skills')
+      const found = skills === undefined ? null : await skills.get(skill.name, { cwd: skill.cwd })
+      response.end(JSON.stringify(found ?? null))
+      return
+    }
     if (rpc !== undefined) {
       const result = await ctx.typertGateway.invoke({ ...rpc, peer, signal: AbortSignal.timeout(30_000) })
       response.end(JSON.stringify(result))

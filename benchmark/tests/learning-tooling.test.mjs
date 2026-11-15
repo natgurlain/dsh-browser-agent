@@ -70,6 +70,7 @@ test('Online-Mind2Web rows are normalized and leveled by reference length', () =
     { taskId: 't1', task: 'Find a red bike', website: 'https://bikes.example/', referenceLength: 4, level: 'easy' })
   assert.equal(normalizeTask({ task_id: 't2', confirmed_task: 'Book', website: 'https://x.example', reference_length: 12 }).level, 'hard')
   assert.throws(() => normalizeTask({ task_id: 't3', task_description: 'x', website: 'ftp://x' }), /website/u)
+  assert.equal(normalizeTask({ task_id: 't4', task_description: 'x', website: 'https://x.example', reference_length: 3, level: 'Hard' }).level, 'hard')
 })
 
 test('the loader downloads with a token, explains gating, and selects a balanced deterministic subset', async () => {

@@ -1219,6 +1219,7 @@ try {
     page, panel, origin, workspace, tool, succeed, settings, waitFor, delay, results, tabId, root,
     knownSessions: [conversation.sessionId, secondConversation.sessionId],
     toolNames: async () => (await fetch(probe, { headers })).json(),
+    hostSkill: async skill => (await fetch(probe, { method: 'POST', headers, body: JSON.stringify({ skill }) })).json(),
   })
 
   // ---- Kill switch (last: it drops the bridge) ----

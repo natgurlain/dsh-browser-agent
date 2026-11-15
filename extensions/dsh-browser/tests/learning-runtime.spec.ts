@@ -39,6 +39,7 @@ function runtime(overrides: Partial<LearningDeps> = {}, stored: Record<string, u
     bridgeConnected: () => true,
     agentActiveOnTab: () => false,
     halted: () => false,
+    fixtureAllowed: () => true,
     authorize: vi.fn(async () => 'approved' as const),
     capturedRequests: () => undefined,
     siteDriversSupported: true,
@@ -170,6 +171,15 @@ describe('learning runtime', () => {
     await vi.waitFor(() => { expect(request).toHaveBeenCalledWith('bridge.learning.fixture.save', expect.anything(), 60_000) })
     const payload = request.mock.calls.find(([method]) => method === 'bridge.learning.fixture.save')![1] as { fixture: { page: { kind: string }; failure: string } }
     expect(payload.fixture).toMatchObject({ failure: 'not-found', page: { kind: 'dom' } })
+  })
+
+  it('never captures a fixture where page sharing is off or reads are blocked', async () => {
+    const { learning, request } = runtime({ fixtureAllowed: () => false }, { dshLearningSettings: { fixtures: true } })
+    await learning.ready
+    learning.recordResult(call('browser_click', { selector: '#gone' }), { ok: false, error: { code: 'action-failed', message: 'No element matched selector: #gone' } }, { tabId: 7, url: tabUrl })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(request.mock.calls.some(([method]) => method === 'bridge.learning.fixture.save')).toBe(false)
   })
 
   it('ignores watch events while the agent is acting on the tab', async () => {
