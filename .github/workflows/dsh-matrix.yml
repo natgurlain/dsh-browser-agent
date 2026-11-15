@@ -2,8 +2,11 @@ name: DSH compatibility matrix
 
 # Probes the bridge against DSH releases other than the exact pin.
 # Only the pin row can fail the workflow; latest/next rows report via the job
-# summary and warnings. The pin itself is enforced by ci.yml (check:runtime and
-# the runtime smoke).
+# summary and warnings. The pin itself is enforced by the gate that ci.yml runs
+# (`pnpm gate`: its check-runtime and smoke-runtime steps). There is no separate
+# runtime workflow. Like every workflow here, this one has never run: GitHub
+# Actions is not available for this repository; run a row locally with
+# `node scripts/dsh-matrix.mjs <target>`.
 
 on:
   schedule:

@@ -1,5 +1,11 @@
 name: CI
 
+# Runs the local gate (`pnpm gate`, scripts/gate.mjs): the workflow adds only
+# the toolchain, a Chromium install and artifact upload, so the steps cannot
+# drift from what developers run. GitHub Actions has never run for this
+# repository (private, no Actions billing); the gate is proven locally and this
+# file is ready for the day the repository is public.
+
 on:
   push:
     branches: [main]
@@ -13,9 +19,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  checks:
+  gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
+    env:
+      # Chromium aborts when its profile socket path is too long.
+      DSH_SMOKE_ARTIFACTS: /tmp/dshb
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -28,28 +37,38 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      # The gate's first step repeats this install; it is needed here so the
+      # workspace's own playwright-core can install the matching Chromium.
       - run: pnpm install --frozen-lockfile
-      - run: pnpm run check:runtime
-      - run: pnpm run typecheck
-      - run: pnpm run test
-      - name: Build bridge and Chrome extension
-        run: pnpm run build
-      - name: Build Firefox extension
-        run: pnpm --filter dsh-browser-extension run build:firefox
-      # scripts/tests run on all three platforms in uninstall.yml (Script tests).
-      - name: Benchmark tests
-        run: pnpm run test:benchmark
-      - name: Runtime smoke (real DSH host)
-        run: node scripts/smoke-runtime.mjs
-      - name: Install Chromium for the browser smoke
+      - name: Install Chromium for the browser steps
         # Use the workspace's own playwright-core so the browser revision
         # matches chromium.executablePath() in scripts/smoke-browser.mjs.
         run: pnpm --filter @natgurlain/dsh-bridge-browser exec playwright-core install --with-deps chromium
-      - name: Headless browser smoke
-        env:
-          # Chromium aborts when its profile socket path is too long.
-          DSH_SMOKE_ARTIFACTS: /tmp/dshb
-        run: pnpm run test:browser
+      # Everything else: frozen install, check:runtime, typecheck, unit tests
+      # (bridge, extension, MCP shim), both builds, scripts/tests,
+      # benchmark/tests, the runtime and browser smokes, the model-free
+      # injection check and the uninstall UI smoke. `pnpm gate --list` prints them.
+      # scripts/tests also run on macOS and Windows in uninstall.yml.
+      - name: Gate
+        run: pnpm gate --output "$RUNNER_TEMP/gate/result.json"
+      - name: Gate summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/gate/result.json" ]; then
+            {
+              echo '```json'
+              cat "$RUNNER_TEMP/gate/result.json"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload gate result and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate
+          path: ${{ runner.temp }}/gate
+          retention-days: 14
+          if-no-files-found: ignore
       - name: Upload browser smoke artifacts
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
