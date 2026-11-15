@@ -283,7 +283,20 @@ export interface BridgeServerDeps {
   maxApprovalHoldMs?: number
   /** Clock seam for tests. */
   now?: () => number
+  /**
+   * Session lineage and Host-side taint (session-taint.ts). A subagent or
+   * fork without its own browser affinity is routed to its nearest
+   * ancestor's install, and a call from a session the Host holds tainted
+   * (itself or an ancestor) carries `tainted: true` to the extension.
+   */
+  sessionLineage?: {
+    parentOf(sessionId: string): string | undefined
+    isTainted(sessionId: string): boolean
+  }
 }
+
+/** Longest parent chain followed when resolving inherited affinity. */
+const MAX_AFFINITY_DEPTH = 32
 
 /** One in-flight tool call awaiting the extension's `tool.result`. */
 interface PendingTool {
@@ -493,6 +506,7 @@ export class BridgeServer {
         args,
         expiresAt,
         ...(sessionId === undefined ? {} : { sessionId }),
+        ...(sessionId !== undefined && this.sessionTainted(sessionId) ? { tainted: true as const } : {}),
       } satisfies BridgeFrame), (error) => {
         /* v8 ignore next -- teardown race: when the write fails, the socket's
         close handler settles the same call with the same code; the callback
@@ -554,18 +568,55 @@ export class BridgeServer {
   }
 
   /**
-   * Choose the connection for one tool call: the session's affine client
-   * when it is connected and can serve the tool, else the most recently
+   * The install a session is bound to: its own affinity, else its nearest
+   * ancestor's (a subagent or fork acts in the browser its parent drives).
+   */
+  private sessionTainted(sessionId: string): boolean {
+    try {
+      return this.deps.sessionLineage?.isTainted(sessionId) === true
+    } catch {
+      return true
+    }
+  }
+
+  private affinityOf(sessionId: string): string | undefined {
+    let current: string | undefined = sessionId
+    const seen = new Set<string>()
+    while (current !== undefined && !seen.has(current) && seen.size < MAX_AFFINITY_DEPTH) {
+      const key = this.sessionAffinity.get(current)
+      if (key !== undefined) return key
+      seen.add(current)
+      current = this.deps.sessionLineage?.parentOf(current)
+    }
+    return undefined
+  }
+
+  /**
+   * Choose the connection for one tool call. A session bound to an install
+   * (directly or through its parent) is served only there: when that install
+   * is down or cannot serve the tool the call fails rather than acting in a
+   * different browser profile. Unbound sessions go to the most recently
    * active capable connection.
+   * @throws BridgeToolError (`bridge-closed`) for a bound session whose install cannot serve the call.
    */
   private pickConnection(name: string, sessionId: string | undefined): ReadyConnection | undefined {
     const capable = (conn: ReadyConnection): boolean =>
       conn.ws.readyState === WebSocket.OPEN
       && (!DEVTOOLS_TOOLS.has(name) || isDevToolsCaps(conn.clientCaps.devTools))
     if (sessionId !== undefined) {
-      const key = this.sessionAffinity.get(sessionId)
-      const affine = key === undefined ? undefined : this.connections.get(key)
-      if (affine !== undefined && capable(affine)) return affine
+      const key = this.affinityOf(sessionId)
+      if (key !== undefined) {
+        const affine = this.connections.get(key)
+        if (affine === undefined || affine.ws.readyState !== WebSocket.OPEN) {
+          throw new BridgeToolError('bridge-closed', 'the browser this session is bound to is not connected; '
+            + 'reconnect that browser (the call is not sent to another browser profile)')
+        }
+        if (!capable(affine)) {
+          throw new BridgeToolError('bridge-closed', `the browser this session is bound to cannot serve "${name}"; `
+            + 'enable it there (the call is not sent to another browser profile)')
+        }
+        return affine
+      }
     }
     let best: ReadyConnection | undefined
     for (const conn of this.connections.values()) {
@@ -795,10 +846,8 @@ export class BridgeServer {
       void this.handleRpc(conn, frame)
       return
     }
-    // The browser a session is driven from is where its tools should act.
-    if (frame.method === 'session.prompt' || frame.method === BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD) {
-      this.sessionAffinity.set(sessionId, conn.key)
-    }
+    // The browser a session is driven from is where its tools should act;
+    // handleRpc binds it only once the Host (or session scope) accepted it.
     const previous = this.orderedSessionRpcs.get(sessionId) ?? Promise.resolve()
     const task = previous.then(
       () => this.handleRpc(conn, frame),
@@ -882,6 +931,7 @@ export class BridgeServer {
         await (payload.reason === undefined
           ? this.deps.injectBrowserSnapshot(payload.sessionId, payload.snapshot)
           : this.deps.injectBrowserSnapshot(payload.sessionId, payload.snapshot, payload.reason))
+        this.sessionAffinity.set(payload.sessionId, conn.key)
         sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { accepted: true } })
       } catch (error: unknown) {
         sendFrame(conn, {
@@ -921,6 +971,10 @@ export class BridgeServer {
         payload: frame.payload,
         signal: conn.abort.signal,
       })
+      // Bind the session to this browser only once the Host accepted the
+      // prompt (an unauthorized prompt must not steer another session's tools).
+      const prompted = frame.method === 'session.prompt' ? orderedSessionId(frame) : undefined
+      if (prompted !== undefined && result.ok) this.sessionAffinity.set(prompted, conn.key)
       sendFrame(conn, {
         t: 'rpc.result',
         id: frame.id,
@@ -1053,7 +1107,11 @@ export class BridgeServer {
     clearTimeout(pending.timer)
     this.dropPendingTool(frame.id)
     if (frame.ok) {
-      if (pending.sessionId !== undefined) this.sessionAffinity.set(pending.sessionId, conn.key)
+      // An unbound session that a browser served is bound there from now on
+      // (never rebinds: a bound session is only ever routed to its install).
+      if (pending.sessionId !== undefined && !this.sessionAffinity.has(pending.sessionId)) {
+        this.sessionAffinity.set(pending.sessionId, conn.key)
+      }
       this.auditSafely(audit => { audit.settled(frame.id, { ok: true, result: frame.result }) })
       pending.resolve(frame.result)
     } else {

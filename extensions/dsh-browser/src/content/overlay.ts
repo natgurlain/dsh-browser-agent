@@ -13,8 +13,15 @@
  *   shadow root the page cannot query, style, or observe.
  * - The host's own styles are inline `!important`, which page stylesheets
  *   cannot override, and the host never takes pointer events. Only the pill
- *   and banner buttons do, and only outside action windows, so an agent click
- *   can never land on them; their handlers accept trusted events only.
+ *   and banner buttons do; their handlers accept trusted events only and
+ *   ignore clicks inside an action window, so an agent click can never
+ *   trigger them. Nothing page-visible changes during an action window, so
+ *   hit-testing cannot tell agent activity from the user's.
+ * - The host is re-verified every {@link HOST_CHECK_MS} while visible: a page
+ *   that removes or restyles it gets a fresh one.
+ * - The banner's Resume does not resume: it opens the side panel, whose own
+ *   Resume confirms (a page could fake clicks on a lookalike, never on the
+ *   panel). Stop only reduces privilege, so it acts at once.
  * - Typed text is never rendered: the typing flash shows a fixed label.
  * - `prefers-reduced-motion` turns every animation into an instant change.
  *
@@ -84,7 +91,6 @@ const SHADOW_CSS = `
 .pill button, .banner button { pointer-events: auto; cursor: pointer; border: 0; border-radius: 999px; font: 600 12px/1 inherit; font-family: inherit; }
 .pill button { padding: 5px 10px; background: #b42318; color: #fff; }
 .pill button:hover { background: #912018; }
-.acting .pill button, .acting .banner button { pointer-events: none; }
 .banner { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); display: none; align-items: center; gap: 12px; max-width: calc(100vw - 32px); padding: 10px 10px 10px 16px; border-radius: 14px; background: #fffaeb; border: 1px solid #fedf89; color: #4a3200; box-shadow: 0 10px 28px rgba(23,32,51,.18); }
 .banner.on { display: flex; }
 .banner strong { font-weight: 650; }
@@ -112,6 +118,8 @@ const CURSOR_SVG = '<svg width="22" height="22" viewBox="0 0 22 22" aria-hidden=
 
 /** How long buttons stay inert after an announced action. */
 const ACTING_WINDOW_MS = 4_000
+/** How often the host's attachment, style, and geometry are re-verified. */
+const HOST_CHECK_MS = 500
 /** How long the outline and typing flash stay visible. */
 const HIGHLIGHT_MS = 1_400
 const MOVE_MS = 320
@@ -141,6 +149,9 @@ export class AgentOverlay {
   private control = false
   private takeover = false
   private actingTimer: ReturnType<typeof setTimeout> | undefined
+  /** Inside an action window: button clicks are ignored (no visible or hit-test change). */
+  private acting = false
+  private checkTimer: number | undefined
   private highlightTimer: ReturnType<typeof setTimeout> | undefined
   private cursorAt: { x: number; y: number } | undefined
 
@@ -218,6 +229,7 @@ export class AgentOverlay {
   /** Remove the host (content script replaced or overlays turned off). */
   dispose(): void {
     if (this.actingTimer !== undefined) clearTimeout(this.actingTimer)
+    this.stopChecks()
     if (this.highlightTimer !== undefined) clearTimeout(this.highlightTimer)
     this.host?.remove()
     this.host = undefined
@@ -249,6 +261,62 @@ export class AgentOverlay {
     parts.bannerTitle.textContent = this.copy.takeoverTitle
     parts.bannerBody.textContent = this.copy.takeoverBody
     parts.resume.textContent = this.copy.resume
+    if (this.control || this.takeover) this.startChecks()
+    else this.stopChecks()
+  }
+
+  /**
+   * While the frame, pill, or banner should be visible, re-verify the host:
+   * a page that removes it, restyles it (opacity, transform, size), or moves
+   * it gets a fresh host. The closed shadow root keeps the inside out of
+   * reach, so the host element is the only thing the page can tamper with.
+   */
+  private startChecks(): void {
+    if (this.checkTimer !== undefined) return
+    const view = this.doc.defaultView
+    if (view === null) return
+    this.checkTimer = view.setInterval(() => { this.verifyHost() }, HOST_CHECK_MS)
+  }
+
+  private stopChecks(): void {
+    if (this.checkTimer === undefined) return
+    this.doc.defaultView?.clearInterval(this.checkTimer)
+    this.checkTimer = undefined
+  }
+
+  /** Whether the host is still attached, unstyled by the page, and covering the viewport. */
+  private hostIntact(): boolean {
+    const host = this.host
+    if (host === undefined || !host.isConnected || host.parentNode !== this.doc.documentElement) return false
+    if (host.getAttribute('style') !== HOST_STYLE || host.attributes.length !== 1) return false
+    const view = this.doc.defaultView
+    if (view === null) return true
+    try {
+      const computed = view.getComputedStyle(host)
+      if (computed.display === 'none' || computed.visibility === 'hidden' || computed.opacity !== '1'
+        || (computed.transform !== '' && computed.transform !== 'none')) return false
+      const rect = host.getBoundingClientRect()
+      // jsdom has no layout (all zero); a real page must keep it at the viewport.
+      if (rect.width !== 0 || rect.height !== 0) {
+        if (Math.abs(rect.left) > 1 || Math.abs(rect.top) > 1
+          || Math.abs(rect.width - view.innerWidth) > 2 || Math.abs(rect.height - view.innerHeight) > 2) return false
+      }
+    } catch { /* computed style unavailable: attribute checks stand */ }
+    return true
+  }
+
+  private verifyHost(): void {
+    if (!(this.control || this.takeover)) {
+      this.stopChecks()
+      return
+    }
+    if (this.hostIntact()) return
+    // Recreate from scratch: a tampered host is discarded, never repaired in place.
+    this.host?.remove()
+    this.host = undefined
+    this.parts = undefined
+    this.cursorAt = undefined
+    this.render()
   }
 
   private ensure(): OverlayParts | undefined {
@@ -291,13 +359,13 @@ export class AgentOverlay {
     // Only real user clicks count: page scripts cannot reach a closed root,
     // and synthetic events are refused all the same.
     stop.addEventListener('click', (event) => {
-      if (!event.isTrusted) return
+      if (!event.isTrusted || this.acting) return
       event.preventDefault()
       event.stopPropagation()
       this.actions.killSwitch()
     })
     resume.addEventListener('click', (event) => {
-      if (!event.isTrusted) return
+      if (!event.isTrusted || this.acting) return
       event.preventDefault()
       event.stopPropagation()
       this.actions.resume()
@@ -311,11 +379,11 @@ export class AgentOverlay {
 
   /** Make the pill and banner buttons inert while an agent action may land on them. */
   markActing(): void {
-    const parts = this.parts
-    if (parts === undefined) return
-    parts.layer.classList.add('acting')
+    // Nothing the page can observe changes (no class, no pointer-events):
+    // hit-testing the buttons must not reveal when the agent is acting.
+    this.acting = true
     if (this.actingTimer !== undefined) clearTimeout(this.actingTimer)
-    this.actingTimer = setTimeout(() => { parts.layer.classList.remove('acting') }, ACTING_WINDOW_MS)
+    this.actingTimer = setTimeout(() => { this.acting = false }, ACTING_WINDOW_MS)
   }
 
   private visibleRect(el: Element): DOMRect | undefined {

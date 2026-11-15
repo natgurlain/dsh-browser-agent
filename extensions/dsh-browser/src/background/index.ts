@@ -134,7 +134,8 @@ import {
   resolveApprovalGate,
 } from './authorization.ts'
 import { DevToolsGrants } from './devtools-grants.ts'
-import { BRIDGE_TAINT_CLEAR_METHOD, PolicyRuntime } from './policy-runtime.ts'
+import { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD, PolicyRuntime } from './policy-runtime.ts'
+import { splitSelectionMessage } from '../panel/selection.ts'
 import { callPolicyTargets, forcedApprovalPrompt, originFromUrl } from './authorization.ts'
 import { normalizeSitePattern, normalizeSiteRules, type SiteRuleEntry } from '../security/site-policy.ts'
 import { CommitGate, STRICT_MODE_UNAVAILABLE } from './commit-gate.ts'
@@ -504,6 +505,25 @@ async function prepareCommitGate(
   return undefined
 }
 
+/** The agent turn of a session ended: its strict tabs keep only the short grace. */
+function commitGateTurnEnded(sessionId: string | undefined): void {
+  for (const [tabId, caller] of commitGateCallers) {
+    if (sessionId === undefined || caller.sessionId === sessionId) commitGate.turnEnded(tabId)
+  }
+}
+
+/**
+ * A tab opened by a strict tab inside an agent turn (Shift/Ctrl-click,
+ * `target=_blank`, `window.open`) is gated too: its writes belong to the turn.
+ */
+chrome.tabs.onCreated?.addListener((tab) => {
+  if (tab.id === undefined || tab.openerTabId === undefined) return
+  if (!commitGate.adoptOpened(tab.id, tab.openerTabId)) return
+  const caller = commitGateCallers.get(tab.openerTabId)
+  commitGateCallers.set(tab.id, { ...caller?.sessionId === undefined ? {} : { sessionId: caller.sessionId }, windowId: tab.windowId })
+  void commitGate.arm(tab.id).catch(() => { /* best effort: the opener's turn still gates the opener */ })
+})
+
 /** Run one agent call with the tab's commit gate armed and the agent turn marked. */
 async function withCommitGate(
   target: { id?: number; url?: string; windowId?: number },
@@ -514,7 +534,7 @@ async function withCommitGate(
   if (refused !== undefined) return refused
   if (target.id === undefined) return run()
   const tabId = target.id
-  commitGate.callStarted(tabId)
+  commitGate.callStarted(tabId, sessionId !== undefined)
   try {
     return await run()
   } finally {
@@ -1088,6 +1108,7 @@ function resumeFlowDeps(): ResumeFlowDeps {
       ? tabAffinity.snapshot().controlled?.tabId
       : tabAffinity.getSessionTab(sessionId)?.tabId,
     shareDetails: () => unrestrictedAccessEnabled() || settings.sharePageContent !== 'off',
+    pageHidden: (url) => policyRuntime.pageHidden(url),
     pageDelta: async (sessionId, tabId) => {
       const controller = new AbortController()
       const timer = setTimeout(() => { controller.abort() }, 20_000)
@@ -1128,6 +1149,8 @@ async function pauseAgent(request: PauseRequest): Promise<void> {
   await pauseReady
   const wasRunning = !pauseGate.holding()
   pauseGate.pause(request)
+  // Taking over hands the page to the user: their own writes are not the agent's.
+  if (request === 'take-over') commitGateTurnEnded(undefined)
   if (wasRunning) pauseBaseline = capturePauseBaseline(resumeFlowDeps())
 }
 
@@ -1353,12 +1376,23 @@ function backgroundApprovalTimeoutMs(): number {
  */
 function notifyApproval(request: ApprovalRequest, _windowId: number): void {
   if (!settings.approvalNotifications) return
-  void Promise.resolve(chrome.notifications.create(approvalNotificationId(request.id), approvalNotificationOptions(request, {
-    target: EXT_TARGET,
-    iconUrl: chrome.runtime.getURL('assets/icons/icon128.png'),
-    copy: APPROVAL_NOTIFICATION_COPY[getUiLocale() === 'zh' ? 'zh' : 'en'],
-    minutes: backgroundApprovalTimeoutMs() / 60_000,
-  }))).catch(() => {})
+  void (async () => {
+    // Name the tab the call acts on (its title is page-authored: quoted, capped).
+    let tabTitle: string | undefined
+    const tabId = request.sessionId === undefined
+      ? tabAffinity.snapshot().controlled?.tabId
+      : tabAffinity.getSessionTab(request.sessionId)?.tabId
+    if (tabId !== undefined) {
+      try { tabTitle = (await chrome.tabs.get(tabId)).title } catch { /* tab gone */ }
+    }
+    await chrome.notifications.create(approvalNotificationId(request.id), approvalNotificationOptions(request, {
+      target: EXT_TARGET,
+      iconUrl: chrome.runtime.getURL('assets/icons/icon128.png'),
+      copy: APPROVAL_NOTIFICATION_COPY[getUiLocale() === 'zh' ? 'zh' : 'en'],
+      minutes: backgroundApprovalTimeoutMs() / 60_000,
+      ...tabTitle === undefined ? {} : { tabTitle },
+    }))
+  })().catch(() => {})
 }
 
 function clearApprovalNotification(id: string): void {
@@ -1902,6 +1936,25 @@ async function authorizeToolCall(
   return decision === 'allow-once' ? 'approved' : 'denied'
 }
 
+/**
+ * A prompt carrying a page selection puts page-authored text into the
+ * session: taint it here and on the Host before the prompt is forwarded.
+ */
+async function taintAttachedSelection(sessionId: string, payload: unknown): Promise<void> {
+  const content = (payload as { content?: unknown } | null)?.content
+  if (!Array.isArray(content)) return
+  for (const part of content) {
+    const text = (part as { type?: unknown; text?: unknown } | null)?.text
+    if (typeof text !== 'string') continue
+    const attached = splitSelectionMessage(text)
+    if (attached === null) continue
+    await policyRuntime.ready
+    policyRuntime.recordSelection(sessionId, originFromUrl(attached.selection.url))
+    await gatewayRpc(BRIDGE_TAINT_MARK_METHOD, { sessionId }).catch(() => { /* older bridge: extension taint still applies */ })
+    return
+  }
+}
+
 /** Capture the newly controlled tab and seed it into this session's next Agent step. */
 async function refreshFollowedPage(sessionId: string, tabId: number): Promise<void> {
   activeFollowRefreshes.get(sessionId)?.controller.abort()
@@ -1916,6 +1969,7 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
   }
   activeFollowRefreshes.set(sessionId, activeRefresh)
   try {
+    await policyRuntime.ready
     const target = await resolveToolTab(sessionId)
     if ('ok' in target || target.id !== tabId || controller.signal.aborted) return
     const budget = caps === null
@@ -1929,7 +1983,9 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
       controller.signal,
       target,
       () => target.id !== undefined && tabAffinity.allowsTarget(target.id, sessionId),
-      { unrestrictedAccess },
+      // Site rules, managed policy, and taint apply to the injected read too:
+      // a blocked page is refused, an ask page shows its card.
+      { unrestrictedAccess, policy: policyRuntime.evaluator(sessionId, unrestrictedAccess) },
     )
     if (!answer.ok || controller.signal.aborted || !tabAffinity.allowsTarget(tabId, sessionId)) return
     if (typeof answer.result !== 'object' || answer.result === null) return
@@ -2184,10 +2240,14 @@ function routeToolCall(call: ToolCall): void {
         commitAction,
         rollbackActionCommit,
         policy,
+        tabHidden: (url) => policyRuntime.pageHidden(url, unrestrictedAccess),
       },
     )
   }
-  const dispatch = (): Promise<ToolAnswer> => policyRuntime.ready.then(() => isTabManagementTool(call.name)
+  const dispatch = (): Promise<ToolAnswer> => policyRuntime.ready.then(() => {
+    // A subagent or fork of a tainted session: the Host says so on the call.
+    if (call.tainted === true) policyRuntime.markHostTaint(call.sessionId)
+  }).then(() => isTabManagementTool(call.name)
     ? managementDispatch()
     : isDevToolsTool(call.name)
     ? dispatchDevToolsTool(call, controller.signal)
@@ -2596,6 +2656,10 @@ async function startBridge(): Promise<void> {
           const eventSessionId = (frame.frame.payload as { sessionId?: unknown } | null)?.sessionId
           if (typeof eventSessionId === 'string' && runtimeSessions.has(eventSessionId)) runtimeLease.touch()
           transientEvents.ingest(frame)
+          const sessionEvent = frame.frame.method === 'session/event'
+            ? (frame.frame.payload as { event?: { type?: unknown } } | null)?.event
+            : undefined
+          if (sessionEvent?.type === 'turn/end' && typeof eventSessionId === 'string') commitGateTurnEnded(eventSessionId)
           broadcastEvent(frame)
         }
         else if (frame.t === 'tool.call') routeToolCall(frame)
@@ -2736,8 +2800,10 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
     return
   }
   if (type === 'DSH_AGENT_RESUME') {
-    // The takeover banner's Resume button, only from a tab showing it.
-    if (pauseGate.state().mode === 'taken-over' && boundTabIds().has(sender.tab.id)) void resumeAgent()
+    // The takeover banner's Resume button, only from a tab showing it. A page
+    // can tamper with what surrounds the in-page banner, so it never resumes
+    // by itself: it opens the side panel, whose Resume confirms.
+    if (pauseGate.state().mode === 'taken-over' && boundTabIds().has(sender.tab.id)) openAssistantPanel(sender.tab.windowId)
     return
   }
   if (type !== 'DSH_SELECTION' || sender.tab === undefined) return
@@ -2798,6 +2864,7 @@ chrome.runtime.onConnect.addListener((port) => {
         const prepare = rpcMsg.method === 'session.prompt'
           ? Promise.resolve().then(async () => {
               await refresh
+              if (typeof rpcSessionId === 'string') await taintAttachedSelection(rpcSessionId, rpcMsg.payload)
               return rpcSessionId === undefined || tabAffinity.getSessionTab(rpcSessionId) !== undefined
             })
           : Promise.resolve(true)

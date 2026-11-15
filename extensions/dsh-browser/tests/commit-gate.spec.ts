@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   AGENT_TURN_GRACE_MS,
+  AGENT_TURN_MAX_IDLE_MS,
   CommitGate,
   commitApprovalPrompt,
   isMutatingMethod,
@@ -30,7 +31,10 @@ describe('request body summaries', () => {
     expect(summary.text).toContain('note = "hi there"')
     expect(summary.text).not.toContain('hunter2')
     expect(summary.text).not.toContain('4111')
-    expect(summary.text).toContain('password = •••• (masked)')
+    expect(summary.text).toContain('2 sensitive field(s) shown masked below')
+    // Sensitive values stay available to reveal on the card, never dropped.
+    expect(summary.sensitiveText).toContain('password = "hunter2"')
+    expect(summary.sensitiveText).toContain('card_number = "4111111111111111"')
   })
 
   it('flattens JSON, reads multipart field names and files, and describes unseen bodies', () => {
@@ -100,11 +104,35 @@ describe('CommitGate', () => {
     expect(await settled()).toEqual(['Fetch.failRequest', { requestId: 'r4', errorReason: 'BlockedByClient' }])
     expect(ask).toHaveBeenCalledTimes(2)
     gate.callEnded(7)
-    // Still the agent's within the grace window, the user's afterwards.
+    // An unended turn outlasts the short grace (a page timer cannot wait it out)…
+    now += AGENT_TURN_GRACE_MS + 1
+    expect(gate.agentTurnActive(7)).toBe(true)
+    now += AGENT_TURN_MAX_IDLE_MS
+    expect(gate.agentTurnActive(7)).toBe(false)
+    // …and once the turn is seen to end, only the grace remains.
+    gate.callStarted(7)
+    gate.callEnded(7)
+    gate.turnEnded(7)
     now += AGENT_TURN_GRACE_MS - 1
     expect(gate.agentTurnActive(7)).toBe(true)
     now += 2
     expect(gate.agentTurnActive(7)).toBe(false)
+  })
+
+  it('adopts tabs the strict tab opens during an agent turn', async () => {
+    let now = 1_000
+    const { broker } = fakeBroker()
+    const gate = new CommitGate({ broker, ask: async () => 'approved', now: () => now })
+    expect(gate.adoptOpened(8, 7)).toBe(false)
+    await gate.arm(7)
+    expect(gate.adoptOpened(8, 7)).toBe(false)
+    gate.callStarted(7)
+    expect(gate.adoptOpened(8, 7)).toBe(true)
+    expect(gate.agentTurnActive(8)).toBe(true)
+    gate.callEnded(7)
+    gate.turnEnded(7)
+    now += AGENT_TURN_GRACE_MS + 1
+    expect(gate.agentTurnActive(8)).toBe(false)
   })
 
   it('fails a held write when asking throws, and drops the armed state when detached', async () => {

@@ -204,7 +204,7 @@ describe('audit notes and the pause gate', () => {
     expect(env.sessionData.dshAgentPause).toBeNull()
   })
 
-  it('shows the takeover banner on the controlled tab and resumes from its button', async () => {
+  it('shows the takeover banner on the controlled tab; its Resume opens the panel, which resumes', async () => {
     const env = await boot()
     env.socket.receive({ t: 'tool.call', id: 'first', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 10_000, sessionId: 'session-live' })
     await vi.waitFor(() => { expect(env.sent()).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'first' })) })
@@ -215,6 +215,10 @@ describe('audit notes and the pause gate', () => {
     // The pill is on the controlled tab too (the setting defaults to on).
     expect(env.tabMessages).toContainEqual({ tabId: 1, message: expect.objectContaining({ type: 'DSH_OVERLAY', op: 'control', on: true }) })
     env.content.emit({ type: 'DSH_AGENT_RESUME' }, { id: 'test-extension', tab: browserTab('https://example.com/start') }, () => {})
+    // The in-page button is not authoritative: it only brings up the panel.
+    await vi.waitFor(() => { expect(chrome.sidePanel.open).toHaveBeenCalled() })
+    expect(env.pauseStates().at(-1)?.mode).toBe('taken-over')
+    env.panel.emit({ type: 'agent.resume' })
     await vi.waitFor(() => {
       env.answerRpcs()
       expect(env.pauseStates().at(-1)?.mode).toBe('running')

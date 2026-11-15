@@ -22,6 +22,8 @@
  * @module
  */
 
+import { getDomain } from 'tldts'
+
 export type SiteRule = 'blocked' | 'read-only' | 'ask' | 'trusted'
 
 /** Every rule, most restrictive first. */
@@ -51,6 +53,11 @@ export interface SitePolicy {
   defaultsEnabled: boolean
   /** Unrestricted access: sites no layer names are `trusted`. */
   defaultTrusted: boolean
+  /**
+   * Managed `enforceSiteDefaults`: a user rule can only tighten a shipped
+   * default, never loosen it (the stricter of the two applies).
+   */
+  enforceDefaults?: boolean
 }
 
 /**
@@ -106,8 +113,27 @@ export function normalizeSitePattern(value: unknown): string | undefined {
   return `${host}${path}`
 }
 
-/** Normalize a stored rule list, dropping malformed entries and duplicates. */
-export function normalizeSiteRules(value: unknown): SiteRuleEntry[] {
+/**
+ * Whether a pattern is narrow enough to be a user `trusted` rule: its host
+ * part must name one literal registrable domain (eTLD+1), optionally with a
+ * leading `*.`. Catch-all globs (`*a*`, `*.com`, `e*`) would recreate
+ * unrestricted access one rule at a time, so they are refused as `trusted`
+ * (they stay fine for the restrictive rules).
+ */
+export function isNarrowTrustedPattern(pattern: string): boolean {
+  const slash = pattern.indexOf('/')
+  const host = (slash === -1 ? pattern : pattern.slice(0, slash)).replace(/^\*\./, '')
+  if (host.includes('*')) return false
+  const domain = getDomain(host, { allowPrivateDomains: true })
+  return domain !== null && domain !== '' && (host === domain || host.endsWith(`.${domain}`))
+}
+
+/**
+ * Normalize a stored rule list, dropping malformed entries and duplicates.
+ * User-layer `trusted` rules must be narrow ({@link isNarrowTrustedPattern});
+ * pass `source: 'managed'` for administrator rules, which are not limited.
+ */
+export function normalizeSiteRules(value: unknown, source: SiteRuleSource = 'user'): SiteRuleEntry[] {
   if (!Array.isArray(value)) return []
   const byPattern = new Map<string, SiteRule>()
   for (const entry of value) {
@@ -115,6 +141,7 @@ export function normalizeSiteRules(value: unknown): SiteRuleEntry[] {
     const pattern = normalizeSitePattern((entry as { pattern?: unknown }).pattern)
     const rule = (entry as { rule?: unknown }).rule
     if (pattern === undefined || !isSiteRule(rule)) continue
+    if (rule === 'trusted' && source !== 'managed' && !isNarrowTrustedPattern(pattern)) continue
     const existing = byPattern.get(pattern)
     byPattern.set(pattern, existing === undefined ? rule : mostRestrictive(existing, rule))
   }
@@ -176,6 +203,8 @@ function parseWebUrl(value: string | URL): URL | undefined {
 function layerVerdict(entries: readonly SiteRuleEntry[], url: URL, source: SiteRuleSource): SiteVerdict | undefined {
   let verdict: SiteVerdict | undefined
   for (const entry of entries) {
+    // Rules stored before the normalizer refused catch-all trusted globs.
+    if (source === 'user' && entry.rule === 'trusted' && !isNarrowTrustedPattern(entry.pattern)) continue
     if (!matchSitePattern(entry.pattern, url)) continue
     if (verdict === undefined || mostRestrictive(verdict.rule, entry.rule) !== verdict.rule) {
       verdict = { rule: entry.rule, pattern: entry.pattern, source }
@@ -191,9 +220,17 @@ function layerVerdict(entries: readonly SiteRuleEntry[], url: URL, source: SiteR
 export function resolveSiteRule(value: string | URL, policy: SitePolicy): SiteVerdict | undefined {
   const url = parseWebUrl(value)
   if (url === undefined) return undefined
-  return layerVerdict(policy.managed, url, 'managed')
-    ?? layerVerdict(policy.user, url, 'user')
-    ?? (policy.defaultsEnabled ? layerVerdict(DEFAULT_SITE_RULES, url, 'default') : undefined)
+  const managed = layerVerdict(policy.managed, url, 'managed')
+  if (managed !== undefined) return managed
+  const user = layerVerdict(policy.user, url, 'user')
+  const defaults = policy.defaultsEnabled || policy.enforceDefaults === true
+    ? layerVerdict(DEFAULT_SITE_RULES, url, 'default')
+    : undefined
+  if (policy.enforceDefaults === true && user !== undefined && defaults !== undefined) {
+    return mostRestrictive(user.rule, defaults.rule) === user.rule ? user : defaults
+  }
+  return user
+    ?? defaults
     ?? (policy.defaultTrusted ? { rule: 'trusted', pattern: '*', source: 'user' } : undefined)
 }
 

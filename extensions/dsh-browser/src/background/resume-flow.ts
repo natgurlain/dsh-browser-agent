@@ -48,6 +48,8 @@ export interface ResumeFlowDeps {
   pageDelta: (sessionId: string, tabId: number) => Promise<string | undefined>
   /** Deliver the delta to the session's Agent. */
   inject: (sessionId: string, text: string) => Promise<void>
+  /** Whether site policy forbids the agent from reading this URL (its address and title are withheld). */
+  pageHidden?: (url: string) => boolean
 }
 
 /** Capture what the user is about to change. */
@@ -106,6 +108,7 @@ export async function prepareResume(
       newTabs: newTabs.length,
       ...(delta === undefined ? {} : { pageDelta: delta }),
       shareDetails: share,
+      redactAfter: after?.url !== undefined && deps.pageHidden?.(after.url) === true,
     })
     await deps.inject(sessionId, text).catch(() => {})
   }

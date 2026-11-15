@@ -24,7 +24,7 @@ import { isDevToolsTool } from './authorization.ts'
 export const POLICY_PORT_NAME = 'dsh-policy'
 export const TAINT_STORAGE_KEY = 'dshSessionTaint'
 /** Bridge RPC that clears the Host-side taint guard for one session. */
-export { BRIDGE_TAINT_CLEAR_METHOD } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+export { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 
 /** The settings fields the policy layer reads. */
 export interface PolicySettings {
@@ -97,6 +97,7 @@ export class PolicyRuntime {
       managed: this.managed.siteRules,
       user: settings.siteRules,
       defaultsEnabled: settings.siteDefaultsEnabled || this.managed.enforceSiteDefaults,
+      enforceDefaults: this.managed.enforceSiteDefaults,
       defaultTrusted: unrestricted && !this.managed.disableUnrestricted,
     }
   }
@@ -122,6 +123,34 @@ export class PolicyRuntime {
     })
   }
 
+  /**
+   * Whether the agent may not see a page at all — a blocked site rule or an
+   * origin outside the managed allowlist — so even its title and address are
+   * withheld (tab lists, resume summaries). Non-web pages are not judged.
+   */
+  pageHidden(url: string, unrestricted?: boolean): boolean {
+    let origin: string
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+      origin = parsed.origin
+    } catch {
+      return false
+    }
+    return evaluateCallPolicy({
+      name: 'browser_list_tabs',
+      args: {},
+      targets: { reads: [origin], acts: [], urls: [url] },
+      site: this.sitePolicy(unrestricted),
+      managed: { disableScreenshots: false, disableDevTools: false, ...this.managed.allowedOrigins === undefined ? {} : { allowedOrigins: this.managed.allowedOrigins } },
+    }).kind === 'deny'
+  }
+
+  /** Evaluate a call without recording it for taint (follow refreshes, landed pages). */
+  evaluator(sessionId: string | undefined, unrestricted: boolean): CallPolicyHook {
+    return (call, targets) => this.evaluate({ ...call, sessionId }, targets, unrestricted)
+  }
+
   /** The hook a dispatch path consults; it remembers the targets for {@link recordResult}. */
   hook(callId: string, sessionId: string | undefined, unrestricted: boolean): CallPolicyHook {
     const record: CallRecord = {}
@@ -140,7 +169,10 @@ export class PolicyRuntime {
   recordResult(call: Pick<ToolCall, 'id' | 'name' | 'sessionId'>, ok: boolean, fallbackOrigin?: string): void {
     const record = this.calls.get(call.id)
     this.calls.delete(call.id)
-    if (!resultTaintsSession(call.name, ok)) return
+    // A failed call that reached a page can still quote it (an open dialog's
+    // text, a content-script error): it taints like a success.
+    const reachedPage = record?.targets !== undefined || fallbackOrigin !== undefined
+    if (!resultTaintsSession(call.name, true) || (!ok && !reachedPage)) return
     const targets = record?.targets
     const origins = targets === undefined
       ? fallbackOrigin === undefined ? [] : [fallbackOrigin]
@@ -173,6 +205,20 @@ export class PolicyRuntime {
     if (enabled) this.strictSessions.add(key)
     else this.strictSessions.delete(key)
     this.broadcast()
+  }
+
+  /**
+   * The Host reports this session (or an agent it was spawned or forked
+   * from) tainted: apply the taint rules even without a record of our own.
+   * The sources are unknown, so no origin is ever exempt.
+   */
+  markHostTaint(sessionId: string | undefined): void {
+    if (this.taint.get(sessionId) === undefined) this.taint.mark(sessionId, 'host-lineage', [])
+  }
+
+  /** The user attached a page selection to a prompt: its page text entered the session. */
+  recordSelection(sessionId: string, origin: string | undefined): void {
+    this.taint.mark(sessionId, 'selection-attachment', origin === undefined ? [] : [origin])
   }
 
   /** A snapshot was injected into a session without a tool call (follow refresh). */

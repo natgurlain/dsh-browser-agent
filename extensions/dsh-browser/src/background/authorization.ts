@@ -645,20 +645,47 @@ function callPolicyTargetsFor(call: ToolCall, frames: TabFrame[]): CallPolicyTar
   if (call.name === 'browser_clipboard' && call.args.action === 'write') return { reads: [], acts: [] }
   const frameId = requestedFrame(call.args)
   const target = frames.find((frame) => frame.frameId === frameId) ?? frames.find((frame) => frame.frameId === 0)
-  const targetOrigins = uniqueOrigins(target === undefined ? [] : [target], frames)
-  if (WHOLE_TAB_READS.has(call.name)) return { reads: uniqueOrigins(frames, frames), acts: [] }
+  const targetFrames = target === undefined ? [] : [target]
+  const targetOrigins = uniqueOrigins(targetFrames, frames)
+  if (WHOLE_TAB_READS.has(call.name)) return { reads: uniqueOrigins(frames, frames), acts: [], urls: frameUrls(frames, frames) }
   const devToolsRead = isDevToolsTool(call.name)
     && call.name !== 'browser_devtools_set_element_style'
     && call.name !== 'browser_devtools_set_element_attribute'
     && call.name !== 'browser_console_eval'
-  if ((READ_TOOLS.has(call.name) && !extractPaginates(call)) || devToolsRead) return { reads: targetOrigins, acts: [] }
+  const urls = frameUrls(targetFrames, frames)
+  if ((READ_TOOLS.has(call.name) && !extractPaginates(call)) || devToolsRead) return { reads: targetOrigins, acts: [], urls }
   return {
     reads: [],
     acts: targetOrigins,
-    ...(call.name === 'browser_type' || call.name === 'browser_clipboard') && targetOrigins[0] !== undefined
+    urls,
+    ...TYPING_TOOLS.has(call.name) && targetOrigins[0] !== undefined
       ? { typeTargetOrigin: targetOrigins[0] }
       : {},
   }
+}
+
+/** Calls that write model-chosen characters into a frame (taint's typing rule). */
+const TYPING_TOOLS = new Set(['browser_type', 'browser_clipboard', 'browser_press', 'browser_dialog'])
+
+/** Effective web URLs of frames (an about:blank or srcdoc frame inherits its parent's). */
+function frameUrls(targets: TabFrame[], allFrames: TabFrame[]): string[] {
+  const urls = new Set<string>()
+  for (const frame of targets) {
+    const url = effectiveFrameUrl(frame, allFrames)
+    if (url !== undefined) urls.add(url)
+  }
+  return [...urls].sort()
+}
+
+function effectiveFrameUrl(frame: TabFrame, frames: TabFrame[], visited = new Set<number>()): string | undefined {
+  if (visited.has(frame.frameId)) return undefined
+  visited.add(frame.frameId)
+  try {
+    const url = new URL(frame.url)
+    if (url.protocol === 'http:' || url.protocol === 'https:') return url.href
+  } catch { /* fall through to the parent */ }
+  const parent = frames.find((candidate) => candidate.frameId === frame.parentFrameId)
+  return parent === undefined ? undefined : effectiveFrameUrl(parent, frames, visited)
 }
 
 /**

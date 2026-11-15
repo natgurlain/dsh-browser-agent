@@ -456,6 +456,9 @@ try {
   await settings({ unrestrictedBrowserAccess: false })
 
   succeed(await tool('browser_snapshot', {}))
+  // The snapshot read the cross-origin iframes too: typing into the top page
+  // is exempt from the taint prompt only when every source is that origin.
+  await clearTaint()
   for (const sharing of ['off', 'ask']) {
     await settings({ sharePageContent: sharing })
     await page.locator('p').evaluate((element, sharing) => { element.textContent = `PRIVATE_${sharing}` }, sharing)
@@ -487,12 +490,17 @@ try {
   succeed(await approve(tool('browser_console_logs', {}), 'trust-session'))
   assert.equal(lastApproval.grantOrigin, origin)
   succeed(await tool('browser_console_logs', {}))
+  // While tainted every eval asks (a forced card no grant covers): these
+  // steps are about grants, so each eval starts from an untainted session.
+  await clearTaint()
   succeed(await approve(tool('browser_console_eval', { expression: 'window.executed++' }), 'trust-eval-session'))
   assert.deepEqual(lastApproval.details, [{ kind: 'code', value: 'window.executed++' }])
+  await clearTaint()
   succeed(await tool('browser_console_eval', { expression: 'window.executed++' }))
   results.push('developer-tools trust is scoped per kind: the tools grant does not cover eval, the eval grant does')
   await panel.evaluate(() => panelPort.disconnect())
   await settingsDone(await openPanel())
+  await clearTaint()
   const renewal = await approve(tool('browser_console_eval', { expression: 'window.executed++' }), 'allow-once')
   succeed(renewal)
   assert.equal(await page.evaluate(() => window.executed), 3)
@@ -589,6 +597,9 @@ try {
     // borders, padding, and the nested frame's scale/rotate transform.
     assert.match(succeed(await tool('browser_click', { frame, selector: '#inner', trusted: true })), /\(trusted\)/)
     assert.equal(await document.evaluate(() => window.innerClicks), 3, kind)
+    // The snapshot read every frame of the tab: typing is exempt from the
+    // taint prompt only when every origin the session read is the target's.
+    await clearTaint()
     succeed(await tool('browser_type', { frame, selector: '#input', text: kind, replace: true }))
     assert.equal(await document.locator('#input').inputValue(), kind)
     succeed(await tool('browser_scroll', { frame, direction: 'down', amount: 100 }))
@@ -623,18 +634,23 @@ try {
     const url = frameUrls[kind]
     assert.equal(await page.frame({ url }).locator('#upload').evaluate(input => input.files[0].name), 'upload.txt')
     // The developer-tools setting does not cover eval: every call shows its source.
+    // (Eval and attribute writes also ask while tainted; these steps test frame routing.)
+    await clearTaint()
     assert.match(succeed(await approve(tool('browser_console_eval', { frame, expression: 'window.pageMarker' }), 'allow-once')), /frame-world/)
     assert.equal(lastApproval.details[0].value, 'window.pageMarker')
+    await clearTaint()
     succeed(await tool('browser_devtools_set_element_attribute', { frame, selector: '#inner', name: 'data-tested', value: kind }))
     assert.equal(await page.frame({ url }).locator('#inner').getAttribute('data-tested'), kind)
   }
   results.push('uploads and developer tools use Chrome frame identities across same-process and out-of-process iframes')
+  await clearTaint()
 
   succeed(await tool('browser_devtools_set_element_style', { selector: '#button', mode: 'rule', properties: [{ name: 'color', value: 'rgb(9, 8, 7)' }] }))
   assert.deepEqual(await page.locator('#button').evaluate(element => {
     const style = getComputedStyle(element); return [style.color, style.backgroundColor, style.marginLeft]
   }), ['rgb(9, 8, 7)', 'rgb(240, 240, 240)', '5px'])
   assert.equal(await page.locator('#unrelated').evaluate(element => getComputedStyle(element).color), 'rgb(4, 5, 6)')
+  await clearTaint()
   succeed(await tool('browser_devtools_set_element_style', { selector: '#button', mode: 'rule', properties: [{ name: 'margin-top', value: '12px' }] }))
   assert.deepEqual(await page.locator('#button').evaluate(element => {
     const style = getComputedStyle(element); return [style.marginTop, style.marginRight, style.marginBottom, style.marginLeft]
@@ -704,6 +720,7 @@ try {
   assert.match(succeed(await tool('browser_get_text', { offset: 8_000 })), new RegExp(`Characters 8000–${total} of ${total}\\.`))
   results.push('browser_get_text pages long text with offsets and reports the total length')
 
+  await clearTaint()
   const typed = succeed(await tool('browser_type', { selector: '#email', text: 'not-an-email' }))
   assert.match(typed, /The field holds 12 characters, including the typed text\./)
   assert.match(typed, /2 new alert\/validation message\(s\) appeared/)
@@ -1008,9 +1025,12 @@ try {
   [policyRequest] = await answerApproval(tool('browser_click', { selector: '#submit' }), 'deny')
   assert.equal(policyRequest.action, 'network_commit')
   assert.equal(policyRequest.forced, true)
-  assert.match(policyRequest.summary, /^This will send 2 field\(s\) to http:\/\/127\.0\.0\.1:\d+\/strict-submit \(POST, includes masked sensitive fields\)$/)
+  assert.match(policyRequest.summary, /^This will send 2 field\(s\) to http:\/\/127\.0\.0\.1:\d+\/strict-submit \(POST, includes sensitive fields: reveal to check them\)$/)
   assert.match(policyRequest.details[0].value, /name = "Ada"/)
-  assert.doesNotMatch(JSON.stringify(policyRequest), /hunter2/)
+  assert.doesNotMatch(policyRequest.details[0].value, /hunter2/)
+  // Sensitive values are on the card, masked until the user reveals them.
+  assert.equal(policyRequest.details[1].masked, true)
+  assert.match(policyRequest.details[1].value, /password = "hunter2"/)
   await delay(500)
   assert.equal(strictSubmissions.length, 0)
   await page.goto(`${origin}/strict`)

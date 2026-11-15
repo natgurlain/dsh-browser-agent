@@ -283,17 +283,74 @@ describe('tool routing', () => {
     await expect(followUp).resolves.toEqual({ text: 'b2' })
   })
 
-  it('falls back to the most recently active client when the affine client is gone', async () => {
+  it('fails instead of falling back to another profile when the affine client is gone', async () => {
     const h = await startBridge()
     const a = await connectClient(h.url, identity('client-aaaa'))
     const b = await connectClient(h.url, identity('client-bbbb'))
     await a.rpc('session.prompt', { sessionId: 's-a', text: 'go' })
     a.ws.close()
     await waitFor(() => h.bridge.connectionCount() === 1)
-    const call = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1_000, 's-a')
+    expect(() => h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1_000, 's-a'))
+      .toThrow(expect.objectContaining({ code: 'bridge-closed' }))
+    expect(toolCalls(b)).toHaveLength(0)
+  })
+
+  it('fails instead of falling back when the affine client lacks the capability', async () => {
+    const h = await startBridge()
+    const plain = await connectClient(h.url, identity('client-plan'))
+    const dev = await connectClient(h.url, { ...identity('client-devt'), devTools: { version: DEVTOOLS_CAPS_VERSION } })
+    await plain.rpc('session.prompt', { sessionId: 's-p', text: 'go' })
+    expect(() => h.bridge.requestTool('browser_console_eval', { code: '1' }, new AbortController().signal, 1_000, 's-p'))
+      .toThrow(expect.objectContaining({ code: 'bridge-closed' }))
+    expect(toolCalls(dev)).toHaveLength(0)
+  })
+
+  it('pins a session only after the Host authorized the prompt', async () => {
+    const h = await startBridge({
+      api: {
+        call: async ({ method, payload }) => method === 'session.prompt' && (payload as { sessionId?: string }).sessionId === 'foreign'
+          ? { ok: false, error: { code: 'forbidden', message: 'no', details: {} } }
+          : { ok: true, value: 'ok' },
+        async *events() {},
+        respond: async () => ({ accepted: true }),
+      },
+    })
+    const a = await connectClient(h.url, identity('client-aaaa'))
+    const b = await connectClient(h.url, identity('client-bbbb'))
+    await a.rpc('session.prompt', { sessionId: 'foreign', text: 'hijack' })
+    await b.rpc('session.list', {})
+    // The refused prompt did not bind "foreign" to A: routing still picks B.
+    const call = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1_000, 'foreign')
     const frame = await nextToolCall(b)
+    expect(toolCalls(a)).toHaveLength(0)
     b.send({ t: 'tool.result', id: frame.id, ok: true, result: { text: 'b' } })
     await expect(call).resolves.toEqual({ text: 'b' })
+  })
+
+  it('routes subagent sessions to the parent install and marks tainted sessions on the wire', async () => {
+    const parents: Record<string, string> = { child: 's-a', grandchild: 'child' }
+    const h = await startBridge({
+      sessionLineage: { parentOf: (id) => parents[id], isTainted: (id) => id === 'grandchild' },
+    })
+    const a = await connectClient(h.url, identity('client-aaaa'))
+    const b = await connectClient(h.url, identity('client-bbbb'))
+    await a.rpc('session.prompt', { sessionId: 's-a', text: 'go' })
+    await b.rpc('session.list', {})
+    const call = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1_000, 'grandchild')
+    const frame = await nextToolCall(a)
+    expect(frame).toMatchObject({ sessionId: 'grandchild', tainted: true })
+    expect(toolCalls(b)).toHaveLength(0)
+    a.send({ t: 'tool.result', id: frame.id, ok: true, result: { text: 'a' } })
+    await expect(call).resolves.toEqual({ text: 'a' })
+    const plain = h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1_000, 's-a')
+    const plainFrame = await nextToolCall(a, 2)
+    expect(plainFrame).not.toHaveProperty('tainted')
+    a.send({ t: 'tool.result', id: plainFrame.id, ok: true, result: { text: 'a2' } })
+    await plain
+    a.ws.close()
+    await waitFor(() => h.bridge.connectionCount() === 1)
+    expect(() => h.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1_000, 'child'))
+      .toThrow(expect.objectContaining({ code: 'bridge-closed' }))
   })
 
   it('audits which connection served a call and lets only that connection annotate it', async () => {

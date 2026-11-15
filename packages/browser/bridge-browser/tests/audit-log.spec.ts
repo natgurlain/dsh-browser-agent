@@ -4,7 +4,9 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   AUDIT_GENESIS_HASH,
+  AUDIT_KEY_FILE,
   AuditLog,
+  auditEntryHash,
   ToolCallAuditor,
   auditFileName,
   canonicalJson,
@@ -64,13 +66,16 @@ describe('audit log chain', () => {
     for (const callId of ['a', 'b', 'c']) await log.append('s', { kind: 'tool-call', callId })
     const lines = readFileSync(log.file('s'), 'utf8').trim().split('\n')
     const entries = parseAuditLines(lines.join('\n'))
-    expect(verifyAuditChain(entries).ok).toBe(true)
+    const key = await log.chainKey()
+    expect(verifyAuditChain(entries, key).ok).toBe(true)
+    // Keyed entries do not verify without the key.
+    expect(verifyAuditChain(entries).ok).toBe(false)
 
     const edited = entries.map((entry, index) => index === 1 ? { ...(entry as object), callId: 'forged' } : entry)
-    expect(verifyAuditChain(edited)).toMatchObject({ ok: false, brokenAt: 1, reason: expect.stringContaining('hash') })
-    expect(verifyAuditChain([entries[0], entries[2]])).toMatchObject({ ok: false, brokenAt: 1 })
-    expect(verifyAuditChain([entries[1], entries[0]])).toMatchObject({ ok: false, brokenAt: 0 })
-    expect(verifyAuditChain(parseAuditLines(`${lines[0]}\n{oops\n`))).toMatchObject({ ok: false, brokenAt: 1 })
+    expect(verifyAuditChain(edited, key)).toMatchObject({ ok: false, brokenAt: 1, reason: expect.stringContaining('hash') })
+    expect(verifyAuditChain([entries[0], entries[2]], key)).toMatchObject({ ok: false, brokenAt: 1 })
+    expect(verifyAuditChain([entries[1], entries[0]], key)).toMatchObject({ ok: false, brokenAt: 0 })
+    expect(verifyAuditChain(parseAuditLines(`${lines[0]}\n{oops\n`), key)).toMatchObject({ ok: false, brokenAt: 1 })
 
     writeFileSync(log.file('s'), `${lines[0]}\n${lines[2]}\n`)
     expect((await new AuditLog(join(log.directory)).read('s')).verification.ok).toBe(false)
@@ -87,7 +92,76 @@ describe('audit log chain', () => {
   })
 })
 
+describe('keyed audit chain (P2 hardening)', () => {
+  it('detects a tail truncation (poc5)', async () => {
+    const dir = temp()
+    const log = new AuditLog(dir)
+    await log.append('s1', { kind: 'tool-call', tool: 'browser_snapshot' })
+    await log.append('s1', { kind: 'tool-call', tool: 'browser_type', url: 'https://evil.example/' })
+    await log.append('s1', { kind: 'result', tool: 'browser_type', outcome: 'ok' })
+    const lines = readFileSync(log.file('s1'), 'utf8').trim().split('\n')
+    writeFileSync(log.file('s1'), `${lines[0]}\n`)
+    const out = await new AuditLog(dir).read('s1')
+    expect(out.verification).toMatchObject({ ok: false, reason: expect.stringMatching(/truncated|rewritten/u) })
+    // A later append after the truncation must not paper over it.
+    await new AuditLog(dir).append('s1', { kind: 'tool-call', tool: 'browser_click' })
+    expect((await new AuditLog(dir).read('s1')).verification.ok).toBe(false)
+  })
+
+  it('detects a rewrite re-hashed with the public hash function (poc5)', async () => {
+    const dir = temp()
+    const log = new AuditLog(dir)
+    await log.append('s1', { kind: 'tool-call', tool: 'browser_snapshot' })
+    await log.append('s1', { kind: 'tool-call', tool: 'browser_type', url: 'https://evil.example/' })
+    await log.append('s1', { kind: 'result', tool: 'browser_type', outcome: 'ok' })
+    const lines = readFileSync(log.file('s1'), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>)
+    let prev = AUDIT_GENESIS_HASH
+    const forged = [lines[0], { ...lines[1], tool: 'browser_scroll', url: undefined }, lines[2]].map((entry, index) => {
+      const { hash: _hash, ...body } = { ...entry, seq: index + 1, prevHash: prev }
+      const hash = auditEntryHash(body)
+      prev = hash
+      return JSON.stringify({ ...body, hash })
+    })
+    writeFileSync(log.file('s1'), `${forged.join('\n')}\n`)
+    expect((await new AuditLog(dir).read('s1')).verification.ok).toBe(false)
+  })
+
+  it('keeps legacy unkeyed logs readable and flags them', async () => {
+    const dir = temp()
+    let prev = AUDIT_GENESIS_HASH
+    const legacy = [1, 2].map((seq) => {
+      const body = { seq, ts: 't', kind: 'tool-call', prevHash: prev }
+      const hash = auditEntryHash(body)
+      prev = hash
+      return JSON.stringify({ ...body, hash })
+    })
+    const log = new AuditLog(dir)
+    await log.append('other', { kind: 'tool-call' })
+    writeFileSync(log.file('legacy'), `${legacy.join('\n')}\n`)
+    expect((await log.read('legacy')).verification).toEqual({ ok: true, count: 2, unkeyed: true })
+    // Continuing a legacy file switches to keyed entries and stays verifiable.
+    await log.append('legacy', { kind: 'result' })
+    expect((await new AuditLog(dir).read('legacy')).verification).toEqual({ ok: true, count: 3 })
+  })
+
+  it('keeps the chain key private', async () => {
+    const dir = temp()
+    const log = new AuditLog(dir)
+    await log.append('s', { kind: 'tool-call' })
+    if (process.platform !== 'win32') expect(statSync(join(dir, AUDIT_KEY_FILE)).mode & 0o777).toBe(0o600)
+  })
+})
+
 describe('audit masking', () => {
+  it('masks clipboard html and printable or trusted key presses (poc1 §4)', () => {
+    const masked = maskAuditArgs({ action: 'write', text: 'secret-text', html: '<b>card 4111 1111 1111 1111</b>' })
+    expect(JSON.stringify(masked)).not.toMatch(/4111|secret/u)
+    expect(maskAuditArgs({ key: 'h', trusted: true })).toEqual({ key: { masked: true, length: 1 }, trusted: true })
+    expect(maskAuditArgs({ key: 'h' })).toEqual({ key: { masked: true, length: 1 } })
+    expect(maskAuditArgs({ key: 'Enter' })).toEqual({ key: 'Enter' })
+    expect(maskAuditArgs({ key: 'Tab', trusted: true })).toEqual({ key: { masked: true, length: 3 }, trusted: true })
+  })
+
   it('never keeps typed text, dialog answers, code, or upload paths', () => {
     const masked = maskAuditArgs({
       index: 7,

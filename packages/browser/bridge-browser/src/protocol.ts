@@ -45,6 +45,13 @@ export const BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD = 'bridge.injectBrowserSnapsh
  */
 export const BRIDGE_TAINT_CLEAR_METHOD = 'bridge.clearSessionTaint'
 
+/**
+ * Internal RPC the extension sends when page text enters a session outside a
+ * tool result (a selection attached to a prompt): the bridge taints the
+ * session. Only ever raises the restriction. Answered by the bridge itself.
+ */
+export const BRIDGE_TAINT_MARK_METHOD = 'bridge.markSessionTaint'
+
 /** Internal RPC used by the panel to permanently delete one session's durable storage. */
 export const BRIDGE_SESSION_PURGE_METHOD = 'bridge.session.purge'
 
@@ -721,8 +728,15 @@ export type ServerFrame =
   | { t: 'respond.result'; id: string; ok: false; error: { code: string; message: string } }
   /** One bridge-owned event envelope projected from Remote streams and waterfalls. */
   | { t: 'event'; frame: { rpcId: string; method: string; payload: unknown } }
-  /** A model-requested browser action to execute in the user-controlled tab. */
-  | { t: 'tool.call'; id: string; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string }
+  /**
+   * A model-requested browser action to execute in the user-controlled tab.
+   * `tainted: true` means the Host holds this session (or an ancestor it was
+   * spawned or forked from) tainted by untrusted web content; the extension
+   * must apply its taint rules even when it has no taint record of its own
+   * for this session id (a subagent's first call). Absent means "no Host
+   * taint known", never "untainted" (the extension's own record still counts).
+   */
+  | { t: 'tool.call'; id: string; name: string; args: Record<string, unknown>; expiresAt: number; sessionId?: string; tainted?: true }
   /** Withdraw a tool call that timed out or whose caller was cancelled. */
   | { t: 'tool.cancel'; id: string }
   /** Liveness probe. */
@@ -842,6 +856,7 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
             args: frame.args as Record<string, unknown>,
             expiresAt: frame.expiresAt,
             ...(typeof frame.sessionId === 'string' ? { sessionId: frame.sessionId } : {}),
+            ...(frame.tainted === true ? { tainted: true as const } : {}),
           }
         : undefined
     case 'tool.cancel':

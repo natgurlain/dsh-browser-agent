@@ -67,6 +67,8 @@ export interface ToolCall {
   expiresAt?: number
   /** Owning Agent session, when supplied by a current bridge. */
   sessionId?: string
+  /** The Host holds this session (or an ancestor agent) tainted (protocol `tool.call.tainted`). */
+  tainted?: true
 }
 
 /** The wire answer for one tool call. */
@@ -192,7 +194,15 @@ export interface TabManagementContext {
   policy?: CallPolicyHook
   /** On-page agent overlay (ghost cursor, target outline); best effort. */
   overlay?: ActionOverlay
+  /**
+   * Whether a tab's page is one the agent may not see at all (blocked site,
+   * outside the managed allowlist): browser_list_tabs withholds its title and URL.
+   */
+  tabHidden?: (url: string) => boolean
 }
+
+/** Placeholder for the title and URL of a tab site policy hides. */
+const TAB_HIDDEN = '(hidden by site policy)'
 
 /** What the dispatcher asks of the on-page overlay. Never fails a call. */
 export interface ActionOverlay {
@@ -822,18 +832,51 @@ function stripDuplicateSnapshotPrompt(status: string): string {
   return status.replace(/ Call browser_snapshot again after (?:navigation settles|the page loads|it loads)\.$/, '')
 }
 
+/**
+ * Policy hooks of in-flight page calls, for the snapshot taken after a
+ * navigation they caused (threaded by call object so the long dispatch
+ * signatures stay unchanged).
+ */
+const landingPolicies = new WeakMap<ToolCall, CallPolicyHook>()
+
+/**
+ * Site policy for the page a navigation actually landed on (redirects,
+ * script navigations, and child frames included): undefined when it may be
+ * snapshotted, otherwise the answer to return instead — no page content.
+ */
+function landedPageWithheld(
+  call: ToolCall,
+  frames: TabFrame[],
+  status: string,
+  policy: CallPolicyHook | undefined,
+): ToolAnswer | undefined {
+  if (policy === undefined) return undefined
+  const snapshotCall: ToolCall = { ...call, name: 'browser_snapshot', args: {} }
+  const decision = policy(snapshotCall, callPolicyTargets(snapshotCall, frames))
+  if (decision.kind === 'deny') {
+    return { ok: true, result: { text: `${stripDuplicateSnapshotPrompt(status)}\nThe navigation landed on a blocked site; no page content was captured. ${decision.message}` } }
+  }
+  if (decision.kind === 'force') {
+    return { ok: true, result: { text: `${stripDuplicateSnapshotPrompt(status)}\nThe page it landed on needs the user's approval before it is read (site policy), so no snapshot was captured. Call browser_snapshot to request it.` } }
+  }
+  return undefined
+}
+
 async function snapshotAfterNavigation(
   tabId: number,
   call: ToolCall,
   status: string,
   budget: ContentBudget,
   targetStillAllowed?: () => boolean,
+  policy: CallPolicyHook | undefined = landingPolicies.get(call),
 ): Promise<ToolAnswer | undefined> {
   const prefix = `${stripDuplicateSnapshotPrompt(status)}\n${NAVIGATION_SNAPSHOT_GUIDANCE}`
   const snapshotMaxChars = budget.maxChars - prefix.length - 2
-  if (snapshotMaxChars < 500) return undefined
   const frames = await listTabFrames(tabId, undefined)
   if (targetStillAllowed?.() === false) return targetChanged()
+  const withheld = landedPageWithheld(call, frames, status, policy)
+  if (withheld !== undefined) return withheld
+  if (snapshotMaxChars < 500) return undefined
   const answer = await snapshotAllFrames(
     tabId,
     frames,
@@ -1714,15 +1757,20 @@ async function dispatchTabManagementTool(
     const records = tabs
       .filter((tab): tab is chrome.tabs.Tab & { id: number } => tab.id !== undefined)
       .sort((left, right) => left.windowId - right.windowId || left.index - right.index)
-      .map((tab) => ({
-        tabId: tab.id,
-        windowId: tab.windowId,
-        index: tab.index,
-        active: tab.active,
-        controlled: tab.id === context.controlledTabId,
-        title: tab.title ?? '',
-        url: tabUrl(tab),
-      }))
+      .map((tab) => {
+        // Blocked sites and origins outside the managed allowlist: not even
+        // their title or address reaches the model.
+        const hidden = context.tabHidden?.(tabUrl(tab)) === true
+        return {
+          tabId: tab.id,
+          windowId: tab.windowId,
+          index: tab.index,
+          active: tab.active,
+          controlled: tab.id === context.controlledTabId,
+          title: hidden ? TAB_HIDDEN : tab.title ?? '',
+          url: hidden ? TAB_HIDDEN : tabUrl(tab),
+        }
+      })
     return {
       ok: true,
       result: { text: wrapUntrustedContent(JSON.stringify({ tabs: records }, null, 2), budget.maxChars) },
@@ -2025,6 +2073,8 @@ export async function dispatchToolCall(
   if (isCancelled(call, signal)) return cancelled()
   const decision: CallPolicyDecision = tabManagement.policy?.(call, callPolicyTargets(call, frames)) ?? { kind: 'default' }
   if (decision.kind === 'deny') return policyDenied(decision.message)
+  // A navigation this call causes is judged again on the page it lands on.
+  if (tabManagement.policy !== undefined) landingPolicies.set(call, tabManagement.policy)
   const skipsPrompt = decision.kind === 'trust' || (tabManagement.unrestrictedAccess && decision.kind !== 'force')
   const approvalContext: ApprovalContext = openDialog !== undefined
     ? dialogApprovalContext(openDialog)
@@ -2401,6 +2451,7 @@ export async function dispatchOpenTab(
       status,
       budget ?? { maxItems: 60, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS },
       () => targetStillAllowed(tabId),
+      policy,
     )
     if (snapshot !== undefined) return snapshot
   } catch {

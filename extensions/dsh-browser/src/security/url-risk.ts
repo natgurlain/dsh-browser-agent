@@ -10,6 +10,8 @@
  * @module
  */
 
+import { getDomain } from 'tldts'
+
 /**
  * Why a value was flagged: `long` and `entropy` describe one value;
  * `aggregate` marks a parameter that only looks like data together with its
@@ -45,6 +47,11 @@ export interface UrlAnalysis {
   fragmentFlag?: UrlValueFlag
   /** Flag on the most suspicious path segment. */
   pathFlag?: UrlValueFlag
+  /**
+   * The hostname carries data: a long or token-shaped label below the
+   * registrable domain, or an unusual number of subdomain labels.
+   */
+  hostFlag?: UrlValueFlag
   /** The URL names a username or password (`user:pass@host`). */
   userinfo?: true
   /** The path, query, and fragment together exceed {@link MAX_URL_PAYLOAD} characters. */
@@ -81,6 +88,20 @@ const LETTER_POOL_MIN_VOWELS = 0.3
 export const MAX_URL_PAYLOAD = 512
 /** Canonical UUID: common in REST paths and ids, so it is not judged on its own. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+/** Subdomain labels (below the registrable domain) beyond which a host is judged to carry data. */
+const MAX_SUBDOMAIN_LABELS = 4
+/** Subdomain characters beyond which a host is judged to carry data. */
+const MAX_SUBDOMAIN_CHARS = 48
+/** A single subdomain label this long carries data (DNS allows 63). */
+const LONG_LABEL_LENGTH = 32
+/**
+ * Natural-language words across query/fragment values that flag a URL when
+ * (distinct) spread over at least {@link WORDY_PARAMS} parameters: a sentence chopped
+ * into short `a=the+vault&b=password+is…` values, each below every per-value
+ * threshold. Ordinary filters and tracking parameters carry a few words.
+ */
+const WORDY_WORDS = 12
+const WORDY_PARAMS = 3
 
 /**
  * Parse and annotate a URL for display.
@@ -125,11 +146,22 @@ export function analyzeUrl(value: string): UrlAnalysis | undefined {
       }
     }
   }
+  const hostFlag = flagHost(url.hostname)
+  // Distinct words: `q=` and `oq=` repeating one search do not add up.
+  const wordy = params.filter((param) => wordsIn(param.value).length > 0).length >= WORDY_PARAMS
+    && new Set(params.flatMap((param) => wordsIn(param.value))).size >= WORDY_WORDS
+  if (wordy) {
+    for (const [index, param] of params.entries()) {
+      if (param.flag === undefined && wordsIn(param.value).length > 0) params[index] = { ...param, flag: 'aggregate' }
+    }
+  }
   const userinfo = url.username !== '' || url.password !== ''
   const oversized = path.length + url.search.length + url.hash.length > MAX_URL_PAYLOAD
   const risky = userinfo
     || oversized
     || aggregate
+    || wordy
+    || hostFlag !== undefined
     || pathFlag !== undefined
     || fragmentFlag !== undefined
     || params.some((param) => param.flag !== undefined)
@@ -142,9 +174,37 @@ export function analyzeUrl(value: string): UrlAnalysis | undefined {
     risky,
     ...fragmentFlag === undefined ? {} : { fragmentFlag },
     ...pathFlag === undefined ? {} : { pathFlag },
+    ...hostFlag === undefined ? {} : { hostFlag },
     ...userinfo ? { userinfo: true as const } : {},
     ...oversized ? { oversized: true as const } : {},
   }
+}
+
+/** Natural-language words (letter runs of 2+, lowercased) in one value. */
+function wordsIn(value: string): string[] {
+  return (value.match(/[A-Za-z]{2,}/g) ?? []).map((word) => word.toLowerCase())
+}
+
+/**
+ * Classify the part of a hostname below its registrable domain, which an
+ * attacker's DNS server receives verbatim (no request even needs to succeed).
+ */
+function flagHost(hostname: string): UrlValueFlag | undefined {
+  const host = hostname.toLowerCase().replace(/\.$/, '')
+  if (/^[\d.]+$/.test(host) || host.startsWith('[')) return undefined
+  const domain = getDomain(host, { allowPrivateDomains: true })
+  const sub = domain === null || domain === host ? '' : host.slice(0, -(domain.length + 1))
+  if (sub === '') return undefined
+  const labels = sub.split('.')
+  if (labels.some((label) => label.length >= LONG_LABEL_LENGTH)) return 'long'
+  if (labels.length > MAX_SUBDOMAIN_LABELS || sub.length > MAX_SUBDOMAIN_CHARS) return 'aggregate'
+  for (const label of labels) {
+    if (UUID.test(label)) continue
+    if (runIsToken(longestRun(label)) || flagValue(label) === 'entropy') return 'entropy'
+  }
+  const opaque = opaquePayload(labels)
+  if (opaque.chars >= AGGREGATE_OPAQUE_CHARS && opaque.runs >= AGGREGATE_OPAQUE_RUNS) return 'aggregate'
+  return undefined
 }
 
 /** Whether a URL carries a long or high-entropy query/fragment value. */

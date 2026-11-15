@@ -8,10 +8,17 @@
  *
  * - reads (GET, HEAD, OPTIONS) continue at once;
  * - writes (POST, PUT, PATCH, DELETE, and any other method, which covers form
- *   submissions) continue at once when no agent call is in flight on the tab
- *   (nor ended within {@link AGENT_TURN_GRACE_MS}) — the user is driving;
+ *   submissions) continue at once when the tab is outside an agent turn — the
+ *   user is driving. A turn starts with an agent call on the tab and lasts
+ *   until the extension sees the turn end (`turn/end`, or a takeover) plus
+ *   {@link AGENT_TURN_GRACE_MS}; unseen, it lasts {@link AGENT_TURN_MAX_IDLE_MS}
+ *   after the last call, so page timers cannot simply wait out a fixed grace;
+ * - tabs the controlled tab opens during a turn (Shift/Ctrl-click,
+ *   `target=_blank`, `window.open`) are armed too and share the turn
+ *   ({@link CommitGate.adoptOpened});
  * - writes during an agent turn pause behind an approval card: "This will send
- *   <fields, sensitive ones masked> to <origin/path>". Allow continues the
+ *   <fields> to <origin/path>", listing every field in full (scrollable), with
+ *   sensitive ones in a separate block masked until the user reveals them. Allow continues the
  *   request; anything else (deny, timeout, panel gone, error) fails it with
  *   `BlockedByClient`. Every paused request is settled exactly once.
  *
@@ -20,7 +27,10 @@
  * call is refused instead of running unguarded.
  *
  * Limits (documented, not bugs): WebSocket frames and `navigator.sendBeacon`
- * are not interceptable here; out-of-process iframes (cross-site frames under
+ * are not interceptable here; a write a page timer fires after the turn and
+ * its grace have ended is treated as the user's; a new tab's very first
+ * request can race the gate's attachment (a POST navigation `target=_blank`
+ * form may slip through); out-of-process iframes (cross-site frames under
  * site isolation) and service-worker-initiated requests are not paused by a
  * page-target Fetch session; the debugger shows Chrome's "being debugged" bar;
  * Firefox has no debugger API, so strict mode is unavailable there.
@@ -32,12 +42,21 @@ import type { DebuggerBroker, DebuggerLease } from './debugger-broker.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { approvalBinding, sha256Hex } from '../security/payload-binding.ts'
 
-/** How long after an agent call ends its page writes still count as the agent's. */
+/** How long after the agent's turn ends its page writes still count as the agent's. */
 export const AGENT_TURN_GRACE_MS = 3_000
-/** Longest field value shown on the card before it is shortened. */
-const MAX_VALUE_CHARS = 120
-/** Longest raw text body shown on the card. */
-const MAX_TEXT_BODY_CHARS = 600
+/**
+ * Upper bound on an agent turn the gate has not seen end (no `turn/end`
+ * reached the extension): writes up to this long after the last agent call
+ * still count as the agent's, so a page timer cannot outwait a fixed 3 s.
+ */
+export const AGENT_TURN_MAX_IDLE_MS = 60_000
+/**
+ * Longest raw text body or field value shown on the card. Beyond it the card
+ * says how much was left out, so nothing is ever dropped silently.
+ */
+const MAX_SHOWN_CHARS = 64 * 1024
+/** Most fields listed on the card; the rest are counted, never dropped silently. */
+const MAX_FIELDS = 2_000
 
 const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 const SENSITIVE_FIELD = /pass|pwd|secret|token|auth|session|cookie|card|cc-?num|cvv|cvc|csc|ssn|iban|routing|account.?num|pin\b|otp|2fa|mfa|private|api.?key|credential/i
@@ -68,19 +87,26 @@ function header(headers: Record<string, string> | undefined, name: string): stri
   return key === undefined ? '' : headers[key] ?? ''
 }
 
-function shorten(value: string): string {
-  const inline = value.replace(/\s+/g, ' ')
-  return inline.length <= MAX_VALUE_CHARS ? inline : `${inline.slice(0, MAX_VALUE_CHARS - 1)}…`
+function capped(value: string): string {
+  return value.length <= MAX_SHOWN_CHARS
+    ? value
+    : `${value.slice(0, MAX_SHOWN_CHARS)}… (${value.length - MAX_SHOWN_CHARS} more characters not shown)`
 }
 
-function field(name: string, value: string): { line: string; sensitive: boolean } {
-  const sensitive = SENSITIVE_FIELD.test(name)
-  return { line: `${name} = ${sensitive ? '•••• (masked)' : JSON.stringify(shorten(value))}`, sensitive }
+interface FieldLine { line: string; sensitive: boolean }
+
+function field(name: string, value: string): FieldLine {
+  return { line: `${name} = ${JSON.stringify(capped(value))}`, sensitive: SENSITIVE_FIELD.test(name) }
 }
 
-/** Human-readable body summary with sensitive fields masked. */
+/**
+ * Human-readable body summary. `text` lists every ordinary field in full;
+ * `sensitiveText` lists the sensitive ones (password, card, token…), which
+ * the card shows masked until the user reveals them.
+ */
 export interface BodySummary {
   text: string
+  sensitiveText?: string
   fields: number
   sensitive: boolean
 }
@@ -88,7 +114,7 @@ export interface BodySummary {
 /**
  * Summarize a request body for the approval card: form, JSON, and multipart
  * bodies become `name = value` lines (sensitive names masked); other text is
- * shown shortened; binary or unavailable bodies are described by size.
+ * shown in full (up to a stated cap); binary or unavailable bodies are described by size.
  */
 export function summarizeRequestBody(request: PausedRequest['request']): BodySummary {
   const contentType = header(request.headers, 'content-type').toLowerCase()
@@ -102,14 +128,14 @@ export function summarizeRequestBody(request: PausedRequest['request']): BodySum
       sensitive: request.hasPostData === true,
     }
   }
-  const lines: Array<{ line: string; sensitive: boolean }> = []
+  const lines: FieldLine[] = []
   if (contentType.includes('application/x-www-form-urlencoded')) {
     for (const [name, value] of new URLSearchParams(body)) lines.push(field(name, value))
   } else if (contentType.includes('json') || /^\s*[[{]/.test(body)) {
     try {
       flattenJson(JSON.parse(body), '', lines, 0)
     } catch {
-      lines.push({ line: shorten(body.slice(0, MAX_TEXT_BODY_CHARS)), sensitive: false })
+      lines.push({ line: capped(body), sensitive: SENSITIVE_FIELD.test(body) })
     }
   } else if (contentType.includes('multipart/form-data')) {
     for (const part of body.split(/\r?\n--/)) {
@@ -121,17 +147,28 @@ export function summarizeRequestBody(request: PausedRequest['request']): BodySum
     }
   } else {
     const printable = /^[\x09\x0a\x0d\x20-\x7e -￿]*$/.test(body)
-    return printable
-      ? { text: shorten(body.slice(0, MAX_TEXT_BODY_CHARS)), fields: 0, sensitive: SENSITIVE_FIELD.test(body) }
-      : { text: `${body.length} bytes of ${contentType || 'binary data'}`, fields: 0, sensitive: false }
+    if (!printable) return { text: `${body.length} bytes of ${contentType || 'binary data'}`, fields: 0, sensitive: false }
+    return SENSITIVE_FIELD.test(body)
+      ? { text: '(raw text body, shown masked below)', sensitiveText: capped(body), fields: 0, sensitive: true }
+      : { text: capped(body), fields: 0, sensitive: false }
   }
   if (lines.length === 0) return { text: '(empty body)', fields: 0, sensitive: false }
-  return { text: lines.map((entry) => entry.line).join('\n'), fields: lines.length, sensitive: lines.some((entry) => entry.sensitive) }
+  const shown = lines.slice(0, MAX_FIELDS)
+  const more = lines.length - shown.length
+  const plain = shown.filter((entry) => !entry.sensitive).map((entry) => entry.line)
+  const secret = shown.filter((entry) => entry.sensitive).map((entry) => entry.line)
+  if (more > 0) plain.push(`… ${more} more field(s) not shown`)
+  if (secret.length > 0) plain.push(`(${secret.length} sensitive field(s) shown masked below)`)
+  return {
+    text: plain.length === 0 ? '(only sensitive fields)' : plain.join('\n'),
+    ...secret.length === 0 ? {} : { sensitiveText: secret.join('\n') },
+    fields: lines.length,
+    sensitive: secret.length > 0,
+  }
 }
 
-function flattenJson(value: unknown, path: string, lines: Array<{ line: string; sensitive: boolean }>, depth: number): void {
-  if (lines.length >= 40) return
-  if (value !== null && typeof value === 'object' && depth < 3) {
+function flattenJson(value: unknown, path: string, lines: FieldLine[], depth: number): void {
+  if (value !== null && typeof value === 'object' && depth < 8) {
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
       flattenJson(child, path === '' ? key : `${path}.${key}`, lines, depth + 1)
     }
@@ -153,13 +190,16 @@ export function commitApprovalPrompt(paused: PausedRequest): ApprovalPrompt {
   return {
     kind: 'action',
     action: 'network_commit',
-    summary: `This will send ${what} to ${destination} (${method}${body.sensitive ? ', includes masked sensitive fields' : ''})`,
+    summary: `This will send ${what} to ${destination} (${method}${body.sensitive ? ', includes sensitive fields: reveal to check them' : ''})`,
     origins: origin === undefined || origin === 'null' ? [] : [origin],
     canTrust: false,
     forced: true,
     perCallOnly: true,
     details: [
       { kind: 'text', value: body.text, masked: false, label: `${method} ${paused.request.url}` },
+      ...body.sensitiveText === undefined
+        ? []
+        : [{ kind: 'text' as const, value: body.sensitiveText, masked: true, label: 'Sensitive fields (masked; reveal to check)' }],
     ],
     binding: approvalBinding({
       action: 'network_commit',
@@ -181,6 +221,10 @@ interface GateTab {
   armed: boolean
   inFlight: number
   lastCallEnd: number
+  /** An agent call ran here and the agent's turn has not been seen to end. */
+  turnOpen: boolean
+  /** Tab that opened this one during an agent turn (its turn covers this tab). */
+  opener?: number
 }
 
 /** Per-tab commit gate over the shared debugger broker. */
@@ -195,7 +239,7 @@ export class CommitGate {
   private tab(tabId: number): GateTab {
     let entry = this.tabs.get(tabId)
     if (entry === undefined) {
-      entry = { armed: false, inFlight: 0, lastCallEnd: Number.NEGATIVE_INFINITY }
+      entry = { armed: false, inFlight: 0, lastCallEnd: Number.NEGATIVE_INFINITY, turnOpen: false }
       this.tabs.set(tabId, entry)
     }
     return entry
@@ -207,8 +251,14 @@ export class CommitGate {
   }
 
   /** An agent call on the tab starts / ends (agent-turn detection). */
-  callStarted(tabId: number): void {
-    this.tab(tabId).inFlight += 1
+  /**
+   * `turn`: the call belongs to an agent session whose turn end the
+   * extension can observe; calls without one (probes) keep only the grace.
+   */
+  callStarted(tabId: number, turn = true): void {
+    const entry = this.tab(tabId)
+    entry.inFlight += 1
+    if (turn) entry.turnOpen = true
   }
 
   callEnded(tabId: number): void {
@@ -217,11 +267,37 @@ export class CommitGate {
     entry.lastCallEnd = this.now()
   }
 
-  /** Whether page writes on the tab currently belong to an agent turn. */
-  agentTurnActive(tabId: number): boolean {
+  /**
+   * The agent's turn ended (or the user took over): from now on only the
+   * short grace applies. Without this signal a turn counts as open for up to
+   * {@link AGENT_TURN_MAX_IDLE_MS} after its last call.
+   */
+  turnEnded(tabId: number): void {
     const entry = this.tabs.get(tabId)
-    if (entry === undefined) return false
-    return entry.inFlight > 0 || this.now() - entry.lastCallEnd < AGENT_TURN_GRACE_MS
+    if (entry === undefined || !entry.turnOpen) return
+    entry.turnOpen = false
+    entry.lastCallEnd = Math.max(entry.lastCallEnd, this.now())
+  }
+
+  /**
+   * A tab was opened by `openerTabId` (Shift/Ctrl-click, `target=_blank`,
+   * `window.open`). When the opener is armed and inside an agent turn, the new
+   * tab belongs to that turn: returns true, and the caller must arm it.
+   */
+  adoptOpened(tabId: number, openerTabId: number): boolean {
+    if (!this.isArmed(openerTabId) || !this.agentTurnActive(openerTabId)) return false
+    this.tab(tabId).opener = openerTabId
+    return true
+  }
+
+  /** Whether page writes on the tab currently belong to an agent turn. */
+  agentTurnActive(tabId: number, seen = new Set<number>()): boolean {
+    const entry = this.tabs.get(tabId)
+    if (entry === undefined || seen.has(tabId)) return false
+    seen.add(tabId)
+    const idle = this.now() - entry.lastCallEnd
+    if (entry.inFlight > 0 || idle < AGENT_TURN_GRACE_MS || (entry.turnOpen && idle < AGENT_TURN_MAX_IDLE_MS)) return true
+    return entry.opener !== undefined && this.agentTurnActive(entry.opener, seen)
   }
 
   /**

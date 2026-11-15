@@ -18,10 +18,21 @@ import type { ApprovalDetail, ApprovalRequest } from '../security/approval.ts'
 /** Whether a notification may allow an approval (`quick`) or must open the card (`review`). */
 export type ApprovalNotificationClass = 'quick' | 'review'
 
+/** Longest summary a notification shows whole; a longer one is never allowable there. */
+export const MAX_NOTIFICATION_SUMMARY = 160
+/** Longest origin list a notification shows whole. */
+const MAX_NOTIFICATION_ORIGINS = 120
+/** Longest (page-authored) tab title quoted in a notification. */
+const MAX_NOTIFICATION_TITLE = 60
+
 /** Classify one approval for the notification surface. */
 export function approvalNotificationClass(request: ApprovalRequest): ApprovalNotificationClass {
   if (request.devTools === true || request.perCallOnly === true || request.forced === true || request.urlRisk === true
     || request.permission !== undefined) return 'review'
+  // Allow is offered only when the notification can show the whole summary
+  // and which site it acts on: never on a truncated or site-less description.
+  if (request.summary.length > MAX_NOTIFICATION_SUMMARY || request.origins.length === 0
+    || request.origins.join(', ').length > MAX_NOTIFICATION_ORIGINS) return 'review'
   for (const detail of request.details ?? []) {
     // A plain, non-risky destination is fully described by the summary.
     if (detail.kind === 'url' && !detail.url.risky && detail.url.userinfo !== true) continue
@@ -57,14 +68,14 @@ export interface ApprovalNotificationCopy {
 export const APPROVAL_NOTIFICATION_COPY: Record<'en' | 'zh', ApprovalNotificationCopy> = {
   en: {
     title: 'Browser action awaiting approval',
-    quickMessage: '{summary}\nAllow it here, or open the assistant to review. Expires in {minutes} min.',
-    reviewMessage: '{summary}\nThis action needs a full review: open the assistant to see it. Expires in {minutes} min.',
+    quickMessage: '{summary}\nOn {site}\nAllow it here, or open the assistant to review. Expires in {minutes} min.',
+    reviewMessage: '{summary}\nOn {site}\nThis action needs a full review: open the assistant to see it. Expires in {minutes} min.',
     buttons: { 'allow-once': 'Allow once', deny: 'Deny', review: 'Review' },
   },
   zh: {
     title: '浏览器操作等待确认',
-    quickMessage: '{summary}\n可在此允许，或打开助手查看详情。{minutes} 分钟内有效。',
-    reviewMessage: '{summary}\n该操作需要完整审阅：请打开助手查看。{minutes} 分钟内有效。',
+    quickMessage: '{summary}\n网站：{site}\n可在此允许，或打开助手查看详情。{minutes} 分钟内有效。',
+    reviewMessage: '{summary}\n网站：{site}\n该操作需要完整审阅：请打开助手查看。{minutes} 分钟内有效。',
     buttons: { 'allow-once': '允许一次', deny: '拒绝', review: '审阅' },
   },
 }
@@ -72,16 +83,25 @@ export const APPROVAL_NOTIFICATION_COPY: Record<'en' | 'zh', ApprovalNotificatio
 /** Build `chrome.notifications.create` options for one approval. */
 export function approvalNotificationOptions(
   request: ApprovalRequest,
-  options: { target: 'chrome' | 'firefox'; iconUrl: string; copy: ApprovalNotificationCopy; minutes: number },
+  options: { target: 'chrome' | 'firefox'; iconUrl: string; copy: ApprovalNotificationCopy; minutes: number; tabTitle?: string },
 ): chrome.notifications.NotificationOptions<true> {
   const buttons = approvalNotificationButtons(request, options.target)
-  const template = approvalNotificationClass(request) === 'quick' ? options.copy.quickMessage : options.copy.reviewMessage
-  const summary = request.summary.length > 160 ? `${request.summary.slice(0, 157)}…` : request.summary
+  const quick = approvalNotificationClass(request) === 'quick'
+  const template = quick ? options.copy.quickMessage : options.copy.reviewMessage
+  // Only a review notification may shorten (it decides nothing).
+  const summary = quick || request.summary.length <= MAX_NOTIFICATION_SUMMARY
+    ? request.summary
+    : `${request.summary.slice(0, MAX_NOTIFICATION_SUMMARY - 3)}…`
+  const origins = request.origins.length === 0 ? '?' : request.origins.join(', ')
+  const title = (options.tabTitle ?? '').replace(/\s+/g, ' ').trim()
+  const site = title === ''
+    ? origins
+    : `${origins} (tab "${title.length > MAX_NOTIFICATION_TITLE ? `${title.slice(0, MAX_NOTIFICATION_TITLE - 1)}…` : title}")`
   return {
     type: 'basic',
     iconUrl: options.iconUrl,
     title: options.copy.title,
-    message: template.replace('{summary}', summary).replace('{minutes}', String(Math.max(1, Math.round(options.minutes)))),
+    message: template.replace('{summary}', () => summary).replace('{site}', () => site).replace('{minutes}', String(Math.max(1, Math.round(options.minutes)))),
     // Firefox rejects `requireInteraction` and `buttons`.
     ...(options.target === 'chrome'
       ? { requireInteraction: true, buttons: buttons.map((button) => ({ title: options.copy.buttons[button] })) }

@@ -31,7 +31,10 @@ export const CONTENT_FREE_TOOLS: ReadonlySet<string> = new Set([
 export interface TaintRecord {
   /** Origins whose content entered the session (empty when unknown, e.g. tab titles). */
   sources: string[]
-  /** Origin of the most recent page read, when known. */
+  /**
+   * Origin of the most recent page read, when known. Informational only: no
+   * exemption keys on it (see {@link onlySourceIs}).
+   */
   lastReadOrigin?: string
   /** First tool (or 'snapshot-injection') that tainted the session. */
   firstTool: string
@@ -150,6 +153,28 @@ export interface TaintCallFacts {
 }
 
 /**
+ * Whether data the session read can only have come from `origin`: every
+ * source is that origin. Writing it back there (typing a reply into the mail
+ * the session read, searching the site it read) moves nothing off-site. An
+ * unknown or mixed source set never qualifies, and the most recently read page
+ * is deliberately not enough — one plain navigation to an attacker page must
+ * not make that page the exempt sink for everything read before.
+ */
+export function onlySourceIs(taint: TaintRecord, origin: string | undefined): boolean {
+  return origin !== undefined && taint.sources.length > 0 && taint.sources.every((source) => source === origin)
+}
+
+/** Whether a `browser_press` call types characters (rather than a navigation or editing key). */
+function pressTypes(args: Record<string, unknown>): boolean {
+  if (args.trusted === true) return true
+  const key = typeof args.key === 'string' ? args.key : ''
+  if (typeof args.text === 'string' && args.text !== '') return true
+  // A printable key is one character (after any modifiers, `Shift+a`).
+  const base = key.split('+').at(-1) ?? ''
+  return [...base].length === 1 || [...key].length === 1
+}
+
+/**
  * Reasons a call needs a fresh approval because the session is tainted, or an
  * empty list. Deterministic: the same call and record always give the same
  * answer, so the approval can be recomputed and compared after it resolves.
@@ -157,23 +182,43 @@ export interface TaintCallFacts {
 export function taintForcedReasons(facts: TaintCallFacts, taint: TaintRecord | undefined): string[] {
   if (taint === undefined) return []
   const reasons: string[] = []
+  const typingInto = (what: string): void => {
+    if (!onlySourceIs(taint, facts.targetOrigin)) {
+      reasons.push(`The session has read untrusted page content from ${describeSources(taint)}; ${what} into ${facts.targetOrigin ?? 'an unknown origin'} needs your approval.`)
+    }
+  }
   switch (facts.name) {
     case 'browser_navigate':
     case 'browser_open_tab': {
       const raw = typeof facts.args.url === 'string' ? facts.args.url : ''
       const url = analyzeUrl(raw)
-      if (url !== undefined && url.risky && url.origin !== taint.lastReadOrigin) {
-        reasons.push(`The session has read untrusted page content, and this URL on another origin (${url.origin}) carries data in its path, query, or fragment.`)
+      if (url !== undefined && url.risky && !onlySourceIs(taint, url.origin)) {
+        reasons.push(`The session has read untrusted page content from ${describeSources(taint)}, and this URL (${url.origin}) carries data in its host, path, query, or fragment.`)
       }
       break
     }
-    case 'browser_type':
     case 'browser_clipboard':
-      if (facts.name === 'browser_clipboard' && facts.args.action === 'write') {
+      if (facts.args.action === 'write') {
         reasons.push('The session has read untrusted page content; writing to the system clipboard needs your approval.')
-      } else if (facts.targetOrigin === undefined || !taint.sources.includes(facts.targetOrigin)) {
-        reasons.push(`The session has read untrusted page content from ${describeSources(taint)}; typing into ${facts.targetOrigin ?? 'an unknown origin'} needs your approval.`)
+      } else {
+        typingInto('pasting')
       }
+      break
+    case 'browser_type':
+      typingInto('typing')
+      break
+    case 'browser_press':
+      if (pressTypes(facts.args)) typingInto('typing keys')
+      break
+    case 'browser_dialog':
+      if (typeof facts.args.promptText === 'string' && facts.args.promptText !== '') typingInto('answering a dialog prompt')
+      break
+    case 'browser_console_eval':
+      reasons.push('The session has read untrusted page content; running JavaScript in the page (which can send data anywhere) needs your approval.')
+      break
+    case 'browser_devtools_set_element_attribute':
+    case 'browser_devtools_set_element_style':
+      reasons.push('The session has read untrusted page content; changing element attributes or styles (which can load URLs carrying data) needs your approval.')
       break
     case 'browser_save_pdf':
       reasons.push('The session has read untrusted page content; writing a file into the workspace needs your approval.')

@@ -15,12 +15,18 @@
  * - `setSandboxMode` appends a durable `sandbox/mode` event, and the user's
  *   previous override could not be restored exactly on clear.
  *
- * Allowed while tainted: read-only file tools, planning/question tools, and the
- * `browser_*` tools (the extension gates those itself with its own taint
- * rules). Everything else — shell, file writes, network fetches, delegation
- * (a child agent would not inherit the taint), schedules, MCP and other plugin
+ * Allowed while tainted: planning/question tools, read-only file tools scoped
+ * to the session's own workspace (`read`, `read_image`, `glob`, `grep`), and
+ * the `browser_*` tools (the extension gates those itself with its own taint
+ * rules; calls of a tainted session carry `tainted: true` on the wire).
+ * Everything else — shell, file writes, network fetches (`web_fetch`,
+ * `web_search`), delegation, schedules, MCP (`mcp__*`) and other plugin
  * tools — is denied with a message that tells the model how the user can lift
  * the restriction.
+ *
+ * Lineage: taint follows subagents and forks both ways (see
+ * {@link SessionTaintRegistry}). Any browser result taints, failed ones
+ * included: error text can quote the page.
  *
  * State is in memory: a Host restart forgets the taint (the extension's own
  * taint, persisted in chrome.storage.session, still applies on the browser
@@ -33,14 +39,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { BrowserHostApi, HostRpcCall, HostRpcResult } from './host-api.ts'
 import { isRecord } from './host-api.ts'
-import { BRIDGE_TAINT_CLEAR_METHOD } from './protocol.ts'
+import { realpathSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD } from './protocol.ts'
 
 /** Tools a tainted session may still run (read-only or user-facing). */
 export const TAINT_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
-  'read',
-  'read_image',
-  'glob',
-  'grep',
   'todo_write',
   'ask_user_question',
   'get_goal',
@@ -59,6 +63,19 @@ export const TAINT_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'session_trace',
 ])
 
+/**
+ * File-reading tools a tainted session may run only on paths inside its own
+ * workspace (the session's `cwd`): a page must not steer the model into
+ * reading `~/.ssh` or another repository and smuggling it out through a
+ * browser action. Maps each tool to the argument naming its path.
+ */
+export const TAINT_WORKSPACE_READ_TOOLS: ReadonlyMap<string, { arg: string; optional: boolean }> = new Map([
+  ['read', { arg: 'file_path', optional: false }],
+  ['read_image', { arg: 'file_path', optional: false }],
+  ['glob', { arg: 'path', optional: true }],
+  ['grep', { arg: 'path', optional: true }],
+])
+
 /** Browser tool results that never quote a page. Mirrors the extension's list. */
 const CONTENT_FREE_TOOLS: ReadonlySet<string> = new Set([
   'browser_devtools_network',
@@ -66,14 +83,68 @@ const CONTENT_FREE_TOOLS: ReadonlySet<string> = new Set([
   'browser_close_tab',
 ])
 
-/** Whether a tool may run in a tainted session. */
+/** Whether a tool may run in a tainted session (path-scoped reads: see {@link workspaceReadDenial}). */
 export function toolAllowedWhileTainted(name: string): boolean {
-  return TAINT_ALLOWED_TOOLS.has(name) || name.startsWith('browser_')
+  return TAINT_ALLOWED_TOOLS.has(name) || TAINT_WORKSPACE_READ_TOOLS.has(name) || name.startsWith('browser_')
 }
 
-/** Whether a successful tool result taints its session. */
-export function resultTaintsSession(name: string, isError: boolean): boolean {
-  return !isError && name.startsWith('browser_') && !CONTENT_FREE_TOOLS.has(name)
+/**
+ * Whether a tool result taints its session. Failed browser calls taint too:
+ * their error text can quote the page (an open dialog's message, a field's
+ * validation error). A failure that never reached a page costs only a
+ * needless Clear; a missed taint costs data.
+ * @param name - tool name.
+ * @param _isError - ignored (kept for call-site compatibility).
+ */
+export function resultTaintsSession(name: string, _isError?: boolean): boolean {
+  return name.startsWith('browser_') && !CONTENT_FREE_TOOLS.has(name)
+}
+
+/**
+ * Denial reason when a path-scoped read leaves the session workspace, or
+ * undefined when it stays inside. Fails closed: no workspace, a missing or
+ * non-string path, `~`, or a glob pattern that climbs out all deny. Symlinks
+ * are resolved on the longest existing prefix.
+ * @param name - tool name (one of {@link TAINT_WORKSPACE_READ_TOOLS}).
+ * @param args - the call arguments.
+ * @param workspace - the session's absolute working directory, if known.
+ */
+export function workspaceReadDenial(name: string, args: unknown, workspace: string | undefined): string | undefined {
+  const spec = TAINT_WORKSPACE_READ_TOOLS.get(name)
+  if (spec === undefined) return undefined
+  const deny = (why: string): string => `Tool "${name}" is limited to this session's workspace while the session holds untrusted web page content (${why}). `
+    + 'The user can lift the restriction with "Clear" on the untrusted-content banner in the browser panel. Do not retry outside the workspace.'
+  if (workspace === undefined || !isAbsolute(workspace)) return deny('the session has no workspace directory')
+  const record = typeof args === 'object' && args !== null && !Array.isArray(args) ? args as Record<string, unknown> : {}
+  const pattern = record.pattern
+  if (name === 'glob' && typeof pattern === 'string'
+    && (isAbsolute(pattern) || pattern.startsWith('~') || /(?:^|[\\/])\.\.(?:[\\/]|$)/u.test(pattern))) {
+    return deny('the pattern leaves the workspace')
+  }
+  const raw = record[spec.arg]
+  if (raw === undefined && spec.optional) return undefined
+  if (typeof raw !== 'string' || raw.trim() === '') return deny('no path was given')
+  if (raw.startsWith('~')) return deny('home-relative paths are not allowed')
+  const root = realPathOf(workspace)
+  const target = realPathOf(resolve(workspace, raw))
+  const rel = relative(root, target)
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)) ? undefined : deny(`${raw} is outside the workspace`)
+}
+
+/** Resolve symlinks on the longest existing prefix of a path. */
+function realPathOf(path: string): string {
+  let current = resolve(path)
+  const rest: string[] = []
+  for (;;) {
+    try {
+      return join(realpathSync(current), ...rest.reverse())
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return resolve(path)
+      rest.push(basename(current))
+      current = parent
+    }
+  }
 }
 
 export interface TaintEntry {
@@ -81,26 +152,90 @@ export interface TaintEntry {
   since: number
 }
 
-/** In-memory taint per agent session id. */
+/** Longest parent chain followed (cycles, runaway delegation). */
+const MAX_LINEAGE_DEPTH = 32
+
+/**
+ * In-memory taint per agent session id, plus session lineage (child → parent)
+ * so taint cannot be laundered through subagents or forks:
+ *
+ * - a session that becomes tainted taints every ancestor at once, so a parent
+ *   is restricted before the child's (attacker-steered) answer reaches it, and
+ *   its other children follow through it;
+ * - a session counts as tainted while any ancestor is ({@link isTainted});
+ * - a child linked under a tainted parent gets its own copy of the taint, so
+ *   clearing the parent alone does not clear the child.
+ */
 export class SessionTaintRegistry {
   private readonly entries = new Map<string, TaintEntry>()
+  private readonly parents = new Map<string, string>()
 
   constructor(private readonly now: () => number = Date.now) {}
 
+  /** Mark a session and every ancestor tainted. */
   mark(sessionId: string, tool: string): void {
+    this.markOne(sessionId, tool)
+    for (const ancestor of this.ancestors(sessionId)) this.markOne(ancestor, `${tool} (in subagent ${sessionId})`)
+  }
+
+  private markOne(sessionId: string, tool: string): void {
     if (!this.entries.has(sessionId)) this.entries.set(sessionId, { firstTool: tool, since: this.now() })
   }
 
+  /**
+   * Record that `child` was created by (or forked from) `parent`. A child of a
+   * tainted session starts tainted; a tainted child taints the parent chain.
+   * The first link wins; a link that would close a cycle is ignored.
+   */
+  link(child: string, parent: string): void {
+    if (child === parent || this.parents.has(child) || this.ancestors(parent).includes(child)) return
+    this.parents.set(child, parent)
+    const inherited = this.effective(parent)
+    if (inherited !== undefined) this.markOne(child, `${inherited.firstTool} (inherited from ${parent})`)
+    const own = this.entries.get(child)
+    if (own !== undefined) this.mark(child, own.firstTool)
+  }
+
+  /** The recorded parent session, if any. */
+  parentOf(sessionId: string): string | undefined {
+    return this.parents.get(sessionId)
+  }
+
+  /** Ancestors, nearest first. */
+  ancestors(sessionId: string): string[] {
+    const chain: string[] = []
+    let current = this.parents.get(sessionId)
+    while (current !== undefined && chain.length < MAX_LINEAGE_DEPTH && current !== sessionId && !chain.includes(current)) {
+      chain.push(current)
+      current = this.parents.get(current)
+    }
+    return chain
+  }
+
+  /** Clear only this session's own taint (a tainted ancestor still applies). */
   clear(sessionId: string): boolean {
     return this.entries.delete(sessionId)
   }
 
+  /** This session's own entry. */
   get(sessionId: string): TaintEntry | undefined {
     return this.entries.get(sessionId)
   }
 
+  /** The session's own entry, else the nearest tainted ancestor's. */
+  effective(sessionId: string): TaintEntry | undefined {
+    const own = this.entries.get(sessionId)
+    if (own !== undefined) return own
+    for (const ancestor of this.ancestors(sessionId)) {
+      const entry = this.entries.get(ancestor)
+      if (entry !== undefined) return entry
+    }
+    return undefined
+  }
+
+  /** Whether the session or any ancestor is tainted. */
   isTainted(sessionId: string): boolean {
-    return this.entries.has(sessionId)
+    return this.effective(sessionId) !== undefined
   }
 }
 
@@ -111,25 +246,63 @@ export function taintDenialReason(name: string): string {
     + '("Clear" on the untrusted-content banner). Do not retry; tell the user what you need and why.'
 }
 
+/** The slice of a dsh Agent the taint guard reads. */
+interface AgentLike {
+  id: unknown
+  session?: { header?: { cwd?: unknown; parentSession?: unknown } }
+}
+
+interface GuardExec {
+  name: string
+  arguments?: unknown
+  agent?: AgentLike
+}
+
 interface ToolsWithGuard {
-  guard?: (guard: (exec: { name: string; agent?: { id: unknown } }) => string | undefined) => () => void
+  guard?: (guard: (exec: GuardExec) => string | undefined) => () => void
+}
+
+interface AgentsWithInitiator {
+  currentInitiator?: () => { id: unknown } | undefined
+}
+
+/** Learn a session's parent from its durable header (subagent children). */
+function linkFromHeader(registry: SessionTaintRegistry, agent: AgentLike | undefined): void {
+  const parent = agent?.session?.header?.parentSession
+  if (agent !== undefined && typeof parent === 'string' && parent !== '') registry.link(String(agent.id), parent)
 }
 
 /**
- * Observe browser tool results and guard every other tool of a tainted
- * session. Returns the disposer for both.
+ * Observe browser tool results and agent creation, and guard every other tool
+ * of a tainted session. Returns the disposer for all of them.
  */
 export function installSessionTaint(ctx: Context, registry: SessionTaintRegistry): () => void {
   const disposers: Array<() => void> = []
-  disposers.push(ctx.on('tools/result', (exec, result) => {
+  // Lineage: a subagent's header names its creator; a fork or child created
+  // while another agent drives has that agent as its initiator.
+  disposers.push(ctx.on('agent/created', (payload: { agent: AgentLike }) => {
+    linkFromHeader(registry, payload.agent)
+    try {
+      const initiator = (ctx as unknown as { agents?: AgentsWithInitiator }).agents?.currentInitiator?.()
+      if (initiator !== undefined && String(initiator.id) !== String(payload.agent.id)) {
+        registry.link(String(payload.agent.id), String(initiator.id))
+      }
+    } catch { /* outside an initiator scope */ }
+    return undefined
+  }))
+  disposers.push(ctx.on('tools/result', (exec: GuardExec, result: { isError: boolean }) => {
+    linkFromHeader(registry, exec.agent)
     const sessionId = exec.agent === undefined ? undefined : String(exec.agent.id)
     if (sessionId !== undefined && resultTaintsSession(exec.name, result.isError)) registry.mark(sessionId, exec.name)
     return undefined
   }))
-  const denial = (exec: { name: string; agent?: { id: unknown } }): string | undefined => {
+  const denial = (exec: GuardExec): string | undefined => {
     if (exec.agent === undefined) return undefined
-    if (!registry.isTainted(String(exec.agent.id)) || toolAllowedWhileTainted(exec.name)) return undefined
-    return taintDenialReason(exec.name)
+    linkFromHeader(registry, exec.agent)
+    if (!registry.isTainted(String(exec.agent.id))) return undefined
+    if (!toolAllowedWhileTainted(exec.name)) return taintDenialReason(exec.name)
+    const cwd = exec.agent.session?.header?.cwd
+    return workspaceReadDenial(exec.name, exec.arguments, typeof cwd === 'string' ? cwd : undefined)
   }
   const tools = ctx.tools as unknown as ToolsWithGuard | undefined
   if (typeof tools?.guard === 'function') {
@@ -138,7 +311,7 @@ export function installSessionTaint(ctx: Context, registry: SessionTaintRegistry
     // Older registries: the pre-execute waterfall still denies (weaker only
     // in that an earlier listener could short-circuit it).
     disposers.push(ctx.on('tools/pre-execute', async (exec, next) => {
-      const reason = denial(exec)
+      const reason = denial(exec as unknown as GuardExec)
       return reason === undefined ? next() : { kind: 'deny', reason }
     }))
   }
@@ -153,8 +326,8 @@ function clearPayload(payload: unknown): { sessionId?: string } | undefined {
 }
 
 /**
- * Serve {@link BRIDGE_TAINT_CLEAR_METHOD} at the bridge (never forwarded to
- * the Host). Clearing only lowers this bridge's own restriction, and only the
+ * Serve {@link BRIDGE_TAINT_CLEAR_METHOD} and {@link BRIDGE_TAINT_MARK_METHOD}
+ * at the bridge (never forwarded to the Host). Clearing only lowers this bridge's own restriction, and only the
  * extension panel's explicit Clear sends it.
  */
 export function withTaintMethods(
@@ -164,6 +337,16 @@ export function withTaintMethods(
 ): BrowserHostApi {
   return {
     call: async (call: HostRpcCall): Promise<HostRpcResult> => {
+      if (call.method === BRIDGE_TAINT_MARK_METHOD) {
+        // Marking only raises the restriction, so any session id is accepted
+        // without the ownership check (an unknown id taints nothing live).
+        const payload = clearPayload(call.payload)
+        if (payload?.sessionId === undefined) {
+          return { ok: false, error: { code: 'bad-request', message: 'sessionId must be a non-empty string', details: {} } }
+        }
+        registry.mark(payload.sessionId, 'selection-attachment')
+        return { ok: true, value: { marked: true } }
+      }
       if (call.method !== BRIDGE_TAINT_CLEAR_METHOD) return api.call(call)
       const payload = clearPayload(call.payload)
       if (payload === undefined) {

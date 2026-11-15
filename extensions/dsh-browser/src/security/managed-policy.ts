@@ -52,7 +52,7 @@ export function parseManagedPolicy(raw: unknown): ManagedPolicy {
     : undefined
   const known = ['siteRules', 'disableDevTools', 'disableUnrestricted', 'disableScreenshots', 'enforceSiteDefaults', 'allowedOrigins']
   return {
-    siteRules: normalizeSiteRules(value.siteRules),
+    siteRules: normalizeSiteRules(value.siteRules, 'managed'),
     disableDevTools: value.disableDevTools === true,
     disableUnrestricted: value.disableUnrestricted === true,
     disableScreenshots: value.disableScreenshots === true,

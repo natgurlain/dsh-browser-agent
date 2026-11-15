@@ -11,7 +11,7 @@
  */
 
 import { originMatchesTrusted } from './trusted-origins.ts'
-import { resolveSiteRule, type SitePolicy, type SiteVerdict } from './site-policy.ts'
+import { resolveSiteRule, SITE_RULES, type SitePolicy, type SiteVerdict } from './site-policy.ts'
 import { taintForcedReasons, type TaintRecord } from './taint.ts'
 
 /** Which origins one call reads, changes, or navigates to. */
@@ -22,6 +22,12 @@ export interface CallPolicyTargets {
   acts: string[]
   /** Destination URL of a navigation or new tab. */
   destination?: string
+  /**
+   * Full URLs of the frames behind `reads` and `acts`, so path-scoped rules
+   * (`github.com/settings`, `intranet.example/hr`) apply to page reads and
+   * actions, not only to navigation targets.
+   */
+  urls?: string[]
   /** Origin of the frame a typing or paste call writes into. */
   typeTargetOrigin?: string
   /**
@@ -83,6 +89,16 @@ function describe(verdict: SiteVerdict): string {
   return `${verdict.pattern} (${source})`
 }
 
+/** Restrictiveness rank: no rule (ordinary approval flow) sits between `ask` and `trusted`. */
+function rank(verdict: SiteVerdict | undefined): number {
+  if (verdict === undefined) return SITE_RULES.indexOf('trusted') - 0.5
+  return SITE_RULES.indexOf(verdict.rule)
+}
+
+function stricterVerdict(left: SiteVerdict | undefined, right: SiteVerdict | undefined): SiteVerdict | undefined {
+  return rank(right) < rank(left) ? right : left
+}
+
 /** Evaluate one call against managed policy, site rules, and taint. */
 export function evaluateCallPolicy(input: CallPolicyInput): CallPolicyDecision {
   const managed = input.managed ?? NO_MANAGED_FLAGS
@@ -108,8 +124,15 @@ export function evaluateCallPolicy(input: CallPolicyInput): CallPolicyDecision {
 
   const reasons: string[] = []
   const verdicts = new Map<string, SiteVerdict | undefined>()
+  // An origin is judged by the strictest verdict over the frame URLs the call
+  // touches there (path-scoped rules), or by the origin alone when none is known.
   const verdictFor = (origin: string): SiteVerdict | undefined => {
-    if (!verdicts.has(origin)) verdicts.set(origin, resolveSiteRule(origin, input.site))
+    if (!verdicts.has(origin)) {
+      const urls = (input.targets.urls ?? []).filter((url) => originOf(url) === origin)
+      verdicts.set(origin, urls.length === 0
+        ? resolveSiteRule(origin, input.site)
+        : urls.map((url) => resolveSiteRule(url, input.site)).reduce(stricterVerdict))
+    }
     return verdicts.get(origin)
   }
   // Path-scoped rules (github.com/settings) need the full URL, not the origin.

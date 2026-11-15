@@ -343,6 +343,7 @@ function mountBridge(
     token: tokenRes.token,
     api: withTaintMethods(fenced, taint, (sessionId, signal) => fenced.allowsSession(sessionId, signal, 'own')),
     sessionScope: fenced,
+    sessionLineage: taint,
     allowedChromeExtensionIds: resolved.allowedChromeExtensionIds,
     forwardedPorts: trustedForwardedPorts(resolved, message => { ctx.logger.warn(message) }),
     toolTimeoutMs: resolved.toolTimeoutMs,

@@ -19,9 +19,23 @@
  * @module @natgurlain/dsh-bridge-browser/src/audit-log
  */
 
-import { createHash } from 'node:crypto'
-import { chmod, mkdir, open, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { chmod, mkdir, open, readFile, rename, writeFile } from 'node:fs/promises'
+import { basename, join } from 'node:path'
+
+/**
+ * Keyed chain (tamper evidence against anyone who can edit the log but not
+ * read the bridge's key): new entries carry `alg: 'hmac-sha256'` and their
+ * `hash` is HMAC-SHA256 under a random 32-byte key kept in
+ * {@link AUDIT_KEY_FILE} (0600) beside the logs, so a rewritten history
+ * cannot be re-hashed with the public {@link auditEntryHash}. After every
+ * append the chain head (`seq`, `hash`) is anchored in `<log>.head` under
+ * the same key, so dropping the tail is detected too. Logs written before
+ * keying (no `alg`) still verify and are reported `unkeyed`.
+ */
+export const AUDIT_KEY_FILE = '.chain-key'
+/** `alg` of keyed entries. */
+export const AUDIT_MAC_ALG = 'hmac-sha256'
 
 /** What one entry records. */
 export type AuditKind = 'tool-call' | 'approval' | 'result' | 'navigation' | 'kill-switch'
@@ -75,6 +89,8 @@ export interface AuditEntry extends AuditEntryInput {
   seq: number
   ts: string
   sessionId?: string
+  /** `hmac-sha256` for keyed entries; absent on legacy sha256 entries. */
+  alg?: typeof AUDIT_MAC_ALG
   prevHash: string
   hash: string
 }
@@ -86,6 +102,8 @@ export interface AuditVerification {
   /** Index (0-based line) of the first entry that breaks the chain. */
   brokenAt?: number
   reason?: string
+  /** Every entry predates keying (plain sha256): edits that re-hash cannot be detected. */
+  unkeyed?: true
 }
 
 /** The export handed to the panel's "Export audit log" button. */
@@ -98,7 +116,7 @@ export interface AuditExport {
 }
 
 /** Argument names whose values never enter the log (only their length). */
-const SENSITIVE_ARG = /^(?:text|prompttext|value|values|expression|code|source|script|body|postdata|headers|paths|files?|password|passcode|passphrase|secret|token|cookies?|authorization|credentials?|otp|pin)$/iu
+const SENSITIVE_ARG = /^(?:text|html|prompttext|value|values|expression|code|source|script|body|postdata|headers|paths|files?|password|passcode|passphrase|secret|token|cookies?|authorization|credentials?|otp|pin)$/iu
 /** Query/fragment parameter names that commonly carry credentials. */
 const RISKY_PARAM = /(?:token|key|secret|code|auth|session|sid|sig|signature|pass|pwd|jwt|nonce|otp|ticket|credential|bearer|state|hash|saml|assertion)/iu
 const OPAQUE_VALUE = /^[A-Za-z0-9+/=_~.-]{20,}$/u
@@ -127,10 +145,33 @@ function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex')
 }
 
-/** The chained hash of one entry (everything but `hash` itself). */
+/** The legacy (unkeyed) chained hash of one entry (everything but `hash` itself). */
 export function auditEntryHash(entry: Omit<AuditEntry, 'hash'> | Record<string, unknown>): string {
   const { hash: _hash, ...rest } = entry as Record<string, unknown>
   return sha256(`${String(rest.prevHash)}\n${canonicalJson(rest)}`)
+}
+
+/** The keyed chained hash of one entry: HMAC-SHA256 over the same text as {@link auditEntryHash}. */
+export function auditEntryMac(key: Buffer, entry: Omit<AuditEntry, 'hash'> | Record<string, unknown>): string {
+  const { hash: _hash, ...rest } = entry as Record<string, unknown>
+  return createHmac('sha256', key).update(`${String(rest.prevHash)}\n${canonicalJson(rest)}`).digest('hex')
+}
+
+/** MAC of one log's head anchor. */
+function headMac(key: Buffer, file: string, seq: number, hash: string): string {
+  return createHmac('sha256', key).update(`dsh-browser-audit-head/v1\n${basename(file)}\n${String(seq)}\n${hash}`).digest('hex')
+}
+
+/** A key file's bytes: 64 hex characters. */
+function parseKey(raw: Buffer): Buffer | undefined {
+  const text = raw.toString('utf8').trim()
+  return /^[0-9a-f]{64}$/u.test(text) ? Buffer.from(text, 'hex') : undefined
+}
+
+function sameHex(a: string, b: string): boolean {
+  const left = Buffer.from(a, 'utf8')
+  const right = Buffer.from(b, 'utf8')
+  return left.length === right.length && timingSafeEqual(left, right)
 }
 
 /**
@@ -228,7 +269,14 @@ function maskValue(value: unknown, depth: number, key?: string): unknown {
   if (typeof value === 'object' && value !== null) {
     if (depth >= MAX_PREVIEW_DEPTH) return { keys: Object.keys(value).length }
     const masked: Record<string, unknown> = {}
-    for (const [childKey, child] of Object.entries(value)) masked[childKey] = maskValue(child, depth + 1, childKey)
+    const record = value as Record<string, unknown>
+    for (const [childKey, child] of Object.entries(value)) {
+      // browser_press: a printable key, or any key sent as trusted typing,
+      // is typed text one character at a time.
+      masked[childKey] = childKey === 'key' && typeof child === 'string' && ([...child].length === 1 || record.trusted === true)
+        ? { masked: true, length: child.length }
+        : maskValue(child, depth + 1, childKey)
+    }
     return masked
   }
   return value
@@ -247,13 +295,16 @@ export function auditResultDigest(result: unknown): string {
 }
 
 /**
- * Check every link of a chain.
+ * Check every link of a chain. Legacy (unkeyed) entries are accepted only
+ * before the first keyed one: a keyed log cannot be downgraded mid-chain.
  * @param entries - parsed lines in file order (non-objects count as broken).
+ * @param key - the chain key; keyed entries fail without it.
  * @returns whether the chain is intact and, if not, where it first breaks.
  */
-export function verifyAuditChain(entries: readonly unknown[]): AuditVerification {
+export function verifyAuditChain(entries: readonly unknown[], key?: Buffer): AuditVerification {
   let previous = AUDIT_GENESIS_HASH
   let expectedSeq: number | undefined
+  let keyed = false
   for (const [index, raw] of entries.entries()) {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
       return { ok: false, count: entries.length, brokenAt: index, reason: 'line is not a JSON object' }
@@ -270,13 +321,81 @@ export function verifyAuditChain(entries: readonly unknown[]): AuditVerification
     if (entry.prevHash !== previous) {
       return { ok: false, count: entries.length, brokenAt: index, reason: 'prevHash does not match the previous entry' }
     }
-    if (auditEntryHash(entry) !== entry.hash) {
+    if (entry.alg === AUDIT_MAC_ALG) {
+      if (key === undefined) {
+        return { ok: false, count: entries.length, brokenAt: index, reason: 'keyed entry but the chain key is missing' }
+      }
+      if (!sameHex(auditEntryMac(key, entry), entry.hash)) {
+        return { ok: false, count: entries.length, brokenAt: index, reason: 'hash does not match the entry content (keyed)' }
+      }
+      keyed = true
+    } else if (entry.alg !== undefined) {
+      return { ok: false, count: entries.length, brokenAt: index, reason: `unknown alg ${JSON.stringify(entry.alg)}` }
+    } else if (keyed) {
+      return { ok: false, count: entries.length, brokenAt: index, reason: 'unkeyed entry after keyed entries' }
+    } else if (auditEntryHash(entry) !== entry.hash) {
       return { ok: false, count: entries.length, brokenAt: index, reason: 'hash does not match the entry content' }
     }
     previous = entry.hash
     expectedSeq = entry.seq + 1
   }
-  return { ok: true, count: entries.length }
+  return entries.length > 0 && !keyed ? { ok: true, count: entries.length, unkeyed: true } : { ok: true, count: entries.length }
+}
+
+/** A log's anchored chain head. */
+interface HeadAnchor {
+  seq: number
+  hash: string
+  mac: string
+}
+
+function parseHead(text: string): HeadAnchor | undefined {
+  try {
+    const value = JSON.parse(text) as Partial<HeadAnchor>
+    return typeof value.seq === 'number' && typeof value.hash === 'string' && typeof value.mac === 'string'
+      ? { seq: value.seq, hash: value.hash, mac: value.mac }
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Check a verified chain against its anchored head.
+ * @param file - the log path (the anchor is bound to its name).
+ * @param entries - the parsed lines.
+ * @param chain - {@link verifyAuditChain}'s result.
+ * @param headText - the head file's text, or undefined when there is none.
+ * @param key - the chain key, if one exists.
+ */
+export function verifyAuditHead(
+  file: string,
+  entries: readonly unknown[],
+  chain: AuditVerification,
+  headText: string | undefined,
+  key: Buffer | undefined,
+): AuditVerification {
+  if (!chain.ok) return chain
+  const keyedEntries = entries.some((entry) => (entry as { alg?: unknown } | null)?.alg === AUDIT_MAC_ALG)
+  if (headText === undefined) {
+    return keyedEntries
+      ? { ok: false, count: entries.length, brokenAt: entries.length, reason: 'the head anchor is missing (log truncated or rewritten?)' }
+      : chain
+  }
+  const head = parseHead(headText)
+  if (head === undefined || key === undefined || !sameHex(headMac(key, file, head.seq, head.hash), head.mac)) {
+    return { ok: false, count: entries.length, brokenAt: entries.length, reason: 'the head anchor does not verify' }
+  }
+  const last = entries.at(-1) as { seq?: unknown; hash?: unknown } | undefined
+  if (last?.seq !== head.seq || last.hash !== head.hash) {
+    return {
+      ok: false,
+      count: entries.length,
+      brokenAt: entries.length,
+      reason: `the log was truncated or rewritten: the anchored head is seq ${String(head.seq)}, the file ends at seq ${String(last?.seq ?? 0)}`,
+    }
+  }
+  return chain
 }
 
 /** Parse JSONL text; an unparsable line is kept as `null` so verification flags it. */
@@ -309,6 +428,7 @@ export class AuditLog {
   private readonly now: () => number
   private readonly heads = new Map<string, Promise<ChainHead>>()
   private dirReady: Promise<void> | undefined
+  private keyReady: Promise<Buffer> | undefined
 
   // Plain fields (no parameter properties) so Node can load this file by type stripping.
   constructor(directory: string, now: () => number = Date.now) {
@@ -332,15 +452,17 @@ export class AuditLog {
     const previous = this.heads.get(file) ?? this.recoverHead(file)
     let written!: AuditEntry
     const next = previous.then(async (head) => {
+      await this.ensureDirectory()
+      const key = await this.ensureKey()
       const body: Omit<AuditEntry, 'hash'> = {
         seq: head.seq + 1,
         ts: new Date(this.now()).toISOString(),
         ...(sessionId === undefined ? {} : { sessionId }),
         ...input,
+        alg: AUDIT_MAC_ALG,
         prevHash: head.hash,
       }
-      written = { ...body, hash: auditEntryHash(body) }
-      await this.ensureDirectory()
+      written = { ...body, hash: auditEntryMac(key, body) }
       const handle = await open(file, 'a', 0o600)
       try {
         await handle.write(`${JSON.stringify(written)}\n`)
@@ -348,6 +470,7 @@ export class AuditLog {
         await handle.close()
       }
       await chmod(file, 0o600)
+      await this.writeHead(file, key, written.seq, written.hash)
       return { seq: written.seq, hash: written.hash }
     })
     // A failed write leaves the head where it was so the chain stays valid.
@@ -367,13 +490,46 @@ export class AuditLog {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
     const entries = parseAuditLines(text)
+    const key = await this.chainKey()
+    const headText = await readFile(`${file}.head`, 'utf8').catch(() => undefined)
     return {
       format: 'dsh-browser-audit/v1',
       sessionId: sessionId ?? null,
       exportedAt: new Date(this.now()).toISOString(),
-      verification: verifyAuditChain(entries),
+      verification: verifyAuditHead(file, entries, verifyAuditChain(entries, key), headText, key),
       entries,
     }
+  }
+
+  /** The chain key, when one exists (never creates it). */
+  async chainKey(): Promise<Buffer | undefined> {
+    if (this.keyReady !== undefined) return this.keyReady.catch(() => undefined)
+    return readFile(join(this.directory, AUDIT_KEY_FILE)).then(parseKey, () => undefined)
+  }
+
+  /** Load the chain key, creating it (0600, exclusive) on first use. */
+  private ensureKey(): Promise<Buffer> {
+    this.keyReady ??= (async () => {
+      const path = join(this.directory, AUDIT_KEY_FILE)
+      try {
+        await writeFile(path, randomBytes(32).toString('hex'), { flag: 'wx', mode: 0o600 })
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      }
+      const key = parseKey(await readFile(path))
+      if (key === undefined) throw new Error(`audit chain key ${path} is malformed`)
+      return key
+    })()
+    const ready = this.keyReady
+    ready.catch(() => { if (this.keyReady === ready) this.keyReady = undefined })
+    return ready
+  }
+
+  /** Atomically anchor a log's head. */
+  private async writeHead(file: string, key: Buffer, seq: number, hash: string): Promise<void> {
+    const temp = `${file}.head.tmp`
+    await writeFile(temp, JSON.stringify({ seq, hash, mac: headMac(key, file, seq, hash) }), { mode: 0o600 })
+    await rename(temp, `${file}.head`)
   }
 
   private ensureDirectory(): Promise<void> {
@@ -387,7 +543,17 @@ export class AuditLog {
     return ready
   }
 
-  private recoverHead(file: string): Promise<ChainHead> {
+  /**
+   * The head to continue from: the verified anchor when there is one (so an
+   * append after a truncation links to the anchored head and the gap stays
+   * visible), else the file's last line.
+   */
+  private async recoverHead(file: string): Promise<ChainHead> {
+    const key = await this.chainKey()
+    const anchor = key === undefined ? undefined : parseHead(await readFile(`${file}.head`, 'utf8').catch(() => ''))
+    if (key !== undefined && anchor !== undefined && sameHex(headMac(key, file, anchor.seq, anchor.hash), anchor.mac)) {
+      return { seq: anchor.seq, hash: anchor.hash }
+    }
     return readFile(file, 'utf8').then((text) => {
       const lines = parseAuditLines(text)
       for (let index = lines.length - 1; index >= 0; index -= 1) {

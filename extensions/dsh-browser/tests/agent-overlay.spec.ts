@@ -51,7 +51,9 @@ describe('AgentOverlay (content)', () => {
     expect(root.querySelector('.outline.on .label')?.textContent).toBe('#1')
     expect(root.querySelector('.typing.on')?.textContent).toBe(OVERLAY_COPY_EN.typing)
     expect(root.querySelector('.cursor.on')).toBeNull()
-    expect(root.querySelector('.layer')?.classList.contains('acting')).toBe(true)
+    // The action window is internal state only: nothing page-observable changes.
+    expect(root.querySelector('.layer')?.classList.contains('acting')).toBe(false)
+    expect((overlay as unknown as { acting: boolean }).acting).toBe(true)
     await overlay.point('click', [document.querySelector('#go')!], undefined)
     expect(root.querySelector('.cursor.on')).not.toBeNull()
     expect(root.querySelector('.typing.on')).toBeNull()

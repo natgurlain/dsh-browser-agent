@@ -15,7 +15,7 @@ export async function runAgentUxSmoke(ctx) {
     browser, page, panel, extensionId, directory, origin, bridge, env, downloadDirectory,
     tool, succeed, settings, waitFor, hostRpc, bridgeRpc, scripted, knownSessions, results, delay,
   } = ctx
-  const { verifyAuditChain, parseAuditLines } = await import(pathToFileURL(join(bridge, 'src/audit-log.ts')).href)
+  const { verifyAuditChain, verifyAuditHead, parseAuditLines } = await import(pathToFileURL(join(bridge, 'src/audit-log.ts')).href)
   const shots = join(directory, 'screenshots')
   await mkdir(shots, { recursive: true })
   const taken = []
@@ -85,8 +85,20 @@ export async function runAgentUxSmoke(ctx) {
   await shot(chat, 'panel-takeover-controls.png')
   // The user changes the page while in control; the agent hears about it on resume.
   await page.evaluate(() => { document.title = 'Edited while the user was in control' })
-  // A real (trusted) click on the page banner's Resume, inside the closed shadow root.
+  // A real (trusted) click on the page banner's Resume, inside the closed shadow
+  // root. It is not authoritative (the page could fake a lookalike): it only
+  // brings up the panel, whose own Resume confirms.
+  // Record the panel opening instead of opening a real side panel (one would
+  // stay connected and take later panel-free approvals).
+  const worker = browser.serviceWorkers()[0]
+  await worker.evaluate(() => {
+    globalThis.smokePanelOpens = 0
+    chrome.sidePanel.open = async () => { globalThis.smokePanelOpens += 1 }
+  })
   await page.mouse.click(resumeButton.x, resumeButton.y)
+  await waitFor(() => worker.evaluate(() => globalThis.smokePanelOpens > 0 || undefined), 'the page banner opens the panel')
+  assert.equal(await panel.evaluate(() => messages.filter(message => message.type === 'agent.pause-state').at(-1)?.state.mode), 'taken-over', 'the page banner alone does not resume')
+  await chat.getByRole('button', { name: 'Resume', exact: true }).click()
   try {
     // The screenshot is a read the user approves on the panel's own card.
     await chat.getByRole('button', { name: 'Allow once', exact: true }).click({ timeout: 30_000 })
@@ -100,7 +112,7 @@ export async function runAgentUxSmoke(ctx) {
     throw new Error(`timeline run did not finish: ${JSON.stringify({ model: scripted.state.requests, pauseLog, toolEvents, types: history.events.map(({ event }) => event.type), rows: await chat.locator('.messages').innerText() })}`, { cause: error })
   }
   assert.equal(scripted.state.sawResumeContext, true, 'the resume delta reached the model')
-  results.push('pause after this step and take over hold the agent\'s next step as pending; the page banner\'s Resume injects what changed, then runs it')
+  results.push('pause after this step and take over hold the agent\'s next step as pending; the page banner\'s Resume opens the panel, whose Resume injects what changed, then runs it')
 
   // ---- 2.6: the step timeline, with audit decisions and a screenshot thumbnail ----
   await waitFor(async () => await chat.locator('.timeline-step.ok').count() === 2, 'two completed timeline steps')
@@ -136,12 +148,18 @@ export async function runAgentUxSmoke(ctx) {
   assert.ok(exported.entries.some(entry => entry.kind === 'approval' && entry.durationMs >= 400), 'hold time recorded')
   const home = env.DSH_HOME
   const file = join(home, 'browser-audit', `s-${session.sessionId}.jsonl`)
+  // The chain is keyed (HMAC) with the bridge's private key file, and its head is anchored.
+  const key = Buffer.from((await readFile(join(home, 'browser-audit', '.chain-key'), 'utf8')).trim(), 'hex')
+  assert.equal((await stat(join(home, 'browser-audit', '.chain-key'))).mode & 0o777, 0o600)
   const lines = parseAuditLines(await readFile(file, 'utf8'))
-  assert.equal(verifyAuditChain(lines).ok, true)
+  assert.equal(verifyAuditChain(lines).ok, false, 'a keyed chain does not verify without its key')
+  const chain = verifyAuditChain(lines, key)
+  assert.equal(chain.ok, true)
+  assert.equal(verifyAuditHead(file, lines, chain, await readFile(`${file}.head`, 'utf8'), key).ok, true)
   assert.equal((await stat(file)).mode & 0o777, 0o600)
   assert.equal((await stat(join(home, 'browser-audit'))).mode & 0o777, 0o700)
   const unscoped = parseAuditLines(await readFile(join(home, 'browser-audit', 'unscoped.jsonl'), 'utf8'))
-  assert.equal(verifyAuditChain(unscoped).ok, true)
+  assert.equal(verifyAuditChain(unscoped, key).ok, true)
   assert.ok(unscoped.length > 50, 'the probe\'s agentless calls are audited too')
   await chat.getByRole('button', { name: 'Cancel', exact: true }).click().catch(() => {})
   results.push('every call is in a 0600 hash-chained audit log the panel exports and the chain verifies')
@@ -187,6 +205,7 @@ async function shadowButtonCenter(page, className) {
  */
 export async function assertKillSwitchAudited({ env, bridge, page, panel, waitFor, delay }) {
   const { verifyAuditChain, parseAuditLines } = await import(pathToFileURL(join(bridge, 'src/audit-log.ts')).href)
+  const key = Buffer.from((await readFile(join(env.DSH_HOME, 'browser-audit', '.chain-key'), 'utf8')).trim(), 'hex')
   // Let the pill's buttons leave the window in which agent actions make them inert.
   await delay(4_500)
   const stop = await waitFor(() => shadowButtonCenter(page, 'stop'), 'controlled-tab pill')
@@ -197,7 +216,7 @@ export async function assertKillSwitchAudited({ env, bridge, page, panel, waitFo
   await waitFor(() => panel.evaluate(() => messages.some(message => message.type === 'status' && message.state === 'connected')), 'reconnect after the pill kill switch')
   const raw = await readFile(join(env.DSH_HOME, 'browser-audit', 'unscoped.jsonl'), 'utf8')
   const entries = parseAuditLines(raw)
-  assert.equal(verifyAuditChain(entries).ok, true)
+  assert.equal(verifyAuditChain(entries, key).ok, true)
   assert.ok(entries.filter(entry => entry.kind === 'kill-switch').length >= 2, 'both kill switches recorded')
   // The smoke answered a prompt() dialog with "Ada"; only its length may be kept.
   assert.doesNotMatch(raw, /Ada/u)

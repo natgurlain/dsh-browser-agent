@@ -17,6 +17,8 @@
  * @module
  */
 
+import { wrapUntrustedContent } from '../security/untrusted.ts'
+
 /** User-visible gate mode. */
 export type PauseMode = 'running' | 'paused' | 'taken-over' | 'resuming'
 
@@ -260,7 +262,15 @@ export interface ResumeDeltaInput {
   pageDelta?: string
   /** False when page-content sharing is off: report only that things changed. */
   shareDetails: boolean
+  /**
+   * The page now open is one the agent may not read (blocked site, outside
+   * the managed allowlist): its address and title are withheld.
+   */
+  redactAfter?: boolean
 }
+
+/** Room for the fenced URL/title change lines of one resume delta. */
+const RESUME_FACTS_MAX_CHARS = 6_000
 
 /** Compact, model-facing summary of what changed while the agent was paused. */
 export function describeResumeDelta(input: ResumeDeltaInput): string {
@@ -273,15 +283,17 @@ export function describeResumeDelta(input: ResumeDeltaInput): string {
   } else {
     const urlChanged = input.before?.url !== input.after.url
     const titleChanged = input.before?.title !== input.after.title
-    if (urlChanged) {
-      lines.push(input.shareDetails
-        ? `- URL changed: ${input.before?.url ?? '(unknown)'} → ${input.after.url ?? '(unknown)'}`
-        : '- The page URL changed.')
-    }
-    if (titleChanged) {
-      lines.push(input.shareDetails
-        ? `- Title changed: "${input.before?.title ?? ''}" → "${input.after.title ?? ''}"`
-        : '- The page title changed.')
+    if ((urlChanged || titleChanged) && input.redactAfter === true) {
+      lines.push('- The tab now shows a site the agent may not read (site policy): its address and title are withheld.')
+    } else if ((urlChanged || titleChanged) && input.shareDetails) {
+      // Titles and URLs are page-authored: they ride inside the untrusted boundary.
+      const changes: string[] = []
+      if (urlChanged) changes.push(`URL changed: ${input.before?.url ?? '(unknown)'} → ${input.after.url ?? '(unknown)'}`)
+      if (titleChanged) changes.push(`Title changed: "${input.before?.title ?? ''}" → "${input.after.title ?? ''}"`)
+      lines.push('- The page changed:', wrapUntrustedContent(changes.join('\n'), RESUME_FACTS_MAX_CHARS))
+    } else {
+      if (urlChanged) lines.push('- The page URL changed.')
+      if (titleChanged) lines.push('- The page title changed.')
     }
     if (!urlChanged && !titleChanged && input.newTabs === 0 && (input.pageDelta ?? '').trim() === '') {
       lines.push('- Nothing changed in the controlled tab.')
