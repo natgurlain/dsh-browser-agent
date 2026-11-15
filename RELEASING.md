@@ -2,8 +2,10 @@
 
 ## Cutting a release
 
-1. Bump `version` in `extensions/dsh-browser/manifest.json`, `manifest.firefox.json`
-   and `package.json` (they must match; `scripts/package-release.mjs` refuses otherwise),
+1. Bump `version` in `extensions/dsh-browser/manifest.json`,
+   `extensions/dsh-browser/manifest.firefox.json` and `extensions/dsh-browser/package.json`
+   (they must match; `scripts/package-release.mjs` refuses otherwise; the root
+   `package.json` version is not checked),
    and the bridge version in `packages/browser/bridge-browser/package.json` if it changed.
 2. Tag and push: `git tag v0.1.5 && git push origin v0.1.5`. A tag containing `-`
    (e.g. `v0.1.5-rc.1`) is published as a prerelease.
@@ -60,6 +62,9 @@ Each asset and `SHA256SUMS` carry a GitHub build-provenance attestation:
 `gh attestation verify <file> --repo natgurlain/dsh-browser-agent`.
 
 ## Installer verification (to be implemented in `scripts/install.sh` / `install.ps1`)
+
+Not done yet: today both installers download the `main` branch archive and build from
+source, and they do not use the release assets or `SHA256SUMS`.
 
 The installer must download from one **pinned tag**, never `releases/latest`:
 

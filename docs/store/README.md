@@ -5,7 +5,7 @@ Everything needed to list the extension on the Chrome Web Store and on addons.mo
 | File | Contents |
 |---|---|
 | [listings.md](listings.md) | Name, summary, detailed description, category, screenshot plan |
-| [permissions.md](permissions.md) | Single-purpose statement, remote-code answer, one justification per permission (`debugger`, `<all_urls>`, `downloads`, `notifications`, `tabGroups`, …), Firefox data-collection note |
+| [permissions.md](permissions.md) | Single-purpose statement, remote-code answer, one justification per permission (`debugger`, `<all_urls>`, optional `downloads`, `tabGroups` and `pageCapture`, `notifications`, …), Firefox data-collection note |
 | [privacy-policy.md](privacy-policy.md) | Privacy policy draft (needs placeholders filled in and a review) |
 
 ## Checklist: what you (the publisher) must do
@@ -20,7 +20,7 @@ Everything needed to list the extension on the Chrome Web Store and on addons.mo
 ### Build the packages
 
 - [ ] Bump the version in `extensions/dsh-browser/manifest.json`, `manifest.firefox.json` and `package.json`. Store versions must strictly increase.
-- [ ] Chrome: run `pnpm --filter dsh-browser-extension run build:store`. This produces `dist-store/`, whose manifest has no `key`; the Web Store rejects a `key`. Zip the **contents** of `dist-store/`.
+- [ ] Chrome: upload `dsh-browser-chrome-<tag>.zip` from the GitHub release ([RELEASING.md](../../RELEASING.md)); `scripts/package-release.mjs` already strips the manifest `key`, which the Web Store rejects. Without a release, `pnpm --filter dsh-browser-extension run build:store` produces the same key-less build in `dist-store/`; zip the **contents** of that directory.
   - The store assigns a **new extension ID**. Add that ID to the bridge plugin's `allowedChromeExtensionIds`, or make it the pinned default, so the bridge accepts the store build.
 - [ ] Firefox: run `pnpm --filter dsh-browser-extension run build:firefox` and zip it. Keep `browser_specific_settings.gecko.id` stable (`dsh-browser-agent@natgurlain.github.io`, or your own domain).
 - [ ] AMO requires **source code** whenever the upload is bundled or minified (Vite output is). Upload a source zip with build instructions: `pnpm install && pnpm --filter dsh-browser-extension run build:firefox`, with Node and pnpm versions pinned.

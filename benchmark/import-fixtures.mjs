@@ -5,9 +5,10 @@
  *   node benchmark/import-fixtures.mjs <workspace>/browser-fixtures [--out benchmark/fixture-tasks]
  *
  * Each fixture becomes `<out>/<id>/task.json` plus its page capture; existing
- * tasks are never overwritten. The benchmark site serves DOM captures at
- * `/fixture/<id>` (start it with `fixtureDir`), and `validateFixtureTask`
- * (lib/fixture-tasks.mjs) checks a run's tool calls.
+ * tasks are never overwritten. `startBenchmarkSite({ fixtureDir })` serves DOM
+ * captures at `/fixture/<id>` and `validateFixtureTask` (lib/fixture-tasks.mjs)
+ * checks a run's tool calls, but no runner uses them yet: `run.mjs` has no
+ * fixture option, so these tasks are not part of the paired benchmark.
  */
 
 import { dirname, join, resolve } from 'node:path'
