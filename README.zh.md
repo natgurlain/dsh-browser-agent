@@ -13,7 +13,7 @@
 页面会转换为结构化文本和带编号的交互元素清单。工具通过编号或选择器定位元素；`browser_screenshot` 经批准后截取受控标签页的可视区域。宿主声明图片能力时，侧栏也可发送 PNG、JPEG、WebP 和 GIF 附件。
 
 > [!IMPORTANT]
-> 工作区固定使用 DSH 0.2.2-rc.2。
+> 桥接插件支持 DSH 0.2.2-rc.1 至 0.2.2-rc.3（均已测试，见 [docs/dsh-matrix.md](docs/dsh-matrix.md)）。工作区默认安装 0.2.2-rc.2。在桌面应用自带的 0.2.2-rc.1 上，失败后“继续”和删除会话时等待 worktree 清理这两项不可用。
 
 ## 快速安装
 
@@ -264,7 +264,7 @@ pnpm --filter dsh-browser-extension run test
 注意：
 
 - 启动前桥接插件必须已有 `lib/` 供 Loader 加载；`scripts/install.sh` 和根目录 `pnpm run build` 都会先构建插件再构建扩展。
-- `@deepseek-ai/dsh` 与桥接插件的依赖固定在同一条经过验证的公开发布线上；升级时必须同时更新 manifest、锁文件并重跑根目录检查。
+- 工作区只安装一个确定的 DSH 版本（根 `package.json`、桥接插件的 devDependencies 与锁文件保持一致）。桥接插件的 `engines.dsh` 和 DSH peer 范围更宽，覆盖通过兼容性矩阵的版本（见 [docs/dsh-matrix.md](docs/dsh-matrix.md)）。更换默认版本时必须同时更新 manifest、锁文件并重跑根目录检查。
 
 `check:runtime` 检查实际解析的 DSH 依赖和锁文件；`test:smoke` 使用临时 DSH home 启动真实 web 宿主，验证桥接和重启后的会话读取，无需模型密钥。
 

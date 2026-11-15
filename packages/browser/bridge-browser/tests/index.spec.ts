@@ -7,6 +7,7 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { BEACON_PORTS, BRIDGE_PATH, PINNED_CHROME_EXTENSION_ID } from '../src/protocol.ts'
 import { apply as applyPlugin, Config, trustedForwardedPorts } from '../src/index.ts'
+import { DSH_DEFAULT_VERSION } from '../src/dsh-support.ts'
 
 /** A configured token that passes the strength rule. */
 const STRONG_TOKEN = '9e4b1f7c03a2d58e6b0c4f19a7d3e2b5'
@@ -182,8 +183,50 @@ describe('apply', () => {
     const get = ctx.get.bind(ctx)
     vi.spyOn(ctx, 'get').mockImplementation((key) => key === 'typertGateway' ? gateway : get(key))
     const register = vi.spyOn(ctx.webServer, 'registerUpgrade')
-    await expect(apply(ctx, { token: STRONG_TOKEN, ...VALID })).rejects.toThrow(/dsh 0\.2\.2-rc\.2.*wireStream unavailable/)
+    await expect(apply(ctx, { token: STRONG_TOKEN, ...VALID })).rejects.toThrow(/not supported \(Gateway wireStream unavailable\)\. Tested DSH releases: .*npx @deepseek-ai\/dsh@\S+ web/)
     expect(register).not.toHaveBeenCalled()
+  })
+
+  describe('on a DSH host outside the tested releases', () => {
+    const entry = process.argv[1]
+    afterEach(() => { process.argv[1] = entry as string })
+
+    /** Make the process look like it was started by `@deepseek-ai/dsh@<version>`. */
+    async function runAsDsh(version: string): Promise<void> {
+      const dir = await mkdtemp(join(tmpdir(), 'dsh-bridge-cli-'))
+      dirs.push(dir)
+      await writeFile(join(dir, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version }))
+      await writeFile(join(dir, 'bin.js'), '')
+      process.argv[1] = join(dir, 'bin.js')
+    }
+
+    it('loads and warns with the tested releases and the command to start one', async () => {
+      await runAsDsh('0.2.2-rc.99')
+      const ctx = stubContext()
+      const warn = vi.fn()
+      ;(ctx as unknown as { logger: { warn: typeof warn } }).logger.warn = warn
+      const registerUpgrade = vi.spyOn(ctx.webServer, 'registerUpgrade')
+      await apply(ctx, { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/DSH 0\.2\.2-rc\.99 is not a release this bridge was tested with.*Tested DSH releases: .*npx @deepseek-ai\/dsh@\S+ web/))
+      expect(registerUpgrade).toHaveBeenCalled()
+    })
+
+    it('says nothing on a tested release', async () => {
+      await runAsDsh(DSH_DEFAULT_VERSION)
+      const ctx = stubContext()
+      const warn = vi.fn()
+      ;(ctx as unknown as { logger: { warn: typeof warn } }).logger.warn = warn
+      await apply(ctx, { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('tested with'))
+    })
+
+    it('names the host version when a needed host API is missing', async () => {
+      await runAsDsh('0.2.1-rc.5')
+      const ctx = stubContext()
+      const get = ctx.get.bind(ctx)
+      vi.spyOn(ctx, 'get').mockImplementation((key) => key === 'typertGateway' ? {} : get(key))
+      await expect(apply(ctx, { token: STRONG_TOKEN, ...VALID })).rejects.toThrow(/DSH 0\.2\.1-rc\.5 is not supported \(Gateway wireStream unavailable\)\. Tested DSH releases: /)
+    })
   })
 
   it('rejects a Connection without the in-process Peer factory', async () => {
@@ -193,7 +236,7 @@ describe('apply', () => {
       ? { createSharedFetchHandler: () => ({ fetch: async () => new Response(null, { status: 404 }) }) }
       : get(key))
     const register = vi.spyOn(ctx.webServer, 'registerUpgrade')
-    await expect(apply(ctx, { token: STRONG_TOKEN, ...VALID })).rejects.toThrow(/createPeer unavailable/)
+    await expect(apply(ctx, { token: STRONG_TOKEN, ...VALID })).rejects.toThrow(/not supported \(connection\.createPeer unavailable\)/)
     expect(register).not.toHaveBeenCalled()
   })
 

@@ -7,7 +7,9 @@ Each `## vX.Y.Z` section becomes the notes of that GitHub release
 
 First release of dsh Browser Agent, a fork of [dsh-browser](https://github.com/omdsh-dev/dsh-browser)
 v0.1.4 by Yuxiang Lin and contributors (MIT; see NOTICE). The extension is 0.1.5 and the
-bridge plugin is `@natgurlain/dsh-bridge-browser` 0.0.7. It runs on DSH 0.2.2-rc.2.
+bridge plugin is `@natgurlain/dsh-bridge-browser` 0.0.7. It runs on DSH 0.2.2-rc.1 to
+0.2.2-rc.3 (0.2.2-rc.2 by default); on 0.2.2-rc.1 Continue after a failed turn and the wait for
+worktree cleanup on delete are unavailable. See `docs/dsh-matrix.md`.
 
 Upgrading from upstream 0.1.4: run the installer. It removes the bridge registered under
 the earlier package names (`@deepseek-ai/dsh-bridge-browser`, `@yuxianglin/dsh-bridge-browser`)
