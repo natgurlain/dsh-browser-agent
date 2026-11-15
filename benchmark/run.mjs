@@ -6,7 +6,7 @@ import { startBenchmarkSite } from './site/server.mjs'
 import { startDshBackend } from './lib/dsh-process.mjs'
 import { startExtensionBrowser } from './lib/extension-browser.mjs'
 import { runOne } from './lib/run-one.mjs'
-import { BENCHMARK_SUITE_VERSION, makeTaskInstance, TASK_CATALOG, TASK_IDS } from './lib/tasks.mjs'
+import { ATTACKER_PAGE_HOST, BENCHMARK_SUITE_VERSION, INJECTION_TASK_IDS, makeTaskInstance, pageOriginFor, TASK_CATALOG, TASK_IDS } from './lib/tasks.mjs'
 import { writeReportForFile } from './report.mjs'
 
 const benchmarkRoot = dirname(fileURLToPath(import.meta.url))
@@ -193,6 +193,9 @@ export async function runBenchmark(options) {
         benchmarkRoot,
         bridgeUrl: `ws://127.0.0.1:${options.extensionPort}/ext/bridge`,
         trustedOrigin: site.origin,
+        // The injection task pages are reached under a host name that is neither
+        // loopback nor trusted, so they taint with the shipped settings.
+        hostResolverRules: [`MAP ${ATTACKER_PAGE_HOST} 127.0.0.1`],
       })
     }
     for (let trial = 1; trial <= options.trials; trial += 1) {
@@ -203,7 +206,11 @@ export async function runBenchmark(options) {
           for (let orderIndex = 0; orderIndex < order.length; orderIndex += 1) {
             const backendName = order[orderIndex]
             const runId = `${benchmarkId}:${pairId}:${backendName}`
-            const instance = makeTaskInstance(taskId, seed, runId, site.origin)
+            // Only the extension's browser maps the attacker host name; other backends use the site's own origin.
+            const pageOrigin = backendName === 'extension' && INJECTION_TASK_IDS.includes(taskId)
+              ? pageOriginFor(site.origin, ATTACKER_PAGE_HOST)
+              : site.origin
+            const instance = makeTaskInstance(taskId, seed, runId, pageOrigin)
             const task = taskMetadata.get(taskId)
             let record
             try {

@@ -81,7 +81,10 @@ async function boot(extraSettings: Record<string, unknown> = {}, chromeExtras: R
   await import('../src/background/index.ts')
 
   const portMessages = chromeEvent<[unknown]>()
-  const port = { name: 'dsh-panel', postMessage: vi.fn(), onMessage: portMessages, onDisconnect: chromeEvent<[]>() } as unknown as chrome.runtime.Port
+  const port = {
+    name: 'dsh-panel', postMessage: vi.fn(), disconnect: vi.fn(), onMessage: portMessages, onDisconnect: chromeEvent<[]>(),
+    sender: { url: 'chrome-extension://test/panel/index.html' },
+  } as unknown as chrome.runtime.Port
   onConnect.emit(port)
   await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
   const socket = FakeWebSocket.instances[0]!

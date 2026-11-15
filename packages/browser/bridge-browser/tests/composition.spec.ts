@@ -402,8 +402,9 @@ describe('real Loader composition', () => {
       // `devTools` is the host's offer; the extension's own hello decides
       // whether the matching tool group is registered (asserted below);
       // `hostApprovals` says this bridge forwards approvals to dsh; `standing`
-      // is none by default (no schedules, MCP endpoint off).
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60, devTools: { version: 1 }, hostApprovals: 1, standing: { schedules: 0, mcp: false } },
+      // is none by default (no schedules, MCP endpoint off); `taintExemptions`
+      // says which exemption vouchers this bridge honours (both, by default).
+      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60, devTools: { version: 1 }, hostApprovals: 1, standing: { schedules: 0, mcp: false }, taintExemptions: { local: true, trusted: true } },
     })
 
     // Gateway RPC round-trip against the real session store.

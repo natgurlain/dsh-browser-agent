@@ -59,7 +59,7 @@ import { withSessionDeferral } from './session-deferral.ts'
 import { withSessionWorkspace } from './session-workspace.ts'
 import { createSessionPurger } from './session-purge.ts'
 import { createKillSwitchHandler, createSessionForgetter, createSnapshotInjector } from './bridge-hooks.ts'
-import { installedTokenMismatch, resolveToken, syncInstalledExtensionToken } from './token.ts'
+import { generateToken, installedTokenMismatch, resolveToken, syncInstalledExtensionToken, writeTokenFile } from './token.ts'
 import { withBridgePolicy } from './bridge-policy.ts'
 import { installSessionTaint, SessionTaintRegistry, withTaintMethods } from './session-taint.ts'
 import { fileSessionLedger, type SessionLedger } from './session-ledger.ts'
@@ -76,6 +76,8 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { DEVLOOP_CAPTURE_TIMEOUT_MS, DevLoop, withDevLoopMethods } from './dev-loop.ts'
 import { mountLearning, type LearningMount } from './learning/index.ts'
 import { errorMessage } from './host-api.ts'
+import { filePairedExtensions, PAIRED_EXTENSIONS_FILE_NAME, PairingDesk, type PairedExtensions } from './pairing-host.ts'
+import { mountPairingControls, PAIRING_COMMAND_NAME, type PairingCommandRegistry, type PairingFetchRegistry } from './pairing-mount.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'bridge-browser'
@@ -154,9 +156,19 @@ export interface Config {
   /**
    * Chrome extension IDs allowed to connect (`chrome-extension://<id>` Origin).
    * Defaults to the manifest-keyed ID; replace it for a differently keyed
-   * development build or a Web Store listing.
+   * development build. Extensions the user paired with a code (a Web
+   * Store or Brave build) are allowed in addition, from
+   * `<dsh home>/browser-paired-extensions.json`.
    */
   allowedChromeExtensionIds?: string[]
+  /**
+   * Let an extension without a token ask to pair (it shows a code, and the
+   * user types that code into DSH). Defaults to true. Set it to false to
+   * accept only the installer-provisioned or pasted token and the configured
+   * extension IDs: unknown extensions are then refused at the Origin check,
+   * and extensions paired earlier stay allowed.
+   */
+  pairing?: boolean
   /**
    * Let the extension use full-access permission presets: switch a session to
    * one, and prompt or inject into a session running one. Defaults to false:
@@ -205,12 +217,22 @@ export interface Config {
    * proxied pages), which could otherwise inject text into the session.
    */
   devLoop?: { enabled?: boolean; allowedOrigins?: string[]; trustLoopback?: boolean }
+  /**
+   * Honour the extension's taint-exemption vouchers (session-taint.ts): a
+   * browser result read only from the user's own local pages or from sites
+   * the user trusts does not taint its session. Default true. `false`: every
+   * browser result taints, whatever the extension's settings say. Vouchers
+   * resting on a local page are also refused while `devLoop.trustLoopback`
+   * is false (a dev server that renders untrusted data).
+   */
+  honorTaintExemptions?: boolean
 }
 
 /** The shape after schemastery applies its defaults to every field. */
 type ResolvedConfig = Required<Omit<Config, 'token' | 'mcp' | 'devLoop'>> & Pick<Config, 'token'> & {
   mcp: Required<McpConfig>
   devLoop: { enabled: boolean; allowedOrigins: string[]; trustLoopback: boolean }
+  honorTaintExemptions: boolean
 }
 
 export const Config: z<Config, ResolvedConfig> = z.object({
@@ -225,6 +247,7 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   beacon: z.boolean().default(DEFAULT_BEACON),
   beaconPorts: z.array(z.number().step(1).min(1).max(65535)).default([...BEACON_PORTS]),
   allowedChromeExtensionIds: z.array(z.string().pattern(/^[a-p]{32}$/)).default([PINNED_CHROME_EXTENSION_ID]),
+  pairing: z.boolean().default(true),
   allowDangerFullAccess: z.boolean().default(false),
   safePermissionPresets: z.array(z.string()).default([]),
   forwardedPorts: z.array(z.number().step(1).min(1).max(65535)).default([]),
@@ -238,6 +261,7 @@ export const Config: z<Config, ResolvedConfig> = z.object({
     allowedOrigins: z.array(z.string().pattern(/^https?:\/\/[^/\s]+$/)).default([]),
     trustLoopback: z.boolean().default(true),
   }).default({ enabled: false, allowedOrigins: [], trustLoopback: true }),
+  honorTaintExemptions: z.boolean().default(true),
 }) as unknown as z<Config, ResolvedConfig>
 
 /**
@@ -290,7 +314,9 @@ export async function apply(ctx: Context, resolved: ResolvedConfig): Promise<voi
   }
   const ledger = await fileSessionLedger(dshHomePath(SESSION_LEDGER_FILE_NAME), message => { ctx.logger.warn(message) })
   const watchRecords = await fileWatchRecords(dshHomePath(WATCH_RECORDS_FILE_NAME), message => { ctx.logger.warn(message) })
-  mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection), ledger, watchRecords)
+  // Chrome extension IDs the user paired on an earlier run.
+  const paired = await filePairedExtensions(dshHomePath(PAIRED_EXTENSIONS_FILE_NAME), message => { ctx.logger.warn(message) })
+  mountBridge(ctx, resolved, tokenRes, createRemoteHostApi(gateway, connection), ledger, watchRecords, paired)
 }
 
 function mountBridge(
@@ -300,6 +326,7 @@ function mountBridge(
   hostApi: BrowserHostApi,
   ledger: SessionLedger,
   watchRecords: WatchRecordStore,
+  paired: PairedExtensions,
 ): void {
   // Workspace grouping wraps the gateway create; session deferral wraps the
   // result so materialization at first prompt still flows through grouping.
@@ -316,6 +343,7 @@ function mountBridge(
   // Untrusted web content in a session makes its harness tools read-only
   // until the user clears it in the panel (session-taint.ts).
   const taint = new SessionTaintRegistry()
+  taint.honour = { any: resolved.honorTaintExemptions, local: resolved.honorTaintExemptions && resolved.devLoop.trustLoopback }
   ctx.effect(() => installSessionTaint(ctx, taint), 'bridge-browser: session taint guard')
   // DSH 0.1.7+ replaced `agent/session-start` with `agent/created` as the
   // startup-driving extension point (agent registered with live session and
@@ -390,14 +418,29 @@ function mountBridge(
   })
   ctx.on('agent/status', ({ agent, status }) => { void devLoop.noteStatus(String(agent.id), status) })
   const killSwitch = createKillSwitchHandler({ devLoop, learning: () => learning, info: (message) => { ctx.logger.info(message) } })
+  // One-step pairing for extensions without a token (store builds, Firefox):
+  // they show a code, and nothing is released until the user types it into dsh itself.
+  const pairing = new PairingDesk(
+    Date.now,
+    (message) => { ctx.logger.info(`browser bridge: ${message}`) },
+    // "Official" on the host's card: an extension ID this bridge is configured to accept (the published build's).
+    (origin) => resolved.allowedChromeExtensionIds.some(id => origin === `chrome-extension://${id}`),
+  )
   server = new BridgeServer({
     token: tokenRes.token,
+    ...(resolved.pairing ? { pairing } : {}),
+    onPaired: ({ origin }) => {
+      void paired.add(origin).catch((error: unknown) => {
+        ctx.logger.warn(`browser bridge: could not record the paired extension (it stays allowed until dsh restarts): ${errorMessage(error)}`)
+      })
+    },
     // An MCP client's external session is the bridge's own: the panel may clear its taint too.
     api: withDevLoopMethods(withTaintMethods(fenced, taint, async (sessionId, signal) =>
       ledger.external(sessionId) !== undefined || fenced.allowsSession(sessionId, signal, 'own')), devLoop),
     sessionScope: fenced,
     sessionLineage: taint,
-    allowedChromeExtensionIds: resolved.allowedChromeExtensionIds,
+    allowedChromeExtensionIds: [...resolved.allowedChromeExtensionIds, ...paired.chromeIds()],
+    revokedOrigins: paired.revokedOrigins(),
     forwardedPorts: trustedForwardedPorts(resolved, message => { ctx.logger.warn(message) }),
     toolTimeoutMs: resolved.toolTimeoutMs,
     caps: {
@@ -405,6 +448,8 @@ function mountBridge(
       snapshotMaxChars: resolved.snapshotMaxChars,
       maxInteractiveItems: resolved.maxInteractiveItems,
       devTools: { version: DEVTOOLS_CAPS_VERSION },
+      // Told to the extension so its own taint record agrees with what this bridge honours.
+      taintExemptions: { local: taint.honour.local, trusted: taint.honour.any },
     },
     injectBrowserSnapshot: createSnapshotInjector((sessionId, snapshot, reason) => browserContext.inject(sessionId, snapshot, reason), taint),
     purgeSession,
@@ -466,6 +511,54 @@ function mountBridge(
   ctx.effect(() => ctx.webServer.registerUpgrade(route), 'bridge-browser: /ext/bridge upgrade route')
   // Async disposer: on HMR/unload, wait until the bridge has fully closed (socket/pump/acceptor quiescent) before continuing.
   ctx.effect(() => () => server.close(), 'bridge-browser: bridge server')
+
+  // Host-side pairing controls: both sit behind dsh's own authentication.
+  if (!resolved.pairing) ctx.logger.info('browser bridge: pairing disabled by configuration')
+  else ctx.effect(() => {
+    let disposers: Array<() => unknown> = []
+    try {
+      const routes = optionalService<{ fetch?: PairingFetchRegistry }>(ctx, 'connection')?.fetch
+      const commands = optionalService<PairingCommandRegistry>(ctx, 'commands')
+      disposers = mountPairingControls({
+        desk: pairing,
+        pairedOrigins: () => paired.origins(),
+        unpair: async (origin) => {
+          if (!await paired.remove(origin)) return false
+          // An ID the plugin config also allows stays allowed: unpairing undoes pairing, not configuration.
+          const closed = server.revokeOrigin(origin, { keepAllowed: resolved.allowedChromeExtensionIds.some(id => origin === `chrome-extension://${id}`) })
+          ctx.logger.info(`browser bridge: unpaired ${origin} (${String(closed)} connection${closed === 1 ? '' : 's'} closed)`)
+          return true
+        },
+        // A token pinned in the plugin config belongs to the configuration, not to this file.
+        ...(resolved.token !== undefined && resolved.token !== '' ? {} : {
+          resetToken: async () => {
+            const token = generateToken()
+            // File first: if it cannot be written the old token stays in force everywhere.
+            await writeTokenFile(token, tokenRes.file)
+            const closed = server.resetToken(token)
+            ctx.logger.info(`browser bridge: the bridge token was reset (${String(closed)} connection${closed === 1 ? '' : 's'} closed)`)
+            try {
+              await syncInstalledExtensionToken(token)
+            } catch (error: unknown) {
+              ctx.logger.warn(`browser bridge: could not refresh the installed extension token: ${errorMessage(error)}`)
+            }
+          },
+        }),
+      }, {
+        ...routes === undefined ? {} : { fetch: routes },
+        ...commands === undefined ? {} : { commands },
+      })
+    } catch (error: unknown) {
+      ctx.logger.warn(`browser bridge: could not register the pairing controls: ${errorMessage(error)}`)
+    }
+    if (disposers.length === 0) {
+      ctx.logger.warn(`browser bridge: this dsh offers no pairing control (neither the /api route nor /${PAIRING_COMMAND_NAME}); a pairing code cannot be entered, so extensions without a token must paste it`)
+    }
+    return async () => {
+      pairing.pausePairing('user')
+      for (const dispose of disposers.reverse()) await dispose()
+    }
+  }, 'bridge-browser: pairing controls')
 
   // Zero-config discovery endpoint: the extension fetches this to learn the
   // bridge WebSocket URL without any manual configuration. The URL carries no
@@ -553,7 +646,7 @@ function mountBridge(
     tools: createMcpToolHost(() => ctx.get('tools') as unknown as ToolRegistryLike | undefined, server, resolved.toolTimeoutMs,
       // MCP calls bypass the DSH executor, so record their taint here: later
       // frames of that external session then carry `tainted: true`.
-      (sessionId, tool) => { taint.mark(sessionId, tool) }),
+      (sessionId, tool, callId) => { if (!taint.takeExempt(sessionId, callId)) taint.mark(sessionId, tool) }),
     version: BRIDGE_PACKAGE_VERSION,
   })
 
@@ -671,6 +764,11 @@ function mountDiscoveryBeacon(
       return bound?.close()
     }
   }, 'bridge-browser: discovery beacon')
+}
+
+/** A service this plugin uses when the composition has it (it is not in `inject`). */
+function optionalService<T>(ctx: Context, name: string): T | undefined {
+  return (ctx.get as (name: string) => unknown)(name) as T | undefined
 }
 
 /**

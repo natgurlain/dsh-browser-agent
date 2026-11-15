@@ -15,6 +15,7 @@ import {
 } from './lib/dsh-harness.mjs'
 import { smokeMcp } from './fixtures/mcp-smoke.mjs'
 import { smokeDevLoop } from './fixtures/devloop-smoke.mjs'
+import { smokePairing } from './fixtures/pairing-smoke.mjs'
 
 const dsh = resolveDsh()
 assertBridgeBuilt(dsh)
@@ -33,6 +34,9 @@ const {
   BridgeFrameChannel, bridgeEndpointOfUrl, BRIDGE_APPROVAL_ASK_METHOD, BRIDGE_TOOL_HOLD_METHOD, BRIDGE_WATCH_FIRE_METHOD,
   BRIDGE_DEVLOOP_CANDIDATES_METHOD, BRIDGE_DEVLOOP_LINK_METHOD, BRIDGE_DEVLOOP_UNLINK_METHOD,
 } = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
+const bridgeProtocol = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
+// The pairing math is bundled into the plugin entry; tsc also emits it as a module of its own.
+const bridgePairing = await import(pathToFileURL(join(bridge, 'lib/types/pairing.js')).href)
 const { phase3Reply } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-model.mjs')).href)
 /** What the Phase 3 conversations (watcher wake, fleet workers) showed the model. */
 const phase3State = {}
@@ -250,8 +254,23 @@ async function start(reopen) {
   }
   assert.equal(await rejected(`chrome-extension://${PINNED_CHROME_EXTENSION_ID}`, { t: 'hello', token: '', caps }),
     BRIDGE_CLOSE_CODES.versionMismatch, 'a v1 hello must be refused with a version mismatch')
-  assert.equal(await rejected('chrome-extension://abcdefghijklmnopabcdefghijklmnop'),
-    BRIDGE_CLOSE_CODES.originRejected, 'a foreign extension must be refused')
+  // An extension the bridge does not know may only ask to pair: its hello is
+  // refused on the Origin even with a valid proof of the token.
+  {
+    const nonce = createBridgeNonce()
+    const probe = new WebSocket(config.wsUrl, { origin: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop', handshakeTimeout: 10_000 })
+    const seen = []
+    probe.on('message', data => { seen.push(JSON.parse(data.toString())) })
+    const closed = once(probe, 'close')
+    await once(probe, 'open')
+    const challenge = await waitFor(() => seen.find(value => value.t === 'challenge'), 'bridge challenge', 10_000)
+    probe.send(JSON.stringify({
+      t: 'hello', v: BRIDGE_PROTOCOL_VERSION, nonce, endpoint, caps,
+      mac: await computeBridgeProof(token, 'client', challenge.nonce, nonce, endpoint, { client: caps }),
+    }))
+    assert.equal((await closed)[0], BRIDGE_CLOSE_CODES.originRejected, 'a foreign extension must be refused')
+    assert.equal(seen.some(value => value.t === 'hello.ok'), false)
+  }
   // Firefox-style origin with the real token completes the mutual handshake.
   const main = await connectClient(config.wsUrl, caps, { origin: 'moz-extension://runtime-smoke' })
   socket = main.ws
@@ -803,6 +822,37 @@ try {
   const unknownCommand = await rpc.raw('commands.execute', { sessionId, line: '/definitely-not-a-command' })
   assert.equal(unknownCommand.ok, false, JSON.stringify(unknownCommand))
   assert.equal(unknownCommand.error.code, 'bad-request')
+  // ---- One-step pairing: a store-installed extension shows a code, the user types it on the host ----
+  await smokePairing({
+    WebSocket,
+    protocol: bridgeProtocol,
+    pairing: bridgePairing,
+    wsUrl: rpc.base.replace('http:', 'ws:') + '/ext/bridge',
+    base: rpc.base,
+    token,
+    home,
+    sessionId,
+    rpc,
+    ownerPairing: async (body) => {
+      const response = await fetch(`${rpc.base}/smoke/owner-api`, {
+        method: 'POST', body: JSON.stringify({ path: '/api/bridge-browser.pairing', body }), signal: AbortSignal.timeout(30_000),
+      })
+      return { status: response.status, body: await response.json().catch(() => null) }
+    },
+    // Another owner client (the DSH app or CLI) running a slash command: not through the browser bridge.
+    ownerCommand: async (line) => {
+      const response = await fetch(`${rpc.base}/smoke/owner-invoke`, {
+        method: 'POST',
+        body: JSON.stringify({ namespace: 'commands', method: 'execute', args: { agentId: sessionId, line, submittedAttachments: [] } }),
+        signal: AbortSignal.timeout(30_000),
+      })
+      assert.equal(response.status, 200, await response.clone().text())
+      const execution = await response.json()
+      return execution?.result ?? execution
+    },
+    waitFor,
+  })
+
   // A preset the Host table cannot vouch for is refused as possibly full access.
   const unknownPreset = await rpc.raw('session.setPermission', { sessionId, preset: 'custom' })
   assert.equal(unknownPreset.ok, false, JSON.stringify(unknownPreset))
@@ -865,7 +915,7 @@ try {
   assert.equal((await rpc('session.permissions', { sessionId: retrySession })).current, 'read-only',
     'prompt text must never act as a /permission command')
 
-  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), multi-client bridge with per-install replacement and session routing, browser approvals forwarded to dsh and answered by another owner client (allow and deny), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, MCP clients through the stdio shim on an external session (requester-labelled cards answered in the browser, audit log, Host methods refused), the browser agent preset (browser_* tools only), delegation to it via delegate_browser_task, and bundled skills, the closed dev loop (localhost link, capture after an editing turn, read-only injection without prompting), browser context, a page watcher waking only its owned session (untrusted boundary, rate limit), a tab fleet of real subagents restricted to read tools with structured results, a real transport failure, and session deletion'
+  console.log('Real DSH smoke passed: discovery, mutual authentication (forged Origins and v1 clients refused), multi-client bridge with per-install replacement and session routing, browser approvals forwarded to dsh and answered by another owner client (allow and deny), least-privilege fencing (full access refused), image storage and reads, passive history, concurrent history and prompt admission, independent session observations, model and permission selection, Host commands and skills, V2 migration, one-step pairing of a store-installed extension (the code its panel shows is typed on the host; nothing keyed reaches a requester without it, a forged Origin included; wrong and used codes, the command through the bridge, and pairing while paused are refused; token delivered sealed, ID remembered and unpaired), MCP clients through the stdio shim on an external session (requester-labelled cards answered in the browser, audit log, Host methods refused), the browser agent preset (browser_* tools only), delegation to it via delegate_browser_task, and bundled skills, the closed dev loop (localhost link, capture after an editing turn, read-only injection without prompting), browser context, a page watcher waking only its owned session (untrusted boundary, rate limit), a tab fleet of real subagents restricted to read tools with structured results, a real transport failure, and session deletion'
     + (HOST_GAPS.length === 0
       ? ', including continuation after the transport failure and worktree cleanup failure and retry'
       : ` (DSH ${expectedVersion} lacks ${HOST_GAPS.join(' and ')}: continuation after the transport failure and the worktree cleanup wait, failure and retry were NOT exercised)`))

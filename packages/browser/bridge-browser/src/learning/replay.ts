@@ -60,12 +60,16 @@ export interface ReplayReport {
   candidates?: FoundCandidate[]
   /** Rendered outcome when a `browser_run` ran the program. */
   text?: string
+  /** "Do the remaining N" in batches: rows done, of the rows and steps the card approved. */
+  rows?: { done: number; total: number; steps: number }
 }
 
 /** A concrete program step (no locator: already resolved). */
 export interface ProgramStep {
   tool: string
   args: Record<string, unknown>
+  /** "Do the remaining N": what the step's element looked like (validated by run-program.ts, checked by the extension). */
+  target?: unknown
 }
 
 /** Replay options. */

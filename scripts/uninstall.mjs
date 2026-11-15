@@ -11,11 +11,13 @@ import { parseArgs } from 'node:util'
 const BRIDGES = ['@natgurlain/dsh-bridge-browser', '@yuxianglin/dsh-bridge-browser', '@deepseek-ai/dsh-bridge-browser']
 const DEPENDENCY_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies']
 // Files the bridge plugin writes into the DSH home (MCP bearer token and
-// endpoint, session ledger, watcher records, workflow schedules). The audit log
+// endpoint, session ledger, watcher records, workflow schedules, the record
+// of extensions approved through pairing). The audit log
 // (browser-audit/) and session workspaces (browser-sessions/) are user data and stay.
 const BRIDGE_HOME_FILES = [
   'browser-mcp-token', 'browser-mcp.json',
   'browser-bridge-sessions.json', 'browser-bridge-watchers.json', 'browser-workflow-schedules.json',
+  'browser-paired-extensions.json',
 ]
 const KEPT_HOME_DATA = ['browser-audit', 'browser-sessions']
 const scriptRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')

@@ -2,7 +2,14 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { chromium, findChromiumExecutable } from './chromium.mjs'
 
-export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl, trustedOrigin, connectTimeoutMs = 30_000, actionTimeoutMs = 8_000, profileRoot }) {
+/**
+ * @param {object} options
+ * @param {string} options.trustedOrigin - origin of the page the benchmark tab starts on; always-allowed for actions.
+ * @param {Record<string, unknown>} [options.settings] - extra extension settings applied with the first save.
+ * @param {string[]} [options.hostResolverRules] - Chromium `--host-resolver-rules` entries, e.g.
+ *   `MAP attacker.test 127.0.0.1`: lets a loopback server be reached under a host name that is not loopback.
+ */
+export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl, trustedOrigin, connectTimeoutMs = 30_000, actionTimeoutMs = 8_000, profileRoot, settings = {}, hostResolverRules = [] }) {
   const extensionDir = resolve(repoRoot, 'extensions/dsh-browser/dist')
   const executablePath = await findChromiumExecutable(undefined, { requireExtensions: true })
   if (executablePath === undefined) throw new Error('no Chromium executable found; set PLAYWRIGHT_CHROMIUM_PATH')
@@ -25,6 +32,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         `--load-extension=${extensionDir}`,
         '--disable-background-networking',
         '--disable-component-update',
+        ...hostResolverRules.length === 0 ? [] : [`--host-resolver-rules=${hostResolverRules.join(', ')}`],
       ],
     })
     // Playwright dismisses dialogs nobody listens for; leave them open so the
@@ -44,7 +52,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
     await panel.goto(`chrome-extension://${extensionId}/panel/index.html`)
     await panel.waitForSelector('header.topbar', { timeout: 15_000 })
     stage = 'configuring extension bridge'
-    await panel.evaluate(async ({ configuredBridgeUrl, configuredOrigin, timeoutMs }) => {
+    await panel.evaluate(async ({ configuredBridgeUrl, configuredOrigin, extraSettings, timeoutMs }) => {
       await new Promise((resolveConnection, rejectConnection) => {
         const port = chrome.runtime.connect({ name: 'dsh-panel' })
         window.__dshBenchmarkPort = port
@@ -83,10 +91,11 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
             trustedActionOrigins: [configuredOrigin],
             approvalNotifications: false,
             autoResumeSession: false,
+            ...extraSettings,
           },
         })
       })
-    }, { configuredBridgeUrl: bridgeUrl, configuredOrigin: trustedOrigin, timeoutMs: connectTimeoutMs })
+    }, { configuredBridgeUrl: bridgeUrl, configuredOrigin: trustedOrigin, extraSettings: settings, timeoutMs: connectTimeoutMs })
     stage = 'waiting for extension bridge connection'
     try {
       await panel.locator('.connection .dot.connected').waitFor({ state: 'visible', timeout: connectTimeoutMs })

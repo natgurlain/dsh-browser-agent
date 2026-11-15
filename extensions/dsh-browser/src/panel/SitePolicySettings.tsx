@@ -6,7 +6,7 @@
 
 import { useEffect, useState, type ReactNode } from 'react'
 import type { UiLocale } from '../i18n.ts'
-import { DEFAULT_SITE_RULES, normalizeSitePattern, SITE_RULES, type SiteRule, type SiteRuleEntry } from '../security/site-policy.ts'
+import { DEFAULT_SITE_RULES, normalizeSitePattern, SITE_RULES, withSiteRule, type SiteRule, type SiteRuleEntry } from '../security/site-policy.ts'
 import { parseManagedPolicy, type ManagedPolicy } from '../security/managed-policy.ts'
 import { SettingToggle } from './SettingToggle.tsx'
 import { Callout, EntryAdd, EntryList, SettingRow, SettingsGroup } from './SettingsKit.tsx'
@@ -47,7 +47,7 @@ export function SitePolicySettings({ value, onChange, locale, children }: {
   const normalized = normalizeSitePattern(pattern)
   const add = (): void => {
     if (normalized === undefined) return
-    onChange({ ...value, siteRules: [...value.siteRules.filter((entry) => entry.pattern !== normalized), { pattern: normalized, rule }].sort((a, b) => a.pattern.localeCompare(b.pattern)) })
+    onChange({ ...value, siteRules: withSiteRule(value.siteRules, normalized, rule) })
     setPattern('')
   }
   return (
@@ -59,7 +59,7 @@ export function SitePolicySettings({ value, onChange, locale, children }: {
         disabled={managed?.enforceSiteDefaults === true}
         onChange={(checked) => onChange({ ...value, siteDefaultsEnabled: checked })}
       />
-      <SettingRow label={copy.rulesTitle} help={copy.help} more={<p>{copy.more}</p>}>
+      <SettingRow label={copy.rulesTitle} help={copy.help} more={<><p>{copy.more}</p><p className="trusted-note">{copy.trustedNote}</p></>}>
         {(id) => (
           <>
             <EntryAdd
@@ -121,6 +121,8 @@ export function SitePolicySettings({ value, onChange, locale, children }: {
             {managed.disableUnrestricted && <p>{copy.managedNoUnrestricted}</p>}
             {managed.disableDevTools && <p>{copy.managedNoDevTools}</p>}
             {managed.disableScreenshots && <p>{copy.managedNoScreenshots}</p>}
+            {managed.disableLocalTaintExemption && <p>{copy.managedNoLocalExemption}</p>}
+            {managed.disableTrustedTaintExemption && <p>{copy.managedNoTrustedExemption}</p>}
             {managed.allowedOrigins !== undefined && <p>{copy.managedAllowedOnly(managed.allowedOrigins)}</p>}
           </Callout>
           <EntryList entries={managed.siteRules.map((entry) => ({ key: `managed-${entry.pattern}`, value: entry.pattern, tag: copy.rules[entry.rule] }))} />

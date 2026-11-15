@@ -17,19 +17,34 @@ export function chromeEvent<T extends unknown[]>() {
   }
 }
 
-/** A connected extension-page port (the side panel by default). */
-export function panelPort(name = 'dsh-panel', sender?: chrome.runtime.MessageSender) {
+/** The sender of a port opened by one of this extension's own pages (the stubbed `chrome.runtime`). */
+function extensionPageSender(): chrome.runtime.MessageSender | undefined {
+  const runtime = (globalThis as { chrome?: { runtime?: { id?: string; getURL?: (path: string) => string } } }).chrome?.runtime
+  if (typeof runtime?.getURL !== 'function') return undefined
+  return { ...(runtime.id === undefined ? {} : { id: runtime.id }), url: runtime.getURL('panel/index.html') }
+}
+
+/**
+ * A connected extension-page port (the side panel by default). The worker
+ * accepts its ports from extension pages only, so the sender defaults to one.
+ */
+export function panelPort(name = 'dsh-panel', sender: chrome.runtime.MessageSender | undefined = extensionPageSender()) {
   const onMessage = chromeEvent<[unknown]>()
   const onDisconnect = chromeEvent<[]>()
   const postMessage = vi.fn()
   const disconnect = vi.fn()
+  // The panel port is accepted only from the extension's own pages: by default this is the side panel.
+  const runtime = (globalThis as { chrome?: { runtime?: { id?: string; getURL?: (path: string) => string } } }).chrome?.runtime
+  const page = sender ?? (name === 'dsh-panel' && typeof runtime?.getURL === 'function'
+    ? { ...(runtime.id === undefined ? {} : { id: runtime.id }), url: runtime.getURL('panel/index.html') }
+    : undefined)
   const port = {
     name,
     postMessage,
     disconnect,
     onMessage,
     onDisconnect,
-    ...(sender === undefined ? {} : { sender }),
+    ...(page === undefined ? {} : { sender: page }),
   } as unknown as chrome.runtime.Port
   return { onDisconnect, onMessage, port, postMessage, disconnect }
 }

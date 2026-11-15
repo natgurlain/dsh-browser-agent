@@ -366,6 +366,8 @@ export function createDevLoopPanelRpc(
   devLoop: DevLoopController,
   gatewayRpc: (method: string, payload: unknown) => Promise<unknown>,
   getTab: (tabId: number) => Promise<{ id?: number; url?: string } | undefined> = (tabId) => chrome.tabs.get(tabId),
+  /** A tab was linked: the user said this origin is their own app (taint exemption for local pages). */
+  onLinked?: (origin: string) => void,
 ): (method: string, payload: unknown) => Promise<unknown> | undefined {
   return (method, payload) => {
     const fields = typeof payload === 'object' && payload !== null ? payload as Record<string, unknown> : {}
@@ -389,6 +391,7 @@ export function createDevLoopPanelRpc(
         const origin = answer?.result?.ok === true ? answer.result.value?.link?.origin : undefined
         if (typeof origin === 'string' && devLoop.originOf(tab.url) === origin) {
           await devLoop.link({ sessionId, tabId: tab.id, origin, ...(typeof fields.label === 'string' ? { label: fields.label.slice(0, 120) } : {}) })
+          try { onLinked?.(origin) } catch { /* the link itself stands */ }
         }
         return answer
       })()

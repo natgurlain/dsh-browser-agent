@@ -431,6 +431,16 @@ function effectiveFrameOrigin(frame: TabFrame, frames: TabFrame[], visited = new
  * Unlike `httpOrigin` (security/web-url.ts) this also accepts `blob:` URLs of
  * a web origin, which carry their creator's origin; opaque origins are none.
  */
+/**
+ * Where a tab stands, for the taint exemption (policy-runtime.ts): the top
+ * page's effective origin and the effective origins of every frame. `opaque`
+ * when the top page has no web origin.
+ */
+export function tabProvenanceOf(frames: TabFrame[]): { top?: string; frames: string[]; opaque: boolean; urls: string[] } {
+  const top = uniqueOrigins(frames.filter((frame) => frame.frameId === 0), frames)[0]
+  return { ...top === undefined ? {} : { top }, frames: uniqueOrigins(frames, frames), opaque: top === undefined, urls: frameUrls(frames, frames) }
+}
+
 export function originFromUrl(value: string): string | undefined {
   try {
     const url = new URL(value)

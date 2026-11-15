@@ -287,6 +287,12 @@ export interface ActionContext {
   shareContent?: boolean
   /** Abort generation the action started in (set by {@link runAction}). */
   generation?: number
+  /**
+   * A "do the remaining N" step: called by click, type and select with the
+   * element they resolved, before anything is done to it; throws when it is
+   * no longer what the approval card showed.
+   */
+  checkTarget?: (el: Element) => void
 }
 
 /**
@@ -471,6 +477,7 @@ async function clickAction(args: Record<string, unknown>, ctx: ActionContext): P
     )
   }
   const el = resolveActionTarget(args, ctx.ids)
+  ctx.checkTarget?.(el)
   const label = targetLabel(args, el)
   if (el.matches(':disabled') || el.closest('button:disabled') !== null) {
     throw new ActionError('action-failed', `Element ${label} is disabled.`)
@@ -645,6 +652,7 @@ async function typeAction(args: Record<string, unknown>, ctx: ActionContext): Pr
   if (!(el instanceof Element)) {
     throw new ActionError('action-failed', 'No element has focus; click the target first or pass index or selector.')
   }
+  ctx.checkTarget?.(el)
   assertTypeTargetBound(args, el)
   const label = focusedOnly ? 'the focused element' : targetLabel(args, el)
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
@@ -1098,6 +1106,12 @@ async function selectAction(args: Record<string, unknown>, ctx: ActionContext): 
     throw error
   }
   const el = resolveActionTarget(args, ctx.ids)
+  ctx.checkTarget?.(el)
+  // A custom combobox is operated by clicking option elements found later, which nothing has compared with the card:
+  // a step that must act on an approved element runs on a native select only.
+  if (ctx.checkTarget !== undefined && !(el instanceof HTMLSelectElement)) {
+    throw new ActionError('action-failed', 'This list is not a native select, so its options cannot be checked against the approved row. Nothing was done to it.')
+  }
   const label = targetLabel(args, el)
   let outcome
   try {

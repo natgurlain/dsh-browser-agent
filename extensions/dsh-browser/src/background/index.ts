@@ -26,6 +26,10 @@
  *   panel → bg: { type: 'request-status' }
  *   panel → bg: { type: 'discovery.start', id }
  *   panel → bg: { type: 'discovery.cancel' }
+ *   panel → bg: { type: 'pair.start', id, again?, auto? }
+ *   panel → bg: { type: 'pair.cancel' }
+ *   bg → panel: { type: 'pair.code', id, code, answerTimeoutMs }
+ *   bg → panel: { type: 'pair.result', id, ok, reason? }
  *   panel → bg: { type: 'kill-switch.engage' }
  *   panel → bg: { type: 'kill-switch.release' }
  *   panel → bg: { type: 'agent.pause', mode: 'after-step' | 'take-over' }
@@ -85,15 +89,17 @@ import {
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { BRIDGE_CONFIG_PATH, BRIDGE_PATH, DEVTOOLS_CAPS_VERSION, parseBridgeConfigPayload } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
-import { BridgeClient, type BridgeFailure, type BridgeState } from './bridge.ts'
+import { BridgeClient, InstalledTokenUnreadableError, loadInstalledToken, type BridgeFailure, type BridgeState } from './bridge.ts'
 import { createRpc } from './rpc.ts'
 import { discoverInstances, planDiscovery, portOfUrl, readBridgeConfig } from './discovery.ts'
+import { browserName, extensionOrigin, pairWithBridge, type PairingFailure } from './pairing.ts'
 import { frameDocumentKey, listTabFrames } from './frames.ts'
 import {
   dispatchOpenTab,
   dispatchToolCall,
   isNavigationCandidateTool,
   isTabManagementTool,
+  callQuotedConsole,
   resetInputState,
   resetTabSnapshot,
   type InputRuntime,
@@ -105,7 +111,7 @@ import { HOLD_EXPIRED_MESSAGE, PauseGate, type PauseRequest } from './pause-gate
 import { capturePauseBaseline, prepareResume, type PauseBaseline, type ResumeFlowDeps } from './resume-flow.ts'
 import { AgentOverlayController } from './agent-overlay.ts'
 import { DialogController } from './dialogs.ts'
-import { approveProgram, coverByProgram, ProgramGrants } from './run-program.ts'
+import { approveProgram, coverByProgram, endsSeries, ProgramGrants } from './run-program.ts'
 import { PageWatcherRuntime } from './watcher-runtime.ts'
 import { chromeFleetDeps, FLEETS_STORAGE_KEY, FleetRegistry, type FleetDeps } from './fleet.ts'
 import {
@@ -173,9 +179,10 @@ import {
 } from './authorization.ts'
 import { nextDevToolsAllowance, readDevToolsAllowance } from './devtools-allowance.ts'
 import { DevToolsGrants } from './devtools-grants.ts'
-import { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD, PolicyRuntime } from './policy-runtime.ts'
+import { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD, isExtensionPageSender, PolicyRuntime, type TabProvenance } from './policy-runtime.ts'
+import { normalizeTaintLocalOrigins, normalizeTaintTrustedSites, reconcileTrustConfirmed, servesBridge } from '../security/taint-exempt.ts'
 import { splitSelectionMessage } from '../panel/selection.ts'
-import { callPolicyTargets, forcedApprovalPrompt, originFromUrl } from './authorization.ts'
+import { callPolicyTargets, forcedApprovalPrompt, originFromUrl, tabProvenanceOf } from './authorization.ts'
 import { normalizeSitePattern, normalizeSiteRules, type SiteRuleEntry } from '../security/site-policy.ts'
 import { CommitGate, STRICT_MODE_UNAVAILABLE } from './commit-gate.ts'
 import { fixtureAllowedFor, LearningRuntime } from './learning.ts'
@@ -244,6 +251,16 @@ export interface Settings {
   showAgentOverlay: boolean
   /** Let the agent create standing page watchers (browser_watch); each one still needs its own card. */
   allowPageWatchers: boolean
+  /** Pages served from this machine (loopback) do not taint a session (security/taint-exempt.ts). */
+  taintExemptLocalPages: boolean
+  /** Pages from sites the user marked trusted do not taint a session (security/taint-exempt.ts). */
+  taintExemptTrustedSites: boolean
+  /** Loopback origins the user said are their own pages (dev-loop links, the banner, Settings). */
+  taintLocalOrigins: string[]
+  /** Hosts whose pages are not treated as untrusted content: the banner's Trust. Relaxes no approval card. */
+  taintTrustedSites: string[]
+  /** Trusted site rules and always-allowed origins confirmed for the taint exemption (keys, taint-exempt.ts). */
+  taintTrustConfirmed: string[]
 }
 
 /** Current settings schema; see {@link Settings.settingsVersion}. */
@@ -268,6 +285,11 @@ const SETTINGS_DEFAULTS: Settings = {
   settingsVersion: SETTINGS_VERSION,
   showAgentOverlay: true,
   allowPageWatchers: false,
+  taintExemptLocalPages: true,
+  taintExemptTrustedSites: true,
+  taintLocalOrigins: [],
+  taintTrustedSites: [],
+  taintTrustConfirmed: [],
 }
 
 /** Longest no-panel approval window the bridge's hold can cover. */
@@ -454,6 +476,18 @@ const policyRuntime: PolicyRuntime = new PolicyRuntime({
   settings: () => settings,
   unrestricted: () => unrestrictedAccessEnabled(),
   clearBridgeTaint: async (sessionId) => { await gatewayRpc(BRIDGE_TAINT_CLEAR_METHOD, { sessionId: sessionId ?? null }) },
+  // The banner's choices save through the same path as Settings.
+  saveTaintTrust: async (change) => {
+    await settingsReady
+    await persistSettings({
+      taintTrustedSites: [...settings.taintTrustedSites, ...change.sites],
+      taintLocalOrigins: [...settings.taintLocalOrigins, ...change.localOrigins],
+    })
+  },
+  // Whatever serves the DSH host (its web UI shows every session's transcript) is never exempt.
+  neverExemptOrigin: (origin) => servesBridge(origin, [settings.bridgeUrl, discoveredBridgeUrl, lastBridgeUrl]),
+  // A class of exemption the connected bridge does not honour is off here too.
+  bridgeExemptions: () => caps?.taintExemptions,
   onManagedChange: (managed) => {
     // Managed values override user settings: re-apply them to what is loaded.
     if (!settingsLoaded) return
@@ -853,7 +887,12 @@ async function persistSettings(next: Partial<Settings>): Promise<void> {
   const revokesDevTools = changesDevTools && (settings.allowDevTools || devToolsGrants.hasAny()) && !updated.allowDevTools
   const togglesOverlay = settings.showAgentOverlay !== updated.showAgentOverlay
   const togglesWatchers = settings.allowPageWatchers !== updated.allowPageWatchers
+  // A trusted rule or always-allowed origin added now counts for the taint
+  // exemption at once; ones that predate it wait for the user's confirmation.
+  updated.taintTrustConfirmed = reconcileTrustConfirmed(settings, updated, next.taintTrustConfirmed ?? settings.taintTrustConfirmed)
   settings = updated
+  // Which taint sources the banner can offer to trust follows the site rules and exemption settings.
+  policyRuntime.broadcast()
   if (!updated.unrestrictedBrowserAccess) unrestrictedAccessActive = false
   if (revokesDevTools) devToolsGrants.clear()
   if (togglesOverlay) refreshActionBadges()
@@ -959,6 +998,13 @@ function normalizeUserSettings(candidate: Settings): Settings {
     settingsVersion: SETTINGS_VERSION,
     showAgentOverlay: candidate.showAgentOverlay !== false,
     allowPageWatchers: candidate.allowPageWatchers === true,
+    taintExemptLocalPages: candidate.taintExemptLocalPages !== false,
+    taintExemptTrustedSites: candidate.taintExemptTrustedSites !== false,
+    taintLocalOrigins: normalizeTaintLocalOrigins(candidate.taintLocalOrigins),
+    taintTrustedSites: normalizeTaintTrustedSites(candidate.taintTrustedSites),
+    taintTrustConfirmed: Array.isArray(candidate.taintTrustConfirmed)
+      ? [...new Set(candidate.taintTrustConfirmed.filter((key): key is string => typeof key === 'string'))].sort()
+      : [],
   }
 }
 
@@ -1178,6 +1224,8 @@ async function engageKillSwitch(): Promise<void> {
   sessionTrustedActionOrigins.clear()
   devToolsGrants.clear()
   programGrants.clear()
+  // No series card may be raised for a run started before the switch, and its wait ends now.
+  learning.disarmSeries()
   // Fleet children lose their tab bindings; the tabs stay open for the user.
   void fleets.releaseAll(fleetDeps(AbortSignal.abort(), async () => 'denied'))
   // Standing watchers are standing grants: the kill switch revokes them too.
@@ -1346,6 +1394,8 @@ async function pauseAgent(request: PauseRequest): Promise<void> {
   pauseGate.pause(request)
   // Taking over hands the page to the user: their own writes are not the agent's.
   if (request === 'take-over') commitGateTurnEnded(undefined)
+  // ... and a "do the remaining N" series does not continue blind over whatever they change.
+  if (request === 'take-over') programGrants.onTakeOver()
   if (wasRunning) pauseBaseline = capturePauseBaseline(resumeFlowDeps())
 }
 
@@ -2343,7 +2393,8 @@ async function taintAttachedSelection(sessionId: string, payload: unknown): Prom
     const attached = splitSelectionMessage(text)
     if (attached === null) continue
     await policyRuntime.ready
-    policyRuntime.recordSelection(sessionId, originFromUrl(attached.selection.url))
+    // A selection made on an exempt page (local, or a site the user trusts) taints neither side.
+    if (policyRuntime.recordSelection(sessionId, originFromUrl(attached.selection.url), attached.selection.url).exempt) return
     await gatewayRpc(BRIDGE_TAINT_MARK_METHOD, { sessionId }).catch(() => { /* older bridge: extension taint still applies */ })
     return
   }
@@ -2370,6 +2421,8 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
     const budget = caps === null
       ? undefined
       : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars }
+    // The evaluator also collects which frames the snapshot read (taint exemption).
+    const provenance = policyRuntime.provenanceEvaluator(sessionId, unrestrictedAccess)
     const answer = await dispatchToolCall(
       { id: crypto.randomUUID(), name: 'browser_snapshot', args: {} },
       unrestrictedAccess ? 'auto' : settings.sharePageContent,
@@ -2380,14 +2433,24 @@ async function refreshFollowedPage(sessionId: string, tabId: number): Promise<vo
       () => target.id !== undefined && tabAffinity.allowsTarget(target.id, sessionId),
       // Site rules, managed policy, and taint apply to the injected read too:
       // a blocked page is refused, an ask page shows its card.
-      { unrestrictedAccess, policy: policyRuntime.evaluator(sessionId, unrestrictedAccess) },
+      { unrestrictedAccess, policy: provenance.policy },
     )
     if (!answer.ok || controller.signal.aborted || !tabAffinity.allowsTarget(tabId, sessionId)) return
     if (typeof answer.result !== 'object' || answer.result === null) return
     const snapshot = (answer.result as { text?: unknown }).text
     if (typeof snapshot !== 'string' || snapshot.trim() === '') return
+    const origin = originFromUrl(target.url ?? '')
+    // Decided and recorded in one step, before the bridge is told: a snapshot
+    // of local or user-trusted pages only (every frame) taints neither side.
+    const frames = provenance.origins()
+    const urls = provenance.urls()
+    if (policyRuntime.injectionExempt(sessionId, origin, frames, urls) && policyRuntime.recordInjection(sessionId, origin, frames, urls).exempt) {
+      const local = policyRuntime.restsOnLocalPage([...origin === undefined ? [] : [origin], ...frames ?? []])
+      await gatewayRpc(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId, snapshot, taintExempt: true, ...local ? { taintExemptLocal: true } : {} })
+      return
+    }
     await gatewayRpc(BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, { sessionId, snapshot })
-    policyRuntime.recordInjection(sessionId, originFromUrl(target.url ?? ''))
+    policyRuntime.recordInjection(sessionId, origin, frames)
   } finally {
     activeRefresh.settle()
     if (activeFollowRefreshes.get(sessionId) === activeRefresh) activeFollowRefreshes.delete(sessionId)
@@ -2569,7 +2632,10 @@ const externalRequesters = new ExternalRequesters()
 const devLoop = new DevLoopController(chromeDevLoopBrowser())
 
 /** Panel dev-loop RPCs the background completes (dev-loop.ts). */
-const devLoopPanelRpc = createDevLoopPanelRpc(devLoop, gatewayRpc)
+const devLoopPanelRpc = createDevLoopPanelRpc(devLoop, gatewayRpc, undefined, (origin) => {
+  // Linking a tab into the dev loop says "this is my app": its pages are the user's own.
+  void settingsReady.then(() => persistSettings({ taintLocalOrigins: [...settings.taintLocalOrigins, origin] })).catch(() => {})
+})
 
 /** Learning features (workflows, site drivers, Watch me, failure fixtures); all default off. */
 const learning = new LearningRuntime({
@@ -2645,7 +2711,17 @@ function routeToolCall(call: ToolCall): void {
   // browser_run: an approved program stands in for this step's ordinary card only (run-program.ts).
   // The step must run on the tab the program was approved on.
   const programTarget = tabAffinity.resolveTarget(call.sessionId)
-  const programCover = programGrants.claim(call, programTarget.kind === 'target' ? programTarget.tab.tabId : undefined)
+  const programTabId = programTarget.kind === 'target' ? programTarget.tab.tabId : undefined
+  const programCover = programGrants.claim(call, programTabId)
+  // Anything else that may change the page ends a "do the remaining N" series: its rows are no longer what the card showed.
+  // In its own session now; on whichever tab the call turns out to act on once that tab is resolved (below).
+  const seriesForeign = endsSeries(call, programCover)
+  if (seriesForeign) programGrants.onForeignCall(call.sessionId)
+  const endSeriesOnTab = (target: { id?: number }): void => {
+    if (seriesForeign && target.id !== undefined) programGrants.onForeignTabAction(target.id)
+  }
+  // A claimed step reports how it ended; only a step that was done lets its series go on.
+  let programStepDone = false
   // A fleet worker's cards show under its parent's session; its allowlist is enforced here too (fleet.ts).
   // Both are read once the persisted fleets are loaded, before any dispatch path runs.
   let approvalSession = call.sessionId
@@ -2702,10 +2778,12 @@ function routeToolCall(call: ToolCall): void {
   const dispatch = (): Promise<ToolAnswer> => policyRuntime.ready.then(() => {
     // A subagent or fork of a tainted session: the Host says so on the call.
     if (call.tainted === true) policyRuntime.markHostTaint(call.sessionId)
+    // A fork or subagent of a session that read exempt pages may hold their content.
+    if (call.inheritedExemptReads === true) policyRuntime.noteInheritedExemptReads(call.sessionId)
   }).then(() => fleets.ready).then(() => {
     approvalSession = fleets.approvalSession(call.sessionId)
     fleetRefusal = fleets.refusal(call)
-  }).then(() => fleetRefusal !== undefined
+  }).then((): ToolAnswer | Promise<ToolAnswer> => fleetRefusal !== undefined
     ? { ok: false, error: { code: 'action-failed', message: fleetRefusal } } satisfies ToolAnswer
     : call.name === DEVLOOP_CAPTURE_TOOL
     // Dev loop: a read of the user-linked localhost tab only, under this
@@ -2750,6 +2828,10 @@ function routeToolCall(call: ToolCall): void {
         listFrames: listTabFrames,
         authorize: authorizeFor(call.sessionId),
         signal: controller.signal,
+        // Only "Do the remaining N" runs longer than one program, and only as the extension built it.
+        allowSeries: (sessionId, steps, tabId, documentKey) => learning.claimSeries(sessionId, steps, tabId, documentKey),
+        cardNote: (sessionId, steps) => learning.cardNote(sessionId, steps),
+        onContinued: () => { activeCall.decision = 'program-approved' },
       })
     : call.name === 'browser_open_tab'
     ? resolveOpenTabWindow(call.sessionId).then((target) => 'ok' in target
@@ -2771,7 +2853,7 @@ function routeToolCall(call: ToolCall): void {
       ? target
       : (policyTabOrigin = originFromUrl(target.url ?? ''), withCommitGate(activeCall, target, call.sessionId, () => learning.dispatchSiteDriver(
           call,
-          noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url)),
+          (endSeriesOnTab(target), noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url))),
           policy,
           approve(target.windowId),
           controller.signal,
@@ -2784,17 +2866,28 @@ function routeToolCall(call: ToolCall): void {
           budget,
           approve(target.windowId),
           controller.signal,
-          noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url)),
+          (endSeriesOnTab(target), noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url))),
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
-          { unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit, policy: learning.wrapPolicy(call, target, policy), overlay: agentOverlay },
+          {
+            unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit, policy: learning.wrapPolicy(call, target, policy), overlay: agentOverlay,
+            // A "do the remaining N" step acts only on an element that still looks as its card showed it, on the page the card was approved on.
+            ...(programCover?.target === undefined ? {} : { expect: { target: programCover.target, ...(programCover.page === undefined ? {} : { page: programCover.page }) } }),
+          },
         ))))
   )
   // Paused or taken over: the call waits here, before any tab resolution,
   // policy check, or approval card, so nothing can approve or run it.
   void heldDispatch(call, activeCall, dispatch).then(
     async (answer) => {
-      // Untrusted page content entered the session: taint it (security/taint.ts).
-      policyRuntime.recordResult(call, answer.ok, policyTabOrigin)
+      // Untrusted page content entered the session: taint it (security/taint.ts),
+      // unless everything the call could have quoted is exempt (local pages,
+      // sites the user trusts). The tab is looked at again only when that is possible.
+      const after = policyRuntime.mayExempt(call.sessionId) ? await tabProvenanceAfter(activeCall.tabId) : undefined
+      // Sent on the result frame: the bridge then leaves the session's shell and file tools on.
+      const verdict = policyRuntime.recordResult(call, answer.ok, policyTabOrigin, after, { quotesConsole: callQuotedConsole(call) })
+      const taintExempt = verdict.exempt
+        ? { taintExempt: true as const, ...verdict.local === true ? { taintExemptLocal: true as const } : {} }
+        : {}
       learning.recordResult(call, answer, {
         ...(activeCall.tabId === undefined ? {} : { tabId: activeCall.tabId }),
         ...(activeCall.url === undefined ? {} : { url: activeCall.url }),
@@ -2822,12 +2915,17 @@ function routeToolCall(call: ToolCall): void {
         const socket = bridge
         if (socket === null) return
         recordAuditNote(call, activeCall, navigatedTo)
-        socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result })
+        // Before the result leaves: the bridge sends the next step only after it.
+        if (programCover !== undefined && call.program !== undefined) {
+          programStepDone = true
+          programGrants.settle(call.program, true)
+        }
+        socket.send({ t: 'tool.result', id: call.id, ok: true, result: answer.result, ...taintExempt })
       } else {
         const socket = bridge
         if (socket === null) return
         recordAuditNote(call, activeCall)
-        socket.send({ t: 'tool.result', id: call.id, ok: false, error: answer.error! })
+        socket.send({ t: 'tool.result', id: call.id, ok: false, error: answer.error!, ...taintExempt })
       }
     },
     (error: unknown) => {
@@ -2854,6 +2952,8 @@ function routeToolCall(call: ToolCall): void {
       })
     },
   ).finally(() => {
+    // Failed, denied, cancelled, expired or never answered: a series step that was not done ends its series.
+    if (programCover !== undefined && call.program !== undefined && !programStepDone) programGrants.settle(call.program, false)
     if (expiryTimer !== undefined) clearTimeout(expiryTimer)
     unsettledToolCalls.delete(activeCall)
     activeCall.settle()
@@ -2918,6 +3018,22 @@ async function navigationAfter(call: ToolCall, activeCall: ActiveToolCall): Prom
   }
 }
 
+/**
+ * The origins of the call's tab once the call settled (top page and every
+ * frame), for the taint exemption. Undefined when the tab or its frame tree
+ * cannot be read: the exemption then falls back to what the call itself named.
+ */
+async function tabProvenanceAfter(tabId: number | undefined): Promise<TabProvenance | undefined> {
+  if (tabId === undefined) return undefined
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId })
+    if (frames === null || frames === undefined || frames.length === 0) return undefined
+    return tabProvenanceOf(frames.map((frame) => ({ frameId: frame.frameId, parentFrameId: frame.parentFrameId, url: frame.url })))
+  } catch {
+    return undefined
+  }
+}
+
 /** Annotate the bridge's audit entry for this call; sent ahead of its tool.result. */
 function recordAuditNote(call: ToolCall, activeCall: ActiveToolCall, navigatedTo?: string): void {
   if (rpc === null || bridge?.connected !== true) return
@@ -2939,6 +3055,8 @@ async function dispatchDevToolsTool(call: ToolCall, activeCall: ActiveToolCall, 
   const target = await resolveToolTab(call.sessionId)
   if ('ok' in target) return target
   noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url))
+  // Developer tools can change the page: a "do the remaining N" series on this tab ends.
+  if (target.id !== undefined) programGrants.onForeignTabAction(target.id)
   if (signal.aborted) return devToolsCancelled()
   const frames = await listTabFrames(target.id!, target.url)
   await policyRuntime.ready
@@ -3210,6 +3328,83 @@ async function startBridge(): Promise<void> {
   bridge.start(url, settings.token)
 }
 
+/** The pairing request in flight, if any: one at a time, and a new one withdraws the old. */
+let activePairing: AbortController | undefined
+
+/** Pairing requests the panel may start by itself (not on a click) while panels stay open. */
+const MAX_AUTOMATIC_PAIRINGS = 3
+/** How many it has started since the first panel of this sitting opened. */
+let automaticPairings = 0
+
+/**
+ * One-step pairing (pairing.ts): ask the DSH host for the bridge token, show
+ * the code the user types there, and once the exchange verified store the
+ * token like a typed one and connect. The request goes to the bridge this install
+ * is already trying to reach: the address in use, else the filled-in one,
+ * else the first local instance discovery finds.
+ * @param onCode - receives the code to display while the request waits.
+ * @returns the failure, or `undefined` once the token is stored.
+ */
+async function pairWithHost(
+  onCode: (code: string, answerTimeoutMs: number) => void,
+  options: { again: boolean; auto: boolean },
+): Promise<PairingFailure | undefined> {
+  const { again } = options
+  await settingsReady
+  // What nobody clicked for is bounded: each request shows a code a wrong
+  // peer may guess at once, and a panel that keeps asking by itself would
+  // hand out guesses without the user doing anything.
+  if (options.auto) {
+    if (automaticPairings >= MAX_AUTOMATIC_PAIRINGS) return 'auto-limit'
+    automaticPairings += 1
+  }
+  // An install that already holds a token pairs only when the user explicitly
+  // asked to pair again: a connection that merely fails (a process answering
+  // on the bridge's port, a bridge that is down) must never start a pairing
+  // by itself, and whatever happens the old token stays until a new one verified.
+  // A token file that is there but unreadable right now counts as a token held.
+  const installed = await loadInstalledToken().catch((error: unknown) => error instanceof InstalledTokenUnreadableError ? 'unreadable' : '')
+  if (!again && (settings.token !== '' || installed !== '')) return 'has-token'
+  activePairing?.abort()
+  const controller = new AbortController()
+  activePairing = controller
+  try {
+    await settingsReady
+    const filledIn = settings.bridgeUrl === '' ? undefined : normalizeBridgeUrl(settings.bridgeUrl, BRIDGE_PATH)
+    let url = connectedAddress ?? filledIn
+    if (url === undefined) {
+      await discoveryMemory
+      url = (await discoverInstances(planDiscovery({
+        ...(lastBridgeUrl === undefined ? {} : { rememberedUrl: lastBridgeUrl }),
+        excludeUrls: [...rejectedBridgeUrls],
+      }), {
+        probe: (port, timeoutMs) => readBridgeConfig(port, timeoutMs),
+        shouldContinue: () => !controller.signal.aborted,
+      }, { stopAtFirstHit: true }))[0]?.wsUrl
+    }
+    if (controller.signal.aborted) return 'cancelled'
+    if (url === undefined) return 'unreachable'
+    const paired = await pairWithBridge(url, { origin: extensionOrigin(), name: browserName(), onCode, signal: controller.signal })
+    if (!paired.ok) return paired.reason
+    await persistSettings({ token: paired.token })
+    // A new token is a new connection: drop what belonged to the old one.
+    forgetStandingHost()
+    setBridgeRefusal(undefined)
+    rejectedBridgeUrls.clear()
+    discoveryLatch = 'idle'
+    persistDiscoveryLatch('idle')
+    // This bridge proved it was given the code the user read here: prefer it next time.
+    if (url !== filledIn) rememberBridgeUrl(url)
+    if (panelPorts.size > 0) {
+      await startBridge()
+      broadcastStatus()
+    }
+    return undefined
+  } finally {
+    if (activePairing === controller) activePairing = undefined
+  }
+}
+
 /**
  * Enumerate every local instance for the settings picker.
  *
@@ -3334,7 +3529,15 @@ chrome.runtime.onConnect.addListener((port) => {
   if (pageWatchers.connect(port)) return
   if (learning.connect(port)) return
   if (port.name !== 'dsh-panel') return
+  // Content scripts run beside untrusted pages and can open ports too: the
+  // panel port (settings, approvals, pairing) is for this extension's own pages only.
+  if (!isExtensionPageSender(port.sender)) {
+    port.disconnect()
+    return
+  }
   const wasIdle = panelPorts.size === 0
+  // A new sitting: the panel may ask to pair by itself a few times again.
+  if (wasIdle) automaticPairings = 0
   const tabAffinityRebinds = new Map<string, {
     controller: AbortController
     timer: ReturnType<typeof setTimeout>
@@ -3450,6 +3653,8 @@ chrome.runtime.onConnect.addListener((port) => {
             const connectionChanged = settings.bridgeUrl !== previousConnection.bridgeUrl
               || settings.token !== previousConnection.token
             if (connectionChanged) {
+              // A pairing request still waiting was addressed to the previous bridge.
+              activePairing?.abort()
               // The hint and the headless address belong to the previous connection.
               forgetStandingHost()
               setBridgeRefusal(undefined)
@@ -3538,6 +3743,24 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       case 'discovery.cancel': {
         activeScan?.controller.abort()
+        break
+      }
+      case 'pair.start': {
+        // Only the extension's own panel reaches this port. The panel gets the code to display, never the token.
+        const request = message as { id?: unknown; again?: unknown; auto?: unknown }
+        if (typeof request.id !== 'string') break
+        const id = request.id
+        const post = (reply: unknown): void => { try { port.postMessage(reply) } catch { /* panel closed */ } }
+        void pairWithHost((code, answerTimeoutMs) => { post({ type: 'pair.code', id, code, answerTimeoutMs }) }, { again: request.again === true, auto: request.auto === true }).then(
+          reason => reason,
+          (): PairingFailure => 'unreachable',
+        ).then((reason) => {
+          post(reason === undefined ? { type: 'pair.result', id, ok: true } : { type: 'pair.result', id, ok: false, reason })
+        })
+        break
+      }
+      case 'pair.cancel': {
+        activePairing?.abort()
         break
       }
       case 'kill-switch.engage':
@@ -3739,6 +3962,8 @@ chrome.runtime.onConnect.addListener((port) => {
     const panelSessionId = panelActiveSessions.get(port)
     panelActiveSessions.delete(port)
     panelPorts.delete(port)
+    // Nobody is left to read the code: withdraw a pairing request that is still waiting.
+    if (panelPorts.size === 0) activePairing?.abort()
     if (panelSessionId !== undefined) void checkpointSessionPage(panelSessionId)
     interactionResponses.removePort(port)
     if (panelWindowId !== undefined && !hasPanelInWindow(panelWindowId)) {
@@ -3880,6 +4105,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.webNavigation.onCommitted.addListener(({ tabId, frameId, url }) => {
   // Developer-tools grants end once their tab leaves the granted origin.
   if (frameId === 0) devToolsGrants.onTopFrameCommit(tabId, url)
+  // A "do the remaining N" series ends with the document it was approved on.
+  if (frameId === 0) programGrants.onTopFrameNavigation(tabId, url, false)
   cancelDevToolsCalls(tabId)
   broadcastSelections(selections.clearTab(tabId, frameId))
   // A new top-level document drops any modifier or button held by a trusted
@@ -3998,6 +4225,15 @@ if (import.meta.env.EXT_TARGET === 'firefox') {
 // runtimeRestored has read storage). This unconditional disarm runs before
 // either can: the restore path awaits storage first.
 disarmBridgeKeepalive()
+
+// A single-page app changes route without a new document: a "do the
+// remaining N" series ends when its tab's path changes (query and fragment
+// may change; the rows are checked one by one anyway).
+for (const event of [chrome.webNavigation.onHistoryStateUpdated, chrome.webNavigation.onReferenceFragmentUpdated] as Array<typeof chrome.webNavigation.onHistoryStateUpdated | undefined>) {
+  event?.addListener(({ tabId, frameId, url }) => {
+    if (frameId === 0) programGrants.onTopFrameNavigation(tabId, url, true)
+  })
+}
 
 // `settingsReady` intentionally has no bridge-start continuation: opening a
 // side panel is the first action allowed to claim the bridge connection.

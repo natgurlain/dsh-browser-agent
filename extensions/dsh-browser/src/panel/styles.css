@@ -2562,6 +2562,32 @@ textarea:focus-visible {
   font-size: calc(10.5px * var(--ui-scale));
 }
 
+/* A program series: sample rows, then the folded list (one line per row). */
+.approval-rows-sample {
+  margin: 0 0 3px;
+  color: var(--ink);
+  font-size: calc(11px * var(--ui-scale));
+  overflow-wrap: anywhere;
+}
+
+.approval-rows > summary {
+  cursor: pointer;
+}
+
+.approval-rows-list {
+  max-height: 240px;
+  margin: 4px 0 0;
+  padding-left: 28px;
+  overflow-y: auto;
+  color: var(--ink);
+  font-size: calc(10.5px * var(--ui-scale));
+}
+
+.approval-rows-list summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
 .approval-params {
   display: flex;
   flex-direction: column;
@@ -2982,8 +3008,14 @@ textarea:focus-visible {
 }
 
 /* Session taint banner (TaintBanner.tsx). */
-.taint-banner { display: flex; gap: 8px; align-items: center; padding: 6px 10px; font-size: calc(12px * var(--ui-scale)); background: var(--security-soft); color: var(--security); border-bottom: 1px solid var(--security-border); }
-.taint-banner span { flex: 1; }
+.taint-banner { display: flex; flex-direction: column; gap: 4px; padding: 6px 10px; font-size: calc(12px * var(--ui-scale)); background: var(--security-soft); color: var(--security); border-bottom: 1px solid var(--security-border); }
+.taint-banner-row { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.taint-banner-row > span { flex: 1 1 12em; }
+.taint-banner .taint-more { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
+.taint-banner .taint-sources { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.taint-banner .taint-sources li { display: flex; gap: 8px; align-items: center; justify-content: space-between; overflow-wrap: anywhere; }
+.taint-banner .taint-site { overflow-wrap: anywhere; }
+.taint-banner .taint-site strong { font-weight: 700; }
 
 /* ---- Step timeline (replaces the collapsed "a → b → c" tool row) ---- */
 
@@ -4424,4 +4456,65 @@ textarea:focus-visible {
   .settings-savebar-label {
     flex-basis: 100%;
   }
+}
+
+/* ==== Pairing ================================================================
+   One-step pairing: the extension shows a short code that the user types into
+   DSH (PairingCard). */
+.pairing-card {
+  display: grid;
+  gap: 7px;
+  padding: 13px;
+  font-size: calc(11px * var(--ui-scale));
+}
+
+.app > .pairing-card {
+  margin: 10px 12px 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.pairing-card p {
+  margin: 0;
+  color: var(--faint);
+  line-height: 1.45;
+}
+
+.pairing-card .pairing-needed,
+.pairing-card .pairing-enter {
+  color: var(--ink);
+}
+
+.pairing-card .pairing-enter {
+  font-weight: 650;
+}
+
+.pairing-card .pairing-code {
+  justify-self: start;
+  padding: 6px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--ink);
+  font: 650 calc(20px * var(--ui-scale)) / 1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.12em;
+  user-select: all;
+}
+
+.pairing-card .pairing-warning,
+.pairing-status.settings-error {
+  color: var(--danger);
+}
+
+.pairing-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.pairing-card .pairing-start {
+  justify-self: start;
+}
+
+.pairing-status:empty {
+  display: none;
 }

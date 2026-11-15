@@ -139,7 +139,9 @@ export function canonicalJson(value: unknown): string {
 function sortKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortKeys)
   if (typeof value === 'object' && value !== null) {
-    const sorted: Record<string, unknown> = {}
+    // No prototype: an own "__proto__" key stays an ordinary member instead of
+    // vanishing into the prototype setter (two entries must never hash alike).
+    const sorted = Object.create(null) as Record<string, unknown>
     for (const key of Object.keys(value).sort()) {
       const child = (value as Record<string, unknown>)[key]
       if (child !== undefined) sorted[key] = sortKeys(child)

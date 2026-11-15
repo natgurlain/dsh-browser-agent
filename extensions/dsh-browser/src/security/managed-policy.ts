@@ -25,6 +25,10 @@ export interface ManagedPolicy {
   disableScreenshots: boolean
   /** The shipped read-only defaults cannot be turned off. */
   enforceSiteDefaults: boolean
+  /** Local (loopback) pages taint a session like any other page (taint-exempt.ts). */
+  disableLocalTaintExemption: boolean
+  /** Sites the user trusts taint a session like any other page (taint-exempt.ts). */
+  disableTrustedTaintExemption: boolean
   /**
    * Pinned web origins (exact or `*.` wildcard): the agent may read, act on,
    * and navigate to these only. Undefined = no pin.
@@ -40,6 +44,8 @@ export const EMPTY_MANAGED_POLICY: ManagedPolicy = {
   disableUnrestricted: false,
   disableScreenshots: false,
   enforceSiteDefaults: false,
+  disableLocalTaintExemption: false,
+  disableTrustedTaintExemption: false,
   active: false,
 }
 
@@ -50,13 +56,18 @@ export function parseManagedPolicy(raw: unknown): ManagedPolicy {
   const allowed = Array.isArray(value.allowedOrigins)
     ? [...new Set(value.allowedOrigins.map(normalizeTrustedOrigin).filter((entry): entry is string => entry !== undefined))].sort()
     : undefined
-  const known = ['siteRules', 'disableDevTools', 'disableUnrestricted', 'disableScreenshots', 'enforceSiteDefaults', 'allowedOrigins']
+  const known = [
+    'siteRules', 'disableDevTools', 'disableUnrestricted', 'disableScreenshots', 'enforceSiteDefaults', 'allowedOrigins',
+    'disableLocalTaintExemption', 'disableTrustedTaintExemption',
+  ]
   return {
     siteRules: normalizeSiteRules(value.siteRules, 'managed'),
     disableDevTools: value.disableDevTools === true,
     disableUnrestricted: value.disableUnrestricted === true,
     disableScreenshots: value.disableScreenshots === true,
     enforceSiteDefaults: value.enforceSiteDefaults === true,
+    disableLocalTaintExemption: value.disableLocalTaintExemption === true,
+    disableTrustedTaintExemption: value.disableTrustedTaintExemption === true,
     // An allowlist that parsed to nothing still pins: an admin who listed only
     // malformed entries meant "restrict", so fail closed to "no sites".
     ...allowed === undefined ? {} : { allowedOrigins: allowed },

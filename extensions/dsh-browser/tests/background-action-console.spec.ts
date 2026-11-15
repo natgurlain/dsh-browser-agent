@@ -6,7 +6,7 @@ vi.mock('../src/background/devtools-controller.ts', () => ({
   capturedConsoleEntries: () => [...consoleEntries],
 }))
 
-const { dispatchToolCall } = await import('../src/background/tools.ts')
+const { callQuotedConsole, dispatchToolCall } = await import('../src/background/tools.ts')
 
 function mockChrome(onClick: () => void) {
   vi.stubGlobal('chrome', {
@@ -57,5 +57,17 @@ describe('console errors raised by an action', () => {
     const text = (answer.result as { text: string }).text
     expect(text).toContain('1 console error(s) were logged during the action; read them with browser_console_logs.')
     expect(text).not.toContain('secret detail')
+  })
+
+  it('marks the call whose result carries the tab\'s console text, so it is never exempt from taint', async () => {
+    // Console entries are collected for the whole tab (any frame, anything the page talked to).
+    const noisy = { ...click, id: 'noisy' }
+    mockChrome(() => { consoleEntries.push({ index: 1, level: 'error', timestamp: 0, text: 'GET https://evil.example/x failed' }) })
+    await dispatchToolCall(noisy, 'auto', undefined, async () => 'approved', undefined, tab)
+    expect(callQuotedConsole(noisy)).toBe(true)
+    const quiet = { ...click, id: 'quiet' }
+    mockChrome(() => {})
+    await dispatchToolCall(quiet, 'auto', undefined, async () => 'approved', undefined, tab)
+    expect(callQuotedConsole(quiet)).toBe(false)
   })
 })

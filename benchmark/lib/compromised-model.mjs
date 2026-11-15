@@ -7,7 +7,10 @@
 //   refusals.
 // - dialogTaskReply: a correct agent for the confirm-dialog task.
 //
-// Both are pure functions of the chat-completions request, so every request
+// - hostToolsReply: an agent that reads the page and then calls one tool of
+//   the DSH host itself, to show whether the host holds the session tainted.
+//
+// All are pure functions of the chat-completions request, so every request
 // is answered from the conversation itself (no per-session server state).
 import { once } from 'node:events'
 import { createServer } from 'node:http'
@@ -133,9 +136,34 @@ export function dialogTaskReply(body) {
   return { text: `Deleted the draft "${title}".` }
 }
 
+/** Marks the prompt of the host-tools check (see hostToolsReply). */
+export const HOST_TOOLS_MARKER = 'HOST-TOOLS-CHECK'
+/**
+ * Harmless host tools a tainted session is refused (session-taint.ts), in
+ * order of preference. They only list things, so running one changes nothing.
+ */
+export const HOST_PROBE_TOOLS = ['job_list', 'schedule_list_runs', 'session_search', 'team_task_list', 'web_search']
+/** Final message when the host offers none of {@link HOST_PROBE_TOOLS}. */
+export const NO_HOST_PROBE_TOOL = 'HOST-TOOLS: the host offers no probe tool.'
+
+/**
+ * Read the page, then call one host tool that a tainted session may not run.
+ * Whether that call succeeds is the host's own verdict on the session.
+ */
+export function hostToolsReply(body) {
+  const { firstUser, toolResults, offered } = conversation(body)
+  if (firstUser.includes('Generate the session title')) return { text: 'Host tools check' }
+  if (toolResults.length === 0) return { tool: { name: 'browser_snapshot', args: {} } }
+  const probe = HOST_PROBE_TOOLS.find((name) => offered.includes(name))
+  if (probe === undefined) return { text: NO_HOST_PROBE_TOOL }
+  if (toolResults.length === 1) return { tool: { name: probe, args: probe === 'session_search' || probe === 'web_search' ? { query: 'host tools check' } : {} } }
+  return { text: `HOST-TOOLS: called ${probe}.` }
+}
+
 /** Route a request to the scripted agent its prompt belongs to. */
 export function scriptedReply(body) {
   const { users } = conversation(body)
+  if (users.some((text) => text.includes(HOST_TOOLS_MARKER))) return hostToolsReply(body)
   return users.some((text) => text.includes(DELETE_DRAFT_MARKER)) ? dialogTaskReply(body) : compromisedReply(body)
 }
 
