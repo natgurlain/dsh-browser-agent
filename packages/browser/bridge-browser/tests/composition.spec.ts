@@ -403,8 +403,9 @@ describe('real Loader composition', () => {
       // whether the matching tool group is registered (asserted below);
       // `hostApprovals` says this bridge forwards approvals to dsh; `standing`
       // is none by default (no schedules, MCP endpoint off); `taintExemptions`
-      // says which exemption vouchers this bridge honours (both, by default).
-      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60, devTools: { version: 1 }, hostApprovals: 1, standing: { schedules: 0, mcp: false }, taintExemptions: { local: true, trusted: true } },
+      // says which exemption vouchers this bridge honours (both, by default);
+      // `autoReview` says the composed Host has an LLM service to review with.
+      caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60, devTools: { version: 1 }, hostApprovals: 1, autoReview: 1, standing: { schedules: 0, mcp: false }, taintExemptions: { local: true, trusted: true } },
     })
 
     // Gateway RPC round-trip against the real session store.

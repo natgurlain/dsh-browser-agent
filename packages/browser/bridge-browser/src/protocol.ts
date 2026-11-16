@@ -84,6 +84,168 @@ export const MAX_HOST_APPROVAL_REASON_CHARS = 32 * 1024
 export const HOST_APPROVALS_CAPS_VERSION = 1
 
 /**
+ * Version of Auto review (docs/auto-review-design.md) advertised in server
+ * caps. Present only when the bridge can review at all: the plugin config
+ * allows it, the Host composes an LLM service, and its session history reader
+ * is the one this bridge knows. An extension offers the per-conversation
+ * toggle only for this exact version.
+ */
+export const AUTO_REVIEW_CAPS_VERSION = 1
+
+/**
+ * Bridge-handled RPC: review one pending ordinary approval card
+ * (`{ toolCallId, reviewId, binding, action }` →
+ * `{ reviewId, binding, decision: 'allow' | 'ask', risk?, reason, userTurn? }`).
+ * The session and tool come from the bridge's own record of that call, never
+ * from the payload. The extension applies an `allow` only for the review id
+ * and payload binding it asked about, exactly like the user's "Allow once".
+ */
+export const BRIDGE_REVIEW_ASK_METHOD = 'bridge.review.ask'
+
+/** Bridge-handled RPC: abort one in-flight review (`{ toolCallId, reviewId }`). */
+export const BRIDGE_REVIEW_CANCEL_METHOD = 'bridge.review.cancel'
+
+/**
+ * Bridge-handled RPC: whether Auto review can run for one conversation
+ * (`{ sessionId }` → `{ available: true, model }` or
+ * `{ available: false, reason }`). Grants nothing; it only lets the panel
+ * disable its toggle with a reason.
+ */
+export const BRIDGE_REVIEW_STATUS_METHOD = 'bridge.review.status'
+
+/** Tools whose ordinary cards Auto review may decide (the extension's floor narrows it further). */
+export const AUTO_REVIEW_TOOLS = [
+  'browser_click', 'browser_type', 'browser_select', 'browser_hover', 'browser_press', 'browser_drag', 'browser_navigate',
+] as const
+
+export type AutoReviewTool = typeof AUTO_REVIEW_TOOLS[number]
+
+/** The verbs a reviewed action is described with. */
+export const AUTO_REVIEW_VERBS = ['click', 'double-click', 'right-click', 'type', 'select', 'hover', 'press', 'drag', 'navigate'] as const
+
+/** How the reviewed element presents itself (derived from its kind, never page prose). */
+export const AUTO_REVIEW_TARGET_CLASSES = ['link', 'button', 'field', 'control', 'other', 'none'] as const
+
+/** Longest untrusted (page- or agent-authored) string a review request may carry. */
+export const MAX_REVIEW_UNTRUSTED_CHARS = 200
+
+/** Most recent Auto-approved step labels a review request may carry. */
+export const MAX_REVIEW_RECENT = 3
+
+/**
+ * One pending page action as the extension computed it, for the reviewer.
+ * Booleans and enums are the extension's own facts; everything under
+ * `untrusted` was authored by the page or the agent and is only ever shown to
+ * the reviewer as data.
+ */
+export interface ReviewAction {
+  tool: AutoReviewTool
+  verb: typeof AUTO_REVIEW_VERBS[number]
+  /** Element kind from the fixed vocabulary, or 'none' (navigation, key press to the page). */
+  targetKind: string
+  targetClass: typeof AUTO_REVIEW_TARGET_CLASSES[number]
+  /** Native structure says this likely submits a form (submit button, Enter in a form field). */
+  formSubmitLikely: boolean
+  /** Commit-like by structure or by its EN/ZH name (submit, send, save, delete, …). */
+  commitLike: boolean
+  /** Payment, purchase, account-security or credential words in its name or context. */
+  highRiskWords: boolean
+  /** For navigation: the destination is the current page's origin. Otherwise true. */
+  sameOrigin: boolean
+  /** The conversation has read web pages that taint it. */
+  tainted: boolean
+  /** Actions Auto review approved since the user's last message. */
+  approvedThisTurn: number
+  /** For browser_type: how many characters will be typed. */
+  typedChars?: number
+  /** For browser_press: the key chord (agent-authored, short). */
+  key?: string
+  untrusted: {
+    name?: string
+    context?: string
+    title?: string
+    url?: string
+    destination?: string
+    typed?: string
+    options?: string[]
+    recent?: string[]
+  }
+}
+
+const UNTRUSTED_KEYS = ['name', 'context', 'title', 'url', 'destination', 'typed'] as const
+
+/**
+ * Validate a review action received over the wire. Every field is checked
+ * and unknown members are refused, so nothing unexpected reaches a prompt.
+ * @returns the action, or undefined when anything is off.
+ */
+export function parseReviewAction(value: unknown): ReviewAction | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const raw = value as Record<string, unknown>
+  const allowed = new Set(['tool', 'verb', 'targetKind', 'targetClass', 'formSubmitLikely', 'commitLike', 'highRiskWords', 'sameOrigin', 'tainted', 'approvedThisTurn', 'typedChars', 'key', 'untrusted'])
+  if (Object.keys(raw).some((key) => !allowed.has(key))) return undefined
+  if (!(AUTO_REVIEW_TOOLS as readonly unknown[]).includes(raw.tool)) return undefined
+  if (!(AUTO_REVIEW_VERBS as readonly unknown[]).includes(raw.verb)) return undefined
+  if (typeof raw.targetKind !== 'string' || !/^[a-z]{1,16}$/u.test(raw.targetKind)) return undefined
+  if (!(AUTO_REVIEW_TARGET_CLASSES as readonly unknown[]).includes(raw.targetClass)) return undefined
+  for (const flag of ['formSubmitLikely', 'commitLike', 'highRiskWords', 'sameOrigin', 'tainted'] as const) {
+    if (typeof raw[flag] !== 'boolean') return undefined
+  }
+  if (typeof raw.approvedThisTurn !== 'number' || !Number.isSafeInteger(raw.approvedThisTurn) || raw.approvedThisTurn < 0 || raw.approvedThisTurn > 10_000) return undefined
+  if (raw.typedChars !== undefined && (typeof raw.typedChars !== 'number' || !Number.isSafeInteger(raw.typedChars) || raw.typedChars < 0 || raw.typedChars > 1_000_000)) return undefined
+  if (raw.key !== undefined && (typeof raw.key !== 'string' || raw.key.length > 40)) return undefined
+  const untrusted = raw.untrusted
+  if (typeof untrusted !== 'object' || untrusted === null || Array.isArray(untrusted)) return undefined
+  const fields = untrusted as Record<string, unknown>
+  const known = new Set<string>([...UNTRUSTED_KEYS, 'options', 'recent'])
+  if (Object.keys(fields).some((key) => !known.has(key))) return undefined
+  const out: ReviewAction['untrusted'] = {}
+  for (const key of UNTRUSTED_KEYS) {
+    const field = fields[key]
+    if (field === undefined) continue
+    if (typeof field !== 'string' || field.length > MAX_REVIEW_UNTRUSTED_CHARS) return undefined
+    out[key] = field
+  }
+  for (const key of ['options', 'recent'] as const) {
+    const list = fields[key]
+    if (list === undefined) continue
+    if (!Array.isArray(list) || list.length > (key === 'recent' ? MAX_REVIEW_RECENT : 5)
+      || !list.every((entry) => typeof entry === 'string' && entry.length <= MAX_REVIEW_UNTRUSTED_CHARS)) return undefined
+    out[key] = [...list] as string[]
+  }
+  return {
+    tool: raw.tool as AutoReviewTool,
+    verb: raw.verb as ReviewAction['verb'],
+    targetKind: raw.targetKind,
+    targetClass: raw.targetClass as ReviewAction['targetClass'],
+    formSubmitLikely: raw.formSubmitLikely as boolean,
+    commitLike: raw.commitLike as boolean,
+    highRiskWords: raw.highRiskWords as boolean,
+    sameOrigin: raw.sameOrigin as boolean,
+    tainted: raw.tainted as boolean,
+    approvedThisTurn: raw.approvedThisTurn,
+    ...raw.typedChars === undefined ? {} : { typedChars: raw.typedChars as number },
+    ...raw.key === undefined ? {} : { key: raw.key as string },
+    untrusted: out,
+  }
+}
+
+/** A review's outcome as the bridge answers it. */
+export interface ReviewAnswer {
+  reviewId: string
+  binding: string
+  decision: 'allow' | 'ask'
+  risk?: 'low' | 'medium' | 'high'
+  /** One short sentence from the reviewer (or the bridge, on failure); shown to the user only. */
+  reason: string
+  /** Opaque marker of the newest user message the reviewer saw. */
+  userTurn?: string
+}
+
+/** Why Auto review is not available for a conversation. */
+export type ReviewUnavailableReason = 'host-unsupported' | 'no-model' | 'external-session' | 'disabled' | 'not-started'
+
+/**
  * Internal RPC: the extension annotates one in-flight tool call (approval
  * decision, page URL, navigation) or records the kill switch in the audit log.
  */
@@ -775,6 +937,12 @@ export interface BridgeCaps {
    */
   hostApprovals?: typeof HOST_APPROVALS_CAPS_VERSION
   /**
+   * Server only: the bridge handles {@link BRIDGE_REVIEW_ASK_METHOD} at this
+   * version ({@link AUTO_REVIEW_CAPS_VERSION}). Absent on older bridges and
+   * where the Host cannot review; any other version is treated as absent.
+   */
+  autoReview?: number
+  /**
    * Server only: unattended work the Host holds for this install when the
    * connection is accepted (see {@link StandingWork}). Absent on older
    * bridges, which the extension reads as "none". Bound into the server
@@ -922,6 +1090,11 @@ export type ServerFrame =
      * approval cards; older extensions ignore it.
      */
     requester?: string
+    /**
+     * The model's tool-call id, when the executor supplied one: lets the
+     * panel mark that step (e.g. "Reviewing…"). Older extensions ignore it.
+     */
+    toolCallId?: string
   }
   /** Withdraw a tool call that timed out or whose caller was cancelled. */
   | { t: 'tool.cancel'; id: string }
@@ -1089,6 +1262,7 @@ export function parseBridgeFrame(text: string): BridgeFrame | undefined {
             ...(frame.inheritedExemptReads === true ? { inheritedExemptReads: true as const } : {}),
             ...(isProgramStepRef(frame.program) ? { program: frame.program } : {}),
             ...(typeof frame.requester === 'string' && isRequesterLabel(frame.requester) ? { requester: frame.requester } : {}),
+            ...(typeof frame.toolCallId === 'string' && frame.toolCallId !== '' && frame.toolCallId.length <= 256 ? { toolCallId: frame.toolCallId } : {}),
           }
         : undefined
     case 'tool.cancel':
@@ -1148,6 +1322,8 @@ function isCaps(value: unknown): value is BridgeCaps {
     && (caps.taintExemptions === undefined || isTaintExemptionCaps(caps.taintExemptions))
     // Any version is a valid claim; only the known one is acted on.
     && (caps.standingUpdates === undefined || (typeof caps.standingUpdates === 'number' && Number.isSafeInteger(caps.standingUpdates) && caps.standingUpdates > 0))
+    // Any version is a valid claim; only AUTO_REVIEW_CAPS_VERSION is acted on.
+    && (caps.autoReview === undefined || (typeof caps.autoReview === 'number' && Number.isSafeInteger(caps.autoReview) && caps.autoReview > 0))
 }
 
 function isTaintExemptionCaps(value: unknown): value is { local: boolean; trusted: boolean } {

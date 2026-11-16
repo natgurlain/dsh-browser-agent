@@ -70,6 +70,7 @@ import {
 } from './remote-host-api.ts'
 import type { BrowserHostApi } from './host-api.ts'
 import { mountMcpEndpoint, type McpConfig } from './mcp-mount.ts'
+import { AutoReviewer, isLlmLike } from './auto-review.ts'
 import { createMcpToolHost, type ToolRegistryLike } from './mcp-tools.ts'
 import { registerBrowserDelegateTool, registerBrowserPreset, registerBrowserSkills } from './browser-agent.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -226,6 +227,13 @@ export interface Config {
    * is false (a dev server that renders untrusted data).
    */
   honorTaintExemptions?: boolean
+  /**
+   * Offer Auto review to the browser extension (docs/auto-review-design.md):
+   * per conversation, opt-in in the side panel, the conversation's own model
+   * decides eligible ordinary approval cards. Default true; false removes the
+   * `autoReview` cap so no extension offers the toggle.
+   */
+  autoReview?: boolean
 }
 
 /** The shape after schemastery applies its defaults to every field. */
@@ -262,6 +270,7 @@ export const Config: z<Config, ResolvedConfig> = z.object({
     trustLoopback: z.boolean().default(true),
   }).default({ enabled: false, allowedOrigins: [], trustLoopback: true }),
   honorTaintExemptions: z.boolean().default(true),
+  autoReview: z.boolean().default(true),
 }) as unknown as z<Config, ResolvedConfig>
 
 /**
@@ -474,6 +483,14 @@ function mountBridge(
       () => ctx.agents as unknown as AgentLookup,
     ),
     maxApprovalHoldMs: DEFAULT_MAX_APPROVAL_HOLD_MS,
+    // Auto review runs here on the Host, with the conversation's own model (auto-review.ts).
+    autoReview: new AutoReviewer({
+      llm: () => {
+        const llm = ctx.get('llm' as never) as unknown
+        return isLlmLike(llm) ? llm : undefined
+      },
+      session: (sessionId) => (ctx.agents.get(sessionId as Parameters<typeof ctx.agents.get>[0]) as { session?: unknown } | undefined)?.session,
+    }, { enabled: resolved.autoReview }),
     onDisconnect: (connection) => { learning?.disconnected(connection) },
     // Reasons for an extension to stay connected with no side panel open:
     // this install's workflow schedules, and the MCP endpoint (both opt-in).

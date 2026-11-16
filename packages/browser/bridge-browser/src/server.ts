@@ -77,9 +77,16 @@ import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { BrowserHostApi } from './host-api.ts'
 import {
+  AUTO_REVIEW_CAPS_VERSION,
   BRIDGE_APPROVAL_ASK_METHOD,
   BRIDGE_APPROVAL_WITHDRAW_METHOD,
   BRIDGE_CLOSE_CODES,
+  BRIDGE_REVIEW_ASK_METHOD,
+  BRIDGE_REVIEW_CANCEL_METHOD,
+  BRIDGE_REVIEW_STATUS_METHOD,
+  parseReviewAction,
+  type ReviewAction,
+  type ReviewUnavailableReason,
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_TOOL_HOLD_METHOD,
   DEVTOOLS_TOOL_NAMES,
@@ -117,6 +124,7 @@ import {
 } from './protocol.ts'
 import { SessionPurgeError } from './session-purge.ts'
 import type { BridgeAuditObserver } from './audit-log.ts'
+import { reviewAnswer, type ReviewRecord } from './auto-review.ts'
 import { handleAuditRpc } from './audit-rpc.ts'
 import { verifyToken } from './token.ts'
 import {
@@ -351,6 +359,11 @@ export interface BridgeServerDeps {
   requestHostApproval?: (request: HostApprovalRequest) => Promise<HostApprovalOutcome>
   /** Upper bound on one call's approval hold; defaults to DEFAULT_MAX_APPROVAL_HOLD_MS. */
   maxApprovalHoldMs?: number
+  /**
+   * Auto review (auto-review.ts). Absent, or `supported()` false: no
+   * `autoReview` cap, and the review RPCs are refused as unsupported.
+   */
+  autoReview?: AutoReviewService
   /** Clock seam for tests. */
   now?: () => number
   /**
@@ -380,6 +393,16 @@ export interface BridgeServerDeps {
   standingWork?: (connection: string) => StandingWork
 }
 
+/** What the server needs from the Host's reviewer (auto-review.ts `AutoReviewer`). */
+export interface AutoReviewService {
+  supported(): boolean
+  status(sessionId: string, external: boolean): { available: true; model: string } | { available: false; reason: ReviewUnavailableReason }
+  review(sessionId: string, action: ReviewAction, signal: AbortSignal): Promise<ReviewRecord>
+}
+
+/** Longest review id accepted. */
+const MAX_REVIEW_ID_CHARS = 128
+
 /** Longest parent chain followed when resolving inherited affinity. */
 const MAX_AFFINITY_DEPTH = 32
 
@@ -401,6 +424,8 @@ interface PendingTool {
   timer: NodeJS.Timeout
   /** Forwarded approvals still waiting on dsh, by extension approval id. */
   approvals: Map<string, AbortController>
+  /** Auto reviews in flight for this call, by extension review id. */
+  reviews: Map<string, AbortController>
 }
 
 /** A socket that passed authentication and owns its client identity's slot. */
@@ -483,7 +508,7 @@ export class BridgeServer {
     this.chromeExtensionIds = new Set(deps.allowedChromeExtensionIds ?? [PINNED_CHROME_EXTENSION_ID])
     this.revokedOrigins = new Set(deps.revokedOrigins ?? [])
     this.token = deps.token
-    const { hostApprovals: _hostApprovals, client: _client, standing: _standing, standingUpdates: _standingUpdates, ...caps } = deps.caps
+    const { hostApprovals: _hostApprovals, autoReview: _autoReview, client: _client, standing: _standing, standingUpdates: _standingUpdates, ...caps } = deps.caps
     this.serverCaps = deps.requestHostApproval === undefined
       ? caps
       : { ...caps, hostApprovals: HOST_APPROVALS_CAPS_VERSION }
@@ -502,7 +527,17 @@ export class BridgeServer {
   /** The caps one connection's `hello.ok` carries: the shared ones plus that install's standing work. */
   private capsFor(key: string): BridgeCaps {
     const standing = this.standingFor(key)
-    return standing === undefined ? this.serverCaps : { ...this.serverCaps, standing }
+    // Decided per connection: the Host's LLM service can come and go with its plugins.
+    const review = this.reviewSupported() ? { autoReview: AUTO_REVIEW_CAPS_VERSION } : {}
+    return standing === undefined ? { ...this.serverCaps, ...review } : { ...this.serverCaps, ...review, standing }
+  }
+
+  private reviewSupported(): boolean {
+    try {
+      return this.deps.autoReview?.supported() === true
+    } catch {
+      return false
+    }
   }
 
   /**
@@ -632,6 +667,7 @@ export class BridgeServer {
         },
         timer: setTimeout(onExpire, timeoutMs),
         approvals: new Map(),
+        reviews: new Map(),
       }
       signal.addEventListener('abort', onAbort, { once: true })
       this.pendingTools.set(id, entry)
@@ -647,6 +683,7 @@ export class BridgeServer {
         ...(sessionId !== undefined && this.inheritsExemptReads(sessionId) ? { inheritedExemptReads: true as const } : {}),
         ...(program === undefined ? {} : { program }),
         ...(requester === undefined || sessionId === undefined ? {} : { requester }),
+        ...(callId === undefined ? {} : { toolCallId: callId }),
       } satisfies BridgeFrame), (error) => {
         /* v8 ignore next -- teardown race: when the write fails, the socket's
         close handler settles the same call with the same code; the callback
@@ -1247,6 +1284,18 @@ export class BridgeServer {
       this.handleApprovalWithdraw(conn, frame)
       return
     }
+    if (frame.method === BRIDGE_REVIEW_ASK_METHOD) {
+      await this.handleReviewAsk(conn, frame)
+      return
+    }
+    if (frame.method === BRIDGE_REVIEW_CANCEL_METHOD) {
+      this.handleReviewCancel(conn, frame)
+      return
+    }
+    if (frame.method === BRIDGE_REVIEW_STATUS_METHOD) {
+      await this.handleReviewStatus(conn, frame)
+      return
+    }
     const forbidden = PRIVILEGED_METHODS.has(frame.method) && !isLoopbackAddress(conn.remoteAddress)
     if (forbidden) {
       this.rpcError(conn, frame.id, 'forbidden', 'method is loopback-only')
@@ -1436,6 +1485,109 @@ export class BridgeServer {
     sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { ...echo, decision } })
   }
 
+  /**
+   * Auto review of one ordinary card of an owned pending call
+   * (docs/auto-review-design.md §4.3). The session and tool come from this
+   * bridge's own record of the call; the payload's tool must agree with it.
+   * Every failure answers "ask" or an RPC error: the extension shows the card.
+   */
+  private async handleReviewAsk(conn: ReadyConnection, frame: Extract<ClientFrame, { t: 'rpc' }>): Promise<void> {
+    const service = this.deps.autoReview
+    if (service === undefined || !this.reviewSupported()) {
+      this.rpcError(conn, frame.id, 'unsupported', 'this bridge does not review approvals')
+      return
+    }
+    const tool = this.ownedTool(conn, frame.payload)
+    if (tool === undefined) {
+      this.rpcError(conn, frame.id, 'not-found', 'no pending tool call with that id on this connection')
+      return
+    }
+    const { toolCallId, reviewId, binding, action: rawAction } = frame.payload as Record<string, unknown>
+    const action = parseReviewAction(rawAction)
+    if (typeof reviewId !== 'string' || reviewId === '' || reviewId.length > MAX_REVIEW_ID_CHARS
+      || !isBridgeHex256(binding) || action === undefined) {
+      this.rpcError(conn, frame.id, 'bad-request', 'reviewId, a SHA-256 binding and a valid action are required')
+      return
+    }
+    if (action.tool !== tool.name) {
+      this.rpcError(conn, frame.id, 'bad-request', 'the action does not match the pending call')
+      return
+    }
+    // An external (MCP client) session has no user instruction source.
+    if (tool.sessionId === undefined || isExternalSessionId(tool.sessionId)) {
+      this.rpcError(conn, frame.id, 'unavailable', 'this call has no conversation to review against')
+      return
+    }
+    if (tool.reviews.size > 0) {
+      this.rpcError(conn, frame.id, 'bad-request', 'a review for this call is already running')
+      return
+    }
+    const callId = toolCallId as string
+    const controller = new AbortController()
+    tool.reviews.set(reviewId, controller)
+    let record: ReviewRecord
+    try {
+      record = await service.review(tool.sessionId, action, controller.signal)
+    } catch (error: unknown) {
+      record = { decision: 'ask', reason: 'Auto review could not decide.', latencyMs: 0, failure: errorMessage(error) }
+    } finally {
+      if (tool.reviews.get(reviewId) === controller) tool.reviews.delete(reviewId)
+    }
+    // Only a review of the still-pending, unaborted call may allow.
+    if (controller.signal.aborted || this.pendingTools.get(callId) !== tool) {
+      record = { ...record, decision: 'ask', reason: 'The review was cancelled.', failure: record.failure ?? 'cancelled' }
+    }
+    this.auditSafely(audit => {
+      audit.reviewed?.(callId, {
+        decision: record.decision,
+        ...(record.risk === undefined ? {} : { risk: record.risk }),
+        reason: record.reason,
+        ...(record.model === undefined ? {} : { model: record.model }),
+        latencyMs: record.latencyMs,
+        binding,
+        ...(record.floor === undefined ? {} : { floor: record.floor }),
+        ...(record.failure === undefined ? {} : { failure: record.failure }),
+      })
+    })
+    sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: reviewAnswer(reviewId, binding, record) })
+  }
+
+  /** Abort one in-flight review (Auto turned off, a new user message, the call cancelled). */
+  private handleReviewCancel(conn: ReadyConnection, frame: Extract<ClientFrame, { t: 'rpc' }>): void {
+    const tool = this.ownedTool(conn, frame.payload)
+    const reviewId = tool === undefined ? undefined : (frame.payload as Record<string, unknown>).reviewId
+    const controller = tool === undefined || typeof reviewId !== 'string' ? undefined : tool.reviews.get(reviewId)
+    controller?.abort()
+    sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { cancelled: controller !== undefined } })
+  }
+
+  /** Whether one conversation can be reviewed (the panel's toggle); grants nothing. */
+  private async handleReviewStatus(conn: ReadyConnection, frame: Extract<ClientFrame, { t: 'rpc' }>): Promise<void> {
+    const payload = frame.payload
+    const sessionId = typeof payload === 'object' && payload !== null ? (payload as Record<string, unknown>).sessionId : undefined
+    if (typeof sessionId !== 'string' || sessionId === '' || sessionId.length > 256) {
+      this.rpcError(conn, frame.id, 'bad-request', 'sessionId must be a non-empty string')
+      return
+    }
+    const service = this.deps.autoReview
+    if (service === undefined || !this.reviewSupported()) {
+      sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: { available: false, reason: 'host-unsupported' } })
+      return
+    }
+    if (this.deps.sessionScope !== undefined && !isExternalSessionId(sessionId)
+      && !await this.deps.sessionScope.allowsSession(sessionId, conn.abort.signal, 'read').catch(() => false)) {
+      this.rpcError(conn, frame.id, 'forbidden', `session ${JSON.stringify(sessionId)} is not available to the browser bridge`)
+      return
+    }
+    let status: ReturnType<AutoReviewService['status']>
+    try {
+      status = service.status(sessionId, isExternalSessionId(sessionId))
+    } catch {
+      status = { available: false, reason: 'host-unsupported' }
+    }
+    sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: status })
+  }
+
   /** Withdraw a forwarded approval once the browser has settled it. */
   private handleApprovalWithdraw(conn: ReadyConnection, frame: Extract<ClientFrame, { t: 'rpc' }>): void {
     const tool = this.ownedTool(conn, frame.payload)
@@ -1502,6 +1654,8 @@ export class BridgeServer {
     this.pendingTools.delete(id)
     for (const controller of pending.approvals.values()) controller.abort()
     pending.approvals.clear()
+    for (const controller of pending.reviews.values()) controller.abort()
+    pending.reviews.clear()
   }
 
   /** Close one connection and settle only its own in-flight calls. */

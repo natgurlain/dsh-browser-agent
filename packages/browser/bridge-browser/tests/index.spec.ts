@@ -99,6 +99,7 @@ describe('config', () => {
       mcp: { enabled: false, port: 0 },
       devLoop: { enabled: false, allowedOrigins: [], trustLoopback: true },
       honorTaintExemptions: true,
+      autoReview: true,
     })
   })
 
@@ -138,6 +139,7 @@ describe('config', () => {
       mcp: { enabled: false, port: 0 },
       devLoop: { enabled: false, allowedOrigins: [], trustLoopback: true },
       honorTaintExemptions: true,
+      autoReview: true,
     })
   })
 

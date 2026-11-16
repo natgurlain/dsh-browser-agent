@@ -44,7 +44,7 @@ export const AUDIT_KEY_FILE = '.chain-key'
 export const AUDIT_MAC_ALG = 'hmac-sha256'
 
 /** What one entry records. */
-export type AuditKind = 'tool-call' | 'approval' | 'result' | 'navigation' | 'kill-switch' | 'fixture' | 'schedule'
+export type AuditKind = 'tool-call' | 'approval' | 'result' | 'navigation' | 'kill-switch' | 'fixture' | 'schedule' | 'auto-review'
 
 /** The first entry's `prevHash`. */
 export const AUDIT_GENESIS_HASH = '0'.repeat(64)
@@ -90,6 +90,17 @@ export interface AuditEntryInput {
   durationMs?: number
   /** Step of a `browser_run` program: the program's approval call id and the 0-based step. */
   program?: { id: string; step: number }
+  /** `auto-review` entries: the reviewer's risk class. */
+  risk?: string
+  /** `auto-review` entries: the reviewer's one-sentence reason (or the bridge's, on failure). */
+  reason?: string
+  /** `auto-review` entries: `provider/model` of the reviewer. */
+  model?: string
+  /** `auto-review` entries: the approval binding the review answered. */
+  binding?: string
+  /** `auto-review` entries: a deterministic floor that overrode the reviewer, or why the review failed. */
+  floor?: string
+  failure?: string
 }
 
 /** One persisted, chained entry. */
@@ -630,6 +641,20 @@ export interface BridgeAuditObserver {
   settled(id: string, outcome: { ok: true; result: unknown } | { ok: false; error: { code: string; message: string } }): void
   /** The kill switch: one entry in every session with calls in flight on `connection` (any, when undefined), else in the unscoped log. */
   killSwitch(connection?: string): void
+  /** Auto review decided one card of call `id` (docs/auto-review-design.md §11). */
+  reviewed?(id: string, review: AuditReview): void
+}
+
+/** What one Auto review records. */
+export interface AuditReview {
+  decision: 'allow' | 'ask'
+  risk?: string
+  reason: string
+  model?: string
+  latencyMs: number
+  binding: string
+  floor?: string
+  failure?: string
 }
 
 interface TrackedCall {
@@ -644,7 +669,7 @@ interface TrackedCall {
   url?: string
 }
 
-const PROMPT_DECISIONS = new Set(['allowed', 'auto-allowed', 'denied', 'timed-out', 'unavailable', 'cancelled', 'held-expired', 'program-approved'])
+const PROMPT_DECISIONS = new Set(['allowed', 'auto-allowed', 'auto-reviewed', 'denied', 'timed-out', 'unavailable', 'cancelled', 'held-expired', 'program-approved'])
 const MAX_ERROR_MESSAGE = 240
 
 /** Turns bridge tool traffic into audit entries. Write failures never reach a tool call. */
@@ -739,6 +764,25 @@ export class ToolCallAuditor implements BridgeAuditObserver {
         ? { resultDigest: auditResultDigest(outcome.result) }
         : { error: { code: outcome.error.code, message: redactUrlsInText(outcome.error.message).slice(0, MAX_ERROR_MESSAGE) } }),
       durationMs: Math.max(0, this.now() - call.started),
+    })
+  }
+
+  reviewed(id: string, review: AuditReview): void {
+    const call = this.calls.get(id)
+    if (call === undefined) return
+    this.write(call.sessionId, {
+      kind: 'auto-review',
+      callId: id,
+      ...(call.toolCallId === undefined ? {} : { toolCallId: call.toolCallId }),
+      tool: call.name,
+      decision: review.decision,
+      ...(review.risk === undefined ? {} : { risk: review.risk }),
+      reason: redactUrlsInText(review.reason).slice(0, 300),
+      ...(review.model === undefined ? {} : { model: review.model.slice(0, 200) }),
+      durationMs: Math.max(0, Math.round(review.latencyMs)),
+      binding: review.binding,
+      ...(review.floor === undefined ? {} : { floor: review.floor }),
+      ...(review.failure === undefined ? {} : { failure: redactUrlsInText(review.failure).slice(0, MAX_ERROR_MESSAGE) }),
     })
   }
 
