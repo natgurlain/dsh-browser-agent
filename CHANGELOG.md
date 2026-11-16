@@ -76,7 +76,7 @@ other's protocol version when they connect.
   regular DSH session hand page work over.
 - **DSH 0.2.2-rc.1 to 0.2.2-rc.3** are supported (0.2.2-rc.2 is the default). On
   0.2.2-rc.1, Continue after a failed turn and the wait for worktree cleanup on delete are
-  unavailable. See [docs/dsh-matrix.md](docs/dsh-matrix.md).
+  unavailable. See `docs/dsh-matrix.md`.
 - **Learning features (experimental, all off by default).** Save a run as a workflow,
   replay it with fresh element lookup, and schedule it. Watch me: after you repeat an
   action over two rows, "Do the remaining N like this" does the rest behind one card, in
