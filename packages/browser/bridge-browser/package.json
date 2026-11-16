@@ -4,6 +4,25 @@
   "version": "0.1.0",
   "author": "Yuxiang Lin",
   "license": "MIT",
+  "homepage": "https://github.com/natgurlain/dsh-browser-agent#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/natgurlain/dsh-browser-agent.git",
+    "directory": "packages/browser/bridge-browser"
+  },
+  "bugs": {
+    "url": "https://github.com/natgurlain/dsh-browser-agent/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "browser",
+    "browser-automation",
+    "browser-extension",
+    "ai-agent",
+    "mcp"
+  ],
   "private": true,
   "engines": {
     "node": ">=24.9.0",

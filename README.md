@@ -95,6 +95,16 @@ When the installer opens `chrome://extensions`, follow its instructions to load 
 > [!IMPORTANT]
 > The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project is not currently published as an npm package; use the installer above.
 
+### Plugin only, without the installer
+
+If you would rather add the plugin with DSH's own plugin command, each release also carries the plugin package and the extension builds on their own:
+
+```sh
+dsh plugin --profile web add https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.2.0/dsh-bridge-browser-v0.2.0.tgz
+```
+
+Then download `dsh-browser-chrome-v0.2.0.zip` (or the Firefox zip) from the same [release](https://github.com/natgurlain/dsh-browser-agent/releases), unzip it, load it with **Load unpacked** on your browser's extensions page, and open the side panel. An extension installed this way has no token yet: it shows a short code, and typing that code into the card that appears in DSH connects the two. For the DeepSeek Harness desktop app, use the installer above: it registers the plugin with the app for you.
+
 ## Core capabilities
 
 | Capability | Tool | Notes |

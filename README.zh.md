@@ -95,6 +95,16 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-
 > [!IMPORTANT]
 > npm 上未加 scope 的 [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) 包属于另一个项目，与本仓库无关。本项目目前没有发布 npm 包，请使用上方安装器。
 
+### 只装插件，不用安装器
+
+如果你想用 DSH 自己的插件命令安装，每个发布版本也单独附带了插件包和扩展构建：
+
+```sh
+dsh plugin --profile web add https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.2.0/dsh-bridge-browser-v0.2.0.tgz
+```
+
+然后从同一个[发布页](https://github.com/natgurlain/dsh-browser-agent/releases)下载 `dsh-browser-chrome-v0.2.0.zip`（或 Firefox 的 zip），解压后在浏览器的扩展管理页用**加载已解压的扩展程序**加载，再打开侧边栏。这样安装的扩展还没有 token：它会显示一个短码，把它输入 DSH 中出现的卡片即可连接。如果使用 DeepSeek Harness 桌面应用，请使用上面的安装器：它会替你把插件注册到应用中。
+
 ## 核心能力
 
 | 能力 | 工具 | 说明 |
