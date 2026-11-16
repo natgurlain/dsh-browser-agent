@@ -2399,6 +2399,13 @@ textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.approval-target-note {
+  color: var(--muted);
+  font-size: calc(10px * var(--ui-scale));
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .approval-origins code {
   overflow: hidden;
   color: var(--code-inline-ink);
@@ -3110,16 +3117,35 @@ textarea:focus-visible {
   stroke-width: 1.55;
 }
 
-.timeline-step-copy {
+/*
+ * Label and badges share a wrapping row. The label asks for the width of its
+ * own text: when the badges do not fit beside it they move to a line of their
+ * own under it, and a label longer than the row wraps between words. It is
+ * never squeezed below 96px at the default text size (about "Open page"
+ * plus its number; the floor scales with the text), so it cannot end up as a
+ * column of letters. The target line under the label (a selector, a URL) takes the
+ * width that is there and asks for none.
+ */
+.timeline-step-body {
   display: flex;
   min-width: 0;
   flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 8px;
+}
+
+.timeline-step-copy {
+  display: flex;
+  min-width: min(100%, calc(96px * var(--ui-scale)));
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 1px;
 }
 
 .timeline-step-label {
   display: flex;
+  min-width: 0;
   align-items: baseline;
   gap: 6px;
   color: var(--ink);
@@ -3128,7 +3154,15 @@ textarea:focus-visible {
   line-height: 1.3;
 }
 
+/* Wraps between words; only a single over-long word (a selector, a URL) breaks inside. */
+.timeline-step-text {
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
 .timeline-step-index {
+  flex: 0 0 auto;
   color: var(--faint);
   font-size: calc(9.5px * var(--ui-scale));
   font-variant-numeric: tabular-nums;
@@ -3136,6 +3170,9 @@ textarea:focus-visible {
 }
 
 .timeline-step-target {
+  /* No intrinsic width: fills the label column, never widens it. */
+  width: 0;
+  min-width: 100%;
   overflow: hidden;
   color: var(--ink-soft);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
@@ -3147,11 +3184,29 @@ textarea:focus-visible {
 
 .timeline-step-meta {
   display: flex;
+  min-width: 0;
+  max-width: 100%;
   flex: 0 1 auto;
   flex-wrap: wrap;
   justify-content: flex-end;
   align-items: center;
-  gap: 6px;
+  gap: 4px 6px;
+  margin-left: auto;
+}
+
+/* A badge wider than the row (large text in a narrow panel) is cut with an ellipsis, never the label. */
+.timeline-step-meta > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.timeline-step-meta .decision-badge {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.timeline-step-meta .spinner {
+  flex: 0 0 auto;
 }
 
 .timeline-step-duration {

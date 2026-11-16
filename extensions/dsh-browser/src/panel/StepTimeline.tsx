@@ -86,24 +86,27 @@ const TimelineStep = memo(function TimelineStep({
         onClick={() => { setOpen((value) => !value) }}
       >
         <span className="timeline-step-icon"><StepIcon name={step.name} /></span>
-        <span className="timeline-step-copy">
-          <span className="timeline-step-label">
-            <span className="timeline-step-index">{index + 1}</span>
-            {step.label}
+        {/* The label keeps a readable width; badges that do not fit beside it wrap under it (styles.css). */}
+        <span className="timeline-step-body">
+          <span className="timeline-step-copy">
+            <span className="timeline-step-label">
+              <span className="timeline-step-index">{index + 1}</span>
+              <span className="timeline-step-text">{step.label}</span>
+            </span>
+            {step.target !== undefined && <code className="timeline-step-target" title={step.target}>{step.target}</code>}
           </span>
-          {step.target !== undefined && <code className="timeline-step-target" title={step.target}>{step.target}</code>}
-        </span>
-        <span className="timeline-step-meta">
-          {policyBadges(step, copy).map((badge) => (
-            <span key={badge.key} className={`decision-badge policy ${badge.tone}`}>{badge.label}</span>
-          ))}
-          {decision !== undefined && <span className={`decision-badge ${tone}`}>{decision}</span>}
-          {step.status === 'running'
-            ? <span className="spinner" aria-label={copy.timeline.running} />
-            : step.status === 'error'
-              ? <span className="timeline-step-failed">{copy.timeline.failed}</span>
-              : null}
-          {step.durationMs !== undefined && <span className="timeline-step-duration">{copy.timeline.duration(step.durationMs)}</span>}
+          <span className="timeline-step-meta">
+            {policyBadges(step, copy).map((badge) => (
+              <span key={badge.key} className={`decision-badge policy ${badge.tone}`}>{badge.label}</span>
+            ))}
+            {decision !== undefined && <span className={`decision-badge ${tone}`}>{decision}</span>}
+            {step.status === 'running'
+              ? <span className="spinner" aria-label={copy.timeline.running} />
+              : step.status === 'error'
+                ? <span className="timeline-step-failed">{copy.timeline.failed}</span>
+                : null}
+            {step.durationMs !== undefined && <span className="timeline-step-duration">{copy.timeline.duration(step.durationMs)}</span>}
+          </span>
         </span>
       </button>
       {(step.images?.length ?? 0) > 0 && !open && (
