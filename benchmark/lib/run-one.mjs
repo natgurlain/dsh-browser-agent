@@ -90,6 +90,7 @@ export async function runOne({
   timeoutMs,
   modelSelection,
   metadata = {},
+  onSession,
 }) {
   await resetState(siteOrigin, instance)
   await prepareBackend(backend, instance, extensionBrowser)
@@ -97,6 +98,8 @@ export async function runOne({
   const created = await backend.client.rpc('session.create', { cwd: workspace })
   const sessionId = created.sessionId
   if (backend.backend === 'extension') await extensionBrowser.bindSession?.(sessionId)
+  // Set up the session before its prompt (the model-free check turns Auto review on here).
+  await onSession?.(sessionId)
   const models = await backend.client.rpc('session.modelCatalog')
   let selectedModel = models.default
   if (modelSelection !== undefined) {

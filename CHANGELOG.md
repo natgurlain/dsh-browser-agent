@@ -3,6 +3,23 @@
 Each `## vX.Y.Z` section becomes the notes of that GitHub release
 (`scripts/package-release.mjs --notes`), followed by the SHA-256 digests of its assets.
 
+## v0.3.0
+
+Unreleased (version numbers are not bumped yet).
+
+- **Auto review (opt-in, per conversation).** *Approvals: Ask · Auto* under the composer lets
+  the conversation's own model approve ordinary page actions that fit what you asked for. A
+  fixed set of rules decides first which cards it may decide: forced cards (taint, site
+  rules, strict mode, secrets in URLs), sensitive fields, developer tools, uploads,
+  clipboard, dialogs, programs, fleets, MCP conversations and cross-site navigation always
+  ask. Submit-like controls need your explicit instruction; payments and account settings
+  always ask. Any failure or timeout (9 s) shows the card. Approved steps carry an **Auto**
+  badge and the model's reason; every review is in the audit log. Ends after 60 minutes, on
+  stop or take-over; 25 approvals per message before it asks to continue. One extra model
+  call per reviewed action. Managed policy `disableAutoReview`, Setting *Offer Auto review*,
+  bridge config `autoReview`. Needs this bridge and this extension; older ones simply do not
+  offer it. Design: `docs/auto-review-design.md`.
+
 ## v0.2.1
 
 One version number for everything. The bridge plugin `@natgurlain/dsh-bridge-browser` now

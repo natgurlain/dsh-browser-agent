@@ -21,6 +21,7 @@ const { chromium } = bridgeRequire('playwright-core')
 const { PINNED_CHROME_EXTENSION_ID } = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
 const { startScriptedModel } = await import(pathToFileURL(join(root, 'scripts/fixtures/scripted-model.mjs')).href)
 const { runAgentUxSmoke, assertKillSwitchAudited } = await import(pathToFileURL(join(root, 'scripts/fixtures/agent-ux-smoke.mjs')).href)
+const { AUTO_PROVIDER, AUTO_REVIEW_PAGE, runAutoReviewSmoke, startAutoReviewModel } = await import(pathToFileURL(join(root, 'scripts/fixtures/auto-review-smoke.mjs')).href)
 const { runPhase3Smoke } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-smoke.mjs')).href)
 const { phase3Reply } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-model.mjs')).href)
 const { runPairingSmoke } = await import(pathToFileURL(join(root, 'scripts/fixtures/pairing-browser-smoke.mjs')).href)
@@ -79,6 +80,8 @@ const scripted = await startScriptedModel([
   { name: 'browser_click', args: { selector: '#hoverTarget' }, gate: 'paused' },
   { name: 'browser_screenshot', args: {} },
 ], 'Timeline smoke done.')
+// The Auto review section's agent and reviewer: one scripted model (auto-review-smoke.mjs).
+const autoModel = await startAutoReviewModel()
 
 /** Poll until truthy; fails early (with the DSH log) once DSH has exited. */
 const waitFor = (check, label, timeout = 60_000) => pollFor(check, label, { timeout, host })
@@ -282,6 +285,7 @@ const server = createServer((request, response) => {
     return
   }
   if (request.url.startsWith('/inner')) { response.end(inner); return }
+  if (request.url.startsWith('/auto-review')) { response.end(AUTO_REVIEW_PAGE); return }
   if (request.url.startsWith('/content-tools')) { response.end(contentToolsPage); return }
   if (request.url.startsWith('/ledger')) { response.end(tablePage(Number(new URL(request.url, 'http://x').searchParams.get('page') ?? 1))); return }
   if (request.url.startsWith('/reliability')) { response.end(reliabilityPage); return }
@@ -373,6 +377,7 @@ try {
     ...providerYaml('pending-check', pendingPort, ['pending-check']),
     ...providerYaml('phase3-check', phase3Model.address().port, ['phase3-check'], { input: ['text', 'image'] }),
     ...providerYaml('scripted-check', scripted.port, ['scripted-check'], { input: ['text', 'image'] }),
+    ...providerYaml(AUTO_PROVIDER, autoModel.port, [AUTO_PROVIDER], { input: ['text', 'image'] }),
     '- insert:', '    - id: browser-smoke-probe',
     `      name: ${JSON.stringify(pathToFileURL(join(root, 'scripts/fixtures/browser-probe.mjs')).href)}`,
     '      config:', `        token: ${JSON.stringify(token)}`, '',
@@ -1543,6 +1548,12 @@ try {
     tool, succeed, settings, waitFor, hostRpc, bridgeRpc, scripted, results, delay,
     knownSessions: [conversation.sessionId, secondConversation.sessionId],
   })
+  // ---- Auto review: a reviewed click, an ask card, a forced card, a timeout, off mid-turn ----
+  screenshots.push(...await runAutoReviewSmoke({
+    browser, page, panel, extensionId, directory, settings, waitFor, hostRpc, bridgeRpc, results, delay, autoModel,
+    autoPage: `${origin}/auto-review`,
+    knownSessions: [conversation.sessionId, secondConversation.sessionId, ...(await bridgeRpc('session.list', {})).items.map(item => item.sessionId)],
+  }))
   // ---- Phase 3: browser_run programs, page watchers, tab fleets ----
   screenshots.push(...await runPhase3Smoke({
     browser, page, panel, extensionId, directory, origin, bridge, env, tool, succeed, settings, waitFor, results, delay,
@@ -1818,6 +1829,7 @@ try {
   await new Promise(resolve => pendingServer.close(resolve))
   await scripted.close()
   await new Promise(resolve => phase3Model.close(resolve))
+  await autoModel.close().catch(() => {})
   // SIGTERM, then SIGKILL after 10 s: a hung DSH must not hang CI.
   await host?.stop()
   await new Promise(resolve => server.close(resolve))

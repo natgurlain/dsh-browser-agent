@@ -63,6 +63,7 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         window.__dshBenchmarkApprovalPolicy = undefined
         port.onMessage.addListener((message) => {
           if (typeof message?.type === 'string' && message.type.endsWith('.result')) window.__dshBenchmarkResults.push(message)
+          if (message?.type === 'auto-review.state') window.__dshAutoReviewState = message
           if (message?.type !== 'approval.request' || window.__dshBenchmarkApprovalPolicy === undefined) return
           const request = message.request
           const decision = request.forced === true ? window.__dshBenchmarkApprovalPolicy.forced : window.__dshBenchmarkApprovalPolicy.other
@@ -159,6 +160,22 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
           window.__dshBenchmarkApprovalPolicy = value
           window.__dshBenchmarkApprovals = []
         }, policy)
+      },
+      /**
+       * Turn Auto review on or off for one conversation, as the panel's
+       * control does, and wait until the extension reports it.
+       */
+      async setAutoReview(sessionId, enabled) {
+        await panel.evaluate(async ({ id, on, timeoutMs }) => {
+          window.__dshBenchmarkPort.postMessage({ type: 'auto-review.set', sessionId: id, enabled: on })
+          const deadline = Date.now() + timeoutMs
+          while (Date.now() < deadline) {
+            const state = window.__dshAutoReviewState
+            if (state?.offered === true && (state.sessions?.[id]?.on === true) === on) return
+            await new Promise((resolveWait) => setTimeout(resolveWait, 25))
+          }
+          throw new Error(`Auto review did not turn ${on ? 'on' : 'off'} for ${id}: ${JSON.stringify(window.__dshAutoReviewState)}`)
+        }, { id: sessionId, on: enabled, timeoutMs: actionTimeoutMs })
       },
       /** The approval cards answered since the last setApprovalPolicy call. */
       approvals() {

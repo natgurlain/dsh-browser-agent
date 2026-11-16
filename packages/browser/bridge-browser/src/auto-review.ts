@@ -356,11 +356,13 @@ export interface ReviewRecord {
 /** Runs reviews: one at a time per session, bounded in time, failing to "ask". */
 export class AutoReviewer {
   private readonly queues = new Map<string, Promise<unknown>>()
+  private readonly host: ReviewerHost
+  private readonly options: { timeoutMs?: number; now?: () => number; enabled?: boolean }
 
-  constructor(
-    private readonly host: ReviewerHost,
-    private readonly options: { timeoutMs?: number; now?: () => number; enabled?: boolean } = {},
-  ) {}
+  constructor(host: ReviewerHost, options: { timeoutMs?: number; now?: () => number; enabled?: boolean } = {}) {
+    this.host = host
+    this.options = options
+  }
 
   /** Whether the Host can review at all (the `autoReview` cap). */
   supported(): boolean {
