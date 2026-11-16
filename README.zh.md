@@ -11,7 +11,7 @@
 
 让 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）在你日常使用的浏览器里工作。智能体读取你正在看的页面，点击、输入、导航、管理标签页，用的是你自己的 Chrome、Brave 或 Firefox（其他 Chromium 浏览器应当也可用），保留你的登录态和 Cookie；你在侧边栏里查看并批准它的每一步。
 
-<img width="1836" height="1312" alt="Brave 中的 dsh Browser Agent 侧边栏，正在回答关于旁边 GitHub 页面的问题" src="docs/images/dsh-browser-agent-dark.webp" />
+<img width="900" alt="Brave 中的 dsh Browser Agent 侧边栏，正在回答关于旁边 GitHub 页面的问题" src="docs/images/dsh-browser-agent-dark.png" />
 
 > 基于 Yuxiang Lin 及贡献者的 [dsh-browser](https://github.com/omdsh-dev/dsh-browser)（MIT 许可）。见 [NOTICE](NOTICE)。
 

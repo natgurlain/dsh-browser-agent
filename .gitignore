@@ -14,3 +14,6 @@ release/
 *.pem
 # Failure fixtures imported as benchmark tasks hold captured pages; never commit them.
 benchmark/fixture-tasks/
+
+# Per-machine asdf version pin
+.tool-versions

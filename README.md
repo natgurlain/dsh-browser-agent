@@ -11,7 +11,7 @@
 
 Let [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) work in the browser you already use. The agent reads the page you are on, clicks, types, navigates and manages tabs, in your own Chrome, Brave or Firefox (other Chromium browsers should work too), with your logins and cookies, and you watch and approve what it does from a side panel.
 
-<img width="1836" height="1312" alt="The dsh Browser Agent side panel in Brave, answering a question about the GitHub page next to it" src="docs/images/dsh-browser-agent-dark.webp" />
+<img width="900" alt="The dsh Browser Agent side panel in Brave, answering a question about the GitHub page next to it" src="docs/images/dsh-browser-agent-dark.png" />
 
 > Based on [dsh-browser](https://github.com/omdsh-dev/dsh-browser) by Yuxiang Lin and contributors (MIT). See [NOTICE](NOTICE).
 
