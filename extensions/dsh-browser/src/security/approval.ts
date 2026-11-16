@@ -43,6 +43,17 @@ export interface ApprovalPrompt {
   kind: ApprovalKind
   action: string
   summary: string
+  /**
+   * Secondary line under the summary of a call that targets an element: how
+   * the call addresses it (index or selector) and the row or section the page
+   * shows it in. Plain text; the quoted parts are page-authored.
+   */
+  targetNote?: string
+  /**
+   * The step-timeline label for this call ("Click button “Save”"), when its
+   * target was found on the page. Not part of the binding.
+   */
+  stepLabel?: string
   origins: string[]
   /** True only when one stable origin can safely be added to the action allowlist. */
   canTrust: boolean
@@ -55,8 +66,10 @@ export interface ApprovalPrompt {
   /** Full payload shown on the card. */
   details?: ApprovalDetail[]
   /**
-   * SHA-256 over tool name, arguments, origins, and target document. The
-   * background recomputes it before executing and refuses on any mismatch.
+   * SHA-256 over tool name, arguments, origins, target document, and (for a
+   * call that targets an element) the element's kind and name as the card
+   * states them. The background recomputes it before executing, from a fresh
+   * look at the page, and refuses on any mismatch.
    */
   binding?: string
   /** Origin a developer-tools session grant from this card would cover. */

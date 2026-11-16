@@ -1560,7 +1560,18 @@ try {
   await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request' && message.type !== 'status') })
   const pendingClick = tool('browser_click', { selector: 'h1' })
   await waitFor(() => panel.evaluate(() => messages.some(message => message.type === 'approval.request')), 'approval pending before the kill switch')
+  // The card says what will be clicked: the element's kind and the name the page gives it, read from
+  // the page when the card was raised (the call itself only said "h1"), with the selector as detail.
+  const heading = (await page.locator('h1').first().innerText()).replace(/\s+/g, ' ').trim()
+  assert.ok(heading.length > 0 && heading.length <= 80, `fixture heading: ${JSON.stringify(heading)}`)
+  const clickCard = await panel.evaluate(() => messages.find(message => message.type === 'approval.request').request)
+  assert.equal(clickCard.summary, `Click element “${heading}”`)
+  assert.equal(clickCard.targetNote, 'selector: h1')
+  assert.equal(clickCard.stepLabel, `Click element “${heading}”`)
   await chat.bringToFront()
+  assert.equal(await chat.locator('.approval-dialog .approval-detail strong').first().innerText(), `Click element “${heading}”`)
+  assert.equal(await chat.locator('.approval-dialog .approval-target-note').innerText(), 'selector: h1')
+  results.push('an approval card names the element it will act on, from the page, in the real panel')
   // The approval card covers the toolbar, so it carries its own stop button.
   await chat.locator('.approval-dialog').getByRole('button', { name: 'Stop the agent', exact: true }).click()
   await chat.getByText('Agent stopped', { exact: true }).waitFor()

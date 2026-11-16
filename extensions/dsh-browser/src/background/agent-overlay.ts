@@ -31,6 +31,8 @@ const POINT_KINDS: Record<string, PointKind> = {
 /** Message the content script receives. */
 export type OverlayMessage =
   | { type: 'DSH_OVERLAY'; op: 'point'; kind: PointKind; args: Record<string, unknown>; label?: string; copy: OverlayCopy }
+  | { type: 'DSH_OVERLAY'; op: 'preview'; on: true; kind: PointKind; args: Record<string, unknown>; label?: string; copy: OverlayCopy }
+  | { type: 'DSH_OVERLAY'; op: 'preview'; on: false }
   | { type: 'DSH_OVERLAY'; op: 'control' | 'takeover'; on: boolean; copy: OverlayCopy }
   | { type: 'DSH_OVERLAY'; op: 'hide'; hidden: boolean }
   | { type: 'DSH_OVERLAY'; op: 'acting' }
@@ -77,6 +79,8 @@ async function bounded(work: Promise<unknown>, ms: number): Promise<void> {
 export class AgentOverlayController implements ActionOverlay {
   private readonly controlled = new Set<number>()
   private readonly takenOver = new Set<number>()
+  /** Calls waiting on an approval: where their target is, and whether its outline is showing. */
+  private readonly previews = new Map<string, { tabId: number; target: { frameId?: number; documentId?: string }; message: OverlayMessage; shown: boolean }>()
 
   constructor(private readonly deps: AgentOverlayDeps) {}
 
@@ -102,6 +106,40 @@ export class AgentOverlayController implements ActionOverlay {
     // An action inside an iframe still lands on the top page: keep its Stop button inert too.
     if (frame.frameId !== 0) void this.deps.send(tabId, { type: 'DSH_OVERLAY', op: 'acting' }, { frameId: 0 }).catch(() => {})
     await bounded(this.deps.send(tabId, message, target), this.deps.timeoutMs ?? POINT_TIMEOUT_MS)
+  }
+
+  /**
+   * A call is about to ask for approval. Nothing is drawn yet: most calls are
+   * settled by a standing rule without a card ({@link showPreview}).
+   */
+  armPreview(tabId: number, frame: TabFrame, call: ToolCall): void {
+    if (!this.deps.enabled()) return
+    const kind = POINT_KINDS[call.name]
+    if (kind === undefined || !hasTarget(call)) return
+    const label = targetLabel(call)
+    this.previews.set(call.id, {
+      tabId,
+      target: frame.documentId === undefined ? { frameId: frame.frameId } : { documentId: frame.documentId },
+      // Only addressing fields travel, as for the action itself.
+      message: { type: 'DSH_OVERLAY', op: 'preview', on: true, kind, args: addressingArgs(call.name, call.args), ...(label === undefined ? {} : { label }), copy: this.copy() },
+      shown: false,
+    })
+  }
+
+  /** The call's approval card is on screen: outline its target on the page until the card is answered. */
+  showPreview(callId: string): void {
+    const preview = this.previews.get(callId)
+    if (preview === undefined || preview.shown) return
+    preview.shown = true
+    void this.deps.send(preview.tabId, preview.message, preview.target).catch(() => {})
+  }
+
+  /** The call's approval is settled, either way: remove the outline. */
+  endPreview(call: Pick<ToolCall, 'id'>): void {
+    const preview = this.previews.get(call.id)
+    if (preview === undefined) return
+    this.previews.delete(call.id)
+    if (preview.shown) void this.deps.send(preview.tabId, { type: 'DSH_OVERLAY', op: 'preview', on: false }, preview.target).catch(() => {})
   }
 
   async hiddenDuring<T>(tabId: number, run: () => Promise<T>): Promise<T> {

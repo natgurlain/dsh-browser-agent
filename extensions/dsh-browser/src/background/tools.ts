@@ -61,6 +61,7 @@ import {
 import { parseHttpUrl } from '../security/web-url.ts'
 import { approvalFailure, type ToolAnswer } from './answers.ts'
 import { requestedModifiers, usableInput, type InputRuntime } from './input-actions.ts'
+import { readTargetSlots, type TargetStates } from '../shared/target-description.ts'
 
 /** A tool call from the bridge. */
 export interface ToolCall {
@@ -196,6 +197,12 @@ export interface TabManagementContext {
   /** On-page agent overlay (ghost cursor, target outline); best effort. */
   overlay?: ActionOverlay
   /**
+   * Told the step-timeline label of a call whose target element was found on
+   * the page ("Click button “Save”"): the panel shows it instead of the
+   * generic "Click element". Never model-facing.
+   */
+  onStepLabel?: (label: string) => void
+  /**
    * Whether a tab's page is one the agent may not see at all (blocked site,
    * outside the managed allowlist): browser_list_tabs withholds its title and URL.
    */
@@ -248,6 +255,13 @@ const TAB_HIDDEN = '(hidden by site policy)'
 export interface ActionOverlay {
   /** Point at the call's target in `frame` just before it runs. */
   beforeAction(tabId: number, frame: TabFrame, call: ToolCall): Promise<void>
+  /**
+   * Outline the call's target while its approval card is open. The outline
+   * appears only once a card is really shown ({@link TabManagementContext.onCardShown}
+   * side: `showPreview`), and `endPreview` always removes it.
+   */
+  armPreview?(tabId: number, frame: TabFrame, call: ToolCall): void
+  endPreview?(call: ToolCall): void
   /** Keep the overlay out of a captured screenshot. */
   hiddenDuring<T>(tabId: number, run: () => Promise<T>): Promise<T>
 }
@@ -2086,11 +2100,13 @@ export async function dispatchToolCall(
   // A navigation this call causes is judged again on the page it lands on.
   if (tabManagement.policy !== undefined) landingPolicies.set(call, tabManagement.policy)
   const skipsPrompt = decision.kind === 'trust' || (tabManagement.unrestrictedAccess && decision.kind !== 'force')
+  // What the page says the call's element is, asked now: the card (and the
+  // timeline) name the element from this, never from the model's arguments.
   const approvalContext: ApprovalContext = openDialog !== undefined
     ? dialogApprovalContext(openDialog)
-    : skipsPrompt || call.name !== 'browser_type'
-      ? {}
-      : { typedTargetSensitive: await probeTypeTarget(tab.id, call, frames) }
+    : targetsElement(call) && isInjectablePage(tab.url)
+      ? await probeTargets(tab.id, call, frames, false)
+      : {}
   if (isCancelled(call, signal)) return cancelled()
   // Recomputed after approval and after content-script recovery: the same
   // decision must yield the same card, or the page changed under it.
@@ -2098,8 +2114,18 @@ export async function dispatchToolCall(
     ? forcedApprovalPrompt(call, current, decision.reasons, undefined, context)
     : approvalPromptForCall(call, sharePageContent, current, undefined, context)
   const approval = skipsPrompt ? undefined : promptFor(frames, approvalContext)
+  const stepLabel = approval?.stepLabel
+    ?? (approvalContext.targets === undefined ? undefined : approvalPromptForCall(call, 'auto', frames, undefined, approvalContext)?.stepLabel)
+  if (stepLabel !== undefined) tabManagement.onStepLabel?.(stepLabel)
   if (approval !== undefined) {
-    const authorization = authorize === undefined ? 'unavailable' : await authorize(approval)
+    const previewFrame = approvalContext.targets === undefined ? undefined : frames.find((candidate) => candidate.frameId === requestedFrame(call.args))
+    if (previewFrame !== undefined) tabManagement.overlay?.armPreview?.(tab.id, previewFrame, call)
+    let authorization: ApprovalAuthorization
+    try {
+      authorization = authorize === undefined ? 'unavailable' : await authorize(approval)
+    } finally {
+      if (previewFrame !== undefined) tabManagement.overlay?.endPreview?.(call)
+    }
     if (isCancelled(call, signal)) return cancelled()
     if (targetStillAllowed?.() === false) return targetChanged()
     if (authorization !== 'approved') {
@@ -2120,6 +2146,18 @@ export async function dispatchToolCall(
         return { ok: false, error: { code: 'action-failed', message: 'The dialog closed while approval was pending.' } }
       }
       refreshedContext = dialogApprovalContext(openDialog)
+    } else if (approvalContext.targets !== undefined) {
+      // The card named an element. Look again: if the locator now names
+      // another element, or the element reads differently, the binding below
+      // no longer matches and the call is refused.
+      const again = await probeTargets(tab.id, call, executionFrames, true)
+      if (isCancelled(call, signal)) return cancelled()
+      if (targetStillAllowed?.() === false) return targetChanged()
+      refreshedContext = {
+        ...approvalContext,
+        ...again.targets === undefined ? {} : { targets: again.targets },
+        ...again.targetMoved === true ? { targetMoved: true as const } : {},
+      }
     }
     const refreshedApproval = promptFor(executionFrames, refreshedContext)
     if (refreshedApproval === undefined
@@ -2303,23 +2341,65 @@ function sameApprovalBoundary(before: ApprovalPrompt, after: ApprovalPrompt): bo
     && before.binding === after.binding
 }
 
+/** Tools whose card names the element they act on. */
+const ELEMENT_ACTION_TOOLS = new Set([
+  'browser_click',
+  'browser_type',
+  'browser_select',
+  'browser_hover',
+  'browser_drag',
+  'browser_upload',
+  'browser_press',
+  'browser_clipboard',
+])
+
+function targetsElement(call: ToolCall): boolean {
+  return ELEMENT_ACTION_TOOLS.has(call.name) && !(call.name === 'browser_clipboard' && call.args.action === 'write')
+}
+
+function hasLocator(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const { index, selector } = value as Record<string, unknown>
+  return index !== undefined || (typeof selector === 'string' && selector !== '')
+}
+
+/** The slots a call addresses with a locator (a slot the page does not report on is "not checked"). */
+function expectedSlots(call: ToolCall): Array<keyof TargetStates> {
+  if (call.name === 'browser_drag') {
+    return [...hasLocator(call.args.from) ? ['from' as const] : [], ...hasLocator(call.args.to) ? ['to' as const] : []]
+  }
+  return hasLocator(call.args) ? ['target'] : []
+}
+
 /**
- * Ask the target frame whether browser_type would write into a sensitive
- * field, so the approval card can mask the text. Any failure (no content
- * script yet, frame gone) returns undefined, which masks.
+ * Ask the target frame what the call's element is: for browser_type whether
+ * it is a sensitive field (so the card masks the text), and for every
+ * element action the element's kind, label, and row or section (so the card
+ * says what will be acted on). `recheck` asks again after approval without
+ * replacing the first answer's element binding. Any failure (no content
+ * script yet, frame gone) leaves the sensitivity undefined, which masks, and
+ * the element "not checked", which the card says.
  */
-async function probeTypeTarget(tabId: number, call: ToolCall, frames: TabFrame[]): Promise<boolean | undefined> {
+async function probeTargets(tabId: number, call: ToolCall, frames: TabFrame[], recheck: boolean): Promise<ApprovalContext> {
+  const expected = expectedSlots(call)
+  const unknown = readTargetSlots(undefined, expected).targets
   const frame = frames.find((candidate) => candidate.frameId === requestedFrame(call.args))
-  if (frame === undefined) return undefined
+  if (frame === undefined) return { targets: unknown }
   try {
     const response = await chrome.tabs.sendMessage(
       tabId,
-      { type: 'DSH_TARGET_INFO', args: withoutFrame(call.args) },
+      { type: 'DSH_TARGET_INFO', tool: call.name, args: withoutFrame(call.args), ...recheck ? { recheck: true } : {} },
       frame.documentId === undefined ? { frameId: frame.frameId } : { documentId: frame.documentId },
-    ) as { ok?: unknown; result?: { sensitive?: unknown } } | undefined
-    return response?.ok === true && typeof response.result?.sensitive === 'boolean' ? response.result.sensitive : undefined
+    ) as { ok?: unknown; result?: { sensitive?: unknown; targets?: unknown } } | undefined
+    if (response?.ok !== true) return { targets: unknown }
+    const read = readTargetSlots(response.result?.targets, expected)
+    return {
+      ...typeof response.result?.sensitive === 'boolean' ? { typedTargetSensitive: response.result.sensitive } : {},
+      targets: read.targets,
+      ...read.moved ? { targetMoved: true as const } : {},
+    }
   } catch {
-    return undefined
+    return { targets: unknown }
   }
 }
 

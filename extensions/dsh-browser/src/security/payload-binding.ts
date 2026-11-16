@@ -22,6 +22,12 @@ export interface ApprovalBindingInput {
   frameId?: number
   /** Document identity of that frame (documentId, or URL as a fallback). */
   documentKey?: string
+  /**
+   * What the card says the call acts on (the target element's kind and name
+   * as the page reported them when the card was raised). Hashed only when
+   * given, so bindings of calls without an element target are unchanged.
+   */
+  target?: unknown
 }
 
 /**
@@ -37,6 +43,8 @@ export function approvalBinding(input: ApprovalBindingInput): string {
     origins: input.origins,
     frameId: input.frameId ?? null,
     documentKey: input.documentKey ?? null,
+    // Dropped from the JSON when undefined.
+    target: input.target,
   }))
 }
 

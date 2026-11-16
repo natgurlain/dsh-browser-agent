@@ -1,7 +1,8 @@
 /**
  * "Show the agent on the page": a ghost cursor that glides to each target
  * before a click, hover, or drag; an outline with the element's index just
- * before acting; a brief "typing…" flash on typed fields; and, on tabs the
+ * before acting, and a dashed one while the action's approval card is open;
+ * a brief "typing…" flash on typed fields; and, on tabs the
  * agent controls, a thin colored frame with an "AI controlling" pill whose
  * Stop link fires the kill switch. During a takeover a banner tells the user
  * they are in control and offers Resume.
@@ -90,6 +91,7 @@ const SHADOW_CSS = `
 .outline.on { display: block; }
 .outline .label { position: absolute; left: -2px; top: -22px; padding: 2px 6px; border-radius: 6px 6px 6px 0; background: #4d6bfe; color: #fff; font-weight: 650; font-size: 11px; white-space: nowrap; }
 .outline.below .label { top: auto; bottom: -22px; border-radius: 0 6px 6px 6px; }
+.outline.preview { border-style: dashed; background: transparent; }
 .typing { position: fixed; display: none; padding: 3px 8px; border-radius: 999px; background: #172033; color: #fff; font-size: 11px; box-shadow: 0 0 0 1px rgba(255,255,255,.32); }
 .typing.on { display: block; animation: blink 1s ease-in-out infinite; }
 @keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(125,147,255,.08); } }
@@ -108,6 +110,8 @@ const ACTING_WINDOW_MS = 4_000
 const HOST_CHECK_MS = 500
 /** How long the outline and typing flash stay visible. */
 const HIGHLIGHT_MS = 1_400
+/** How often a card-time outline follows its element (scrolling, layout changes). */
+const PREVIEW_TRACK_MS = 200
 const MOVE_MS = 320
 
 interface OverlayParts {
@@ -124,6 +128,8 @@ interface OverlayParts {
   cursor: HTMLDivElement
   outline: HTMLDivElement
   label: HTMLSpanElement
+  /** The second element of a card-time outline (a drag's destination). */
+  outlineTo: HTMLDivElement
   typing: HTMLDivElement
 }
 
@@ -140,6 +146,9 @@ export class AgentOverlay {
   private checkTimer: number | undefined
   private highlightTimer: ReturnType<typeof setTimeout> | undefined
   private cursorAt: { x: number; y: number } | undefined
+  /** The element(s) outlined while an approval card is open. */
+  private previewed: { targets: Element[]; label: string | undefined } | undefined
+  private previewTimer: number | undefined
 
   constructor(
     private readonly actions: OverlayActions,
@@ -174,6 +183,63 @@ export class AgentOverlay {
   }
 
   /**
+   * Outline the element(s) an action would act on while its approval card is
+   * open, so the user sees on the page what the card names. Only a dashed
+   * outline in the overlay's own layer: nothing on the page is changed,
+   * scrolled, focused, or covered, the outline takes no pointer events, and
+   * (unlike {@link point}) the Stop button stays live, because nothing is
+   * acting. The outline follows its element until {@link clearPreview}.
+   */
+  preview(targets: Element[], label: string | undefined, copy?: Partial<OverlayCopy>): void {
+    this.applyCopy(copy)
+    const parts = this.ensure()
+    if (parts === undefined || targets.length === 0) return
+    this.stopPreviewTracking()
+    if (this.highlightTimer !== undefined) clearTimeout(this.highlightTimer)
+    parts.typing.classList.remove('on')
+    parts.cursor.classList.remove('on')
+    this.previewed = { targets: targets.slice(0, 2), label }
+    this.drawPreview()
+    const view = this.doc.defaultView
+    if (view !== null) this.previewTimer = view.setInterval(() => { this.drawPreview() }, PREVIEW_TRACK_MS)
+  }
+
+  /** Remove the card-time outline (the card was answered, withdrawn, or timed out). */
+  clearPreview(): void {
+    if (this.previewed === undefined) return
+    this.stopPreviewTracking()
+    this.previewed = undefined
+    const parts = this.parts
+    if (parts === undefined) return
+    parts.outline.classList.remove('on', 'preview')
+    parts.outlineTo.classList.remove('on', 'preview')
+  }
+
+  private stopPreviewTracking(): void {
+    if (this.previewTimer === undefined) return
+    this.doc.defaultView?.clearInterval(this.previewTimer)
+    this.previewTimer = undefined
+  }
+
+  private drawPreview(): void {
+    const parts = this.parts
+    const previewed = this.previewed
+    if (parts === undefined || previewed === undefined) return
+    const [first, second] = previewed.targets
+    const firstRect = first === undefined ? undefined : this.visibleRect(first)
+    if (firstRect === undefined) parts.outline.classList.remove('on')
+    else this.showOutline(firstRect, previewed.label)
+    parts.outline.classList.add('preview')
+    const secondRect = second === undefined ? undefined : this.visibleRect(second)
+    if (secondRect === undefined) {
+      parts.outlineTo.classList.remove('on')
+    } else {
+      this.placeOutline(parts.outlineTo, secondRect)
+      parts.outlineTo.classList.add('on', 'preview')
+    }
+  }
+
+  /**
    * Point at the element(s) the agent is about to act on: move the ghost
    * cursor, outline the target with its index, and flash "typing…" for typed
    * fields. Resolves once the movement is done (instantly with reduced motion).
@@ -182,6 +248,11 @@ export class AgentOverlay {
     this.applyCopy(copy)
     const parts = this.ensure()
     if (parts === undefined) return
+    // The action begins: a card-time outline gives way to the solid one.
+    this.stopPreviewTracking()
+    this.previewed = undefined
+    parts.outline.classList.remove('preview')
+    parts.outlineTo.classList.remove('on', 'preview')
     this.markActing()
     const reduced = this.reducedMotion()
     const [first, second] = targets
@@ -216,6 +287,8 @@ export class AgentOverlay {
   dispose(): void {
     if (this.actingTimer !== undefined) clearTimeout(this.actingTimer)
     this.stopChecks()
+    this.stopPreviewTracking()
+    this.previewed = undefined
     if (this.highlightTimer !== undefined) clearTimeout(this.highlightTimer)
     this.host?.remove()
     this.host = undefined
@@ -341,6 +414,7 @@ export class AgentOverlay {
     cursor.innerHTML = CURSOR_SVG
     const outline = make('div', 'outline', layer)
     const label = make('span', 'label', outline)
+    const outlineTo = make('div', 'outline', layer)
     const typing = make('div', 'typing', layer)
     // Only real user clicks count: page scripts cannot reach a closed root,
     // and synthetic events are refused all the same.
@@ -358,7 +432,7 @@ export class AgentOverlay {
     })
     parent.append(host)
     this.host = host
-    this.parts = { root, layer, frame, pill, pillText, stop, banner, bannerTitle, bannerBody, resume, cursor, outline, label, typing }
+    this.parts = { root, layer, frame, pill, pillText, stop, banner, bannerTitle, bannerBody, resume, cursor, outline, label, outlineTo, typing }
     this.render()
     return this.parts
   }
@@ -379,13 +453,17 @@ export class AgentOverlay {
     return rect
   }
 
+  private placeOutline(outline: HTMLDivElement, rect: DOMRect): void {
+    const pad = 3
+    outline.style.left = `${Math.round(rect.left - pad)}px`
+    outline.style.top = `${Math.round(rect.top - pad)}px`
+    outline.style.width = `${Math.round(rect.width + pad * 2)}px`
+    outline.style.height = `${Math.round(rect.height + pad * 2)}px`
+  }
+
   private showOutline(rect: DOMRect, label: string | undefined): void {
     const parts = this.parts!
-    const pad = 3
-    parts.outline.style.left = `${Math.round(rect.left - pad)}px`
-    parts.outline.style.top = `${Math.round(rect.top - pad)}px`
-    parts.outline.style.width = `${Math.round(rect.width + pad * 2)}px`
-    parts.outline.style.height = `${Math.round(rect.height + pad * 2)}px`
+    this.placeOutline(parts.outline, rect)
     parts.outline.classList.toggle('below', rect.top < 28)
     parts.label.textContent = label ?? ''
     parts.label.style.display = label === undefined || label === '' ? 'none' : ''

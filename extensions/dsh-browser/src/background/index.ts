@@ -195,6 +195,7 @@ import {
 } from './session-continuity.ts'
 import { approvalFailureMessage } from './answers.ts'
 import { auditedAuthorize, auditedPolicy, auditNote, noteCallTarget, type AuditedCall } from './audit.ts'
+import { StepLabels, STEP_LABELS_STORAGE_KEY } from '../shared/step-labels.ts'
 import { createDevLoopPanelRpc } from './dev-loop.ts'
 
 /** User settings persisted in chrome.storage.local. */
@@ -746,6 +747,11 @@ const devTools = createDevToolsController({
     }
   },
   onStateChange: () => { broadcastDevToolsState() },
+})
+/** Timeline labels naming the element each call acted on (shared/step-labels.ts); for the panel only. */
+const stepLabels = new StepLabels({
+  read: async () => (await chrome.storage.session.get(STEP_LABELS_STORAGE_KEY))[STEP_LABELS_STORAGE_KEY],
+  write: async (value) => { await chrome.storage.session.set({ [STEP_LABELS_STORAGE_KEY]: value }) },
 })
 const pageSessionContexts = new PageSessionContextTracker({
   read: async () => (await chrome.storage.session.get(PAGE_SESSION_CONTEXT_STORAGE_KEY))[PAGE_SESSION_CONTEXT_STORAGE_KEY],
@@ -2748,7 +2754,13 @@ function routeToolCall(call: ToolCall): void {
    */
   const authorizeFor = (session: string | undefined, label?: (prompt: ApprovalPrompt) => ApprovalPrompt) => (
     (prompt: ApprovalPrompt, windowId: number): Promise<ApprovalAuthorization> => auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(
-      label === undefined ? shown : label(shown), controller.signal, windowId, { sessionId: session, unrestrictedAccess, toolCallId: call.id, onPrompt },
+      label === undefined ? shown : label(shown), controller.signal, windowId, {
+        sessionId: session,
+        unrestrictedAccess,
+        toolCallId: call.id,
+        // A card is really shown: outline the element it names on the page (agent-overlay.ts).
+        onPrompt: () => { onPrompt(); agentOverlay.showPreview(call.id) },
+      },
     ))(prompt)
   )
   // Tab-bound cards show under the fleet parent's session (approvalSession); lane cards under the call's own.
@@ -2886,6 +2898,7 @@ function routeToolCall(call: ToolCall): void {
           () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
           {
             unrestrictedAccess, input: inputRuntime, dialogs, commitAction, rollbackActionCommit, policy: learning.wrapPolicy(call, target, policy), overlay: agentOverlay,
+            onStepLabel: (label) => { stepLabels.note(call.id, label) },
             // A "do the remaining N" step acts only on an element that still looks as its card showed it, on the page the card was approved on.
             ...(programCover?.target === undefined ? {} : { expect: { target: programCover.target, ...(programCover.page === undefined ? {} : { page: programCover.page }) } }),
           },

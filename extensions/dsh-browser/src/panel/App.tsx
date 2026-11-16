@@ -103,7 +103,7 @@ import {
 import { isNearScrollBottom } from './scroll.ts'
 import { SettingToggle } from './SettingToggle.tsx'
 import { EntryAdd, EntryList, SettingRow, SettingsGroup, SettingsKitCopyContext, SettingsSection } from './SettingsKit.tsx'
-import { downloadText, requestOptionalPermission } from './browser-helpers.ts'
+import { downloadText, requestOptionalPermission, storedStepLabels } from './browser-helpers.ts'
 import {
   isExperimentalPreset,
   isSelectablePreset,
@@ -143,6 +143,7 @@ import {
   appendLiveRow,
   appendToolStep,
   applyStepAudit,
+  applyStepLabels,
   auditByCall,
   completeToolStep,
   resultFromEvent,
@@ -712,7 +713,7 @@ function ApprovalDetailView({ detail, copy }: { detail: ApprovalDetail; copy: Pa
   }
 }
 
-function ApprovalDialog({
+export function ApprovalDialog({
   request,
   onDecision,
   onKillSwitch,
@@ -761,7 +762,9 @@ function ApprovalDialog({
         )}
         <div className="approval-detail">
           <span>{copy.approval.request}</span>
-          <strong>{request.summary}</strong>
+          <strong>{revealInvisible(request.summary)}</strong>
+          {/* How the call addresses its element and where the page shows it: plain text, the quoted parts are the page's. */}
+          {request.targetNote !== undefined && <small className="approval-target-note">{revealInvisible(request.targetNote)}</small>}
         </div>
         <div className="approval-origins">
           <span>{copy.approval.origins}</span>
@@ -1239,10 +1242,13 @@ export function App(): React.JSX.Element {
     pending.sessionId = sessionId
     pending.timer = setTimeout(() => {
       pending.timer = undefined
-      void api.rpc<{ entries?: unknown }>(BRIDGE_AUDIT_EXPORT_METHOD, { sessionId }).then((exported) => {
+      void api.rpc<{ entries?: unknown }>(BRIDGE_AUDIT_EXPORT_METHOD, { sessionId }).then(async (exported) => {
         if (sessionRef.current !== sessionId) return
         const audit = auditByCall(exported?.entries)
-        setRows((prev) => applyStepAudit(prev, audit))
+        // What each call's element is called, as the extension recorded it when the call ran.
+        const labels = await storedStepLabels()
+        if (sessionRef.current !== sessionId) return
+        setRows((prev) => applyStepLabels(applyStepAudit(prev, audit), audit, labels))
       }, () => { /* an older bridge without the audit log: no badges */ })
     }, delayMs)
   }
@@ -1607,6 +1613,8 @@ export function App(): React.JSX.Element {
       const seq = nextSeq()
       const step = stepFromCall(payload.event, `live-${seq}`, locale)
       setRows((prev) => appendToolStep(prev, step, seq))
+      // A step that waits on a card (or runs long) is named once the call is dispatched.
+      scheduleStepAudit(payload.sessionId, 500)
       return
     }
     if (payload.event.type === 'tool/result') {
