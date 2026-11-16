@@ -80,6 +80,22 @@ const trustMessages = (): Array<Record<string, unknown>> => ports[0]!.posted.fil
 describe('taint banner layout', () => {
   const en = PANEL_COPY.en.taint
 
+  it('names only the pages that were read: a destination that was only attempted is not listed and gets no Trust button', async () => {
+    const denied: TaintRecord = { ...record(['http://helpdesk.example.test', 'http://shop.localhost:4180']), attempted: ['https://verify.example'] }
+    const view = taintBannerView(denied, sites(['https://verify.example']), en.unknownSource)
+    expect(view.hosts).toEqual(['helpdesk.example.test', 'shop.localhost:4180'])
+    expect(view.trust).toEqual([])
+    const host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+    await act(async () => { root!.render(createElement(TaintBanner, { sessionId: 's1', locale: 'en', acceptSyntheticClicks: true })) })
+    // Even if a (buggy or forged) state offered it, the banner renders no choice for it.
+    await act(async () => { ports[0]!.emit({ type: 'taint.state', records: { s1: denied }, trustable: { s1: sites(['https://verify.example']) } }) })
+    expect(host.textContent).toContain('(helpdesk.example.test, shop.localhost:4180)')
+    expect(host.textContent).not.toContain('verify.example')
+    expect(buttons(host)).toEqual([en.clear])
+  })
+
   it('names host names, not origins, in one short sentence that says why', () => {
     const view = taintBannerView(record(['https://seraph.quest', 'https://x.com']), undefined, en.unknownSource)
     expect(view).toMatchObject({ hosts: ['seraph.quest', 'x.com'], shown: ['seraph.quest', 'x.com'], more: 0, unknown: false, trust: [], local: [] })

@@ -437,15 +437,24 @@ export class PolicyRuntime {
       ? fallbackOrigin === undefined ? [] : [fallbackOrigin]
       : [...new Set([...targets.reads, ...targets.acts])]
     // After a navigation or new tab the agent looks at the destination page.
+    // A navigation that did not succeed (denied, refused, failed) read nothing
+    // there: the destination is kept as attempted, not as a source, so the
+    // banner does not name a site that never loaded. It still counts against
+    // every "only source" exemption (taint.ts `onlySourceIs`).
     let pageOrigin = targets === undefined ? fallbackOrigin : targets.pageOrigin
+    const attempted: string[] = []
     if (targets?.destination !== undefined) {
       try {
         const destination = new URL(targets.destination).origin
-        origins.push(destination)
-        pageOrigin = destination
+        if (ok) {
+          origins.push(destination)
+          pageOrigin = destination
+        } else {
+          attempted.push(destination)
+        }
       } catch { /* not a URL */ }
     }
-    this.taint.mark(call.sessionId, call.name, origins.length === 0 && fallbackOrigin !== undefined ? [fallbackOrigin] : origins, pageOrigin ?? fallbackOrigin)
+    this.taint.mark(call.sessionId, call.name, origins.length === 0 && fallbackOrigin !== undefined ? [fallbackOrigin] : origins, pageOrigin ?? fallbackOrigin, attempted)
     return { exempt: false }
   }
 
@@ -619,7 +628,8 @@ export class PolicyRuntime {
     const now = this.exemption()
     const trusted = [...offers.keys()].filter((origin) => originTaintExempt(origin, now))
     const current = this.taint.get(sessionId)
-    const cleared = current !== undefined && allTaintExempt(current.sources, now)
+    // Attempted destinations must be exempt too: a failed navigation may have loaded part of the page.
+    const cleared = current !== undefined && allTaintExempt([...current.sources, ...current.attempted ?? []], now)
     if (cleared) {
       this.taint.lift(sessionId)
       await this.options.clearBridgeTaint(sessionId).catch(() => {})

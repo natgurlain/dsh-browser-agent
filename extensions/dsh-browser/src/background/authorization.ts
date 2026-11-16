@@ -9,6 +9,7 @@ import { attributeRisk } from '../security/attribute-risk.ts'
 import type { DevToolsGrantKind } from './devtools-grants.ts'
 import { getUiLocale, type UiLocale } from '../i18n.ts'
 import type { CallPolicyTargets } from '../security/call-policy.ts'
+import type { TargetKind, TargetState, TargetStates } from '../shared/target-description.ts'
 
 const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text', 'browser_pdf_text'])
 /**
@@ -221,6 +222,18 @@ export interface ApprovalContext {
   dialog?: { type: string; message: string; defaultPrompt?: string }
   /** For browser_downloads: the optional downloads permission is not granted yet. */
   needsDownloadsPermission?: boolean
+  /**
+   * For a call that targets an element: what the page reported about that
+   * element when the card was raised (content/describe.ts, read through
+   * shared/target-description.ts). The card names the element from this,
+   * never from anything the model wrote. Its kind and name are folded into
+   * the binding, so an element that reads differently at execution time
+   * invalidates the approval. Absent when the page was not asked at all
+   * (callers outside the dispatcher): the card then names the locator only.
+   */
+  targets?: TargetStates
+  /** A re-check found a locator naming another element than the one the card described. */
+  targetMoved?: true
 }
 
 /**
@@ -273,6 +286,7 @@ export function approvalPromptForCall(
       args: call.name === 'browser_dialog' ? { ...call.args, dialog: context.dialog ?? null } : call.args,
       origins: prompt.origins,
       ...target === undefined ? {} : { frameId: target.frameId, documentKey: frameDocumentKey(target) },
+      ...context.targets === undefined || prompt.kind !== 'action' ? {} : { target: boundTargets(context) },
     }),
   }
 }
@@ -355,15 +369,38 @@ function unboundPromptForCall(
     // back door for adding the current page to the persistent allowlist.
     canTrust = destination !== undefined && origins.length === 1 && origins[0] === destination
   }
+  const targetNote = targetNoteFor(call, locale, context)
+  const stepLabel = stepLabelFor(call, locale, context)
   return {
     kind: 'action',
     action: call.name,
     summary: summarizeAction(call, locale, context),
+    ...targetNote === undefined ? {} : { targetNote },
+    ...stepLabel === undefined ? {} : { stepLabel },
     origins,
     // Cross-origin/invalid navigation and unknown history destinations always
     // require a fresh decision; they must never expand trust implicitly.
     canTrust,
     ...extras,
+  }
+}
+
+/**
+ * The part of the target description an approval covers: per element, whether
+ * it was found and its kind and name. The context line is left out on
+ * purpose: a row's text can tick over (a counter, a timestamp) without the
+ * element being a different one, and such a change must not void a card.
+ */
+function boundTargets(context: ApprovalContext): unknown {
+  const bound = (state: TargetState | undefined): unknown => state === undefined
+    ? undefined
+    : state.state === 'found' ? { state: state.state, kind: state.kind, name: state.name } : { state: state.state }
+  const targets = context.targets ?? {}
+  return {
+    target: bound(targets.target),
+    from: bound(targets.from),
+    to: bound(targets.to),
+    ...context.targetMoved === true ? { moved: true } : {},
   }
 }
 
@@ -451,13 +488,149 @@ export function originFromUrl(value: string): string | undefined {
   }
 }
 
-function elementTarget(call: ToolCall, locale: UiLocale): string {
-  if (typeof call.args.selector === 'string' && call.args.selector !== '') {
-    const selector = safeInline(call.args.selector, 160)
+/** How a call addresses an element: its selector, its snapshot index, or focus. */
+function locatorText(locator: Record<string, unknown>, locale: UiLocale): string {
+  if (typeof locator.selector === 'string' && locator.selector !== '') {
+    const selector = safeInline(locator.selector, 160)
     return localized(locale, `selected element (${selector})`, `选择器元素（${selector}）`)
   }
-  if (typeof call.args.index === 'number') return localized(locale, `element [${call.args.index}]`, `元素 [${call.args.index}]`)
+  if (typeof locator.index === 'number') return localized(locale, `element [${locator.index}]`, `元素 [${locator.index}]`)
   return localized(locale, 'the focused element', '当前焦点元素')
+}
+
+const KIND_WORDS: Record<TargetKind, [english: string, chinese: string]> = {
+  button: ['button', '按钮'],
+  link: ['link', '链接'],
+  checkbox: ['checkbox', '复选框'],
+  radio: ['radio button', '单选按钮'],
+  switch: ['switch', '开关'],
+  tab: ['tab', '选项卡'],
+  menuitem: ['menu item', '菜单项'],
+  option: ['option', '选项'],
+  slider: ['slider', '滑块'],
+  combobox: ['dropdown', '下拉框'],
+  listbox: ['list', '列表'],
+  textbox: ['text field', '文本框'],
+  searchbox: ['search field', '搜索框'],
+  spinbutton: ['number field', '数字输入框'],
+  select: ['dropdown', '下拉框'],
+  textarea: ['text area', '多行文本框'],
+  password: ['password field', '密码框'],
+  email: ['email field', '邮箱输入框'],
+  tel: ['phone field', '电话输入框'],
+  url: ['address field', '网址输入框'],
+  number: ['number field', '数字输入框'],
+  date: ['date field', '日期输入框'],
+  file: ['file chooser', '文件选择框'],
+  color: ['colour picker', '颜色选择器'],
+  editable: ['editable text', '可编辑文本'],
+  image: ['image', '图片'],
+  summary: ['expandable section', '可展开区域'],
+  label: ['label', '标签'],
+  clickable: ['element', '元素'],
+  element: ['element', '元素'],
+}
+
+/**
+ * Page-authored text as a card shows it: in quotation marks, which say "this
+ * is what the page calls it". The text was reduced to bounded plain text that
+ * cannot contain these marks (shared/target-description.ts `pageTextForCard`).
+ */
+function quoted(text: string, locale: UiLocale): string {
+  return localized(locale, `“${text}”`, `「${text}」`)
+}
+
+/** A found element in words: `checkbox “Email notifications”`. */
+function foundText(state: Extract<TargetState, { state: 'found' }>, locale: UiLocale): string {
+  const kind = localized(locale, ...KIND_WORDS[state.kind])
+  if (state.name === '') return localized(locale, `${kind} (no label)`, `${kind}（无标签）`)
+  return localized(locale, `${kind} ${quoted(state.name, locale)}`, `${kind}${quoted(state.name, locale)}`)
+}
+
+/**
+ * The element a call acts on, as the card names it. With a page report: the
+ * element's kind and name, or a plain statement that it is not there (or
+ * could not be checked). Without one: the locator.
+ */
+function targetText(locator: Record<string, unknown>, state: TargetState | undefined, locale: UiLocale): string {
+  const where = locatorText(locator, locale)
+  if (state === undefined) return where
+  if (state.state === 'found') return foundText(state, locale)
+  return state.state === 'missing'
+    ? localized(locale, `${where} — not found on the page right now`, `${where}——当前页面上找不到`)
+    : localized(locale, `${where} — could not be checked on the page right now`, `${where}——当前无法在页面上核对`)
+}
+
+function elementTarget(call: ToolCall, locale: UiLocale, context: ApprovalContext = {}): string {
+  return targetText(call.args, context.targets?.target, locale)
+}
+
+function dragEnds(call: ToolCall): { from: Record<string, unknown>; to: Record<string, unknown> | undefined } {
+  const end = (value: unknown): Record<string, unknown> | undefined => typeof value === 'object' && value !== null ? value as Record<string, unknown> : undefined
+  return { from: end(call.args.from) ?? {}, to: typeof call.args.toOffset === 'object' && call.args.toOffset !== null ? undefined : end(call.args.to) }
+}
+
+/** The secondary line for one found element: how the call addresses it and where the page shows it. */
+function notePart(locator: Record<string, unknown>, state: TargetState | undefined, locale: UiLocale): string | undefined {
+  if (state?.state !== 'found') return undefined
+  const address = typeof locator.selector === 'string' && locator.selector !== ''
+    ? localized(locale, `selector: ${safeInline(locator.selector, 160)}`, `选择器：${safeInline(locator.selector, 160)}`)
+    : locatorText(locator, locale)
+  if (state.context === undefined) return address
+  const place = state.context.kind === 'row'
+    ? localized(locale, `in the row ${quoted(state.context.text, locale)}`, `所在行${quoted(state.context.text, locale)}`)
+    : localized(locale, `in ${quoted(state.context.text, locale)}`, `位于${quoted(state.context.text, locale)}`)
+  return `${address} · ${place}`
+}
+
+/** The card's secondary line for a call that targets an element (see `ApprovalPrompt.targetNote`). */
+function targetNoteFor(call: ToolCall, locale: UiLocale, context: ApprovalContext): string | undefined {
+  const targets = context.targets
+  if (targets === undefined) return undefined
+  if (call.name === 'browser_drag') {
+    const ends = dragEnds(call)
+    const from = notePart(ends.from, targets.from, locale)
+    const to = ends.to === undefined ? undefined : notePart(ends.to, targets.to, locale)
+    const parts = [
+      ...from === undefined ? [] : [localized(locale, `from ${from}`, `起点：${from}`)],
+      ...to === undefined ? [] : [localized(locale, `to ${to}`, `终点：${to}`)],
+    ]
+    return parts.length === 0 ? undefined : parts.join(localized(locale, '; ', '；'))
+  }
+  return notePart(call.args, targets.target, locale)
+}
+
+/** The click gesture in words. Only the known values are named; anything else reads "Click". */
+function clickVerb(args: Record<string, unknown>, locale: UiLocale): string {
+  if (args.action === 'dblclick' || args.clicks === 2) return localized(locale, 'Double-click', '双击')
+  if (args.button === 'right') return localized(locale, 'Right-click', '右键点击')
+  if (args.button === 'middle') return localized(locale, 'Middle-click', '中键点击')
+  return localized(locale, 'Click', '点击')
+}
+
+/** The step-timeline label of a call whose element(s) were found (see `ApprovalPrompt.stepLabel`). */
+function stepLabelFor(call: ToolCall, locale: UiLocale, context: ApprovalContext): string | undefined {
+  const targets = context.targets
+  if (targets === undefined) return undefined
+  if (call.name === 'browser_drag') {
+    if (targets.from?.state !== 'found') return undefined
+    const from = foundText(targets.from, locale)
+    if (targets.to === undefined) return localized(locale, `Drag ${from}`, `拖动${from}`)
+    if (targets.to.state !== 'found') return undefined
+    return localized(locale, `Drag ${from} to ${foundText(targets.to, locale)}`, `把${from}拖到${foundText(targets.to, locale)}`)
+  }
+  if (targets.target?.state !== 'found') return undefined
+  const target = foundText(targets.target, locale)
+  switch (call.name) {
+    case 'browser_click': return localized(locale, `${clickVerb(call.args, locale)} ${target}`, `${clickVerb(call.args, locale)}${target}`)
+    case 'browser_type': return localized(locale, `Type into ${target}`, `向${target}输入`)
+    case 'browser_press': return localized(locale, `Press a key in ${target}`, `在${target}中按键`)
+    case 'browser_select': return localized(locale, `Select in ${target}`, `在${target}中选择`)
+    case 'browser_hover': return localized(locale, `Hover over ${target}`, `悬停在${target}上`)
+    case 'browser_upload': return localized(locale, `Attach files to ${target}`, `向${target}附加文件`)
+    case 'browser_clipboard': return call.args.action === 'write' ? undefined : localized(locale, `Paste into ${target}`, `粘贴到${target}`)
+    default: return undefined
+  }
 }
 
 function summarizeAction(call: ToolCall, locale: UiLocale, context: ApprovalContext): string {
@@ -466,30 +639,31 @@ function summarizeAction(call: ToolCall, locale: UiLocale, context: ApprovalCont
     : ''
   switch (call.name) {
     case 'browser_click': {
-      const index = typeof call.args.index === 'number' ? call.args.index : '?'
-      const target = typeof call.args.selector === 'string'
-        ? `selected element (${safeInline(call.args.selector, 160)})`
-        : `element [${index}]`
-      const targetZh = typeof call.args.selector === 'string'
-        ? `选择器元素（${safeInline(call.args.selector, 160)}）`
-        : `元素 [${index}]`
-      const gesture = typeof call.args.action === 'string' && call.args.action !== 'click' ? ` ${call.args.action}` : ''
-      return localized(locale, `${gesture.trim() === '' ? 'Click' : gesture.trim()} ${target}${frame}`, `${gesture === '' ? '点击' : gesture.trim()} ${targetZh}${frame}`)
+      const verb = clickVerb(call.args, locale)
+      const state = context.targets?.target
+      const located = typeof call.args.index === 'number' || (typeof call.args.selector === 'string' && call.args.selector !== '')
+      const target = state !== undefined || located
+        ? targetText(call.args, state, locale)
+        : localized(locale, 'element [?]', '元素 [?]')
+      return localized(locale, `${verb} ${target}${frame}`, `${verb}${state?.state === 'found' ? '' : ' '}${target}${frame}`)
     }
     case 'browser_type': {
       const length = typeof call.args.text === 'string' ? call.args.text.length : 0
       const masked = context.typedTargetSensitive !== false
       return localized(
         locale,
-        `Type ${length} characters into ${elementTarget(call, locale)}${frame}${masked ? ' (sensitive field or not inspected: masked)' : ''}`,
-        `向${elementTarget(call, locale)}输入 ${length} 个字符${frame}${masked ? '（敏感字段或未能检查：已遮盖）' : ''}`,
+        `Type ${length} characters into ${elementTarget(call, locale, context)}${frame}${masked ? ' (sensitive field or not inspected: masked)' : ''}`,
+        `向${elementTarget(call, locale, context)}输入 ${length} 个字符${frame}${masked ? '（敏感字段或未能检查：已遮盖）' : ''}`,
       )
     }
-    case 'browser_press': return localized(
-      locale,
-      `Press “${safeInline(typeof call.args.key === 'string' ? call.args.key : '')}”${frame}`,
-      `发送按键「${safeInline(typeof call.args.key === 'string' ? call.args.key : '')}」${frame}`,
-    )
+    case 'browser_press': {
+      const key = safeInline(typeof call.args.key === 'string' ? call.args.key : '')
+      // With an element (addressed, or the one that has focus) the card says where the key goes.
+      const into = context.targets?.target === undefined ? undefined : elementTarget(call, locale, context)
+      return into === undefined
+        ? localized(locale, `Press “${key}”${frame}`, `发送按键「${key}」${frame}`)
+        : localized(locale, `Press “${key}” in ${into}${frame}`, `在${into}中发送按键「${key}」${frame}`)
+    }
     case 'browser_navigate': return localized(
       locale,
       `Navigate to ${displayUrl(typeof call.args.url === 'string' ? call.args.url : '', locale)}`,
@@ -518,20 +692,22 @@ function summarizeAction(call: ToolCall, locale: UiLocale, context: ApprovalCont
           `Write ${html ? 'text and rich HTML' : 'text'} to the system clipboard`,
           `向系统剪贴板写入${html ? '文本与富文本' : '文本'}`,
         )
-        : localized(locale, 'Paste the clipboard into the page', '把剪贴板内容粘贴到页面')
+        : context.targets?.target === undefined
+          ? localized(locale, 'Paste the clipboard into the page', '把剪贴板内容粘贴到页面')
+          : localized(locale, `Paste the clipboard into ${elementTarget(call, locale, context)}${frame}`, `把剪贴板内容粘贴到${elementTarget(call, locale, context)}${frame}`)
     }
     case 'browser_upload': {
       const count = Array.isArray(call.args.paths) ? call.args.paths.length : 0
       return localized(
         locale,
-        `Attach ${count} local file(s) to ${elementTarget(call, locale)}${frame}`,
-        `向${elementTarget(call, locale)}附加 ${count} 个本地文件${frame}`,
+        `Attach ${count} local file(s) to ${elementTarget(call, locale, context)}${frame}`,
+        `向${elementTarget(call, locale, context)}附加 ${count} 个本地文件${frame}`,
       )
     }
     case 'browser_select': return localized(
       locale,
-      `Select option(s) in ${elementTarget(call, locale)}${frame} (arguments below)`,
-      `在${elementTarget(call, locale)}中选择选项${frame}（参数见下方）`,
+      `Select option(s) in ${elementTarget(call, locale, context)}${frame} (arguments below)`,
+      `在${elementTarget(call, locale, context)}中选择选项${frame}（参数见下方）`,
     )
     case 'browser_extract': {
       const pages = typeof call.args.paginate === 'object' && call.args.paginate !== null
@@ -543,11 +719,11 @@ function summarizeAction(call: ToolCall, locale: UiLocale, context: ApprovalCont
         `跨页提取数据行，最多点击下一页控件 ${typeof pages === 'number' ? pages : 5} 页${frame}（参数见下方）`,
       )
     }
-    case 'browser_hover': return localized(locale, `Move the pointer over ${elementTarget(call, locale)}${frame}`, `把指针移到${elementTarget(call, locale)}上${frame}`)
+    case 'browser_hover': return localized(locale, `Move the pointer over ${elementTarget(call, locale, context)}${frame}`, `把指针移到${elementTarget(call, locale, context)}上${frame}`)
     case 'browser_drag': return localized(
       locale,
-      `Drag ${describeDragEnd(call.args.from, locale)} to ${describeDragDestination(call, locale)}${frame}`,
-      `把${describeDragEnd(call.args.from, locale)}拖到${describeDragDestination(call, locale)}${frame}`,
+      `Drag ${describeDragEnd(call.args.from, locale, context.targets?.from)} to ${describeDragDestination(call, locale, context.targets?.to)}${frame}`,
+      `把${describeDragEnd(call.args.from, locale, context.targets?.from)}拖到${describeDragDestination(call, locale, context.targets?.to)}${frame}`,
     )
     case 'browser_dialog': {
       const kind = context.dialog?.type ?? 'unknown'
@@ -579,20 +755,19 @@ function summarizeRead(call: ToolCall, locale: UiLocale): string {
 }
 
 /** One end of a drag: `{index}` or `{selector}`. */
-function describeDragEnd(value: unknown, locale: UiLocale): string {
+function describeDragEnd(value: unknown, locale: UiLocale, state?: TargetState): string {
   const end = typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
-  if (typeof end.selector === 'string' && end.selector !== '') return localized(locale, `selected element (${safeInline(end.selector, 160)})`, `选择器元素（${safeInline(end.selector, 160)}）`)
-  if (typeof end.index === 'number') return localized(locale, `element [${end.index}]`, `元素 [${end.index}]`)
+  if ((typeof end.selector === 'string' && end.selector !== '') || typeof end.index === 'number') return targetText(end, state, locale)
   return localized(locale, '(no element given)', '（未指定元素）')
 }
 
-function describeDragDestination(call: ToolCall, locale: UiLocale): string {
+function describeDragDestination(call: ToolCall, locale: UiLocale, state?: TargetState): string {
   const offset = call.args.toOffset
   if (typeof offset === 'object' && offset !== null) {
     const { x, y } = offset as { x?: unknown; y?: unknown }
     return localized(locale, `an offset of (${String(x)}, ${String(y)}) px`, `偏移 (${String(x)}, ${String(y)}) 像素处`)
   }
-  return describeDragEnd(call.args.to, locale)
+  return describeDragEnd(call.args.to, locale, state)
 }
 
 function summarizeAlwaysAskRead(call: ToolCall, locale: UiLocale): string {

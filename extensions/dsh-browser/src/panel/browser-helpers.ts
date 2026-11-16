@@ -4,6 +4,8 @@
  * @module
  */
 
+import { readStepLabels, STEP_LABELS_STORAGE_KEY } from '../shared/step-labels.ts'
+
 /** Ask the browser for an optional permission (must run inside a click). */
 export function requestOptionalPermission(permission: string): Promise<boolean> {
   const permissions = (globalThis as { chrome?: { permissions?: { request?: (value: { permissions: string[] }) => Promise<boolean> } } }).chrome?.permissions
@@ -12,6 +14,19 @@ export function requestOptionalPermission(permission: string): Promise<boolean> 
     return Promise.resolve(permissions.request({ permissions: [permission] })).catch(() => false)
   } catch {
     return Promise.resolve(false)
+  }
+}
+
+/**
+ * The extension's step labels (shared/step-labels.ts): what each dispatched
+ * call's element is called. Empty where the session store is not available.
+ */
+export async function storedStepLabels(): Promise<Record<string, string>> {
+  try {
+    const stored = await chrome.storage.session.get(STEP_LABELS_STORAGE_KEY)
+    return readStepLabels(stored[STEP_LABELS_STORAGE_KEY])
+  } catch {
+    return {}
   }
 }
 

@@ -45,18 +45,31 @@ function mockChrome(options: {
     documentId: `document-${options.tab.id}`,
     url: options.tab.url ?? '',
   }])
+  const frameIdOf = (target?: { frameId?: number; documentId?: string }): number => target?.frameId
+    ?? currentFrames().find((frame) => frame.documentId === target?.documentId)?.frameId
+    ?? 0
   const sendMessage = vi.fn(async (
     _tabId: number,
     message: unknown,
     target?: { frameId?: number; documentId?: string },
   ) => {
-    const targetFrameId = target?.frameId
-      ?? currentFrames().find((frame) => frame.documentId === target?.documentId)?.frameId
-      ?? 0
-    const response = options.respond?.(message, targetFrameId) ?? responses.shift()
+    const response = options.respond?.(message, frameIdOf(target)) ?? responses.shift()
     if (response instanceof Error) throw response
     return response
   })
+  // The card-time probe ("what is this element called?", DSH_TARGET_INFO) reads the page before any
+  // approval. It is counted apart, so `sendMessage` keeps meaning "something was sent to act on the page".
+  const probes = vi.fn(async (
+    _tabId: number,
+    message: unknown,
+    target?: { frameId?: number; documentId?: string },
+  ) => {
+    const response = options.respond?.(message, frameIdOf(target)) ?? { ok: true, result: { targets: {} } }
+    if (response instanceof Error) throw response
+    return response
+  })
+  const route = (tabId: number, message: unknown, target?: { frameId?: number; documentId?: string }): Promise<unknown> =>
+    (message as { type?: string }).type === 'DSH_TARGET_INFO' ? probes(tabId, message, target) : sendMessage(tabId, message, target)
   const executeScript = options.injectionError === undefined
     ? vi.fn(async () => [{ frameId: 0, result: undefined }])
     : vi.fn(async () => { throw options.injectionError })
@@ -76,7 +89,7 @@ function mockChrome(options: {
   const remove = vi.fn(async () => undefined)
   const getAllFrames = vi.fn(async () => currentFrames())
   vi.stubGlobal('chrome', {
-    tabs: { query, get, sendMessage, update, goBack, goForward, reload, remove },
+    tabs: { query, get, sendMessage: route, update, goBack, goForward, reload, remove },
     scripting: { executeScript },
     webNavigation: { getAllFrames },
     runtime: {
@@ -95,7 +108,7 @@ function mockChrome(options: {
       listener({ type: 'DSH_CONTENT_READY' }, { tab: { id: tabId }, frameId, documentId } as chrome.runtime.MessageSender)
     }
   }
-  return { emitContentReady, executeScript, get, getAllFrames, goBack, goForward, query, reload, remove, sendMessage, update }
+  return { emitContentReady, executeScript, get, getAllFrames, goBack, goForward, probes, query, reload, remove, sendMessage, update }
 }
 
 afterEach(() => {

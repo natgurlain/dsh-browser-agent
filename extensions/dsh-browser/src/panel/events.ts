@@ -20,7 +20,11 @@ export interface ToolStep {
   /** The model's tool-call id (joins the call, its result, and audit entries). */
   callId: string
   name: string
-  /** Localized action label, e.g. "Click element". */
+  /**
+   * Localized action label, e.g. "Click element"; once the background has
+   * told the panel what the call's element is, the label that names it
+   * ("Click button “Save settings”", see {@link applyStepLabels}).
+   */
   label: string
   /** What the step acted on: "#7", a selector, a host and path, a key. */
   target?: string
@@ -345,6 +349,8 @@ export function completeToolStep(rows: Row[], result: StepResult, seq: number): 
 
 /** What the audit log knows about one step. */
 export interface StepAudit {
+  /** The bridge's id of the call (the extension keys its step labels by it). */
+  bridgeCallId?: string
   decision?: string
   durationMs?: number
   policy?: string
@@ -358,6 +364,7 @@ export function auditByCall(entries: unknown): Map<string, StepAudit> {
   for (const raw of entries) {
     if (!isRecord(raw) || typeof raw.toolCallId !== 'string') continue
     const current = byCall.get(raw.toolCallId) ?? {}
+    if (typeof raw.callId === 'string' && raw.callId !== '') current.bridgeCallId = raw.callId
     if (raw.kind === 'approval' && typeof raw.decision === 'string') current.decision = raw.decision
     if (typeof raw.policy === 'string') current.policy = raw.policy
     if (typeof raw.strictMode === 'string') current.strict = raw.strictMode
@@ -393,6 +400,31 @@ export function applyStepAudit(rows: Row[], audit: Map<string, StepAudit>): Row[
         ...(policy === undefined ? {} : { policy }),
         ...(strict === undefined ? {} : { strict }),
       }
+    })
+    if (!rowChanged) return row
+    changed = true
+    return { ...row, steps }
+  })
+  return changed ? next : rows
+}
+
+/**
+ * Name the element each step acted on. `labels` is the extension's own record
+ * (shared/step-labels.ts), keyed by bridge call id; the audit log pairs that
+ * id with the step's tool-call id. A step without a label keeps its generic one.
+ */
+export function applyStepLabels(rows: Row[], audit: Map<string, StepAudit>, labels: Record<string, string>): Row[] {
+  if (audit.size === 0 || Object.keys(labels).length === 0) return rows
+  let changed = false
+  const next = rows.map((row) => {
+    if (row.kind !== 'tool' || row.steps === undefined) return row
+    let rowChanged = false
+    const steps = row.steps.map((step) => {
+      const bridgeCallId = audit.get(step.callId)?.bridgeCallId
+      const label = bridgeCallId === undefined ? undefined : labels[bridgeCallId]
+      if (label === undefined || label === step.label) return step
+      rowChanged = true
+      return { ...step, label }
     })
     if (!rowChanged) return row
     changed = true

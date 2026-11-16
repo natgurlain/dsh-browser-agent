@@ -79,4 +79,42 @@ describe('StepTimeline', () => {
     expect(html).toContain('Failed')
     expect(html).toContain('aria-expanded="false"')
   })
+
+  it('keeps a denied step readable in a narrow panel: the label has a floor and the badges wrap under it', async () => {
+    // The row of the launch demo: three badges that used to squeeze "Open page" into a column of letters.
+    const html = renderToStaticMarkup(createElement(StepTimeline, {
+      row: {
+        seq: 1, kind: 'tool', text: '', status: 'complete',
+        steps: [{ callId: 'n', name: 'browser_navigate', label: 'Open page', target: 'verify.example.test/verify', status: 'error', policy: 'tainted', decision: 'denied', durationMs: 6700 }],
+      },
+      sessionId: 's',
+      api: {} as PanelApi,
+      copy: PANEL_COPY.en,
+    }))
+    const host = document.createElement('div')
+    host.innerHTML = html
+    // Label and badges are siblings in one wrapping row beside the icon.
+    const body = host.querySelector('.timeline-step-head > .timeline-step-body')!
+    expect([...body.children].map((child) => child.className)).toEqual(['timeline-step-copy', 'timeline-step-meta'])
+    expect(body.querySelector('.timeline-step-copy .timeline-step-label .timeline-step-text')?.textContent).toBe('Open page')
+    expect([...body.querySelectorAll('.timeline-step-meta > *')].map((el) => el.textContent)).toEqual(['Needs review (tainted)', 'Denied', 'Failed', '6.7 s'])
+    // jsdom has no layout, so the rules that make the row hold are asserted as written
+    // (screenshots at 320 to 600 px were checked by eye when they were introduced).
+    const { readFileSync } = await import('node:fs')
+    const { resolve } = await import('node:path')
+    const css = readFileSync(resolve(import.meta.dirname, '../src/panel/styles.css'), 'utf8')
+    const rule = (selector: string): string => {
+      const start = css.indexOf(`\n${selector} {`)
+      expect(start, selector).toBeGreaterThanOrEqual(0)
+      return css.slice(start, css.indexOf('}', start))
+    }
+    expect(rule('.timeline-step-body')).toContain('flex-wrap: wrap')
+    expect(rule('.timeline-step-copy')).toContain('min-width: min(100%, calc(96px * var(--ui-scale)))')
+    expect(rule('.timeline-step-copy')).toContain('flex: 1 1 auto')
+    expect(rule('.timeline-step-text')).toContain('overflow-wrap: break-word')
+    expect(rule('.timeline-step-target')).toContain('width: 0')
+    expect(rule('.timeline-step-meta')).toContain('flex-wrap: wrap')
+    expect(rule('.timeline-step-meta')).toContain('max-width: 100%')
+    expect(rule('.timeline-step-meta .decision-badge')).toContain('text-overflow: ellipsis')
+  })
 })

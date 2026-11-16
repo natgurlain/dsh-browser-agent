@@ -16,6 +16,8 @@ function mockChrome(onClick: () => void) {
       sendMessage: vi.fn(async (_tabId: number, message: { type?: string }) => {
         // The pre-click hit-test is not the action itself.
         if (message.type === 'DSH_INPUT_SETUP') return { ok: false, error: { code: 'action-failed', message: 'not measured' } }
+        // Neither is the card-time look at what the element is called.
+        if (message.type === 'DSH_TARGET_INFO') return { ok: true, result: { targets: {} } }
         onClick()
         return { ok: true, result: { text: 'Clicked.' } }
       }),

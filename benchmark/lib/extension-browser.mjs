@@ -164,6 +164,15 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
       approvals() {
         return panel.evaluate(() => window.__dshBenchmarkApprovals)
       },
+      /**
+       * The extension's taint records by session id: `sources` are the origins
+       * the taint banner says a conversation read, `attempted` the destinations
+       * of navigations that did not succeed.
+       */
+      async taintRecords() {
+        const stored = await worker.evaluate(async () => (await chrome.storage.session.get('dshSessionTaint')).dshSessionTaint)
+        return typeof stored === 'object' && stored !== null ? stored : {}
+      },
       /** Close tabs a run opened (browser_open_tab), leaving the benchmark tab and the panel. */
       async closeOtherTabs() {
         for (const page of context.pages()) {

@@ -1582,6 +1582,17 @@ try {
   }
   const pendingClick = tool('browser_click', { selector: 'h1' })
   await waitFor(() => panel.evaluate(() => messages.some(message => message.type === 'approval.request')), 'approval pending before the kill switch')
+  // The card says what will be clicked: the element's kind and the name the page gives it, read from
+  // the page when the card was raised (the call itself only said "h1"), with the selector as detail.
+  const heading = (await page.locator('h1').first().innerText()).replace(/\s+/g, ' ').trim()
+  assert.ok(heading.length > 0 && heading.length <= 80, `fixture heading: ${JSON.stringify(heading)}`)
+  const clickCard = await panel.evaluate(() => messages.find(message => message.type === 'approval.request').request)
+  assert.equal(clickCard.summary, `Click element “${heading}”`)
+  assert.equal(clickCard.targetNote, 'selector: h1')
+  assert.equal(clickCard.stepLabel, `Click element “${heading}”`)
+  assert.equal(await chat.locator('.approval-dialog .approval-detail strong').first().innerText(), `Click element “${heading}”`)
+  assert.equal(await chat.locator('.approval-dialog .approval-target-note').innerText(), 'selector: h1')
+  results.push('an approval card names the element it will act on, from the page, in the real panel')
   // The chat panel is a tab here, but it stands for the side panel, which is
   // never the browser's active tab: it is clicked where it is, not brought to
   // the front. Bringing it forward used to tell the extension "the user

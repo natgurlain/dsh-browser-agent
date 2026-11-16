@@ -11,7 +11,8 @@
  *   the default-off learning features (learning.ts);
  * - `DSH_SELECTION_WATCH` / `DSH_SELECTION_RESET`, `DSH_TARGET_INFO`,
  *   `DSH_BUDGET`, `DSH_ABORT`: selection reports, the approval-time
- *   sensitivity probe, snapshot budgets and the kill switch.
+ *   probe (sensitivity, and what the target element is called: describe.ts),
+ *   snapshot budgets and the kill switch.
  *
  * On load it announces `DSH_CONTENT_READY`; the reply restores the selection
  * watcher, the overlay and "Watch me" on the new document.
@@ -25,6 +26,7 @@
 
 import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { abortRunningActions, runAction, ActionError, resolveActionTarget, typeTargetIsSensitive } from './actions.ts'
+import { describeActionTargets } from './describe.ts'
 import { AgentOverlay, type OverlayCopy, type PointKind } from './overlay.ts'
 import { ElementIds } from './ids.ts'
 import { handleInputSetup } from './input-support.ts'
@@ -32,6 +34,7 @@ import { assertStepTarget, handleLearningMessage, setWatching } from './learning
 import { SelectionWatcher } from './selection.ts'
 import { armPageWatch } from './watch.ts'
 import type { InputSetupRequest } from '../shared/input-setup.ts'
+import type { TargetSlots } from '../shared/target-description.ts'
 import type { SnapshotBudget } from './snapshot.ts'
 
 /** Negotiated snapshot budgets, patched in from the background via message. */
@@ -116,9 +119,27 @@ function onMessage(message: unknown, _sender: chrome.runtime.MessageSender, send
     return
   }
   if (msg.type === 'DSH_TARGET_INFO') {
-    // Approval-time probe: only a sensitivity bit leaves the page.
-    const args = (message as { args?: Record<string, unknown> }).args ?? {}
-    sendResponse({ ok: true, result: { sensitive: typeTargetIsSensitive(args, ids) } })
+    // Approval-time probe, for the card only (never model-facing): whether
+    // typed text must be masked, and what the page calls the element the
+    // action would act on (its kind, label, and row or section; no values).
+    const probe = message as { args?: Record<string, unknown>; tool?: unknown; recheck?: unknown }
+    const args = probe.args ?? {}
+    const action = typeof probe.tool === 'string' ? probe.tool : 'browser_type'
+    const recheck = probe.recheck === true
+    let targets: TargetSlots = {}
+    try {
+      targets = describeActionTargets(action, args, ids, recheck)
+    } catch {
+      // The description is best effort; the card then says the element was not checked.
+    }
+    sendResponse({
+      ok: true,
+      result: {
+        // A re-check must not rebind the type action to whatever the locator names now.
+        ...(action === 'browser_type' ? { sensitive: typeTargetIsSensitive(args, ids, !recheck) } : {}),
+        targets,
+      },
+    })
     return
   }
   if (msg.type === 'DSH_SELECTION_RESET') {
@@ -218,6 +239,20 @@ async function handleOverlay(command: OverlayCommand): Promise<void> {
     case 'acting':
       overlay.markActing()
       return
+    case 'preview': {
+      // The approval card for this action is open (or closed again): outline what it names.
+      if (command.on !== true) {
+        overlay.clearPreview()
+        return
+      }
+      const args = (typeof command.args === 'object' && command.args !== null ? command.args : {}) as Record<string, unknown>
+      const targets = command.kind === 'drag'
+        ? [overlayTarget(args.from), overlayTarget(args.to)].filter((el): el is Element => el !== undefined)
+        : [overlayTarget(args)].filter((el): el is Element => el !== undefined)
+      if (targets.length === 0) return
+      overlay.preview(targets, typeof command.label === 'string' ? command.label : undefined, command.copy)
+      return
+    }
     case 'point': {
       const kind = command.kind as PointKind
       if (!POINT_KINDS.has(kind)) return

@@ -212,9 +212,10 @@ export function resolveActionTarget(args: Record<string, unknown>, ids: ElementI
  * sensitive so the approval card fails closed to a masked preview.
  * @param args - the browser_type arguments (frame removed).
  * @param ids - the frame's element registry.
+ * @param bind - bind the type action to this element (the first probe only).
  * @returns whether the typed text should be masked on the approval card.
  */
-export function typeTargetIsSensitive(args: Record<string, unknown>, ids: ElementIds): boolean {
+export function typeTargetIsSensitive(args: Record<string, unknown>, ids: ElementIds, bind = true): boolean {
   let el: Element | null
   try {
     el = args.index === undefined && args.selector === undefined
@@ -226,7 +227,8 @@ export function typeTargetIsSensitive(args: Record<string, unknown>, ids: Elemen
   if (!(el instanceof Element)) return true
   // Bind the verdict to this exact element: the type action refuses to write
   // into anything else the same locator resolves to by execution time.
-  typeProbes.set(typeTargetKey(args), { target: new WeakRef(el), at: Date.now() })
+  // A re-check (`bind` false) leaves the first binding in place.
+  if (bind) typeProbes.set(typeTargetKey(args), { target: new WeakRef(el), at: Date.now() })
   return isSensitiveField(el)
 }
 
