@@ -2,7 +2,9 @@ name: Script tests
 
 # Every scripts/tests/*.test.mjs (uninstall lifecycle, token provisioning,
 # release packaging, installer consistency, DSH matrix helpers) on Linux,
-# macOS and Windows. The gate that ci.yml runs (`pnpm gate`) also runs them on
+# macOS and Windows. Windows is the only place install.ps1 and uninstall.ps1
+# run: scripts/tests/install-windows.test.mjs and the PowerShell cases of the
+# uninstall tests. The gate that ci.yml runs (`pnpm gate`) also runs them on
 # Linux; this workflow adds the other two platforms.
 
 on:
@@ -22,9 +24,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
+      # PowerShell 7 as well as Windows PowerShell 5.1 for the .ps1 scripts.
       TEST_PWSH: '1'
+      # The end-to-end dry runs: the real release of this commit, served locally, installed
+      # into a throwaway DSH home and uninstalled again (install.sh on Linux and macOS,
+      # install.ps1 on Windows).
+      DSH_RELEASE_E2E: '1'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
