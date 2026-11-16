@@ -299,6 +299,38 @@ export interface PanelCopy {
     policies: Record<string, string>
     duration: (ms: number) => string
   }
+  autoReview: {
+    /** Accessible name of the composer control. */
+    control: string
+    chipAsk: string
+    chipAuto: string
+    optionAsk: string
+    optionAskHelp: string
+    optionAuto: string
+    optionAutoHelp: string
+    /** The unobtrusive indicator while Auto is on. */
+    on: (minutesLeft: number) => string
+    turnOff: string
+    /** Why Auto ended for this conversation. */
+    ended: Record<string, string>
+    /** Why the control is disabled (one line). */
+    unavailable: Record<string, string>
+    notStarted: string
+    dialogTitle: string
+    dialogBody: string[]
+    dialogConfirm: string
+    dialogCancel: string
+    /** The running step while the reviewer decides. */
+    reviewing: string
+    /** Timeline badge of a step Auto review approved. */
+    badge: string
+    /** Prefix of the reviewer's reason on a timeline row. */
+    reasonPrefix: string
+    settingLabel: string
+    settingHelp: string
+    settingMore: string
+    settingManaged: string
+  }
   audit: {
     section: string
     help: string
@@ -950,6 +982,7 @@ const EN: PanelCopy = {
     decisions: {
       'not-required': 'Auto',
       'auto-allowed': 'Trusted',
+      'auto-reviewed': 'Auto review',
       'program-approved': 'Program approved',
       allowed: 'Approved',
       denied: 'Denied',
@@ -966,6 +999,52 @@ const EN: PanelCopy = {
       'strict-refused': 'Strict mode: refused',
     },
     duration: (ms) => ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`,
+  },
+  autoReview: {
+    control: 'Approvals',
+    chipAsk: 'Approvals: Ask',
+    chipAuto: 'Approvals: Auto',
+    optionAsk: 'Ask',
+    optionAskHelp: 'You answer every approval card.',
+    optionAuto: 'Auto review',
+    optionAutoHelp: 'This conversation\'s model approves ordinary page actions that fit your request, and asks you when unsure.',
+    on: (minutes) => `Auto review on · ${minutes} min left`,
+    turnOff: 'Turn off',
+    ended: {
+      expired: 'Auto review ended after 60 minutes. Turn it on again to continue.',
+      'kill-switch': 'Auto review ended when you stopped the agent.',
+      'take-over': 'Auto review ended when you took over.',
+      managed: 'Auto review was turned off by your administrator.',
+      setting: 'Auto review is turned off in Settings.',
+    },
+    unavailable: {
+      setting: 'Turned off in Settings.',
+      managed: 'Turned off by your administrator.',
+      'kill-switch': 'Not available while the agent is stopped.',
+      disconnected: 'Not connected to DSH.',
+      bridge: 'Update the DSH browser bridge to use Auto review.',
+      'host-unsupported': 'This DSH version cannot run Auto review.',
+      'no-model': 'Choose a model for this conversation first.',
+      'external-session': 'Not available for conversations from other apps.',
+      disabled: 'Turned off in the DSH browser bridge configuration.',
+    },
+    notStarted: 'Takes effect once this conversation has started.',
+    dialogTitle: 'Turn on Auto review for this conversation?',
+    dialogBody: [
+      'Ordinary page actions (clicks, typing into ordinary fields, choosing options, same-site navigation) are checked by this conversation\'s own model before they run. If it judges an action fits what you asked for, the action runs without a card. If it is unsure, you see the usual card with its reason.',
+      'Cards that protect your data still always ask: after the agent read web pages, data leaving the site, sensitive fields, payments and account settings, uploads, the clipboard, developer tools, and anything a site rule marks "ask". Submitting, sending or deleting is approved only when you asked for it in your own words.',
+      'A model can be wrong. Each reviewed action makes one extra call to this conversation\'s model through DSH (your account and quota). It sends your messages in this conversation, the action, the element\'s label and the page address.',
+      'Auto review ends after 60 minutes, when you stop the agent or take over, and after 25 approvals since your last message it asks before continuing.',
+    ],
+    dialogConfirm: 'Turn on Auto review',
+    dialogCancel: 'Keep asking',
+    reviewing: 'Reviewing…',
+    badge: 'Auto',
+    reasonPrefix: 'Auto review',
+    settingLabel: 'Offer Auto review',
+    settingHelp: 'Shows "Approvals: Auto" next to the composer. Every conversation still starts with Ask.',
+    settingMore: 'With Auto review on in a conversation, its own model approves ordinary page actions that fit your request. Each reviewed action costs one extra model call and sends your messages, the action, the element\'s label and the page address to that model. Protective cards always ask.',
+    settingManaged: 'Your administrator turned Auto review off.',
   },
   audit: {
     section: 'Audit log',
@@ -1605,6 +1684,7 @@ const ZH: PanelCopy = {
     decisions: {
       'not-required': '自动',
       'auto-allowed': '已信任',
+      'auto-reviewed': '自动审核',
       'program-approved': '程序已批准',
       allowed: '已批准',
       denied: '已拒绝',
@@ -1621,6 +1701,52 @@ const ZH: PanelCopy = {
       'strict-refused': '严格模式：已拒绝',
     },
     duration: (ms) => ms < 1000 ? `${ms} 毫秒` : `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} 秒`,
+  },
+  autoReview: {
+    control: '审批方式',
+    chipAsk: '审批：询问',
+    chipAuto: '审批：自动',
+    optionAsk: '询问',
+    optionAskHelp: '每个审批卡片都由您决定。',
+    optionAuto: '自动审核',
+    optionAutoHelp: '由本对话的模型批准符合您请求的普通页面操作，不确定时询问您。',
+    on: (minutes) => `自动审核已开启 · 剩余 ${minutes} 分钟`,
+    turnOff: '关闭',
+    ended: {
+      expired: '自动审核已在 60 分钟后结束。如需继续，请重新开启。',
+      'kill-switch': '您停止了代理，自动审核已结束。',
+      'take-over': '您接管了页面，自动审核已结束。',
+      managed: '管理员已关闭自动审核。',
+      setting: '自动审核已在设置中关闭。',
+    },
+    unavailable: {
+      setting: '已在设置中关闭。',
+      managed: '已被管理员关闭。',
+      'kill-switch': '代理已停止，暂不可用。',
+      disconnected: '未连接到 DSH。',
+      bridge: '请更新 DSH 浏览器桥接插件以使用自动审核。',
+      'host-unsupported': '此 DSH 版本无法运行自动审核。',
+      'no-model': '请先为本对话选择模型。',
+      'external-session': '来自其他应用的对话不可用。',
+      disabled: '已在 DSH 浏览器桥接配置中关闭。',
+    },
+    notStarted: '对话开始后生效。',
+    dialogTitle: '为本对话开启自动审核？',
+    dialogBody: [
+      '普通页面操作（点击、在普通字段中输入、选择选项、同站跳转）在执行前由本对话自己的模型检查。若模型判断操作符合您的请求，操作将直接执行，不再弹出卡片；若不确定，您会看到常规卡片及其理由。',
+      '保护数据的卡片始终会询问：代理读取网页后数据离开站点、敏感字段、支付与账户设置、上传文件、剪贴板、开发者工具，以及站点规则标为“询问”的操作。提交、发送或删除只有在您亲口要求时才会被批准。',
+      '模型可能判断错误。每个被审核的操作会通过 DSH 额外调用一次本对话的模型（使用您的账户和额度），发送内容包括您在本对话中的消息、操作本身、元素标签和页面地址。',
+      '自动审核在 60 分钟后、您停止代理或接管页面时结束；自您上一条消息起批准 25 个操作后，会先询问您是否继续。',
+    ],
+    dialogConfirm: '开启自动审核',
+    dialogCancel: '继续逐一询问',
+    reviewing: '正在审核…',
+    badge: '自动',
+    reasonPrefix: '自动审核',
+    settingLabel: '提供自动审核',
+    settingHelp: '在输入框旁显示“审批：自动”。每个对话仍默认为询问。',
+    settingMore: '在某个对话中开启自动审核后，由该对话自己的模型批准符合您请求的普通页面操作。每个被审核的操作需要额外调用一次模型，并向该模型发送您的消息、操作、元素标签和页面地址。保护性卡片始终会询问。',
+    settingManaged: '管理员已关闭自动审核。',
   },
   audit: {
     section: '审计日志',

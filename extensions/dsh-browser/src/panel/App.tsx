@@ -22,6 +22,7 @@ import { TaintExemptionSettings } from './TaintExemptionSettings.tsx'
 import { WatchersCard } from './WatchersCard.tsx'
 import { connectPanel, PanelRpcError, type AgentPauseState, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type StandingStatus, type PanelApi, type PanelSettings } from './api.ts'
 import { StepTimeline } from './StepTimeline.tsx'
+import { AutoReviewControl } from './AutoReviewControl.tsx'
 import { AgentControls } from './AgentControls.tsx'
 import { LearningPanel } from './LearningPanel.tsx'
 import { LearningSettings } from './LearningSettings.tsx'
@@ -766,6 +767,10 @@ export function ApprovalDialog({
           {/* How the call addresses its element and where the page shows it: plain text, the quoted parts are the page's. */}
           {request.targetNote !== undefined && <small className="approval-target-note">{revealInvisible(request.targetNote)}</small>}
         </div>
+        {/* Auto review looked at this card and left it to the user: its line, attributed (the reason is model text). */}
+        {request.autoReviewNote !== undefined && (
+          <p className="approval-auto-review" role="note">{revealInvisible(request.autoReviewNote)}</p>
+        )}
         <div className="approval-origins">
           <span>{copy.approval.origins}</span>
           {request.origins.length === 0
@@ -1234,6 +1239,20 @@ export function App(): React.JSX.Element {
   const takeOver = useCallback(() => { void api.pauseAgent('take-over').catch(() => {}) }, [api])
   const resumeAgent = useCallback(() => { void api.resumeAgent().catch(() => {}) }, [api])
   const engageKillSwitch = useCallback(() => { setKillSwitchEngaged(true); void api.engageKillSwitch().catch(() => {}) }, [api])
+
+  // Steps Auto review is deciding right now ("Reviewing…" instead of a flashing card).
+  const [reviewingCalls, setReviewingCalls] = useState<ReadonlySet<string>>(() => new Set())
+  useEffect(() => api.onAutoReviewing((reviewing) => {
+    if (reviewing.toolCallId === undefined) return
+    const callId = reviewing.toolCallId
+    setReviewingCalls((current) => {
+      if (reviewing.active === current.has(callId)) return current
+      const next = new Set(current)
+      if (reviewing.active) next.add(callId)
+      else next.delete(callId)
+      return next
+    })
+  }), [api])
 
   // Step decisions and durations come from the bridge's audit log.
   const auditRefreshRef = useRef<{ timer?: ReturnType<typeof setTimeout>; sessionId?: string }>({})
@@ -3281,6 +3300,15 @@ export function App(): React.JSX.Element {
                 onChange={(checked) => patch({ allowPageWatchers: checked })}
               />
             </SettingsGroup>
+            <SettingsGroup label={copy.autoReview.settingLabel}>
+              <SettingToggle
+                title={copy.autoReview.settingLabel}
+                help={copy.autoReview.settingHelp}
+                more={<p>{copy.autoReview.settingMore}</p>}
+                checked={settings?.offerAutoReview ?? true}
+                onChange={(checked) => patch({ offerAutoReview: checked })}
+              />
+            </SettingsGroup>
             <DevLoopSettings
               api={api}
               locale={locale}
@@ -3560,7 +3588,7 @@ export function App(): React.JSX.Element {
           <div key={row.seq} className={`row ${row.kind}`}>
             {row.kind === 'assistant' && <span className="assistant-avatar"><img src={whaleUrl} alt={copy.app.assistant} /></span>}
             {row.kind === 'tool'
-              ? <StepTimeline row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />
+              ? <StepTimeline row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} reviewing={reviewingCalls} />
               : <MessageBody row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />}
           </div>
         ))}
@@ -3801,6 +3829,7 @@ export function App(): React.JSX.Element {
         </div>
         {state === 'connected' ? (
           <div className="composer-controls">
+            <AutoReviewControl api={api} copy={copy} sessionId={sessionRef.current} disabled={sessionChanging} />
             <div className="composer-chip" ref={permissionPickerRef}>
               <button
                 type="button"

@@ -4573,3 +4573,92 @@ textarea:focus-visible {
 .pairing-status:empty {
   display: none;
 }
+
+/* ---- Auto review (docs/auto-review-design.md): composer control, indicator, card line, timeline ---- */
+.composer-approvals {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+.composer-chip-trigger.auto-review-active {
+  border-color: var(--blue-line-strong);
+  background: var(--blue-soft);
+  color: var(--blue-ink);
+}
+
+.composer-chip-trigger.auto-review-active:hover:not(:disabled) {
+  background: var(--blue-soft-hover);
+  color: var(--blue-ink);
+}
+
+.auto-review-menu button {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+
+.auto-review-menu button > small {
+  color: var(--muted);
+  font-size: calc(10px * var(--ui-scale));
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.auto-review-indicator {
+  color: var(--blue-ink);
+}
+
+.auto-review-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--blue);
+  box-shadow: 0 0 0 3px var(--blue-soft);
+}
+
+.approval-auto-review {
+  margin: 8px 0 0;
+  padding: 6px 9px;
+  border: 1px solid var(--blue-line);
+  border-radius: 8px;
+  background: var(--blue-wash);
+  color: var(--ink-soft);
+  font-size: calc(10.5px * var(--ui-scale));
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.auto-review-dialog-text {
+  margin: 8px 0 0;
+  color: var(--ink-soft);
+  font-size: calc(11px * var(--ui-scale));
+  line-height: 1.45;
+}
+
+.decision-badge.auto-review-badge {
+  border-color: var(--blue-line);
+  background: var(--blue-soft);
+  color: var(--blue-ink);
+}
+
+.timeline-step-reviewing {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--blue-ink);
+  font-size: calc(9.5px * var(--ui-scale));
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.timeline-step-auto-reason {
+  margin: 0;
+  padding: 0 8px 6px 36px;
+  color: var(--muted);
+  font-size: calc(10px * var(--ui-scale));
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}

@@ -41,6 +41,11 @@ export interface ToolStep {
   policy?: string
   /** Strict mode (`armed`, `refused`). */
   strict?: string
+  /**
+   * Auto review's one-line reason for this step (docs/auto-review-design.md
+   * §11), from the audit log. Model text, shown attributed and plain.
+   */
+  autoReason?: string
   /** Screenshot (or other image) the step returned. */
   images?: ImageAttachmentRef[]
 }
@@ -355,7 +360,12 @@ export interface StepAudit {
   durationMs?: number
   policy?: string
   strict?: string
+  /** The reviewer's reason, when Auto review decided this step. */
+  autoReason?: string
 }
+
+/** Longest reviewer reason shown on a timeline row. */
+const MAX_AUTO_REASON_CHARS = 160
 
 /** Index audit-log entries by the model's tool-call id. */
 export function auditByCall(entries: unknown): Map<string, StepAudit> {
@@ -366,6 +376,9 @@ export function auditByCall(entries: unknown): Map<string, StepAudit> {
     const current = byCall.get(raw.toolCallId) ?? {}
     if (typeof raw.callId === 'string' && raw.callId !== '') current.bridgeCallId = raw.callId
     if (raw.kind === 'approval' && typeof raw.decision === 'string') current.decision = raw.decision
+    if (raw.kind === 'auto-review' && typeof raw.reason === 'string') {
+      current.autoReason = raw.reason.replace(/\s+/gu, ' ').trim().slice(0, MAX_AUTO_REASON_CHARS)
+    }
     if (typeof raw.policy === 'string') current.policy = raw.policy
     if (typeof raw.strictMode === 'string') current.strict = raw.strictMode
     if (raw.kind === 'result') {
@@ -391,7 +404,8 @@ export function applyStepAudit(rows: Row[], audit: Map<string, StepAudit>): Row[
       const durationMs = found.durationMs ?? step.durationMs
       const policy = found.policy ?? step.policy
       const strict = found.strict ?? step.strict
-      if (decision === step.decision && durationMs === step.durationMs && policy === step.policy && strict === step.strict) return step
+      const autoReason = found.autoReason ?? step.autoReason
+      if (decision === step.decision && durationMs === step.durationMs && policy === step.policy && strict === step.strict && autoReason === step.autoReason) return step
       rowChanged = true
       return {
         ...step,
@@ -399,6 +413,7 @@ export function applyStepAudit(rows: Row[], audit: Map<string, StepAudit>): Row[
         ...(durationMs === undefined ? {} : { durationMs }),
         ...(policy === undefined ? {} : { policy }),
         ...(strict === undefined ? {} : { strict }),
+        ...(autoReason === undefined ? {} : { autoReason }),
       }
     })
     if (!rowChanged) return row

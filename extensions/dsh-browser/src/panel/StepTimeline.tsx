@@ -30,6 +30,7 @@ function StepIcon({ name }: { name: string }): React.JSX.Element {
 const DECISION_TONE: Record<string, 'neutral' | 'good' | 'bad' | 'warn'> = {
   'not-required': 'neutral',
   'auto-allowed': 'neutral',
+  'auto-reviewed': 'good',
   'program-approved': 'good',
   allowed: 'good',
   denied: 'bad',
@@ -62,16 +63,20 @@ const TimelineStep = memo(function TimelineStep({
   sessionId,
   api,
   copy,
+  reviewing,
 }: {
   step: ToolStep
   index: number
   sessionId: string
   api: PanelApi
   copy: PanelCopy
+  /** Auto review is deciding this step right now. */
+  reviewing: boolean
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const expandable = step.args !== undefined || step.result !== undefined || (step.images?.length ?? 0) > 0
-  const decision = step.decision === undefined ? undefined : copy.timeline.decisions[step.decision] ?? step.decision
+  const autoReviewed = step.decision === 'auto-reviewed'
+  const decision = step.decision === undefined || autoReviewed ? undefined : copy.timeline.decisions[step.decision] ?? step.decision
   const tone = step.decision === undefined ? 'neutral' : DECISION_TONE[step.decision] ?? 'neutral'
   const detailsId = `step-${step.callId}-details`
   return (
@@ -100,7 +105,10 @@ const TimelineStep = memo(function TimelineStep({
               <span key={badge.key} className={`decision-badge policy ${badge.tone}`}>{badge.label}</span>
             ))}
             {decision !== undefined && <span className={`decision-badge ${tone}`}>{decision}</span>}
-            {step.status === 'running'
+            {autoReviewed && <span className="decision-badge auto-review-badge" title={copy.timeline.decisions['auto-reviewed']}>{copy.autoReview.badge}</span>}
+            {step.status === 'running' && reviewing
+              ? <span className="timeline-step-reviewing" role="status"><span className="spinner" aria-hidden="true" />{copy.autoReview.reviewing}</span>
+              : step.status === 'running'
               ? <span className="spinner" aria-label={copy.timeline.running} />
               : step.status === 'error'
                 ? <span className="timeline-step-failed">{copy.timeline.failed}</span>
@@ -109,6 +117,9 @@ const TimelineStep = memo(function TimelineStep({
           </span>
         </span>
       </button>
+      {step.autoReason !== undefined && step.autoReason !== '' && (step.decision === 'auto-reviewed' || reviewing) && (
+        <p className="timeline-step-auto-reason">{copy.autoReview.reasonPrefix}: {step.autoReason}</p>
+      )}
       {(step.images?.length ?? 0) > 0 && !open && (
         <div className="timeline-step-thumb" aria-label={copy.timeline.screenshot}>
           <MessageImages images={step.images!.slice(0, 1)} sessionId={sessionId} api={api} align="start" copy={copy} />
@@ -146,11 +157,14 @@ export const StepTimeline = memo(function StepTimeline({
   sessionId,
   api,
   copy,
+  reviewing,
 }: {
   row: Row
   sessionId: string
   api: PanelApi
   copy: PanelCopy
+  /** Model tool-call ids Auto review is deciding right now. */
+  reviewing?: ReadonlySet<string>
 }): React.JSX.Element {
   const steps = row.steps ?? []
   const running = row.status === 'running'
@@ -162,7 +176,7 @@ export const StepTimeline = memo(function StepTimeline({
       </header>
       <ol className="step-timeline-list">
         {steps.map((step, index) => (
-          <TimelineStep key={step.callId} step={step} index={index} sessionId={sessionId} api={api} copy={copy} />
+          <TimelineStep key={step.callId} step={step} index={index} sessionId={sessionId} api={api} copy={copy} reviewing={reviewing?.has(step.callId) === true} />
         ))}
       </ol>
     </section>
