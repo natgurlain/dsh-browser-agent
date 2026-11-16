@@ -95,7 +95,10 @@ other's protocol version when they connect.
   connects it. DSH lists paired browsers with **Unpair**, and **Reset bridge token**
   disconnects every browser at once.
 - **Approval cards bound to exactly what runs.** A card shows the full action, and the
-  approval covers that action only.
+  approval covers that action only. For an action on an element the card names it, for
+  example "Click checkbox “Email notifications”", read from the page when the card is
+  raised, and the page outlines that element while the card is open. If the element
+  changes before you answer, the approval does not apply.
 - **Untrusted page content (taint rules).** Once a conversation has read a web page,
   sending data to another site, the clipboard or a file asks first, and the conversation's
   shell and file-writing tools are switched off in DSH. Your own local pages and sites you
