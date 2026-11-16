@@ -195,6 +195,32 @@ export function targetContext(el: Element, name: string): FoundTarget['context']
   return undefined
 }
 
+/**
+ * Whether activating the element submits a form, by native structure only:
+ * a `<button>` whose effective type is submit (a missing or unknown type
+ * attribute is submit) or an `<input type=submit|image>`, with a form owner.
+ * A page-chosen `role` does not change this, so `role="tab"` on a submit
+ * button cannot hide it. A label submits when its control would.
+ */
+export function submitsForm(el: Element): boolean {
+  if (el instanceof HTMLLabelElement) return el.control !== null && el.control !== el && submitsForm(el.control)
+  if (el instanceof HTMLButtonElement) return el.type === 'submit' && el.form !== null
+  if (el instanceof HTMLInputElement) return (el.type === 'submit' || el.type === 'image') && el.form !== null
+  // A click on something inside a submit button (an icon, a span) reaches the button.
+  const button = el.closest('button')
+  return button !== null && button !== el && submitsForm(button)
+}
+
+/** Input types where Enter submits the form (HTML implicit submission). */
+const IMPLICIT_SUBMIT_TYPES: ReadonlySet<string> = new Set([
+  'text', 'search', 'url', 'tel', 'email', 'password', 'date', 'month', 'week', 'time', 'datetime-local', 'number',
+])
+
+/** A single-line field with a form owner: Enter in it submits that form. */
+export function fieldInForm(el: Element): boolean {
+  return el instanceof HTMLInputElement && IMPLICIT_SUBMIT_TYPES.has(el.type) && el.form !== null
+}
+
 /** Describe one element for an approval card. */
 export function describeElement(el: Element): FoundTarget {
   const kind = targetKind(el)
@@ -206,6 +232,8 @@ export function describeElement(el: Element): FoundTarget {
     name,
     ...(context === undefined ? {} : { context }),
     ...(isSensitiveField(el) ? { sensitive: true as const } : {}),
+    ...(submitsForm(el) ? { submits: true as const } : {}),
+    ...(fieldInForm(el) ? { inForm: true as const } : {}),
   }
 }
 

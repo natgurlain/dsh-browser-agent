@@ -1196,6 +1196,7 @@ export function App(): React.JSX.Element {
         taintLocalOrigins: raw?.taintLocalOrigins ?? [],
         taintTrustedSites: raw?.taintTrustedSites ?? [],
         taintTrustConfirmed: raw?.taintTrustConfirmed ?? [],
+        offerAutoReview: raw?.offerAutoReview ?? true,
       }
       setSettings(seeded)
       setSettingsBaseline(seeded)

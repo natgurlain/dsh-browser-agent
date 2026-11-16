@@ -43,6 +43,11 @@
       "description": "Pages from sites the user marked trusted restrict a session like any other page; the user cannot turn that off.",
       "type": "boolean"
     },
+    "disableAutoReview": {
+      "title": "Disable Auto review",
+      "description": "Auto review (a model deciding ordinary approval cards for a conversation) is not offered; every card goes to the user.",
+      "type": "boolean"
+    },
     "allowedOrigins": {
       "title": "Allowed web origins",
       "description": "When set, the agent may read, act on, and navigate to only these origins (https://app.example.com or *.example.com).",

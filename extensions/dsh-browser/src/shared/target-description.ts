@@ -40,6 +40,14 @@ export type TargetDescription =
       sensitive?: true
       /** No locator was given: this is the element that has focus. */
       focused?: true
+      /**
+       * By native structure (tag and effective type, never the page's `role`),
+       * activating it submits a form: a submit button or image input with a
+       * form owner.
+       */
+      submits?: true
+      /** A form field with a form owner: Enter in it may submit that form. */
+      inForm?: true
       /** On a re-check: whether the locator still names the element first described. */
       same?: boolean
     }
@@ -57,7 +65,7 @@ export interface TargetSlots {
  * on the page, or not checked (the page did not answer).
  */
 export type TargetState =
-  | { state: 'found'; kind: TargetKind; name: string; context?: { kind: 'row' | 'section'; text: string }; sensitive?: true; focused?: true }
+  | { state: 'found'; kind: TargetKind; name: string; context?: { kind: 'row' | 'section'; text: string }; sensitive?: true; focused?: true; submits?: true; inForm?: true }
   | { state: 'missing' }
   | { state: 'unknown' }
 
@@ -105,6 +113,8 @@ function readDescription(raw: unknown): TargetState {
     ...(contextText === '' ? {} : { context: { kind: context?.kind === 'row' ? 'row' as const : 'section' as const, text: contextText } }),
     ...(value.sensitive === true ? { sensitive: true as const } : {}),
     ...(value.focused === true ? { focused: true as const } : {}),
+    ...(value.submits === true ? { submits: true as const } : {}),
+    ...(value.inForm === true ? { inForm: true as const } : {}),
   }
 }
 

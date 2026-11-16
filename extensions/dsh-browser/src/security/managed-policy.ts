@@ -29,6 +29,8 @@ export interface ManagedPolicy {
   disableLocalTaintExemption: boolean
   /** Sites the user trusts taint a session like any other page (taint-exempt.ts). */
   disableTrustedTaintExemption: boolean
+  /** Auto review (docs/auto-review-design.md) is not offered: every card goes to the user. */
+  disableAutoReview: boolean
   /**
    * Pinned web origins (exact or `*.` wildcard): the agent may read, act on,
    * and navigate to these only. Undefined = no pin.
@@ -46,6 +48,7 @@ export const EMPTY_MANAGED_POLICY: ManagedPolicy = {
   enforceSiteDefaults: false,
   disableLocalTaintExemption: false,
   disableTrustedTaintExemption: false,
+  disableAutoReview: false,
   active: false,
 }
 
@@ -58,7 +61,7 @@ export function parseManagedPolicy(raw: unknown): ManagedPolicy {
     : undefined
   const known = [
     'siteRules', 'disableDevTools', 'disableUnrestricted', 'disableScreenshots', 'enforceSiteDefaults', 'allowedOrigins',
-    'disableLocalTaintExemption', 'disableTrustedTaintExemption',
+    'disableLocalTaintExemption', 'disableTrustedTaintExemption', 'disableAutoReview',
   ]
   return {
     siteRules: normalizeSiteRules(value.siteRules, 'managed'),
@@ -68,6 +71,7 @@ export function parseManagedPolicy(raw: unknown): ManagedPolicy {
     enforceSiteDefaults: value.enforceSiteDefaults === true,
     disableLocalTaintExemption: value.disableLocalTaintExemption === true,
     disableTrustedTaintExemption: value.disableTrustedTaintExemption === true,
+    disableAutoReview: value.disableAutoReview === true,
     // An allowlist that parsed to nothing still pins: an admin who listed only
     // malformed entries meant "restrict", so fail closed to "no sites".
     ...allowed === undefined ? {} : { allowedOrigins: allowed },
@@ -80,6 +84,8 @@ export interface ManagedOverridable {
   allowDevTools: boolean
   unrestrictedBrowserAccess: boolean
   siteDefaultsEnabled: boolean
+  /** Settings that can offer Auto review carry it; managed `disableAutoReview` pins it off. */
+  offerAutoReview?: boolean
 }
 
 /** Apply managed overrides to user settings (managed wins). */
@@ -89,6 +95,7 @@ export function applyManagedOverrides<T extends ManagedOverridable>(settings: T,
     allowDevTools: settings.allowDevTools && !managed.disableDevTools,
     unrestrictedBrowserAccess: settings.unrestrictedBrowserAccess && !managed.disableUnrestricted,
     siteDefaultsEnabled: settings.siteDefaultsEnabled || managed.enforceSiteDefaults,
+    ...settings.offerAutoReview === undefined ? {} : { offerAutoReview: settings.offerAutoReview && !managed.disableAutoReview },
   }
 }
 

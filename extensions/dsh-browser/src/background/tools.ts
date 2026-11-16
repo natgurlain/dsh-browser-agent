@@ -80,6 +80,8 @@ export interface ToolCall {
   program?: { id: string; step: number }
   /** External (MCP) client label for a bridge-owned external session's call. */
   requester?: string
+  /** The model's tool-call id (protocol `tool.call.toolCallId`): lets the panel mark that step. */
+  toolCallId?: string
 }
 
 /** The wire answer for one tool call (answers.ts). */
@@ -2113,7 +2115,11 @@ export async function dispatchToolCall(
   const promptFor = (current: TabFrame[], context: ApprovalContext): ApprovalPrompt | undefined => decision.kind === 'force'
     ? forcedApprovalPrompt(call, current, decision.reasons, undefined, context)
     : approvalPromptForCall(call, sharePageContent, current, undefined, context)
-  const approval = skipsPrompt ? undefined : promptFor(frames, approvalContext)
+  const unlabelled = skipsPrompt ? undefined : promptFor(frames, approvalContext)
+  // Auto review's floor reads the policy decision off the card (security/auto-review.ts).
+  const approval = unlabelled?.review === undefined
+    ? unlabelled
+    : { ...unlabelled, review: { ...unlabelled.review, policy: decision.kind } }
   const stepLabel = approval?.stepLabel
     ?? (approvalContext.targets === undefined ? undefined : approvalPromptForCall(call, 'auto', frames, undefined, approvalContext)?.stepLabel)
   if (stepLabel !== undefined) tabManagement.onStepLabel?.(stepLabel)

@@ -279,8 +279,20 @@ export function approvalPromptForCall(
   const target = prompt.kind === 'action' && call.name !== 'browser_open_tab'
     ? frames.find((frame) => frame.frameId === requestedFrame(call.args))
     : undefined
+  const topOrigin = uniqueOrigins(frames.filter((frame) => frame.frameId === 0), frames)[0]
+  const pageUrl = target === undefined ? undefined : effectiveFrameUrl(target, frames)
   return {
     ...prompt,
+    ...prompt.kind === 'action' && call.name !== 'browser_open_tab'
+      ? {
+          review: {
+            ...context.targets === undefined ? {} : { targets: context.targets },
+            ...context.typedTargetSensitive === undefined ? {} : { typedTargetSensitive: context.typedTargetSensitive },
+            ...pageUrl === undefined ? {} : { pageUrl },
+            ...topOrigin === undefined ? {} : { topOrigin },
+          },
+        }
+      : {},
     binding: approvalBinding({
       action: call.name,
       args: call.name === 'browser_dialog' ? { ...call.args, dialog: context.dialog ?? null } : call.args,
@@ -392,9 +404,14 @@ function unboundPromptForCall(
  * element being a different one, and such a change must not void a card.
  */
 function boundTargets(context: ApprovalContext): unknown {
+  // `submits` / `inForm` only when set, so bindings of other elements are
+  // unchanged: an element that turns into a submit control after the card
+  // (or Auto review) saw it voids the approval.
   const bound = (state: TargetState | undefined): unknown => state === undefined
     ? undefined
-    : state.state === 'found' ? { state: state.state, kind: state.kind, name: state.name } : { state: state.state }
+    : state.state === 'found'
+      ? { state: state.state, kind: state.kind, name: state.name, ...state.submits === true ? { submits: true } : {}, ...state.inForm === true ? { inForm: true } : {} }
+      : { state: state.state }
   const targets = context.targets ?? {}
   return {
     target: bound(targets.target),

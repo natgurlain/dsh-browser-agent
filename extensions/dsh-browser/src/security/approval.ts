@@ -1,6 +1,7 @@
 /** Shared panel/background contract for browser action approval. */
 
 import type { UrlAnalysis } from './url-risk.ts'
+import type { TargetStates } from '../shared/target-description.ts'
 
 export type ApprovalKind = 'read' | 'action'
 /**
@@ -37,6 +38,25 @@ export type ApprovalDetail =
    * (`payload`, JSON). The panel shows the count and folds the list.
    */
   | { kind: 'rows'; rows: Array<{ label: string; payload: string }> }
+
+/**
+ * What the background knew about an action card's call when it raised it,
+ * kept for Auto review's eligibility floor (security/auto-review.ts). Never
+ * part of the binding (the binding covers the same facts through the target
+ * description) and never shown on the card.
+ */
+export interface ApprovalReviewFacts {
+  /** The element(s) as the page reported them when the card was raised. */
+  targets?: TargetStates
+  /** For browser_type: the content script's sensitivity verdict (undefined: not inspected). */
+  typedTargetSensitive?: boolean
+  /** Effective http(s) URL of the frame the call acts in. */
+  pageUrl?: string
+  /** Effective origin of the tab's top page. */
+  topOrigin?: string
+  /** The policy layer's decision for the call; set by the dispatcher. */
+  policy?: 'default' | 'force' | 'trust'
+}
 
 /** A policy decision awaiting a user response. */
 export interface ApprovalPrompt {
@@ -107,6 +127,16 @@ export interface ApprovalPrompt {
    * that session, which the browser cannot prompt.
    */
   devLoopFor?: string
+  /** Facts for Auto review's eligibility floor (action cards from the page dispatcher only). */
+  review?: ApprovalReviewFacts
+  /**
+   * Auto review looked at this card and left it to the user: the line the
+   * card shows ("Auto review asked: …"). Reviewer text, sanitized and capped;
+   * not part of the binding.
+   */
+  autoReviewNote?: string
+  /** The card is shown because Auto review reached its per-turn limit: approving it lets Auto go on. */
+  autoReviewLimit?: true
 }
 
 /** Correlated request delivered to every open side-panel view. */

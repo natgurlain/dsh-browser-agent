@@ -48,7 +48,8 @@ describe('describing the element in the page (content script)', () => {
       found: true, kind: 'checkbox', name: 'Email notifications', context: { kind: 'section', text: 'Notifications' },
     })
     expect(describeElement(document.querySelector('button')!)).toEqual({
-      found: true, kind: 'button', name: 'Save settings', context: { kind: 'section', text: 'Notifications' },
+      // A submit button of the form (native structure; Auto review treats it as commit-like).
+      found: true, kind: 'button', name: 'Save settings', context: { kind: 'section', text: 'Notifications' }, submits: true,
     })
   })
 
