@@ -1257,6 +1257,10 @@ try {
   await answerApproval(tool('browser_click', { selector: '#submit' }), 'allow-once')
   await waitFor(() => strictSubmissions.length === 1, 'approved submission')
   assert.equal(strictSubmissions[0].body, 'name=Ada&password=hunter2')
+  // The server has the POST before the page has finished navigating to its
+  // answer; starting another navigation in between is refused by the browser
+  // driver ("interrupted by another navigation").
+  await page.waitForURL(url => url.pathname === '/strict-submit')
   // The user's own submission outside an agent turn passes without a card.
   await page.goto(`${origin}/strict`)
   await delay(3_500)
