@@ -1,5 +1,12 @@
 # dsh Browser Agent
 
+[![Release](https://img.shields.io/github/v/release/natgurlain/dsh-browser-agent?label=release)](https://github.com/natgurlain/dsh-browser-agent/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![Manifest V3](https://img.shields.io/badge/extension-Manifest%20V3-4d6bfe)
+![Browsers](https://img.shields.io/badge/browsers-Chrome%20%7C%20Brave%20%7C%20Firefox-informational)
+![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-informational)
+[![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.1%20to%20rc.3-success)](docs/dsh-matrix.md)
+
 [English](README.md) | **中文**
 
 让 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）在你日常使用的浏览器里工作。智能体读取你正在看的页面，点击、输入、导航、管理标签页，用的是你自己的 Chrome、Brave 或 Firefox（其他 Chromium 浏览器应当也可用），保留你的登录态和 Cookie；你在侧边栏里查看并批准它的每一步。
@@ -7,6 +14,8 @@
 <img width="1836" height="1312" alt="Brave 中的 dsh Browser Agent 侧边栏，正在回答关于旁边 GitHub 页面的问题" src="docs/images/dsh-browser-agent-dark.webp" />
 
 > 基于 Yuxiang Lin 及贡献者的 [dsh-browser](https://github.com/omdsh-dev/dsh-browser)（MIT 许可）。见 [NOTICE](NOTICE)。
+
+**目录：** [这是什么](#这是什么) · [为什么用它](#为什么用它) · [快速开始](#快速开始) · [从发布版本安装](#从发布版本安装) · [核心能力](#核心能力) · [详细安装与使用](#详细安装与使用) · [故障排查](#故障排查) · [开发](#开发) · [安全](#安全)
 
 ## 这是什么
 
@@ -85,17 +94,6 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-
 
 > [!IMPORTANT]
 > npm 上未加 scope 的 [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) 包属于另一个项目，与本仓库无关。本项目目前没有发布 npm 包，请使用上方安装器。
-
-## 性能基准
-
-以下数据来自上游项目 dsh-browser，尚未在本分支上重新测量。在其 2026 年 8 月 18 日完成的 60 次配对端到端评测中，两个后端分配到的 30 次运行均全部成功；dsh 浏览器操作使用了更少的模型/工具轮次，并以更短时间完成任务：
-
-| 后端 | 成功率 | 平均端到端耗时 | 平均浏览器工具调用 |
-|---|---:|---:|---:|
-| **dsh 浏览器操作** | **30/30** | **5.32 秒** | **3.4** |
-| 对齐工具契约的 Playwright 基线 | 30/30 | 6.67 秒 | 4.7 |
-
-Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：Playwright 耗时约多 24%；等价地说，dsh 浏览器操作将延迟降低约 20%，每个任务平均节省 1.35 秒。评测使用 6 个浏览器任务、5 个确定性 seed、相同的 DSH profile 与模型（`deepseek-v4-flash`），并通过独立页面状态验证结果。详见[评测方法与复现说明](benchmark/README.md)。
 
 ## 核心能力
 
@@ -272,48 +270,7 @@ Chrome 本机使用无需配置：安装器会把桥接 token 放到已安装的
 
 ## 开发
 
-桥接插件和 Chrome/Firefox 扩展都属于本仓库 workspace；所有命令均在本仓库根目录执行。首次开发安装运行 `pnpm install`。
-
-开发文档：[浏览器桥插件](packages/browser/bridge-browser/README.zh.md)与[浏览器扩展](extensions/dsh-browser/README.zh.md)。
-
-```sh
-pnpm run build
-pnpm run typecheck
-pnpm run test
-pnpm run check:runtime
-pnpm run test:smoke
-
-pnpm --filter @natgurlain/dsh-bridge-browser run build
-pnpm --filter @natgurlain/dsh-bridge-browser run typecheck
-pnpm --filter @natgurlain/dsh-bridge-browser run test
-
-pnpm --filter dsh-browser-extension run build
-pnpm --filter dsh-browser-extension run build:firefox
-pnpm --filter dsh-browser-extension run test
-```
-
-注意：
-
-- 启动前桥接插件必须已有 `lib/` 供 Loader 加载；`scripts/install.sh` 和根目录 `pnpm run build` 都会先构建插件再构建扩展。
-- 工作区只安装一个确定的 DSH 版本（根 `package.json`、桥接插件的 devDependencies 与锁文件保持一致）。桥接插件的 `engines.dsh` 和 DSH peer 范围更宽，覆盖通过兼容性矩阵的版本（见 [docs/dsh-matrix.md](docs/dsh-matrix.md)）。更换默认版本时必须同时更新 manifest、锁文件并重跑根目录检查。
-
-`check:runtime` 检查实际解析的 DSH 依赖和锁文件；`test:smoke` 使用临时 DSH home 启动真实 web 宿主，验证桥接和重启后的会话读取，无需模型密钥。
-
-### 本地 gate
-
-GitHub Actions 从未在本仓库运行过（私有仓库，没有 Actions 额度），因此这里的任何检查都没有经过 CI 验证。gate 是一条本地命令：
-
-```sh
-pnpm gate                  # 全部步骤；需要 Playwright Chromium
-pnpm gate --skip-browser   # 没有 Chromium：跳过三个浏览器步骤
-pnpm gate --list           # 按顺序列出步骤
-```
-
-步骤依次执行（不并行），失败后继续执行其余步骤，最后打印通过/失败汇总表；任何步骤失败则以非零状态退出。结果写入 `.artifacts/gate/result.json`（可用 `--output <file>` 修改）：提交哈希、工作区是否有未提交修改、日期，以及每个步骤的状态、退出码、耗时和测试数量；每个步骤的输出保存在同目录的 `<step>.log`。步骤依次为：冻结锁文件安装、`check:runtime`、`pnpm -r typecheck`、桥接与扩展的单元测试（`--maxWorkers=4`，逐个包运行）、MCP shim 测试、两个构建、`pnpm test:scripts`、`pnpm test:benchmark`、`pnpm test:smoke`（真实 DSH 宿主，含 MCP 和 dev loop）、`pnpm test:browser`、`pnpm test:model-free`（无模型的提示注入 canary 检查和对话框任务）以及 `pnpm test:uninstall:ui`。`.github/workflows/ci.yml` 只运行 `pnpm gate`。各阶段 gate 与步骤的对应关系、以及无模型注入检查能证明和不能证明什么，见[英文 README 的 The gate 一节](README.md#the-gate)。
-
-构建后运行 `pnpm test:browser`，需要已安装 Playwright Chromium，或通过 `CHROMIUM_PATH` 指定支持加载未打包扩展的 Chromium 可执行文件。测试会启动真实 DSH 和 Chromium，验证页面共享、开发者工具授权、输入、iframe 上传与定位，以及 CSS 修改。测试开启并确认跨站 iframe 的进程隔离，覆盖同源、跨源和嵌套 iframe 中的元素点击、输入与滚动。测试无需模型密钥，结果保存在 `.artifacts/browser-smoke/`。
-
-构建扩展后运行 `pnpm test:uninstall`。设置界面测试使用 `pnpm test:uninstall:ui`，需要 Playwright Chromium。
+面向贡献者的构建、测试与发布说明见 [docs/development.zh.md](docs/development.zh.md)：工作区命令、一条命令运行全部检查的本地 gate（`pnpm gate`），以及 DSH 兼容性矩阵。发布流程见 [RELEASING.md](RELEASING.md)。
 
 ## 安全
 
