@@ -29,6 +29,14 @@ test('root, extension package and both manifests carry the same version', () => 
   assert.match(version, /^\d+\.\d+\.\d+$/)
 })
 
+test('the bridge plugin carries the release version', () => {
+  // One number everywhere: the plugin on npm, the extension and the release tag.
+  const bridge = JSON.parse(read('packages/browser/bridge-browser/package.json')).version
+  assert.equal(bridge, version, 'packages/browser/bridge-browser/package.json version')
+  const constant = /export const BRIDGE_PACKAGE_VERSION = '([^']+)'/u.exec(read('packages/browser/bridge-browser/src/index.ts'))
+  assert.equal(constant?.[1], version, 'BRIDGE_PACKAGE_VERSION')
+})
+
 test('CHANGELOG.md has the section this version publishes as release notes', () => {
   const section = changelogSection(read('CHANGELOG.md'), tag)
   assert.ok(section.length > 200, 'the section has content')

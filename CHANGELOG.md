@@ -3,6 +3,19 @@
 Each `## vX.Y.Z` section becomes the notes of that GitHub release
 (`scripts/package-release.mjs --notes`), followed by the SHA-256 digests of its assets.
 
+## v0.2.1
+
+One version number for everything. The bridge plugin `@natgurlain/dsh-bridge-browser` now
+carries the same version as the extension and the release (it was 0.1.0 inside v0.2.0), and a
+test keeps the two in step.
+
+- **Plugin package for npm.** The plugin package is `@natgurlain/dsh-bridge-browser`, with
+  keywords and repository links so plugin lists and indexes can find it.
+- **Plugin-only install.** The README describes adding the plugin with `dsh plugin add` from
+  the release file and pairing an extension loaded from the release zip, for people who
+  prefer DSH's own plugin command to the installer.
+- No change in behaviour from v0.2.0.
+
 ## v0.2.0
 
 First release of dsh Browser Agent, based on [dsh-browser](https://github.com/omdsh-dev/dsh-browser)
