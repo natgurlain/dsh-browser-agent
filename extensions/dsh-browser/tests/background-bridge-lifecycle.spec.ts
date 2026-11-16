@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createBridgeNonce } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_CLOSE_CODES, computeBridgeProof, createBridgeNonce } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { challengeUntilHello, completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
 import { FakeWebSocket } from './support/fake-websocket.ts'
 import { chromeEvent, panelPort } from './support/chrome.ts'
@@ -1433,4 +1433,256 @@ describe('headless reconnect after a worker restart', () => {
     await new Promise((resolve) => { setTimeout(resolve, 30) })
     expect(FakeWebSocket.instances).toHaveLength(0)
   })
+})
+
+describe('outage of a connected bridge while a panel is open', () => {
+  const HOME = 'ws://127.0.0.1:3080/ext/bridge'
+  const BEACON = 43189
+  const CAPS = { textOnly: true as const, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }
+  /** Recovery looks one second after the drop, then two seconds later: enough for two looks. */
+  const TWO_LOOKS_MS = 3_400
+  /** Ends the background of the test that just ran: its timers would otherwise keep probing. */
+  let shutDown: (() => void) | undefined
+
+  afterEach(async () => {
+    shutDown?.()
+    shutDown = undefined
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+  })
+
+  /**
+   * A background connected to HOME with one panel open. `answers` maps a
+   * loopback port to the bridge address its discovery endpoint advertises;
+   * a port that is not in it does not answer.
+   */
+  async function connected() {
+    const chromeMock = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: HOME } }) })
+    const answers = new Map<number, string>([[3080, HOME]])
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const wsUrl = answers.get(Number(new URL(String(input)).port))
+      return wsUrl === undefined ? new Response(null, { status: 503 }) : new Response(JSON.stringify({ wsUrl }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    await vi.waitFor(() => { expect(FakeWebSocket.instances).toHaveLength(1) })
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    await completeHandshake(socket, { until: panelSawConnected(panel.postMessage) })
+    const statuses = (): Array<{ state?: unknown; discovery?: unknown; failure?: unknown; address?: unknown; killSwitch?: unknown }> => (
+      panel.postMessage.mock.calls.map(([message]) => message as { type?: unknown; state?: unknown })
+        .filter(message => message.type === 'status')
+    )
+    const probed = (port: number): number => fetchMock.mock.calls.filter(([input]) => Number(new URL(String(input)).port) === port).length
+    const refusalLatched = (): boolean => (chrome.storage.local.set as unknown as { mock: { calls: Array<[Record<string, unknown>]> } })
+      .mock.calls.some(([items]) => 'dshBridgeRefusal' in items)
+    /** The bridge goes away: its socket drops and its port stops answering. */
+    const drop = async (): Promise<void> => {
+      answers.delete(3080)
+      socket.close(1006, '')
+      await vi.waitFor(() => { expect(statuses().at(-1)?.state).toBe('reconnecting') })
+      panel.postMessage.mockClear()
+    }
+    /** The next socket the client opens to `url`. */
+    const socketTo = async (url: string): Promise<FakeWebSocket> => {
+      const seen = FakeWebSocket.instances.length
+      let found: FakeWebSocket | undefined
+      await vi.waitFor(() => {
+        found = FakeWebSocket.instances.slice(seen).find(candidate => candidate.url === url)
+        expect(found).toBeDefined()
+      }, { timeout: 8_000, interval: 20 })
+      return found!
+    }
+    shutDown = () => { chromeMock.onCommand.emit('kill-switch') }
+    /** A bridge at `wsUrl`, advertised by its own port and by a beacon port. */
+    const advertise = (beacon: number, wsUrl: string): void => {
+      answers.set(beacon, wsUrl)
+      answers.set(Number(new URL(wsUrl).port), wsUrl)
+    }
+    const alarm = (): void => { chromeMock.alarms.onAlarm.emit({ name: 'bridge-keepalive', scheduledTime: Date.now() }) }
+    return { chromeMock, answers, advertise, fetchMock, panel, socket, statuses, probed, refusalLatched, drop, socketTo, alarm }
+  }
+
+  it('stays reconnecting through keepalive ticks while the bridge is unreachable, then reconnects when it returns', async () => {
+    const env = await connected()
+    await env.drop()
+
+    // The keepalive lands while nothing answers anywhere, twice.
+    env.alarm()
+    await new Promise((resolve) => { setTimeout(resolve, TWO_LOOKS_MS) })
+    env.alarm()
+    // It looked for the bridge by itself (address first, then the beacon ports)…
+    expect(env.probed(BEACON)).toBeGreaterThanOrEqual(1)
+    // …and the miss was not final: no `stopped`, no "not found".
+    expect(env.statuses().map(status => status.state)).not.toContain('stopped')
+    expect(env.statuses().map(status => status.discovery)).not.toContain('not-found')
+    expect(env.statuses().at(-1)?.state).toBe('reconnecting')
+
+    env.answers.set(3080, HOME)
+    const next = await env.socketTo(HOME)
+    next.open()
+    await completeHandshake(next, { until: panelSawConnected(env.panel.postMessage) })
+    expect(env.statuses().map(status => status.state)).not.toContain('stopped')
+    expect(env.statuses().at(-1)?.state).toBe('connected')
+  }, 20_000)
+
+  it('finds the bridge on the new port it restarted on, without ending the connection for the panel', async () => {
+    const env = await connected()
+    await env.drop()
+    const moved = 'ws://127.0.0.1:45555/ext/bridge'
+    env.advertise(BEACON, moved)
+
+    const next = await env.socketTo(moved)
+    next.open()
+    await completeHandshake(next, { until: panelSawConnected(env.panel.postMessage) })
+
+    expect(env.statuses().map(status => status.state)).not.toContain('stopped')
+    expect(env.statuses().at(-1)).toMatchObject({ state: 'connected', address: moved })
+    // The handshake proved it: the new address is tried first next time.
+    expect(chrome.storage.local.set).toHaveBeenCalledWith({ dshLastBridgeUrl: moved })
+  }, 20_000)
+
+  it('rules out a squatter that fails the proof, tells it nothing but the hello, and keeps looking', async () => {
+    const env = await connected()
+    await env.drop()
+    const squatter = 'ws://127.0.0.1:46001/ext/bridge'
+    env.advertise(BEACON, squatter)
+
+    const impostor = await env.socketTo(squatter)
+    impostor.open()
+    const serverNonce = createBridgeNonce()
+    const hello = await challengeUntilHello(impostor, serverNonce)
+    impostor.receive({ t: 'hello.ok', caps: CAPS, mac: await computeBridgeProof('not-the-token', 'server', hello.nonce, serverNonce, hello.endpoint, { client: hello.caps, server: CAPS }) })
+    await vi.waitFor(() => { expect(impostor.closedWith?.code).toBe(BRIDGE_CLOSE_CODES.authFailed) })
+    expect(impostor.sent.map(frame => (frame as { t: string }).t)).toEqual(['hello'])
+    expect(JSON.stringify(impostor.sent)).not.toContain(TEST_BRIDGE_TOKEN)
+
+    // The squatter keeps answering; the real bridge appears on the next beacon port.
+    const real = 'ws://127.0.0.1:46002/ext/bridge'
+    env.advertise(BEACON + 1, real)
+    const next = await env.socketTo(real)
+    next.open()
+    await completeHandshake(next, { until: panelSawConnected(env.panel.postMessage) })
+
+    // It was never dialed again, the loop did not stop, and nothing was latched as a refusal.
+    expect(FakeWebSocket.instances.filter(candidate => candidate.url === squatter)).toHaveLength(1)
+    expect(env.statuses().map(status => status.state)).not.toContain('stopped')
+    expect(env.statuses().map(status => status.failure)).not.toContain('token-mismatch')
+    expect(env.refusalLatched()).toBe(false)
+  }, 20_000)
+
+  it('treats a refusal from an address it only discovered as "not that one", not as the answer', async () => {
+    const env = await connected()
+    await env.drop()
+    const other = 'ws://127.0.0.1:46003/ext/bridge'
+    env.advertise(BEACON, other)
+
+    // Another DSH on this computer: it holds a different token and refuses the hello.
+    const foreign = await env.socketTo(other)
+    foreign.open()
+    foreign.close(BRIDGE_CLOSE_CODES.authFailed, 'auth failed')
+    await new Promise((resolve) => { setTimeout(resolve, TWO_LOOKS_MS) })
+
+    expect(FakeWebSocket.instances.filter(candidate => candidate.url === other)).toHaveLength(1)
+    expect(env.statuses().map(status => status.state)).not.toContain('stopped')
+    expect(env.statuses().at(-1)?.state).toBe('reconnecting')
+    expect(env.statuses().at(-1)?.failure).toBeUndefined()
+    expect(env.refusalLatched()).toBe(false)
+
+    env.answers.set(3080, HOME)
+    const next = await env.socketTo(HOME)
+    next.open()
+    await completeHandshake(next, { until: panelSawConnected(env.panel.postMessage) })
+    expect(env.statuses().map(status => status.state)).not.toContain('stopped')
+  }, 20_000)
+
+  it('moves on from a discovered address whose dial just fails, and tries it again once the others had their turn', async () => {
+    const env = await connected()
+    await env.drop()
+    const starting = 'ws://127.0.0.1:46006/ext/bridge'
+    env.advertise(BEACON, starting)
+
+    // It advertises itself but is not accepting sockets yet.
+    const early = await env.socketTo(starting)
+    early.close(1006, '')
+    // With nothing else to try, the same address gets another turn, and this time it is up.
+    const later = await env.socketTo(starting)
+    later.open()
+    await completeHandshake(later, { until: panelSawConnected(env.panel.postMessage) })
+
+    expect(env.statuses().map(status => status.state)).not.toContain('stopped')
+    expect(env.statuses().at(-1)).toMatchObject({ state: 'connected', address: starting })
+    expect(env.refusalLatched()).toBe(false)
+  }, 20_000)
+
+  it('takes a refusal from the address that was connected as the answer: latched, and no search', async () => {
+    const env = await connected()
+    // The bridge is back at once, but no longer accepts this install's token.
+    env.socket.close(1006, '')
+    const next = await env.socketTo(HOME)
+    next.open()
+    next.close(BRIDGE_CLOSE_CODES.authFailed, 'auth failed')
+
+    await vi.waitFor(() => { expect(env.statuses().at(-1)).toMatchObject({ state: 'reconnecting', failure: 'token-mismatch' }) })
+    await vi.waitFor(() => {
+      expect(chrome.storage.local.set).toHaveBeenCalledWith({ dshBridgeRefusal: 'token-mismatch' })
+    })
+    // A refusal is not an outage: nothing goes looking for another bridge.
+    env.advertise(BEACON, 'ws://127.0.0.1:46004/ext/bridge')
+    await new Promise((resolve) => { setTimeout(resolve, TWO_LOOKS_MS) })
+    expect(env.probed(BEACON)).toBe(0)
+    expect(FakeWebSocket.instances.some(candidate => candidate.url.includes(':46004'))).toBe(false)
+  }, 20_000)
+
+  it('stops looking when the last panel closes: panel-free reconnects keep their own rules', async () => {
+    const env = await connected()
+    await env.drop()
+    env.panel.onDisconnect.emit()
+    env.advertise(BEACON, 'ws://127.0.0.1:46005/ext/bridge')
+    await new Promise((resolve) => { setTimeout(resolve, TWO_LOOKS_MS) })
+    // No scan runs by itself with nobody there, and nothing dials what a scan would have found.
+    expect(env.probed(BEACON)).toBe(0)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+  }, 20_000)
+
+  it('stops at once for the kill switch and does not look again', async () => {
+    const env = await connected()
+    await env.drop()
+    env.chromeMock.onCommand.emit('kill-switch')
+    await vi.waitFor(() => { expect(env.statuses().at(-1)).toMatchObject({ state: 'stopped', killSwitch: true }) })
+    const probes = env.fetchMock.mock.calls.length
+    env.answers.set(3080, HOME)
+    env.answers.set(BEACON, HOME)
+    await new Promise((resolve) => { setTimeout(resolve, TWO_LOOKS_MS) })
+    env.alarm()
+    await new Promise((resolve) => { setTimeout(resolve, 50) })
+    expect(env.fetchMock.mock.calls.length).toBe(probes)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+  }, 20_000)
+
+  it('gives up after ten minutes with "not found" and says the bridge did not come back', async () => {
+    const env = await connected()
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    try {
+      await env.drop()
+      await vi.advanceTimersByTimeAsync(10 * 60_000 - 5_000)
+      expect(env.statuses().map(status => status.state)).not.toContain('stopped')
+      const probes = env.fetchMock.mock.calls.length
+      expect(probes).toBeGreaterThan(20)
+
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(env.statuses().at(-1)).toMatchObject({ state: 'stopped', discovery: 'not-found', failure: 'gave-up' })
+
+      // Stopped means stopped: neither time nor the keepalive looks again.
+      const after = env.fetchMock.mock.calls.length
+      env.alarm()
+      await vi.advanceTimersByTimeAsync(5 * 60_000)
+      expect(env.fetchMock.mock.calls.length).toBe(after)
+      expect(FakeWebSocket.instances).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  }, 20_000)
 })

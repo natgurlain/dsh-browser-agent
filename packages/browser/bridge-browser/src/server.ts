@@ -670,7 +670,8 @@ export class BridgeServer {
     this.closed = true
     // Capture the live pumps BEFORE dropConnection forgets the connections.
     const pumps = [...this.connections.values()].map((conn) => conn.pump)
-    for (const conn of [...this.connections.values()]) this.dropConnection(conn, 'the bridge closed')
+    // Not `replaced`: nothing took these clients' slots, and a client told so stops for good.
+    for (const conn of [...this.connections.values()]) this.dropConnection(conn, 'the bridge closed', BRIDGE_CLOSE_CODES.closing)
     for (const socket of this.wss.clients) socket.terminate()
     await new Promise<void>((resolve, reject) => {
       this.wss.close((error) => {

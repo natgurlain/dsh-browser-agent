@@ -8,7 +8,7 @@ export interface PanelCopy {
   /** Status shown when the startup pass found no local dsh at all. */
   statusNotFound: string
   /** Specific refusals reported by the bridge (shown instead of the transport state). */
-  bridgeFailure: Record<'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy' | 'no-token' | 'token-unreadable', string>
+  bridgeFailure: Record<'token-mismatch' | 'version-mismatch' | 'origin-rejected' | 'busy' | 'no-token' | 'token-unreadable' | 'gave-up', string>
   /** One-step pairing with the DSH host (PairingCard). */
   pairing: {
     title: string
@@ -502,6 +502,8 @@ export interface PanelCopy {
     openSessions: string
     sessions: string
     newSession: string
+    /** Shown when a reconnect finds that DSH no longer has the conversation the panel was on. */
+    conversationGone: string
     sessionPickerLoading: string
     sessionPickerEmpty: string
     deleteSession: string
@@ -602,6 +604,7 @@ const EN: PanelCopy = {
     busy: 'Bridge busy, retrying…',
     'no-token': 'Not paired with DSH yet',
     'token-unreadable': 'The installed bridge token could not be read; retrying',
+    'gave-up': 'DSH has not come back for 10 minutes. Start DSH, then choose Detect or Reconnect.',
   },
   pairing: {
     title: 'Pair with DSH',
@@ -1153,6 +1156,7 @@ const EN: PanelCopy = {
     openSessions: 'Session history',
     sessions: 'Sessions',
     newSession: 'New chat',
+    conversationGone: 'DSH no longer has the previous conversation (it may have been restarted or reset), so a new chat was started.',
     sessionPickerLoading: 'Loading…',
     sessionPickerEmpty: 'No past sessions yet',
     deleteSession: 'Delete session',
@@ -1255,6 +1259,7 @@ const ZH: PanelCopy = {
     busy: '桥接繁忙，正在重试…',
     'no-token': '尚未与 DSH 配对',
     'token-unreadable': '无法读取已安装的桥接令牌，正在重试',
+    'gave-up': 'DSH 已有 10 分钟没有恢复。请启动 DSH，然后选择“自动检测”或“重新连接”。',
   },
   pairing: {
     title: '与 DSH 配对',
@@ -1806,6 +1811,7 @@ const ZH: PanelCopy = {
     openSessions: '历史会话',
     sessions: '会话',
     newSession: '新对话',
+    conversationGone: 'DSH 中已没有之前的对话（它可能已重启或重置），因此已开始新对话。',
     sessionPickerLoading: '加载中…',
     sessionPickerEmpty: '暂无历史会话',
     deleteSession: '删除会话',

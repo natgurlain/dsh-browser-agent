@@ -430,6 +430,63 @@ describe('panel session transitions', () => {
     })
   })
 
+  it('resumes the same conversation after a reconnect when DSH still has it', async () => {
+    await renderConnected(null)
+    const created = rpc.mock.calls.filter(([method]) => method === 'session.create').length
+    rpc.mockClear()
+
+    await act(async () => { onStatus?.('reconnecting', null) })
+    await act(async () => { onStatus?.('connected', null) })
+
+    expect(rpc).toHaveBeenCalledWith('session.history', { sessionId: 'session-current' })
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.create')).toHaveLength(0)
+    expect(created).toBe(1)
+    expect(document.querySelector('.notice')).toBeNull()
+  })
+
+  it('says so and starts a new chat when the reconnected DSH no longer has the conversation', async () => {
+    await renderConnected(null)
+    ;(panelApi.setActiveSession as Mock).mockReset().mockResolvedValue(undefined)
+    const original = rpc.getMockImplementation()!
+    let next = 0
+    rpc.mockImplementation(async (method, payload) => {
+      if (method === 'session.create') return { sessionId: `session-after-restart-${String(next += 1)}` }
+      if (method === 'session.history' && (payload as { sessionId: string }).sessionId === 'session-current') {
+        throw Object.assign(new Error('session "session-current" is not available to the browser extension'), { code: 'forbidden' })
+      }
+      return original(method, payload)
+    })
+    rpc.mockClear()
+
+    await act(async () => { onStatus?.('reconnecting', null) })
+    await act(async () => { onStatus?.('connected', null) })
+
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.create')).toHaveLength(1)
+    expect(rpc).toHaveBeenCalledWith('session.history', { sessionId: 'session-after-restart-1' })
+    expect(document.querySelector('.notice')?.textContent).toBe(
+      'DSH no longer has the previous conversation (it may have been restarted or reset), so a new chat was started.',
+    )
+    // Not presented as an error, and not as the old conversation.
+    expect(document.body.textContent).not.toContain('is not available to the browser extension')
+  })
+
+  it('keeps the conversation and reports the failure when the history read merely fails after a reconnect', async () => {
+    await renderConnected(null)
+    const original = rpc.getMockImplementation()!
+    rpc.mockImplementation(async (method, payload) => {
+      if (method === 'session.history') throw Object.assign(new Error('gateway rpc session.history timed out after 30000ms'), { code: 'bridge-unavailable' })
+      return original(method, payload)
+    })
+    rpc.mockClear()
+
+    await act(async () => { onStatus?.('reconnecting', null) })
+    await act(async () => { onStatus?.('connected', null) })
+
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.create')).toHaveLength(0)
+    expect(document.querySelector('.notice')).toBeNull()
+    expect(document.body.textContent).toContain('timed out')
+  })
+
   it('releases the controls and surfaces an activation failure', async () => {
     await act(async () => { root.render(createElement(App)) })
     await act(async () => {

@@ -358,6 +358,11 @@ try {
     `    sessionWorkspacePath: ${JSON.stringify(workspace)}`,
     `    forwardedPorts: [${String(bridgeProxy.address().port)}]`,
     '    allowForwardedPorts: true',
+    // The outage below is simulated by taking the proxy offline. With the
+    // discovery beacon on, the extension would (rightly) find the host beside
+    // the proxy and the outage would end early; the restarted host at the end
+    // of this smoke runs with the beacon on, which is how it is found.
+    '    beacon: false',
     '- id: tool-executor-native', '  disabled: false',
     '- id: tool-executor-ptc', '  disabled: true',
     '- id: agent-default-model', '  config:',
@@ -373,7 +378,7 @@ try {
   ].join('\n'))
   host = await startHost({ cli, patch, env })
   const { base } = host
-  const probe = await waitFor(() => host.log.match(/Browser smoke probe: (http:\/\/127\.0\.0\.1:\d+)/)?.[1], 'tool probe startup')
+  let probe = await waitFor(() => host.log.match(/Browser smoke probe: (http:\/\/127\.0\.0\.1:\d+)/)?.[1], 'tool probe startup')
   const configResponse = await fetch(`${base}/ext/bridge-config`)
   assert.equal(configResponse.status, 200)
   const config = await configResponse.json()
@@ -1356,15 +1361,14 @@ try {
   await stopButton.waitFor()
   await waitFor(() => pendingRequests > beforeReconnect, 'second pending provider request')
   await composer.fill('Keep this draft across reconnect.')
-  // The extension's half-minute keepalive alarm re-probes the address of a
-  // bridge that is down, and gives the connection up when that probe and the
-  // discovery pass after it find nothing. That is a different scenario from
-  // the short outage tested here, so the outage is kept clear of the alarm.
-  const keepaliveDue = await worker.evaluate(async () => (await chrome.alarms.get('bridge-keepalive'))?.scheduledTime)
-  if (keepaliveDue !== undefined && keepaliveDue - Date.now() < 5_000) {
-    await delay(Math.max(0, keepaliveDue - Date.now()) + 500)
-  }
   await panel.evaluate(() => { messages.length = 0 })
+  /** Fire the extension's keepalive alarm now, then put its half-minute period back. */
+  const forceKeepalive = async (target) => {
+    await target.evaluate(() => chrome.alarms.create('bridge-keepalive', { when: Date.now() }))
+    await pollFor(async () => (await target.evaluate(async () => (await chrome.alarms.get('bridge-keepalive')) === undefined)),
+      'forced keepalive tick')
+    await target.evaluate(() => chrome.alarms.create('bridge-keepalive', { periodInMinutes: 0.5 }))
+  }
   // What a failure of this step needs: the statuses and events the extension
   // broadcast since the outage began, what the panel shows, and what the Host
   // holds for the session the panel was on.
@@ -1402,6 +1406,22 @@ try {
   await waitFor(() => panel.evaluate(() => messages.some(message => (
     message.type === 'status' && message.state === 'reconnecting'
   ))), 'bridge disconnection')
+  // The half-minute keepalive lands while nothing answers at the bridge's
+  // address, twice, with time between for the extension to look for the bridge
+  // by itself. That used to end the connection ("not found") and cost the
+  // panel its conversation; an outage is now retried, and only a refusal or
+  // ten minutes without an answer ends it.
+  await forceKeepalive(worker)
+  await delay(2_500)
+  await forceKeepalive(worker)
+  await reconnectStep('outage kept as reconnecting', async () => {
+    const statuses = await panel.evaluate(() => messages.filter(message => message.type === 'status')
+      .map(message => ({ state: message.state, discovery: message.discovery, failure: message.failure })))
+    assert.equal(statuses.some(status => status.state === 'stopped' || status.state === 'connected'), false,
+      `the outage must stay an outage: ${JSON.stringify(statuses)}`)
+    assert.equal(statuses.some(status => status.discovery === 'not-found' || status.failure !== undefined), false,
+      `an unreachable bridge is neither "not found" nor a refusal: ${JSON.stringify(statuses)}`)
+  })
   await hostRpc('session', 'cancel', { sessionId: conversation.sessionId })
   await waitFor(async () => !(await hostRpc('session', 'state', { sessionId: conversation.sessionId })).running,
     'host turn completion during disconnection')
@@ -1429,7 +1449,88 @@ try {
   await waitFor(async () => (await chat.locator('.composer-model > button').textContent()).trim() === 'connection-check',
     'live projection after reconnect')
   await secondChat.getByRole('button', { name: 'Continue generating', exact: true }).waitFor()
-  results.push('reconnection restores both panels, completed turn state, history and live projections without losing drafts')
+  // ---- DSH restarted on another port in the middle of a conversation ----
+  // What the desktop app does on every launch: the host comes back on a port
+  // nobody can predict, and only its discovery beacon says where. Run last:
+  // every session, watcher and grant of the first host process ends with it.
+  const hostRestart = async () => {
+    const liveWorker = () => browser.serviceWorkers().find(candidate => candidate.url().includes(extensionId))
+    await openPanel()
+    await waitFor(() => panel.evaluate(() => messages.some(message => message.type === 'status' && message.state === 'connected')),
+      'panel connected before the restart')
+    const known = new Set((await bridgeRpc('session.list', {})).items.map(item => item.sessionId))
+    const view = await browser.newPage()
+    await view.goto(`chrome-extension://${extensionId}/panel/index.html`)
+    const box = view.locator('textarea')
+    await box.waitFor()
+    await waitFor(() => box.isEnabled(), 'restart panel readiness')
+    await box.fill('Remember this conversation across a DSH restart.')
+    await view.getByRole('button', { name: 'Send message', exact: true }).click()
+    await view.getByRole('button', { name: 'Continue generating', exact: true }).waitFor({ timeout: 30_000 })
+    const kept = (await bridgeRpc('session.list', {})).items.find(item => !item.blank && !known.has(item.sessionId))
+    assert.ok(kept, 'the conversation started before the restart')
+    await box.fill('Keep this draft across the restart.')
+    const statuses = () => panel.evaluate(() => messages.filter(message => message.type === 'status')
+      .map(message => ({ state: message.state, discovery: message.discovery, failure: message.failure, address: message.address })))
+
+    await panel.evaluate(() => { messages.length = 0 })
+    const oldPort = hostPort
+    // The proxy address the extension is connected through dies with the first
+    // host: the restarted one is reachable only where its beacon says.
+    bridgeOnline = false
+    await host.stop()
+    // The host is down on purpose: poll without the harness check that it is alive.
+    await pollFor(async () => (await statuses()).some(status => status.state === 'reconnecting'), 'the panel noticed DSH going away', { timeout: 20_000 }).catch(async error => { throw new Error(`${error.message}: ${JSON.stringify(await panel.evaluate(() => messages.map(message => message.type === 'status' ? message : message.type)))}`) })
+    // DSH is gone and the keepalive fires: the panel keeps waiting on its conversation.
+    await forceKeepalive(liveWorker())
+    await delay(2_500)
+    assert.equal((await statuses()).some(status => status.state === 'stopped' || status.discovery === 'not-found'), false,
+      `a DSH that is restarting is not "not found": ${JSON.stringify(await statuses())}`)
+
+    const restartPatch = join(directory, 'host.restart.patch.yml')
+    const firstPatch = await readFile(patch, 'utf8')
+    assert.ok(firstPatch.includes('    beacon: false\n'))
+    await writeFile(restartPatch, firstPatch.replace('    beacon: false\n', ''))
+    const firstLog = host.log
+    host = await startHost({ cli, patch: restartPatch, env })
+    host.log = `${firstLog}\n--- DSH restarted ---\n${host.log}`
+    probe = await waitFor(() => host.log.split('--- DSH restarted ---')[1].match(/Browser smoke probe: (http:\/\/127\.0\.0\.1:\d+)/)?.[1], 'tool probe after the restart')
+    const newPort = Number(new URL((await (await fetch(`${host.base}/ext/bridge-config`)).json()).wsUrl).port)
+    assert.notEqual(newPort, oldPort, 'the restarted DSH listens on another port')
+
+    await waitFor(async () => (await statuses()).some(status => status.state === 'connected' && String(status.address).includes(`:${String(newPort)}/`)),
+      'the panel found the restarted DSH on its new port', 120_000).catch(async error => { throw new Error(`${error.message}\n${JSON.stringify(await statuses())}`, { cause: error }) })
+    assert.equal((await statuses()).some(status => status.state === 'stopped'), false,
+      `the restart was reported to the panel as a stopped connection: ${JSON.stringify(await statuses())}`)
+
+    // The conversation: the host process is new, but sessions live in DSH's
+    // storage and the bridge's own list of them is on disk too, so the panel
+    // is expected to carry on in the same one. Should a DSH ever come back
+    // without it, the panel has to say so; a blank chat with no word is the
+    // one outcome that fails here.
+    const goneNotice = view.locator('.notice', { hasText: 'DSH no longer has the previous conversation' })
+    const outcome = await waitFor(async () => {
+      if (await goneNotice.count() > 0) return 'said the conversation is gone and started a new chat'
+      const rows = await view.locator('.row.user').allTextContents()
+      const listed = (await bridgeRpc('session.list', {})).items.some(item => item.sessionId === kept.sessionId)
+      return listed && rows.some(row => row.includes('Remember this conversation across a DSH restart.'))
+        ? 'resumed the same conversation' : undefined
+    }, 'the conversation after the restart, or a plain statement that it is gone', 60_000)
+    assert.equal(await box.inputValue(), 'Keep this draft across the restart.')
+    if (outcome === 'resumed the same conversation') {
+      assert.ok((await bridgeRpc('session.history', { sessionId: kept.sessionId })).events.length > 0,
+        'the restarted DSH still serves the conversation history')
+      assert.equal(await goneNotice.count(), 0)
+      // And it is live, not a stale picture: the same conversation takes the next turn.
+      const { cursor } = await hostRpc('session', 'state', { sessionId: kept.sessionId })
+      await view.getByRole('button', { name: 'Continue generating', exact: true }).click()
+      await waitFor(async () => (await hostRpc('session', 'state', { sessionId: kept.sessionId })).cursor > cursor,
+        'the restarted DSH runs the resumed conversation')
+    }
+    await view.close()
+    results.push(`DSH restarted on another port mid-conversation: a keepalive tick while it was down left the panel reconnecting, the panel found the new port through the discovery beacon without a stopped connection, kept the draft, and ${outcome}`)
+  }
+  results.push('reconnection restores both panels, completed turn state, history and live projections without losing drafts, and keepalive ticks during the outage neither end the connection nor cost the panel its conversation')
 
   // ---- Agent on the page, step timeline + audit log, pause / take over / resume ----
   screenshots = await runAgentUxSmoke({
@@ -1654,6 +1755,7 @@ try {
       return response.json()
     },
   }))
+  await hostRestart()
   await writeFile(join(directory, 'results.json'), JSON.stringify(results, null, 2))
   await writeFile(join(directory, 'screenshots.json'), JSON.stringify(screenshots, null, 2))
   console.log(`Browser smoke passed: ${results.join('; ')}`)

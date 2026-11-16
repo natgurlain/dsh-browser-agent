@@ -91,6 +91,7 @@ import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts
 import { BRIDGE_CONFIG_PATH, BRIDGE_PATH, DEVTOOLS_CAPS_VERSION, parseBridgeConfigPayload } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, InstalledTokenUnreadableError, loadInstalledToken, type BridgeFailure, type BridgeState } from './bridge.ts'
 import { createRpc } from './rpc.ts'
+import { OutageRecovery } from './outage-recovery.ts'
 import { discoverInstances, planDiscovery, portOfUrl, readBridgeConfig } from './discovery.ts'
 import { browserName, extensionOrigin, pairWithBridge, type PairingFailure } from './pairing.ts'
 import { frameDocumentKey, listTabFrames } from './frames.ts'
@@ -300,6 +301,8 @@ const MAX_APPROVAL_TIMEOUT_MINUTES = 14
  * assigned by the system at every start and no fixed port list can predict it. Probe in this order:
  * the last address that worked → the `dsh web` default port → the plugin's fixed-port beacon (43189–43198).
  * It runs once when the panel opens, or when the user clicks "Detect"; not found is final, with no retry.
+ * The one exception is a bridge that was connected and went away while a panel is open (DSH restarting):
+ * that outage is retried for a bounded period, see "Outage recovery" below and outage-recovery.ts.
  */
 const LEGACY_LOCAL_URL = 'ws://127.0.0.1:3080'
 const LAST_BRIDGE_URL_KEY = 'dshLastBridgeUrl'
@@ -364,6 +367,17 @@ function onBridgeProofRejected(url: string): void {
   const discovered = discoveredBridgeUrl
   forgetBridgeUrl(url)
   if (discovered !== undefined) forgetBridgeUrl(discovered)
+  if (outageRecovery.active) {
+    // Met while looking for a bridge that went away: it only rules this
+    // address out. The panel keeps its conversation and the search goes on.
+    rejectedBridgeUrls.add(url)
+    if (discovered !== undefined) rejectedBridgeUrls.add(discovered)
+    discoveredBridgeUrl = undefined
+    connectedAddress = outageHomeUrl
+    bridge?.hold()
+    outageRecovery.soon()
+    return
+  }
   if (discovered === undefined) return
   rejectedBridgeUrls.add(discovered)
   rejectedBridgeUrls.add(url)
@@ -1088,7 +1102,9 @@ function statusPayload(): {
     killSwitch: killSwitchEngaged,
     standing: standingSummary(),
     ...(connectedAddress === undefined ? {} : { address: connectedAddress }),
-    ...(bridge?.failure === undefined || bridge.state === 'connected' ? {} : { failure: bridge.failure }),
+    ...(bridge?.failure === undefined || bridge.state === 'connected'
+      ? (bridge === null && outageGaveUp ? { failure: 'gave-up' as const } : {})
+      : { failure: bridge.failure }),
   }
 }
 
@@ -3162,6 +3178,123 @@ function cancelAllToolCalls(): void {
   activeToolCalls.clear()
 }
 
+// ---- Outage recovery (outage-recovery.ts) ----
+
+/** The current client completed a handshake: only a bridge that was connected has outages to recover. */
+let bridgeWasConnected = false
+/** The address that was connected when the outage began: the only one whose refusal is an answer. */
+let outageHomeUrl: string | undefined
+/** Discovered addresses that refused this install during the outage; they belong to something else. */
+const outageRefusedUrls = new Set<string>()
+/** Discovered addresses whose dial failed without a refusal; tried again once the others had their turn. */
+const outageFailedUrls = new Set<string>()
+/** The outage period ended with the bridge still away; reported until the next connection attempt. */
+let outageGaveUp = false
+
+const outageRecovery = new OutageRecovery({
+  now: () => Date.now(),
+  setTimer: (run, delayMs) => setTimeout(run, delayMs),
+  clearTimer: (timer) => { clearTimeout(timer as ReturnType<typeof setTimeout>) },
+  attempt: attemptOutageRecovery,
+  giveUp: giveUpOutage,
+})
+
+/**
+ * A connected bridge dropped while a panel is open: keep looking for it
+ * instead of leaving it to one keepalive-driven discovery pass, whose miss
+ * would stop the connection and cost the panel its conversation. With no
+ * panel open nothing here runs (the panel-free rules are unchanged), and a
+ * refusal from the address that was connected is an answer, not an outage.
+ */
+function beginOutageRecoveryIfDue(): void {
+  const client = bridge
+  if (outageRecovery.active || client === null || !bridgeWasConnected) return
+  if (client.state !== 'reconnecting' || panelPorts.size === 0 || killSwitchEngaged) return
+  if (connectedAddress === undefined) return
+  if (client.failure !== undefined && BRIDGE_REFUSALS.includes(client.failure)) return
+  outageHomeUrl = connectedAddress
+  outageRefusedUrls.clear()
+  outageFailedUrls.clear()
+  outageRecovery.begin()
+}
+
+/**
+ * One look for the bridge: the address that was connected first, then the
+ * ordinary local discovery (the remembered port, the `dsh web` default and
+ * the beacon ports; loopback only), so a DSH restarted on another port is
+ * found. Nothing is latched and the discovery status is left alone: a miss
+ * here only means "not yet". Whatever is found still has to pass the mutual
+ * handshake before anything is trusted or sent.
+ */
+async function attemptOutageRecovery(): Promise<void> {
+  const client = bridge
+  const home = outageHomeUrl
+  if (client === null || home === undefined) {
+    outageRecovery.end()
+    return
+  }
+  const waiting = (): boolean => bridge === client && outageRecovery.active && client.state === 'reconnecting'
+    && panelPorts.size > 0 && !killSwitchEngaged
+  // Dialing or handshaking right now: that attempt's outcome comes first.
+  if (!waiting()) return
+  if (!rejectedBridgeUrls.has(home) && await probeBridge(home)) {
+    if (!waiting()) return
+    // It answers again: dial it now, unless it is being retried at the slower
+    // pace of a refusal already (`busy`, a token that cannot be read yet).
+    if (connectedAddress === home && client.failure !== undefined) return
+    discoveredBridgeUrl = undefined
+    connectedAddress = home
+    client.redirect(home, settings.token)
+    broadcastStatus()
+    return
+  }
+  if (!waiting() || !isLocalBridgeAddress(home)) return
+  await discoveryMemory
+  const instances = await discoverInstances(planDiscovery({
+    ...(lastBridgeUrl === undefined ? {} : { rememberedUrl: lastBridgeUrl }),
+    excludeUrl: home,
+    excludeUrls: [...rejectedBridgeUrls, ...outageRefusedUrls, ...outageFailedUrls],
+  }), {
+    probe: (port, timeoutMs) => readBridgeConfig(port, timeoutMs),
+    shouldContinue: waiting,
+  }, { stopAtFirstHit: true })
+  if (!waiting()) return
+  // The first answer that is on this computer and was not already ruled out:
+  // recovery never leaves the loopback, whatever a discovery answer advertises.
+  const candidate = instances.map(instance => ({ found: instance.wsUrl, url: normalizeBridgeUrl(instance.wsUrl, BRIDGE_PATH) }))
+    .find(({ found, url }) => isLocalBridgeAddress(url)
+      && ![found, url].some(address => rejectedBridgeUrls.has(address) || outageRefusedUrls.has(address) || outageFailedUrls.has(address)))
+  if (candidate === undefined) {
+    // Every candidate had its turn: the ones that merely failed get another.
+    outageFailedUrls.clear()
+    return
+  }
+  if (candidate.url === connectedAddress) return
+  const { found, url } = candidate
+  discoveredBridgeUrl = found
+  connectedAddress = url
+  client.redirect(url, settings.token)
+  broadcastStatus()
+}
+
+/** The retry period ended: stop with "not found", as a failed discovery pass does. */
+function giveUpOutage(): void {
+  const client = bridge
+  // An answer arrived meanwhile (connected, or a refusal being shown): that stands.
+  if (client === null || client.state === 'connected' || client.failure !== undefined) return
+  outageGaveUp = true
+  discoveryLatch = 'not-found'
+  discoveryState = 'not-found'
+  persistDiscoveryLatch('not-found')
+  bridgeStartRevision += 1
+  bridge = null
+  rpc = null
+  connectedAddress = undefined
+  discoveredBridgeUrl = undefined
+  client.stop()
+  broadcastStatus()
+}
+
 /**
  * (Re)start the bridge with the current settings.
  *
@@ -3182,6 +3315,9 @@ async function startBridge(): Promise<void> {
   // instead of launching a competing scan. Checked before the revision bump so
   // a duplicate trigger cannot invalidate the pass it is deferring to.
   if (discoveryLatch === 'running') return
+  // An explicit (re)start replaces whatever an outage recovery was doing.
+  outageRecovery.end()
+  outageGaveUp = false
   const revision = ++bridgeStartRevision
   const lease = (): boolean => revision === bridgeStartRevision && runtimeWantsBridge()
   let url = settings.bridgeUrl
@@ -3245,6 +3381,32 @@ async function startBridge(): Promise<void> {
           interactionResponses.failAll(responseMessages().disconnected)
           transientEvents.clear()
         }
+        if (state === 'connected') {
+          bridgeWasConnected = true
+          outageRecovery.end()
+        } else if (state === 'stopped') {
+          bridgeWasConnected = false
+          outageRecovery.end()
+        } else if (state === 'reconnecting' && client === bridge && outageRecovery.active) {
+          const refused = client.failure !== undefined && BRIDGE_REFUSALS.includes(client.failure)
+          if (connectedAddress !== undefined && connectedAddress !== outageHomeUrl) {
+            // An address found while looking for the bridge did not take this
+            // install. A refusal means it is some other DSH: ruled out for
+            // this outage. Anything else (not ready yet, a dropped dial) is
+            // set aside until the other candidates had their turn. Either way
+            // the search goes on; only the address that was connected can
+            // refuse for good.
+            const ruledOut = refused ? outageRefusedUrls : outageFailedUrls
+            ruledOut.add(connectedAddress)
+            discoveredBridgeUrl = undefined
+            connectedAddress = outageHomeUrl
+            client.hold()
+            outageRecovery.soon()
+          } else if (refused) {
+            // The bridge that was connected answers and refuses: not an outage.
+            outageRecovery.end()
+          }
+        }
         // Replaced by another browser, or refused for a reason only the user
         // can fix: latch it, so no headless start (this worker or a restarted
         // one) reclaims the slot or repeats the refusal.
@@ -3262,6 +3424,7 @@ async function startBridge(): Promise<void> {
           broadcastStatus()
           return
         }
+        if (state === 'reconnecting' && client === bridge) beginOutageRecoveryIfDue()
         broadcastStatus()
         learning.onBridgeState(state)
         if (state === 'stopped') refreshPanelResumeHints()
@@ -3324,6 +3487,7 @@ async function startBridge(): Promise<void> {
     }))
     bridge = client
     rpc = createRpc(client)
+    bridgeWasConnected = false
   }
   bridge.start(url, settings.token)
 }
@@ -3559,6 +3723,8 @@ chrome.runtime.onConnect.addListener((port) => {
     // the lease ends or the user asks again (settings save / "Detect").
     if (discoveryLatch === 'not-found') return
     if (bridge === null || bridge.state === 'stopped') return startBridge()
+    // The bridge dropped while no panel was open: this panel waits for it.
+    beginOutageRecoveryIfDue()
   })
   try { port.postMessage(statusPayload()) } catch { /* port closed */ }
   void killSwitchReady.then(() => {
@@ -3977,6 +4143,9 @@ chrome.runtime.onConnect.addListener((port) => {
       // A session the user just left running may still need the browser: the
       // runtime lease keeps an established connection for the idle window.
       if (bridge?.state === 'connected') runtimeLease.touch()
+      // Recovery is for a user who is there; panel-free reconnects keep their own rules.
+      outageRecovery.end()
+      outageGaveUp = false
       if (!runtimeWantsBridge()) {
         bridgeStartRevision += 1
         bridge?.suspendReconnect()
@@ -4172,6 +4341,13 @@ function onKeepaliveAlarm(): void {
     }
     // Panel-free runtime: the worker was restarted, or the socket dropped.
     if (bridge === null || bridge.state === 'reconnecting') void settingsReady.then(() => startBridge())
+    return
+  }
+  // An outage of a connected bridge is retried on its own schedule, for a
+  // bounded period; this alarm only makes sure an overdue attempt runs.
+  beginOutageRecoveryIfDue()
+  if (outageRecovery.active) {
+    outageRecovery.tick()
     return
   }
   // A confirmed miss is terminal for this lease: do not re-probe in the
