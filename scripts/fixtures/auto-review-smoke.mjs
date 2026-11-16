@@ -137,7 +137,13 @@ export async function runAutoReviewSmoke(ctx) {
 
   // ---- The control: Ask by default, a one-time explanation, then Auto ----
   const chip = chat.locator('.composer-approvals .composer-chip-trigger')
-  await waitFor(async () => !(await chip.isDisabled()) && (await chip.textContent()) === 'Approvals: Ask', 'the Approvals control is offered and starts on Ask')
+  try {
+    await waitFor(async () => !(await chip.isDisabled()) && (await chip.textContent()) === 'Approvals: Ask', 'the Approvals control is offered and starts on Ask', 20_000)
+  } catch (error) {
+    await shot(chat, 'debug-auto-review-control.png').catch(() => {})
+    const seen = await panel.evaluate(() => messages.filter(message => String(message.type).startsWith('auto-review')).slice(-3)).catch(cause => String(cause))
+    throw new Error(`Approvals control not usable: ${JSON.stringify({ title: await chip.getAttribute('title').catch(() => null), text: await chip.textContent().catch(() => null), seen })}`, { cause: error })
+  }
   await chip.click()
   await chat.locator('.auto-review-menu').waitFor()
   await shot(chat, 'auto-review-menu.png')

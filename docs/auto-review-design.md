@@ -304,8 +304,9 @@ exist.
 
 The bridge writes one entry per review: `kind: 'auto-review'`, `callId`,
 `toolCallId`, `decision` (`allow`/`ask`), `risk`, `reason` (sanitized, ≤ 300),
-`model` (`provider/model`), `latencyMs`, `binding`, and `failure` when it
-failed. No page text beyond what approval entries already hold (the URL is
+`model` (`provider/model`), `durationMs` (the review's latency), `binding`,
+`floor` when a deterministic floor overrode the reviewer, and `failure` when it
+failed (timeout, invalid output, cancelled, no user message, …). No page text beyond what approval entries already hold (the URL is
 redacted as elsewhere; element names are not stored). The extension annotates
 the call's decision as `auto-reviewed` when the review allowed it.
 

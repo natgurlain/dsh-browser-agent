@@ -425,6 +425,8 @@ export function connectPanel(): PanelApi {
   const devToolsStatusListeners = new Set<(status: DevToolsStatus) => void>()
   const killSwitchListeners = new Set<(engaged: boolean) => void>()
   const autoReviewStateListeners = new Set<(state: AutoReviewState) => void>()
+  // The control mounts after the status that carried the state: replay the latest one to it.
+  let lastAutoReviewState: AutoReviewState | undefined
   const autoReviewingListeners = new Set<(reviewing: AutoReviewing) => void>()
   const pendingAutoReviewStatus = new Map<string, (value: AutoReviewAvailability) => void>()
   const pauseStateListeners = new Set<(state: AgentPauseState) => void>()
@@ -561,6 +563,7 @@ export function connectPanel(): PanelApi {
         break
       case 'auto-review.state': {
         const state = parseAutoReviewState(msg)
+        lastAutoReviewState = state
         for (const listener of autoReviewStateListeners) listener(state)
         break
       }
@@ -925,6 +928,7 @@ export function connectPanel(): PanelApi {
     },
     onAutoReviewState(callback) {
       autoReviewStateListeners.add(callback)
+      if (lastAutoReviewState !== undefined) callback(lastAutoReviewState)
       return () => { autoReviewStateListeners.delete(callback) }
     },
     onAutoReviewing(callback) {

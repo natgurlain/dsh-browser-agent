@@ -11,7 +11,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AUTO_REVIEW_EXPLAINED_KEY, AutoReviewControl, autoReviewBlocker } from '../src/panel/AutoReviewControl.tsx'
 import { StepTimeline } from '../src/panel/StepTimeline.tsx'
-import { parseAutoReviewState, type AutoReviewState, type PanelApi } from '../src/panel/api.ts'
+import { connectPanel, parseAutoReviewState, type AutoReviewState, type PanelApi } from '../src/panel/api.ts'
 import { applyStepAudit, auditByCall, type Row } from '../src/panel/events.ts'
 import { PANEL_COPY } from '../src/panel/strings.ts'
 import { fakePanelApi } from './support/panel-api.ts'
@@ -153,5 +153,28 @@ describe('the timeline', () => {
       row: row(undefined, { status: 'running' }), sessionId: 's1', api: fakePanelApi(), copy: PANEL_COPY.zh, reviewing: new Set(['call_1']),
     }))
     expect(html).toContain('正在审核…')
+  })
+})
+
+describe('the panel API', () => {
+  it('replays the latest state to a control that mounts after it arrived, and answers status requests', async () => {
+    let receive: ((message: unknown) => void) | undefined
+    const postMessage = vi.fn()
+    const port = { postMessage, onMessage: { addListener: vi.fn((listener: (message: unknown) => void) => { receive = listener }) }, onDisconnect: { addListener: vi.fn() } }
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => port) } })
+    const api = connectPanel()
+    receive?.({ type: 'auto-review.state', offered: true, sessions: { s1: { on: true, expiresAt: 9 } } })
+    const seen: AutoReviewState[] = []
+    api.onAutoReviewState((state) => { seen.push(state) })
+    expect(seen).toEqual([{ offered: true, sessions: { s1: { on: true, expiresAt: 9 } } }])
+    const status = api.autoReviewStatus('s1')
+    const request = postMessage.mock.calls.map(([message]) => message as Record<string, unknown>).find((message) => message.type === 'auto-review.status')!
+    receive?.({ type: 'auto-review.status.result', id: request.id, available: false, reason: 'no-model' })
+    await expect(status).resolves.toEqual({ available: false, reason: 'no-model' })
+    const reviewing: unknown[] = []
+    api.onAutoReviewing((value) => { reviewing.push(value) })
+    receive?.({ type: 'auto-review.reviewing', sessionId: 's1', toolCallId: 'c', label: 'Click', active: true })
+    receive?.({ type: 'auto-review.reviewing', label: 'no session' })
+    expect(reviewing).toEqual([{ sessionId: 's1', toolCallId: 'c', label: 'Click', active: true }])
   })
 })
