@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import {
   DEFAULT_RECORD,
   dropUnpublished,
@@ -79,10 +81,11 @@ test('resolveTargets runs each version once and keeps every label', async () => 
 test('parseArgs: targets, --record with and without a file, and errors', () => {
   const options = parseArgs(['pin', '--record', 'latest', '--probe-outside-range', '--max-workers', '2'], {})
   assert.deepEqual(options.targets, ['pin', 'latest'])
-  assert.ok(options.record.endsWith(DEFAULT_RECORD))
+  // An absolute path to the default record, in the platform's own form.
+  assert.equal(options.record, fileURLToPath(new URL(`../../${DEFAULT_RECORD}`, import.meta.url)))
   assert.equal(options.probeOutsideRange, true)
   assert.equal(options.maxWorkers, 2)
-  assert.ok(parseArgs(['pin', '--record', 'out/matrix.md'], {}).record.endsWith('out/matrix.md'))
+  assert.equal(parseArgs(['pin', '--record', 'out/matrix.md'], {}).record, resolve('out/matrix.md'))
   assert.equal(parseArgs(['pin'], {}).record, undefined)
   assert.throws(() => parseArgs([], {}), /usage:/)
   assert.throws(() => parseArgs(['pin', '--bogus'], {}), /unknown argument: --bogus/)

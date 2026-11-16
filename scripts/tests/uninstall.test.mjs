@@ -471,7 +471,9 @@ const ENGLISH_ONLY = ['Uninstall target', 'Remove web profile bridges', 'Delete:
 // The locale decides only when DSH_BROWSER_LANG is not set.
 const LOCALE = { DSH_BROWSER_LANG: '', LC_ALL: '', LC_MESSAGES: '', LANG: '' }
 // The fixture directories have Chinese names on purpose; what is checked is the messages around them.
+// pnpm prints a link: target with forward slashes, on Windows too, so both forms are replaced.
 const messages = (fixture, result) => [fixture.source, fixture.home, fixture.base, root].filter(Boolean)
+  .flatMap(path => [path, path.replaceAll('\\', '/')])
   .reduce((text, path) => text.replaceAll(path, '<path>'), result.stdout + result.stderr)
 
 function assertEnglish(fixture, result) {

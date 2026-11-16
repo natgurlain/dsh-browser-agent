@@ -7,8 +7,10 @@ name: Script tests
 
 on:
   push:
-    branches: [main]
+    # ci/** branches: a way to run all three platforms before opening a pull request.
+    branches: [main, 'ci/**']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read

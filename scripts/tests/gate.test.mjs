@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { buildResult, formatSummary, gateSteps, parseArgs, parseCounts, runSteps, summarize } from '../gate.mjs'
 
@@ -59,7 +60,8 @@ test('the gate commands are the documented ones, with a bounded worker count for
   assert.equal(command('build-firefox'), 'pnpm --filter dsh-browser-extension run build:firefox')
   assert.equal(command('smoke-runtime'), 'pnpm test:smoke')
   assert.equal(command('smoke-browser'), 'pnpm test:browser')
-  assert.match(command('model-free', { outputDir: '/out' }), /^node benchmark\/model-free-check\.mjs --output \/out[/\\]model-free-check\.json$/u)
+  // The output file is under the given directory, in the platform's own path form.
+  assert.equal(command('model-free', { outputDir: '/out' }), `node benchmark/model-free-check.mjs --output ${join('/out', 'model-free-check.json')}`)
   // Every `pnpm <script>` the gate names exists, and the gate is itself a root script.
   const scripts = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).scripts
   assert.equal(scripts.gate, 'node scripts/gate.mjs')

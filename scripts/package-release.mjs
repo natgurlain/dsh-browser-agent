@@ -199,13 +199,19 @@ export function createTarGz(entries, { mtime = 0 } = {}) {
 
 /** Tracked files of the working tree as archive entries under `<prefix>/`. */
 export function sourceEntries(repoRoot, prefix) {
-  const listed = spawnSync('git', ['ls-files', '-z'], { cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  // The executable bit comes from the index, not the file system: Windows has no such bit, so
+  // a stat there would package install.sh as 0644 and the archive would differ by platform.
+  const listed = spawnSync('git', ['ls-files', '-s', '-z'], { cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
   if (listed.status !== 0) throw new Error(`git ls-files failed in ${repoRoot}: ${listed.stderr || listed.error}`)
-  return listed.stdout.split('\0').filter(Boolean).sort().map((name) => {
+  const tracked = listed.stdout.split('\0').filter(Boolean).map((line) => {
+    // "<mode> <object> <stage>\t<path>"
+    const tab = line.indexOf('\t')
+    return { name: line.slice(tab + 1), gitMode: line.slice(0, line.indexOf(' ')) }
+  })
+  return tracked.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)).map(({ name, gitMode }) => {
     const path = join(repoRoot, name)
-    const info = statSync(path)
-    if (!info.isFile()) throw new Error(`unsupported file type in source tree: ${name}`)
-    return { name: `${prefix}/${name}`, data: readFileSync(path), mode: info.mode & 0o111 ? 0o755 : 0o644 }
+    if (!['100644', '100755'].includes(gitMode) || !statSync(path).isFile()) throw new Error(`unsupported file type in source tree: ${name}`)
+    return { name: `${prefix}/${name}`, data: readFileSync(path), mode: gitMode === '100755' ? 0o755 : 0o644 }
   })
 }
 
