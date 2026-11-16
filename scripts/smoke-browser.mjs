@@ -1257,6 +1257,10 @@ try {
   await answerApproval(tool('browser_click', { selector: '#submit' }), 'allow-once')
   await waitFor(() => strictSubmissions.length === 1, 'approved submission')
   assert.equal(strictSubmissions[0].body, 'name=Ada&password=hunter2')
+  // The server has the POST before the page has finished navigating to its
+  // answer; starting another navigation in between is refused by the browser
+  // driver ("interrupted by another navigation").
+  await page.waitForURL(url => url.pathname === '/strict-submit')
   // The user's own submission outside an agent turn passes without a card.
   await page.goto(`${origin}/strict`)
   await delay(3_500)
@@ -1558,9 +1562,32 @@ try {
   await settings({ unrestrictedBrowserAccess: true })
   await settings({ unrestrictedBrowserAccess: false, trustedActionOrigins: [] })
   await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'approval.request' && message.type !== 'status') })
+  // What a failure of this section needs: which tab the tools are bound to,
+  // which tab the browser reports as active, and what the extension told the
+  // panel last (statuses, affinity changes, approvals).
+  const killSwitchEvidence = async () => {
+    const evidence = await panel.evaluate(async () => ({
+      affinity: messages.findLast(message => message.type === 'tab-affinity')?.state,
+      tabs: (await chrome.tabs.query({})).map(tab => `${tab.id}${tab.active ? '*' : ''} w${tab.windowId} ${String(tab.url).slice(0, 70)}`),
+      lastFocusedActive: (await chrome.tabs.query({ active: true, lastFocusedWindow: true })).map(tab => tab.id),
+      storedAffinity: (await chrome.storage.session.get('dshTabAffinity')).dshTabAffinity,
+      recentMessages: messages.slice(-40).map(message => (
+        message.type === 'status' ? `status:${message.state}${message.killSwitch ? ':kill-switch' : ''}`
+          : message.type === 'tab-affinity' ? `tab-affinity:r${message.state.revision}:${message.state.status}:controlled=${message.state.controlled?.tabId}:active=${message.state.active?.tabId}${message.state.pinned ? ':pinned' : ''}`
+            : message.type === 'approval.request' ? `approval.request:${message.request?.action}`
+              : message.type
+      )),
+    })).catch(cause => `unavailable: ${cause.message}`)
+    return JSON.stringify(evidence, null, 2)
+  }
   const pendingClick = tool('browser_click', { selector: 'h1' })
   await waitFor(() => panel.evaluate(() => messages.some(message => message.type === 'approval.request')), 'approval pending before the kill switch')
-  await chat.bringToFront()
+  // The chat panel is a tab here, but it stands for the side panel, which is
+  // never the browser's active tab: it is clicked where it is, not brought to
+  // the front. Bringing it forward used to tell the extension "the user
+  // switched tabs" (to the panel's own page). After Reconnect the tools then
+  // stayed paused on that question until the panel's new chat happened to
+  // bind itself to the panel tab, and the snapshot below raced that.
   // The approval card covers the toolbar, so it carries its own stop button.
   await chat.locator('.approval-dialog').getByRole('button', { name: 'Stop the agent', exact: true }).click()
   await chat.getByText('Agent stopped', { exact: true }).waitFor()
@@ -1576,7 +1603,16 @@ try {
   await chat.getByRole('button', { name: 'Reconnect', exact: true }).click()
   await waitFor(() => panel.evaluate(() => messages.some(message => message.type === 'status' && message.state === 'connected')), 'reconnect after kill switch')
   await waitFor(async () => (await (await fetch(probe, { headers })).json()).includes('browser_snapshot'), 'tools after reconnect')
-  succeed(await tool('browser_snapshot', {}))
+  // The user never left the page, so nothing is pending for the tools: they
+  // are still bound to the page that is still the active tab.
+  const boundToPage = await panel.evaluate(() => messages.findLast(message => message.type === 'tab-affinity')?.state)
+  if (boundToPage?.status !== 'following' || boundToPage.controlled?.tabId !== tabId) {
+    throw new Error(`the tools should still follow the fixture page (tab ${String(tabId)}) after the kill switch and Reconnect\n--- kill-switch evidence ---\n${await killSwitchEvidence()}`)
+  }
+  const afterReconnect = await tool('browser_snapshot', {})
+  if (afterReconnect.isError) {
+    throw new Error(`browser_snapshot after the kill switch and Reconnect: ${JSON.stringify(afterReconnect)}\n--- kill-switch evidence ---\n${await killSwitchEvidence()}`)
+  }
   await waitFor(async () => await badge(tabId) === 'AI', 'controlled tab badge after reconnect')
   results.push('the kill switch cancels pending approvals and calls, drops the bridge until Reconnect, and the badge shows OFF / AI')
   await page.bringToFront()
