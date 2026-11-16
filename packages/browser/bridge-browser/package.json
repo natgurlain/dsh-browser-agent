@@ -23,7 +23,9 @@
     "ai-agent",
     "mcp"
   ],
-  "private": true,
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=24.9.0",
     "dsh": "^0.2.2-rc.1"
