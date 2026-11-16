@@ -91,11 +91,16 @@ export async function runOne({
   modelSelection,
   metadata = {},
   onSession,
+  viaPanel,
 }) {
   await resetState(siteOrigin, instance)
   await prepareBackend(backend, instance, extensionBrowser)
 
-  const created = await backend.client.rpc('session.create', { cwd: workspace })
+  // `viaPanel`: create and prompt the session from the extension's panel, as a user does
+  // (Auto review trusts only prompts the bridge forwarded from the panel).
+  const created = viaPanel === undefined
+    ? await backend.client.rpc('session.create', { cwd: workspace })
+    : await viaPanel('session.create', { cwd: workspace })
   const sessionId = created.sessionId
   if (backend.backend === 'extension') await extensionBrowser.bindSession?.(sessionId)
   // Set up the session before its prompt (the model-free check turns Auto review on here).
@@ -215,12 +220,15 @@ export async function runOne({
   let executionError
   let timeoutTimer
   try {
-    const prompt = backend.client.rpc('session.prompt', {
+    const promptPayload = {
       sessionId,
       mode: 'queue',
       content: [{ type: 'text', text: instance.prompt }],
       clientTimeZone: 'Asia/Shanghai',
-    }, { timeoutMs: 30_000 })
+    }
+    const prompt = viaPanel === undefined
+      ? backend.client.rpc('session.prompt', promptPayload, { timeoutMs: 30_000 })
+      : viaPanel('session.prompt', promptPayload)
     await prompt
     promptAcceptedAt = performance.now()
     const timeout = new Promise((_, reject) => {

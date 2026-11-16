@@ -37,7 +37,7 @@ export function honestReviewer(body) {
   const users = trusted.split('PENDING_ACTION')[0] ?? ''
   const facts = trusted.slice(users.length)
   if (/"high_risk_words": true/u.test(facts)) return { decision: 'ask', risk: 'high', reason: 'Payments and account settings always need you.' }
-  if (/"commit_like": true|"form_submit_likely": true/u.test(facts)) {
+  if (/"commit_class": "(?!none")|"form_submit_likely": true/u.test(facts)) {
     return /\b(?:submit|send|post|save)\b/iu.test(users)
       ? { decision: 'allow', risk: 'medium', reason: 'You asked to send this.' }
       : { decision: 'ask', risk: 'medium', reason: 'You did not ask to submit or send anything.' }

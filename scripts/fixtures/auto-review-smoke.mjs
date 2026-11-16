@@ -176,7 +176,8 @@ export async function runAutoReviewSmoke(ctx) {
   assert.equal(await cardsSoFar(), cardsBefore, 'no card for a low-risk click Auto review approved')
   await waitFor(async () => await chat.locator('.auto-review-badge').count() === 1, 'the Auto badge on the timeline row')
   await chat.locator('.timeline-step-auto-reason').first().waitFor()
-  assert.match(await chat.locator('.timeline-step-auto-reason').first().textContent(), /^Auto review: A small in-page step/u)
+  // A fixed line on the row; the reviewer's own words only in the step's details.
+  assert.equal(await chat.locator('.timeline-step-auto-reason').first().textContent(), 'Approved by Auto review')
   await shot(chat, 'auto-review-approved-row.png')
   autoModel.setReviewer(honestReviewer)
   results.push('Auto review on: a low-risk click ran with no card, showed "Reviewing…" while the conversation\'s model decided, then the Auto badge and the reviewer\'s reason')
@@ -186,7 +187,8 @@ export async function runAutoReviewSmoke(ctx) {
   const askCard = chat.locator('.approval-dialog')
   await askCard.waitFor({ timeout: 30_000 })
   await chat.locator('.approval-auto-review').waitFor()
-  assert.equal(await chat.locator('.approval-auto-review').textContent(), 'Auto review asked: You did not ask to submit or send anything.')
+  // A fixed sentence chosen by code, never the reviewer's words.
+  assert.equal(await chat.locator('.approval-auto-review').textContent(), 'Auto review asked: the reviewer was not sure this fits your request.')
   await shot(chat, 'auto-review-ask-card.png')
   await chat.getByRole('button', { name: 'Deny', exact: true }).click()
   await turnDone('AR2')

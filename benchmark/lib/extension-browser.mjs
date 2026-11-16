@@ -167,6 +167,8 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
        */
       async setAutoReview(sessionId, enabled) {
         await panel.evaluate(async ({ id, on, timeoutMs }) => {
+          // This panel shows the conversation: Auto approves only in a conversation a panel shows.
+          window.__dshBenchmarkPort.postMessage({ type: 'session.active', sessionId: id })
           window.__dshBenchmarkPort.postMessage({ type: 'auto-review.set', sessionId: id, enabled: on })
           const deadline = Date.now() + timeoutMs
           while (Date.now() < deadline) {
@@ -176,6 +178,16 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
           }
           throw new Error(`Auto review did not turn ${on ? 'on' : 'off'} for ${id}: ${JSON.stringify(window.__dshAutoReviewState)}`)
         }, { id: sessionId, on: enabled, timeoutMs: actionTimeoutMs })
+      },
+      /**
+       * A session RPC sent from the panel, as the user's own panel sends it:
+       * prompts sent this way are the only ones Auto review trusts.
+       */
+      async panelRpc(method, payload) {
+        const answer = await request({ type: 'rpc', method, payload }, 'rpc.result')
+        const result = answer?.result?.result
+        if (answer?.ok !== true || result?.ok !== true) throw new Error(`panel ${method} failed: ${JSON.stringify(answer)}`)
+        return result.value
       },
       /** The approval cards answered since the last setApprovalPolicy call. */
       approvals() {
