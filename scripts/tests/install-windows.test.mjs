@@ -104,7 +104,8 @@ function ranLines(box) {
 
 /** Both streams with the sandbox paths (which have Chinese in them on purpose) replaced. */
 function messages(box, result) {
-  return [box.base, box.base.replaceAll('\\', '/')].reduce((text, path) => text.replaceAll(path, '<base>'), result.stdout + result.stderr)
+  return [dirname(box.dshHome), box.base].flatMap(path => [path, path.replaceAll('\\', '/')])
+    .reduce((text, path) => text.replaceAll(path, '<path>'), result.stdout + result.stderr)
 }
 
 function leftovers(box) {

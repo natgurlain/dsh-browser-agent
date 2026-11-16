@@ -176,6 +176,27 @@ function Get-ReleaseDigest {
   return $found[0]
 }
 
+function Get-ReleaseFileDigest {
+  <#
+    Lower-case SHA-256 of a file, computed with .NET. Not Get-FileHash: in Windows PowerShell
+    that is a script function of Microsoft.PowerShell.Utility, and it is missing when
+    powershell.exe is started from a process that inherited a PowerShell 7 PSModulePath.
+  #>
+  param([string]$Path)
+
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      return [System.BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+    } finally {
+      $sha256.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 function Get-VerifiedRelease {
   param(
     [Parameter(Mandatory = $true)][string]$Directory,
@@ -297,7 +318,7 @@ function Get-VerifiedRelease {
     if ($name -eq 'SHA256SUMS') { continue }
 
     $expected = Get-ReleaseDigest -Directory $Directory -Name $name -Tag $Tag
-    $actual = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actual = Get-ReleaseFileDigest -Path $target
     if ($actual -ne $expected) {
       Stop-Release "$name 的 SHA-256 与 SHA256SUMS 不符（期望 $expected，实际 $actual）。文件未被解压或执行。" `
         "SHA-256 mismatch for $name (expected $expected, got $actual). Nothing was unpacked or run."
