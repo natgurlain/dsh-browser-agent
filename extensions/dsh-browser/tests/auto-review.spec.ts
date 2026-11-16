@@ -105,6 +105,9 @@ describe('eligibility floor', () => {
     expect(autoReviewEligibility(card('browser_type', { index: 2, text: 'shoes' }, field), ctx('browser_type', { index: 2, text: 'shoes' })).eligible).toBe(false)
     expect(autoReviewEligibility(card('browser_type', { index: 2, text: 'shoes' }, { ...field, typedTargetSensitive: true }), ctx('browser_type', { index: 2, text: 'shoes' })).eligible).toBe(false)
     expect(autoReviewEligibility(card('browser_type', { index: 2, text: 'shoes' }, { ...field, typedTargetSensitive: false }), ctx('browser_type', { index: 2, text: 'shoes' })).eligible).toBe(true)
+    // A line break can press Enter (and submit) when typed key by key.
+    expect(autoReviewEligibility(card('browser_type', { index: 2, text: 'shoes\n' }, { ...field, typedTargetSensitive: false }), ctx('browser_type', { index: 2, text: 'shoes\n' })))
+      .toEqual({ eligible: false, reason: 'typed-line-break' })
   })
 
   it('a drag needs both ends found; a key press needs a found, non-sensitive focus', () => {
@@ -119,6 +122,10 @@ describe('eligibility floor', () => {
     expect(autoReviewEligibility(card('browser_navigate', same, {}), ctx('browser_navigate', same)).eligible).toBe(true)
     expect(autoReviewEligibility(card('browser_navigate', other, {}), ctx('browser_navigate', other))).toEqual({ eligible: false, reason: 'cross-origin-navigation' })
     expect(autoReviewEligibility(card('browser_navigate', { url: 'javascript:alert(1)' }, {}), ctx('browser_navigate', { url: 'javascript:alert(1)' })).eligible).toBe(false)
+    // The reviewer never sees a query or fragment, so a navigation that carries one is the user's call.
+    for (const url of ['https://shop.example/items/7?action=delete&confirm=1', 'https://shop.example/items/7#confirm', 'https://shop.example/items/7?']) {
+      expect(autoReviewEligibility(card('browser_navigate', { url }, {}), ctx('browser_navigate', { url }))).toEqual({ eligible: false, reason: 'navigation-query' })
+    }
   })
 })
 

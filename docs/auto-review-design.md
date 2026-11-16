@@ -78,8 +78,10 @@ agent cannot learn to phrase requests to pass.
 ### 4.1 Capability
 
 Server caps gain `autoReview: 1` when the plugin can offer the feature at all
-(config not disabled, the host composes an LLM service with `stream`, and the
-session API exposes the history reader). It is stripped from configured caps
+(config not disabled, and the host composes an LLM service with `stream`). The
+history reader is checked per conversation by `bridge.review.status` (below),
+which also reports `host-unsupported` when the conversation holds user-sourced
+messages but none carries an `rpcId`. It is stripped from configured caps
 and re-added by `BridgeServer` like `hostApprovals`. `isCaps` accepts an absent
 value or any positive safe integer; only version 1 is acted on. An old
 extension ignores the key; an old bridge never sends it, so a new extension
@@ -143,7 +145,8 @@ card is shown and no model is called.
 | 5 | Policy decision for the call is `default` | site `ask` (forced), `read-only`/`blocked` (denied), managed pin (denied outside) |
 | 6 | Tool ∈ {`browser_click`, `browser_type`, `browser_select`, `browser_hover`, `browser_press`, `browser_drag`, `browser_navigate`} | `browser_clipboard`, `browser_upload`, `browser_dialog` (confirm() is often the commit), `browser_back`/`forward` (destination unknown), `browser_reload` (may resubmit POST), paginated `browser_extract`, every read |
 | 7 | Every addressed element was found (`state: 'found'`), none is `sensitive`, none is a `password` or `file` kind; for `browser_type`, `typedTargetSensitive === false` (undefined counts as sensitive); for `browser_press` without a locator the focused element must be found and not sensitive | password, payment, one-time-code fields (privacy.ts), unknown/missing targets |
-| 8 | `browser_navigate` only to the current top page's origin | cross-origin navigation is **ineligible in v1** (the bridge does not tell the extension which origins the user named) |
+| 8 | `browser_navigate` only to the current top page's origin, and without a query or fragment | cross-origin navigation is **ineligible in v1** (the bridge does not tell the extension which origins the user named); `?action=delete`-style URLs are ineligible because the reviewer is shown origin and path only |
+| 8a | `browser_type` text without a line break | a CR/LF typed key by key can press Enter and submit the form |
 | 9 | Per-conversation limits not reached (§7) | then the card shows with a limit line |
 
 Note: an explicit user or managed site rule stricter than default never
@@ -254,7 +257,8 @@ Deterministic post-rules (pure, unit-tested):
 4. Effective medium + allow → also requires that one of the user's own
    messages contains a commit verb (EN/ZH list: submit, send, post, save,
    delete, remove, confirm, publish, apply, update, 提交, 发送, 发布, 保存,
-   删除, 确认, …). Without it → ask. This is a weak lexical check that the
+   删除, 确认, …; generic task words such as set, change, turn on, complete
+   or go ahead do not count). Without it → ask. This is a weak lexical check that the
    instruction exists, not proof that it covers this target; the model judges
    the target.
 5. Otherwise allow.

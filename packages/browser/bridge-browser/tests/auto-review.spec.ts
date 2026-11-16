@@ -303,6 +303,16 @@ describe('AutoReviewer', () => {
     expect(new AutoReviewer(host, { enabled: false }).status('live', false)).toEqual({ available: false, reason: 'disabled' })
     expect(new AutoReviewer(host, { enabled: false }).supported()).toBe(false)
     expect(new AutoReviewer({ llm: () => undefined, session: () => undefined }).supported()).toBe(false)
+    // A host whose user prompts carry no RPC id cannot tell the user's words apart: not offered.
+    const unmarked = { llm: () => llm(ALLOW_LOW), session: () => session([userEvent(1, 'hi', { kind: 'user' })]) }
+    expect(new AutoReviewer(unmarked).status('live', false)).toEqual({ available: false, reason: 'host-unsupported' })
+  })
+
+  it('needs a committing verb, not a generic task word, for a medium allow', () => {
+    const medium: ReviewerVerdict = { decision: 'allow', risk: 'medium', reason: 'r' }
+    for (const text of ['Set it up and go ahead.', 'Turn on notifications and complete the steps.', 'Change the setting.', 'Enter the details.']) {
+      expect(applyFloors(medium, action({ commitLike: true }), [{ seq: 1, text }]).decision).toBe('ask')
+    }
   })
 })
 

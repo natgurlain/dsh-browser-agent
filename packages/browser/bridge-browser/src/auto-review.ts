@@ -259,7 +259,9 @@ export function parseVerdict(text: string): ReviewerVerdict {
 const RISK_ORDER = { low: 0, medium: 1, high: 2 } as const
 
 /** Words in the user's own messages that ask for a committing action (EN/ZH). */
-const COMMIT_INSTRUCTION = /\b(?:submit|send|post|publish|save|apply|confirm|delete|remove|discard|archive|reply|comment|share|update|create|subscribe|unsubscribe|sign (?:in|out|up)|log (?:in|out)|login|logout|register|follow|unfollow|join|leave|accept|approve|decline|reject|search|enter|press enter|book|reserve|enable|disable|turn (?:on|off)|change|set|fill (?:in|out)|complete|finish|go ahead)\b|提交|发送|发布|保存|应用|确认|确定|删除|移除|回复|评论|分享|更新|创建|订阅|退订|登录|退出|注册|关注|加入|接受|同意|拒绝|搜索|预订|预约|启用|停用|开启|关闭|修改|设置|填写|完成/iu
+// Only verbs that name a committing action; generic task words (set, change,
+// turn on, complete, go ahead) are left out on purpose, so they never pass.
+const COMMIT_INSTRUCTION = /\b(?:submit|send|post|publish|save|apply|confirm|delete|remove|discard|archive|reply|comment|share|update|create|subscribe|unsubscribe|sign (?:in|out|up)|log (?:in|out)|login|logout|register|follow|unfollow|join|leave|accept|approve|decline|reject|search|press enter|book|reserve)\b|提交|发送|发布|保存|应用|确认|确定|删除|移除|回复|评论|分享|更新|创建|订阅|退订|登录|退出|注册|关注|加入|接受|同意|拒绝|搜索|预订|预约/iu
 
 /** The outcome after the deterministic floors. */
 export interface FlooredDecision {
@@ -377,6 +379,10 @@ export class AutoReviewer {
     const session = this.host.session(sessionId)
     if (session === undefined || session === null) return { available: false, reason: 'not-started' }
     if (!isReviewableSession(session)) return { available: false, reason: 'host-unsupported' }
+    // The host must mark the user's own prompts (a user source with an RPC id):
+    // where it has user prompts but marks none, no message could ever authorize
+    // anything, so Auto is not offered there at all.
+    if (!userPromptsIdentifiable(session)) return { available: false, reason: 'host-unsupported' }
     const route = routeOf(session)
     if (route === undefined) return { available: false, reason: 'no-model' }
     return { available: true, model: `${route.provider}/${route.model}` }
@@ -460,6 +466,26 @@ export function reviewAnswer(reviewId: string, binding: string, record: ReviewRe
     reason: record.reason,
     ...record.userTurn === undefined ? {} : { userTurn: record.userTurn },
   }
+}
+
+/**
+ * Whether this host lets the reviewer tell the user's own prompts apart: false
+ * when the session holds user-sourced messages and none carries an RPC id.
+ * A session with no user message yet says nothing either way.
+ */
+export function userPromptsIdentifiable(session: SessionLike): boolean {
+  let userSourced = 0
+  try {
+    for (const raw of session.snapshotEvents()) {
+      const event = raw as { type?: unknown; data?: { source?: { kind?: unknown; rpcId?: unknown } } }
+      if (event.type !== 'user/message' || event.data?.source?.kind !== 'user') continue
+      if (typeof event.data.source.rpcId === 'string' && event.data.source.rpcId !== '') return true
+      userSourced += 1
+    }
+  } catch {
+    return false
+  }
+  return userSourced === 0
 }
 
 function routeOf(session: SessionLike): { provider: string; model: string } | undefined {

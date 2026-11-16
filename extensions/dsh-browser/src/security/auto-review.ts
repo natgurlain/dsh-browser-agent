@@ -42,6 +42,8 @@ export type IneligibleReason =
   | 'target-not-found'
   | 'sensitive-target'
   | 'cross-origin-navigation'
+  | 'navigation-query'
+  | 'typed-line-break'
 
 export type Eligibility = { eligible: true; tool: AutoReviewTool } | { eligible: false; reason: IneligibleReason }
 
@@ -89,6 +91,16 @@ function originOf(value: unknown): string | undefined {
   }
 }
 
+function hasQueryOrFragment(value: unknown): boolean {
+  if (typeof value !== 'string') return true
+  try {
+    const url = new URL(value)
+    return url.search !== '' || url.hash !== '' || value.includes('?') || value.includes('#')
+  } catch {
+    return true
+  }
+}
+
 /**
  * The eligibility floor: whether Auto review may decide this card. Every
  * condition must hold; the first that fails is the reason.
@@ -121,9 +133,13 @@ export function autoReviewEligibility(prompt: ApprovalPrompt, call: ReviewCallCo
   }
   // Undefined means "not inspected", which counts as sensitive.
   if (call.tool === 'browser_type' && facts.typedTargetSensitive !== false) return no('sensitive-target')
+  // A line break typed key by key can press Enter and submit the form: the user decides.
+  if (call.tool === 'browser_type' && typeof call.args.text === 'string' && /[\r\n]/u.test(call.args.text)) return no('typed-line-break')
   if (call.tool === 'browser_navigate') {
     const destination = originOf(call.args.url)
     if (destination === undefined || facts.topOrigin === undefined || destination !== facts.topOrigin) return no('cross-origin-navigation')
+    // The reviewer is shown origin and path only; a query or fragment (?action=delete) it could not see is the user's call.
+    if (hasQueryOrFragment(call.args.url)) return no('navigation-query')
   }
   return { eligible: true, tool: call.tool as AutoReviewTool }
 }
