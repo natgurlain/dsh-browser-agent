@@ -327,13 +327,25 @@ function intersects(left: Set<string>, right: Set<string>): boolean {
   return false
 }
 
-/** Whether the instruction names the control itself ("click Done"). */
-function quotesName(name: string | undefined, instruction: string): boolean {
-  if (name === undefined) return false
-  const words = name.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []
-  if (words.length === 0 || words.length > 4) return false
-  const said = new Set(instruction.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])
-  return words.every((word) => said.has(word)) || instruction.toLowerCase().includes(name.toLowerCase())
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+}
+
+/**
+ * Whether the instruction names the control itself, as a control: the name
+ * in quotes ("Send", “Done”, 「完成」), or right after an imperative that
+ * presses or picks something ("click Done", "press Send", 点击完成). A name
+ * that merely occurs in the sentence ("send me the summary", "OK, read my
+ * inbox", "tell me when you're done") does not count.
+ */
+export function namesControl(name: string | undefined, instruction: string): boolean {
+  const control = name?.replace(/\s+/gu, ' ').trim().toLowerCase() ?? ''
+  if (control === '' || control.length > 60) return false
+  const text = instruction.replace(/\s+/gu, ' ').toLowerCase()
+  const named = escapeRegExp(control)
+  const quoted = new RegExp(`["“”'‘’「『]\\s*${named}\\s*["“”'‘’」』]`, 'u')
+  const pressed = new RegExp(`(?:\\b(?:click|press|tap|hit|select|choose|push|use|pick)\\s+(?:on\\s+)?(?:the\\s+)?|(?:点击|点一下|点|按下|按|选择|选))["“'‘「]?${named}`, 'u')
+  return quoted.test(text) || pressed.test(text)
 }
 
 /**
@@ -347,7 +359,7 @@ export function instructionCovers(action: ReviewAction, newest: string): 'restri
   if (RESTRICTION.test(newest)) return 'restricted'
   const cls = action.commitClass
   const said = significantTokens(newest)
-  if (cls === 'confirm' || cls === 'unknown') return quotesName(action.untrusted.name, newest) ? undefined : 'no-instruction'
+  if (cls === 'confirm' || cls === 'unknown') return namesControl(action.untrusted.name, newest) ? undefined : 'no-instruction'
   const verbs = CLASS_VERBS[cls]
   if (verbs !== undefined && !verbs.test(newest)) return 'no-instruction'
   if (cls === 'address') {
@@ -357,12 +369,14 @@ export function instructionCovers(action: ReviewAction, newest: string): 'restri
   if (cls === 'type') {
     const typed = action.untrusted.typed ?? ''
     const typedTokens = significantTokens(typed)
-    const covered = typedTokens.size > 0 ? intersects(typedTokens, said) : typed.trim() !== '' && newest.toLowerCase().includes(typed.trim().toLowerCase())
+    // The user dictated it: every significant word of the typed text is in the message
+    // (one shared word would let the agent append what it read to the user's words).
+    const covered = typedTokens.size > 0 ? [...typedTokens].every((token) => said.has(token)) : typed.trim() !== '' && newest.toLowerCase().includes(typed.trim().toLowerCase())
     return covered ? undefined : 'no-instruction'
   }
   const target = targetTokens(action)
   // A control named by its verb alone ("Send", "Delete"): the message must name it.
-  if (target.size === 0) return quotesName(action.untrusted.name, newest) ? undefined : 'no-instruction'
+  if (target.size === 0) return namesControl(action.untrusted.name, newest) ? undefined : 'no-instruction'
   return intersects(target, said) ? undefined : 'no-instruction'
 }
 

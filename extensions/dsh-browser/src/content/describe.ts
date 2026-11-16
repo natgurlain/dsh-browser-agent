@@ -240,14 +240,19 @@ function linkOf(el: Element): HTMLAnchorElement | HTMLAreaElement | undefined {
   return link instanceof HTMLAnchorElement || link instanceof HTMLAreaElement ? link : undefined
 }
 
-/** For a submit control: where its form goes, and how. */
+/**
+ * Where an element's form goes, and how: for a submit control its own
+ * formaction/formmethod first, for a field or select the form's.
+ */
 function formOf(el: Element): (TargetDestination & { method?: 'get' | 'post' | 'dialog' }) | undefined {
-  const control = el instanceof HTMLLabelElement ? el.control : el.closest('button, input[type="submit"], input[type="image"]') ?? el
-  if (!(control instanceof HTMLButtonElement) && !(control instanceof HTMLInputElement)) return undefined
+  const control = el instanceof HTMLLabelElement ? el.control : el.closest('button, input, select, textarea') ?? el
+  if (!(control instanceof HTMLButtonElement) && !(control instanceof HTMLInputElement) && !(control instanceof HTMLSelectElement) && !(control instanceof HTMLTextAreaElement)) return undefined
   const form = control.form
   if (form === null) return undefined
-  const destination = destinationOf(control.formAction || form.action || document.baseURI)
-  const method = (control.formMethod || form.method || 'get').toLowerCase()
+  const submitter = control instanceof HTMLButtonElement || (control instanceof HTMLInputElement && (control.type === 'submit' || control.type === 'image'))
+  const own = submitter ? (control as HTMLButtonElement | HTMLInputElement) : undefined
+  const destination = destinationOf(own?.getAttribute('formaction') !== null && own !== undefined ? own.formAction : form.action || document.baseURI)
+  const method = ((own?.getAttribute('formmethod') !== null && own !== undefined ? own.formMethod : '') || form.method || 'get').toLowerCase()
   return 'other' in destination ? destination : { ...destination, ...(method === 'get' || method === 'post' || method === 'dialog' ? { method } : {}) }
 }
 
@@ -266,10 +271,12 @@ export function describeElement(el: Element): FoundTarget {
     ...(fieldInForm(el) ? { inForm: true as const } : {}),
     ...(() => {
       const link = linkOf(el)
-      return link === undefined ? {} : { href: destinationOf(link.getAttribute('href') ?? '') }
+      return link === undefined ? {} : { href: destinationOf(link.getAttribute('href') ?? ''), ...link.hasAttribute('download') ? { download: true as const } : {} }
     })(),
     ...(() => {
-      const form = submitsForm(el) ? formOf(el) : undefined
+      // Submit controls, fields where Enter submits, and selects in a form: where their form goes.
+      const inForm = submitsForm(el) || fieldInForm(el) || ((el instanceof HTMLSelectElement || (el instanceof HTMLLabelElement && el.control instanceof HTMLSelectElement)) && (el instanceof HTMLSelectElement ? el : el.control as HTMLSelectElement).form !== null)
+      const form = inForm ? formOf(el) : undefined
       return form === undefined ? {} : { form }
     })(),
   }

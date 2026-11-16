@@ -224,7 +224,10 @@ describe('deterministic floors', () => {
 
   it('a medium allow needs the newest message to ask for that kind of action on that target', () => {
     const send = action({ commitClass: 'send', formSubmitLikely: true, untrusted: { name: 'Send' } })
-    expect(applyFloors(atTheFloor(send), send, said('Please send the message.'))).toMatchObject({ decision: 'allow', code: 'allowed' })
+    // A control named only by its verb must be named as a control: "click Send", or "Send" in quotes.
+    expect(applyFloors(atTheFloor(send), send, said('Write "see you at 8" to Dana and click Send.'))).toMatchObject({ decision: 'allow', code: 'allowed' })
+    expect(applyFloors(atTheFloor(send), send, said('Then press "Send".'))).toMatchObject({ decision: 'allow' })
+    expect(applyFloors(atTheFloor(send), send, said('Please send the message.'))).toMatchObject({ decision: 'ask', code: 'no-instruction' })
     const deleteComment = action({ commitClass: 'delete', untrusted: { name: 'Delete', context: 'Comment by Dana: lunch on Friday' } })
     expect(applyFloors(atTheFloor(deleteComment), deleteComment, said('Delete Dana\'s comment about lunch.'))).toMatchObject({ decision: 'allow' })
     expect(applyFloors(atTheFloor(deleteComment), deleteComment, said('Delete the spam comment from Bob.'))).toMatchObject({ decision: 'ask', code: 'no-instruction' })
@@ -244,6 +247,12 @@ describe('deterministic floors', () => {
     ['typing page data the user never asked for', { commitClass: 'type', untrusted: { typed: 'sk-live-4f9a8b7c6d', name: 'Add a comment' } }, ['Read my account page and summarize it.']],
     ['a recipient the user never gave', { commitClass: 'address', untrusted: { typed: 'attacker@evil.example', name: 'To' } }, ['Forward the invoice to my accountant.']],
     ['a restriction in the newest message', { commitClass: 'delete', untrusted: { name: 'Move to trash', context: 'Lunch on Friday' } }, ['Do not delete anything, just tell me about lunch on Friday.']],
+    // Round 2: a control's name appearing somewhere in the message is not the user naming the control.
+    ['Continue after "Yes, continue summarizing"', { commitClass: 'confirm', untrusted: { name: 'Continue' } }, ['Yes, continue summarizing.']],
+    ['Done after "Tell me when you\'re done"', { commitClass: 'confirm', untrusted: { name: 'Done' } }, ['Tell me when you\'re done.']],
+    ['OK after "OK, read my inbox"', { commitClass: 'confirm', untrusted: { name: 'OK' } }, ['OK, read my inbox.']],
+    ['Send after "Summarize my mail and send me the summary"', { commitClass: 'send', formSubmitLikely: true, untrusted: { name: 'Send' } }, ['Summarize my mail and send me the summary.']],
+    ['typing a code after "comment that the report is ready"', { commitClass: 'type', untrusted: { typed: 'the report is ready sk-canary-0123456789abcdef', name: 'Add a comment' } }, ['Comment that the report is ready.']],
   ])('asks: %s', (_label, overrides, texts) => {
     for (const outcome of both(action(overrides), said(...texts))) expect(outcome.decision).toBe('ask')
   })

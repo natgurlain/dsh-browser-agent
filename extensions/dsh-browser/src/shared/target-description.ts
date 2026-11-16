@@ -66,6 +66,8 @@ export type TargetDescription =
       inForm?: true
       /** For a link (or an element inside one): where it goes. */
       href?: TargetDestination
+      /** The link downloads its target (`download` attribute): a file lands on disk. */
+      download?: true
       /** For a submit control: where its form goes, and how. */
       form?: TargetDestination & { method?: 'get' | 'post' | 'dialog' }
       /** For a native select and a browser_select call: the labels of the options it would choose. */
@@ -91,7 +93,7 @@ export interface TargetSlots {
 export type TargetState =
   | {
     state: 'found'; kind: TargetKind; name: string; context?: { kind: 'row' | 'section'; text: string }; sensitive?: true; focused?: true; submits?: true; inForm?: true
-    href?: TargetDestination; form?: TargetDestination & { method?: 'get' | 'post' | 'dialog' }; chosen?: string[]; autoSubmit?: true
+    href?: TargetDestination; download?: true; form?: TargetDestination & { method?: 'get' | 'post' | 'dialog' }; chosen?: string[]; autoSubmit?: true
   }
   | { state: 'missing' }
   | { state: 'unknown' }
@@ -153,6 +155,7 @@ function readDescription(raw: unknown): TargetState {
     ...(value.submits === true ? { submits: true as const } : {}),
     ...(value.inForm === true ? { inForm: true as const } : {}),
     ...(value.href === undefined ? {} : { href: readDestination(value.href) }),
+    ...(value.download === true ? { download: true as const } : {}),
     ...(value.form === undefined ? {} : {
       form: (() => {
         const destination = readDestination(value.form)

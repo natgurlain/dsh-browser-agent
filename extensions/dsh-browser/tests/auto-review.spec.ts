@@ -162,6 +162,13 @@ describe('commit classes (security review F2)', () => {
     expect(pathCarriesData('/docs/getting-started')).toBe(false)
   })
 
+  it('a download link is never reviewed: it writes a file', () => {
+    expect(judge('browser_click', { index: 1 }, { targets: { target: found('link', 'Report', { href: SAME('/files/report.csv'), download: true }) } })).toEqual({ eligible: false, reason: 'download' })
+    document.body.innerHTML = '<a id="d" href="/files/report.csv" download>Report</a><form action="https://evil.example/collect"><input id="q" name="q"></form>'
+    expect(describeElement(document.getElementById('d')!)).toMatchObject({ download: true })
+    expect(describeElement(document.getElementById('q')!)).toMatchObject({ inForm: true, form: { origin: 'https://evil.example', path: '/collect' } })
+  })
+
   it('a submit control is at least a submission, and its form must stay on this origin', () => {
     expect(judge('browser_click', { index: 1 }, { targets: { target: found('button', 'OK', { submits: true, form: { origin: 'https://evil.example', path: '/collect', query: false } }) } }))
       .toEqual({ eligible: false, reason: 'form-destination' })
@@ -172,7 +179,7 @@ describe('commit classes (security review F2)', () => {
   it.each([
     'Done', 'OK', 'Continue', 'Yes', 'Move to trash', 'Empty trash', 'Archived', 'Deleted', 'Make public', 'Forward', 'Share', 'Publish', 'Transfer',
     'Merge', 'Revoke', 'Remove', 'Unsubscribe', 'Block', 'Report', 'I understand the consequences, delete this repository', '移至回收站', '发送', '',
-    'Lunch on Friday', 'Apply', 'Approve',
+    'Lunch on Friday', 'Apply', 'Approve', 'Close issue', 'Cancel membership', 'Go live', 'Hide post', 'Edit permissions', 'Show more of Bob\'s posts',
   ])('a button named %j needs the user\'s words (at least medium)', (name) => {
     const result = judge('browser_click', { index: 1 }, { targets: { target: found('button', name) } })
     expect(['medium', 'high']).toContain(floorOf(result))
@@ -203,7 +210,10 @@ describe('commit classes (security review F2)', () => {
     expect(floorOf(press('Tab', found('textbox', 'Name', { focused: true })))).toBe('low')
     expect(floorOf(press('Shift+Tab', found('textbox', 'Name', { focused: true })))).toBe('low')
     expect(floorOf(press('ArrowDown', found('listbox', 'Country', { focused: true })))).toBe('low')
-    expect(floorOf(press('Enter', found('textbox', 'Search', { focused: true, inForm: true })))).toBe('medium')
+    expect(floorOf(press('Enter', found('textbox', 'Search', { focused: true, inForm: true, form: SAME('/search') })))).toBe('medium')
+    // Enter in a field submits its form: a form posting elsewhere, or one the page did not describe, is the user's call.
+    expect(press('Enter', found('textbox', 'Search', { focused: true, inForm: true, form: { origin: 'https://evil.example', path: '/collect', query: false } }))).toEqual({ eligible: false, reason: 'form-destination' })
+    expect(press('Enter', found('textbox', 'Search', { focused: true, inForm: true }))).toEqual({ eligible: false, reason: 'form-destination' })
     expect(floorOf(press('Enter', found('textarea', 'Message', { focused: true })))).toBe('medium')
     expect(floorOf(press('a', found('textbox', 'Name', { focused: true })))).toBe('low')
   })
@@ -215,7 +225,8 @@ describe('commit classes (security review F2)', () => {
     expect(floorOf(select({ chosen: ['Owner'] }, { index: 4, label: 'Owner' }))).toBe('high')
     expect(floorOf(select({ chosen: ['Public'] }))).toBe('medium')
     expect(floorOf(select({ chosen: ['Japan'] }))).toBe('low')
-    expect(floorOf(select({ chosen: ['Japan'], autoSubmit: true }))).toBe('medium')
+    expect(floorOf(select({ chosen: ['Japan'], autoSubmit: true, inForm: true, form: SAME('/prefs') }))).toBe('medium')
+    expect(select({ chosen: ['Japan'], autoSubmit: true, inForm: true, form: { origin: 'https://evil.example', path: '/collect', query: false } })).toEqual({ eligible: false, reason: 'form-destination' })
   })
 
   it('describes the options a native select would choose from the page, not from the call', () => {

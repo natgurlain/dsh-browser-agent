@@ -61,6 +61,7 @@ export type IneligibleReason =
   | 'data-in-path'
   | 'press-key'
   | 'select-unresolved'
+  | 'download'
 
 /** What the extension concluded about an eligible action. */
 export interface Assessment {
@@ -151,15 +152,20 @@ const ADDRESS_FIELD = /\b(?:to|cc|bcc|recipients?|e-?mail|address|url|link|websi
 const ADDRESS_KINDS: ReadonlySet<TargetKind> = new Set(['email', 'url', 'tel', 'number', 'spinbutton'])
 
 /**
- * Names whose first word says the button only shows, hides or moves around
- * (EN/ZH). Such a button stays low; any other button is at least medium.
+ * The words a harmless button's name may consist of (EN): verbs that only
+ * show, hide or move around, and the UI nouns they act on. A button is low
+ * only when EVERY word of its name is one of these ("Show more", "Next
+ * page", "Expand all comments"); "Close issue", "Cancel membership" or "Go
+ * live" are not. Any other button is at least medium.
  */
-const HARMLESS_FIRST_WORDS = new Set([
+const HARMLESS_WORDS = new Set([
   'open', 'show', 'view', 'see', 'expand', 'collapse', 'more', 'less', 'load', 'read', 'next', 'previous', 'prev', 'back', 'close',
-  'dismiss', 'cancel', 'hide', 'menu', 'options', 'details', 'info', 'help', 'filter', 'filters', 'sort', 'preview', 'play', 'pause',
-  'zoom', 'toggle', 'edit', 'copy', 'refresh', 'scroll', 'page', 'go',
+  'dismiss', 'hide', 'menu', 'options', 'details', 'info', 'help', 'filter', 'filters', 'sort', 'preview', 'zoom', 'in', 'out',
+  'toggle', 'refresh', 'scroll', 'page', 'pages', 'all', 'comments', 'replies', 'results', 'items', 'list', 'panel', 'dialog',
+  'sidebar', 'navigation', 'nav', 'section', 'thread', 'up', 'down', 'top', 'bottom', 'first', 'last', 'older', 'newer', 'the',
+  'a', 'an', 'cancel', 'go', 'to', 'tab', 'tabs', 'image', 'images', 'photo', 'photos', 'text', 'description', 'answer', 'answers',
 ])
-const HARMLESS_ZH = /^(?:打开|显示|查看|展开|收起|更多|下一|上一|返回|关闭|取消|菜单|详情|帮助|筛选|排序|刷新|预览|编辑|复制|加载)/u
+const HARMLESS_ZH = /^(?:打开|显示|查看|展开|收起|更多|下一页|上一页|返回|关闭|菜单|详情|帮助|筛选|排序|刷新|预览|加载)(?:更多|详情|菜单|全部|评论|回复|内容|结果)?$/u
 
 /** Keys that only move focus, scroll or dismiss. */
 const NAVIGATION_KEYS = new Set(['Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Escape', 'Esc', 'PageUp', 'PageDown', 'Home', 'End', 'Up', 'Down', 'Left', 'Right'])
@@ -231,8 +237,8 @@ export function classOfWords(...texts: Array<string | undefined>): CommitClass |
 export function harmlessButtonName(name: string): boolean {
   const trimmed = name.trim()
   if (HARMLESS_ZH.test(trimmed)) return true
-  const first = trimmed.toLowerCase().match(/[\p{L}\p{N}]+/u)?.[0]
-  return first !== undefined && HARMLESS_FIRST_WORDS.has(first)
+  const words = trimmed.toLowerCase().match(/[\p{L}\p{N}']+/gu) ?? []
+  return words.length > 0 && words.every((word) => HARMLESS_WORDS.has(word) || /^\d+$/u.test(word))
 }
 
 function highRisk(...texts: Array<string | undefined>): boolean {
@@ -255,6 +261,8 @@ function classifyClick(target: Extract<TargetState, { state: 'found' }>, topOrig
   const context = target.context?.text
   // A link: where it goes decides. Cross-origin, query-carrying or non-web destinations are the user's call.
   if (target.href !== undefined) {
+    // A download writes a file to the user's disk: never Auto.
+    if (target.download === true) return no('download')
     const href = target.href
     if ('other' in href || topOrigin === undefined || href.origin !== topOrigin || href.query) return no('link-destination')
     if (tainted && pathCarriesData(href.path)) return no('data-in-path')
@@ -342,7 +350,12 @@ function classifyPress(target: Extract<TargetState, { state: 'found' }>, args: R
   if (ENTER_KEYS.has(key) && field) {
     // Shift+Enter in a multi-line field is a line break: typing.
     if (press.modifiers.includes('Shift') && (target.kind === 'textarea' || target.kind === 'editable')) return classifyTyping(target, tainted)
-    if (target.inForm === true) return { commitClass: 'submit', formSubmitLikely: true, highRiskWords: highRisk(target.name, target.context?.text) }
+    if (target.inForm === true) {
+      // Enter submits the field's form: where that form goes decides too.
+      const form = target.form
+      if (form === undefined || 'other' in form || topOrigin === undefined || form.origin !== topOrigin) return no('form-destination')
+      return { commitClass: classOfWords(pathWords(form.path)) ?? 'submit', formSubmitLikely: true, highRiskWords: highRisk(target.name, target.context?.text, form.path) || HIGH_RISK_PATHS.test(form.path), sameOrigin: true, destination: destinationText(form) }
+    }
     // Enter in a message box sends; in any other field its page code decides.
     return { commitClass: target.kind === 'textarea' || target.kind === 'editable' ? 'send' : 'submit', formSubmitLikely: false, highRiskWords: highRisk(target.name, target.context?.text) }
   }
@@ -441,6 +454,8 @@ export function autoReviewEligibility(prompt: ApprovalPrompt, call: ReviewCallCo
       if (typeof target === 'string') return refuse(target)
       // Only a native select whose chosen options the page itself named.
       if (target.chosen === undefined || target.chosen.length === 0) return refuse('select-unresolved')
+      // A select whose page code submits on change: its form must stay on this origin.
+      if (target.autoSubmit === true && target.form !== undefined && ('other' in target.form || facts.topOrigin === undefined || target.form.origin !== facts.topOrigin)) return refuse('form-destination')
       const chosen = target.chosen.join(' · ')
       const cls = classOfWords(target.name, chosen) ?? (SHARE_OPTIONS.test(chosen) ? 'share' : target.autoSubmit === true ? 'submit' : 'none')
       classified = { commitClass: cls, formSubmitLikely: target.autoSubmit === true, highRiskWords: highRisk(target.name, target.context?.text, chosen) }

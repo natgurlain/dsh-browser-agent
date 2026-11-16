@@ -52,6 +52,22 @@ rules, strict mode), uploads, downloads, the clipboard, dialogs, developer
 tools, programs, new tabs, or anything without a panel showing the
 conversation.
 
+Known residues, stated plainly:
+
+* Target words are page-authored: a page can label a destructive control with
+  the words of the user's request; the class verb must still match.
+* The restriction veto is lexical and over-cautious ("don't forget to send it"
+  vetoes too): an extra card, never an extra approval.
+* "Trust this domain for this session" on any card takes that origin out of
+  Auto review and its limits entirely: trusted origins skip cards before Auto
+  is consulted, exactly as without Auto.
+* The record of panel prompts is in memory: after DSH restarts, the user must
+  send a new message before anything is approved.
+* A side panel counts as "showing" the conversation even when its window is in
+  the background.
+* The policy decision (site rules, taint) is not recomputed when the review
+  answers; eligibility, visibility and the commit class are.
+
 ## 3. Threat model
 
 | Attacker | Capability | What Auto review must not let them do |
@@ -178,7 +194,8 @@ is shown and no model is called.
 | 8 | Every addressed element found; none sensitive, `password` or `file`; for typing `typedTargetSensitive === false` | sensitive and unknown targets |
 | 9 | Navigation: same origin, no query or fragment, **not after the conversation read web pages** | cross-origin; `?action=delete`; any navigation once tainted |
 | 10 | Link clicks: the page reported a destination; same origin, no query or fragment, http(s); once tainted, no path segment that carries a host, percent-encoding or a long letter-digit run | cross-origin or query links, `javascript:`, `/away/evil.example/<data>` |
-| 11 | Submit controls: the form's action is on the same origin | forms posting elsewhere |
+| 11 | Submit controls, Enter in a field with a form, and selects that submit on change: the form's action is on the same origin and was described | forms posting elsewhere |
+| 11a | Links without a `download` attribute | a download writes a file to disk |
 | 12 | Typing: no control characters (line break, tab) | a newline can press Enter; a tab moves focus onto a button a typed space presses |
 | 13 | Key presses: no `down`/`up` hold; no modifier other than Shift; the key is a navigation key, Space/Enter on a control (classified as a click on it), Enter in a text field, or a character into a text field (classified as typing) | Ctrl/Alt/Meta chords, `#`, `e`, `Delete` and other shortcuts on non-text targets |
 | 14 | Select: a native select whose chosen option labels the page itself reported | ARIA comboboxes, unresolved values |
@@ -211,10 +228,14 @@ anything else, a non-`stop` finish, an error, or 9 s → ask.
    authorize a committing action):
    * a restriction in it ("only read", "read-only", "don't/do not/never/without
      … send/delete/change/…", "no changes", 不要/别/只读/只看/不得/无需/不用/勿) → ask (`restricted`);
-   * `confirm` / `unknown`: the message must name the control itself ("click
-     Done"); otherwise ask;
-   * `address`: the typed value must appear in the message; `type`: a
-     significant word of the typed text must;
+   * `confirm` / `unknown`: the message must name the control **as a
+     control**: in quotes ("Done", 「完成」) or right after an imperative that
+     presses or picks it ("click Done", "press Send", 点击完成). A name that
+     merely occurs ("OK, read my inbox", "tell me when you're done", "send me
+     the summary") does not count;
+   * `address`: the typed value must appear in the message; `type`: **every**
+     significant word of the typed text must (the user dictated it; one shared
+     word would let the agent append what it read to the user's words);
    * every other class: the message must use a verb of that class (send ↔
      send/forward/reply/email; delete ↔ delete/remove/trash/archive/clear;
      save ↔ save/update/apply/change/set; submit ↔ submit/post/publish/comment;
@@ -222,8 +243,9 @@ anything else, a non-`stop` finish, an error, or 9 s → ask.
      subscribe, join, …; change ↔ transfer/move/merge/revoke/reset/enable/…; EN
      and ZH) **and** share a significant word with the target (name, context,
      chosen options, drop target, destination path; verbs and stop words do
-     not count). A control named only by its verb ("Send") must be named in the
-     message.
+     not count). A control named only by its verb ("Send") must be named as a
+     control, as for `confirm`: "send the email" alone does not let a bare Send
+     button through (cost: the user writes "click Send", or answers the card).
    Otherwise ask (`no-instruction`).
 4. Otherwise allow (`allowed`).
 
@@ -241,8 +263,9 @@ to the audit log.
 `describe.ts` reports, besides kind and name: `submits` (native: a submit
 button or image input with a form owner, never from `role`), `inForm` (a
 single-line field where Enter submits), `href` (a link's origin and path, and
-whether a query or fragment is attached; `other` for non-web targets), `form`
-(a submit control's form action and method), `chosen` (the labels a
+whether a query or fragment is attached; `other` for non-web targets),
+`download`, `form` (the form action and method of a submit control, a field
+where Enter submits, or a select in a form), `chosen` (the labels a
 `browser_select` would choose, read from the page) and `autoSubmit` (an
 `onchange` handler on the select or its form). All of these are folded into
 the approval binding.
@@ -257,11 +280,13 @@ finish/agree) over the name and, for links and forms, the destination path.
 Then structure:
 
 * **buttons, menu items, clickable elements** with no committing word are
-  `none` only when their name starts with a clearly non-committing word
-  (open/show/view/expand/collapse/more/next/previous/back/close/cancel/menu/
-  details/…; ZH 打开/显示/查看/展开/…); any other button is `unknown` — at
-  least medium. A word list can never be complete, so the default for a button
-  is "needs your words";
+  `none` only when **every** word of their name is a non-committing UI word
+  (show/open/view/expand/collapse/more/next/previous/back/close/cancel/hide/
+  menu/details/page/all/comments/replies/…; ZH 打开/显示/查看/展开/… with an
+  optional 更多/详情/全部/评论/…): "Show more" and "Next page" are low, "Close
+  issue", "Cancel membership", "Go live" are not. Any other button is
+  `unknown` — at least medium. A word list can never be complete, so the
+  default for a button is "needs your words";
 * **submit controls** are at least `submit`;
 * **checkboxes, radios, switches, tabs, options** stay `none` unless their
   label changes who can see something (`share`);
