@@ -67,17 +67,36 @@ export async function runAgentUxSmoke(ctx) {
   await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'agent.pause-state') })
   await composer.fill('Hover the target, then take a screenshot.')
   await chat.getByRole('button', { name: 'Send message', exact: true }).click()
-  // The scripted model "thinks" for a few seconds before its first browser step.
+  // What a failure of the pause steps needs: every model request (a second one
+  // that carries a tool result means the first step ran; one that carries none
+  // is a retry), and the pause states the extension reported, in order.
+  const pauseEvidence = async () => JSON.stringify({
+    modelRequests: scripted.state.log,
+    pauseStates: await panel.evaluate(() => messages.filter(message => message.type === 'agent.pause-state')
+      .map(message => `${message.state.mode}:held=${message.state.held.map(call => call.name).join(',')}`)).catch(cause => `unavailable: ${cause.message}`),
+  }, null, 2)
+  // The scripted model does not answer its first request until it is released
+  // below: the turn is running, and no browser step has been asked for yet.
   const pauseButton = chat.getByRole('button', { name: 'Pause after this step', exact: true })
   await pauseButton.waitFor()
   await shot(chat, 'panel-running-controls.png')
   await pauseButton.click()
   await chat.getByText('Paused', { exact: true }).waitFor()
+  // Paused for certain (the extension said so) before the model asks for its
+  // first step. A fixed "thinking" time used to stand in for this, and a slow
+  // machine let the first step run before the click: the second step was then
+  // the one held, after two model requests.
+  await waitFor(() => panel.evaluate(() => messages.some(message => message.type === 'agent.pause-state' && message.state.mode === 'paused')),
+    'the extension acknowledged the pause')
+  scripted.release('paused')
   await waitFor(() => panel.evaluate(() => messages.some(message => message.type === 'agent.pause-state' && message.state.held.length === 1)), 'held agent step', 20_000)
   await chat.getByText('1 browser action is waiting for you.', { exact: true }).waitFor()
   await shot(chat, 'panel-paused-after-step.png')
   await delay(400)
-  assert.equal(scripted.state.requests, 1, 'the model is waiting on its held step, not retrying')
+  assert.deepEqual(
+    await panel.evaluate(() => messages.findLast(message => message.type === 'agent.pause-state').state.held.map(call => call.name)),
+    ['browser_click'], `the first step is the one held\n${await pauseEvidence()}`)
+  assert.equal(scripted.state.requests, 1, `the model is waiting on its held step, not retrying\n${await pauseEvidence()}`)
   await chat.getByRole('button', { name: 'Take over', exact: true }).click()
   await chat.getByText("You're in control", { exact: true }).waitFor()
   const resumeButton = await waitFor(() => shadowButtonCenter(page, 'resume'), 'takeover banner on the page')

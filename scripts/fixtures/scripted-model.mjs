@@ -7,11 +7,22 @@ import { createServer } from 'node:http'
 import { readJson, streamReply } from '../lib/dsh-harness.mjs'
 
 /**
- * @param {Array<{ name: string, args: Record<string, unknown> }>} steps - tool calls, in order.
+ * A step with `gate: '<name>'` is not answered until `release('<name>')`: the
+ * model "thinks" for exactly as long as the smoke needs to set something up
+ * (click Pause, see it acknowledged), instead of for a fixed time the smoke
+ * then has to beat.
+ *
+ * `state.log` records every request (when it arrived, how many tool results
+ * it carried, which step it was answered with): a second request carrying no
+ * new tool result is a retry; one carrying a result means that step ran.
+ * @param {Array<{ name: string, args: Record<string, unknown>, delayMs?: number, gate?: string }>} steps - tool calls, in order.
  * @param {string} finalText - the closing assistant message.
  */
 export async function startScriptedModel(steps, finalText) {
-  const state = { requests: 0, sawResumeContext: false, toolResults: [] }
+  const state = { requests: 0, sawResumeContext: false, toolResults: [], log: [] }
+  const startedAt = Date.now()
+  const released = new Set()
+  const waiting = new Map()
   const server = createServer(async (request, response) => {
     const body = await readJson(request)
     if (!String(request.url).endsWith('/chat/completions')) {
@@ -29,8 +40,15 @@ export async function startScriptedModel(steps, finalText) {
     const toolMessages = messages.filter(message => message.role === 'tool')
     state.toolResults = toolMessages.map(text)
     const next = steps[toolMessages.length]
+    const entry = { atMs: Date.now() - startedAt, toolResults: toolMessages.length, answer: next?.name ?? 'final text' }
+    state.log.push(entry)
     // A step may "think" first, leaving the panel time to show the running controls.
     if (next?.delayMs !== undefined) await new Promise(resolve => setTimeout(resolve, next.delayMs))
+    if (next?.gate !== undefined && !released.has(next.gate)) {
+      entry.gated = next.gate
+      await new Promise(resolve => { waiting.set(next.gate, [...(waiting.get(next.gate) ?? []), resolve]) })
+    }
+    entry.answeredAtMs = Date.now() - startedAt
     const id = `chatcmpl-${state.requests}`
     const model = body.model ?? 'scripted'
     const callId = `call_${state.requests}`
@@ -51,6 +69,12 @@ export async function startScriptedModel(steps, finalText) {
   return {
     port: server.address().port,
     state,
+    /** Let every step gated on `name` answer, now and from here on. */
+    release: (name) => {
+      released.add(name)
+      for (const resolve of waiting.get(name) ?? []) resolve()
+      waiting.delete(name)
+    },
     close: () => new Promise(resolve => server.close(resolve)),
   }
 }

@@ -172,6 +172,40 @@ describe('audit notes and the pause gate', () => {
     expect(hook.mock.calls.map(([callId]) => callId)).toEqual(['click'])
   })
 
+  it('answers a held step once and acts on the page once, however long it is held and however often Resume arrives', async () => {
+    const env = await boot()
+    env.panel.emit({ type: 'agent.pause', mode: 'after-step' })
+    await vi.waitFor(() => { expect(env.pauseStates().at(-1)?.mode).toBe('paused') })
+    env.socket.receive({ t: 'tool.call', id: 'click', name: 'browser_click', args: { selector: 'h1' }, expiresAt: Date.now() + 30_000, sessionId: 'session-live' })
+    await vi.waitFor(() => { expect(env.pauseStates().at(-1)?.held).toHaveLength(1) })
+
+    // Held: the bridge hears nothing about this call. No result and no error
+    // means the model has nothing to answer or retry on; its one request for
+    // this step simply stays open.
+    await new Promise((resolve) => { setTimeout(resolve, 150) })
+    const aboutTheCall = (): Sent[] => env.sent().filter((frame) => frame.id === 'click')
+    const pageClicks = (): number => env.tabMessages.filter(({ message }) => message.type === 'DSH_ACTION' && message.action === 'browser_click').length
+    expect(aboutTheCall()).toEqual([])
+    expect(pageClicks()).toBe(0)
+    expect(env.pauseStates().at(-1)?.held).toHaveLength(1)
+
+    env.panel.emit({ type: 'agent.resume' })
+    // A second Resume (a double click, a second panel) while the first is under way.
+    env.panel.emit({ type: 'agent.resume' })
+    await vi.waitFor(() => {
+      env.answerRpcs()
+      expect(env.sent()).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'click', ok: true }))
+    })
+    env.panel.emit({ type: 'agent.resume' })
+    await new Promise((resolve) => { setTimeout(resolve, 150) })
+    env.answerRpcs()
+
+    // One answer for the one call, and the page was clicked once.
+    expect(aboutTheCall().filter((frame) => frame.t === 'tool.result')).toHaveLength(1)
+    expect(pageClicks()).toBe(1)
+    expect(env.pauseStates().at(-1)).toMatchObject({ mode: 'running', held: [] })
+  })
+
   it('shows the takeover banner on the controlled tab; its Resume opens the panel, which resumes', async () => {
     const env = await boot()
     env.socket.receive({ t: 'tool.call', id: 'first', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 10_000, sessionId: 'session-live' })

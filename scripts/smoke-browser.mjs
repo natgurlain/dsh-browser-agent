@@ -75,7 +75,8 @@ phase3Model.listen(0, '127.0.0.1')
 await once(phase3Model, 'listening')
 // A scripted model drives one real Agent session through the browser tools.
 const scripted = await startScriptedModel([
-  { name: 'browser_click', args: { selector: '#hoverTarget' }, delayMs: 5_000 },
+  // Answered once the smoke has paused the agent (agent-ux-smoke.mjs releases it).
+  { name: 'browser_click', args: { selector: '#hoverTarget' }, gate: 'paused' },
   { name: 'browser_screenshot', args: {} },
 ], 'Timeline smoke done.')
 

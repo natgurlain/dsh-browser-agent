@@ -52,6 +52,27 @@ export async function runPhase3Smoke(ctx) {
   await chat.setViewportSize({ width: 420, height: 860 })
   await chat.goto(`chrome-extension://${extensionId}/panel/index.html`)
   await page.bringToFront()
+  // The panel that just opened starts a new chat, and a new chat binds the
+  // tools to whichever tab is active when it is created. The program below is
+  // called without a session, so it follows that binding: let it settle on
+  // the fixture page first. Started earlier, a slow session.create could land
+  // while the panel tab was in front for its screenshot, move the tools to
+  // the panel's own page, and the approved program was (rightly) refused:
+  // "The controlled tab changed while the program card was open."
+  await waitFor(() => chat.locator('textarea').isEnabled(), 'program panel readiness')
+  /** Which tab the tools are bound to and which is active, for a failure of the program steps. */
+  const affinityEvidence = async () => JSON.stringify(await panel.evaluate(async () => ({
+    affinity: messages.findLast(message => message.type === 'tab-affinity')?.state,
+    tabs: (await chrome.tabs.query({})).map(tab => `${tab.id}${tab.active ? '*' : ''} ${String(tab.url).slice(0, 70)}`),
+    recentAffinity: messages.filter(message => message.type === 'tab-affinity').slice(-8)
+      .map(message => `r${message.state.revision}:${message.state.status}:controlled=${message.state.controlled?.tabId}:active=${message.state.active?.tabId}`),
+  })).catch(cause => `unavailable: ${cause.message}`), null, 2)
+  await waitFor(() => panel.evaluate(() => {
+    const state = messages.findLast(message => message.type === 'tab-affinity')?.state
+    return state?.status === 'following' && String(state.controlled?.url).includes('/reliability')
+  }), 'the tools follow the fixture page before the program starts').catch(async error => {
+    throw new Error(`${error.message}\n--- tab affinity ---\n${await affinityEvidence()}`, { cause: error })
+  })
   await clearApprovals()
   const program = [
     { tool: 'browser_type', args: { selector: '#runQ', text: 'wool socks', replace: true }, expect: { value: { selector: '#runQ', equals: 'wool socks' } } },
@@ -73,7 +94,9 @@ export async function runPhase3Smoke(ctx) {
   taken.push(cardShot)
   await page.bringToFront()
   await panel.evaluate(id => { panelPort.postMessage({ type: 'approval.response', id, decision: 'allow-once' }) }, card.id)
-  const ran = succeed(await pending)
+  const outcome = await pending
+  if (outcome.isError) throw new Error(`the approved program did not run: ${JSON.stringify(outcome)}\n--- tab affinity ---\n${await affinityEvidence()}`)
+  const ran = succeed(outcome)
   assert.match(ran, /Program completed: 3 of 3 steps ran/)
   assert.match(ran, /expect met/)
   assert.match(ran, /Page changes at the stop point/)
