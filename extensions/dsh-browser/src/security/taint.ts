@@ -64,6 +64,16 @@ export interface TaintRecord {
   /** Origins whose content entered the session (empty when unknown, e.g. tab titles). */
   sources: string[]
   /**
+   * Destinations of navigations that did not succeed (denied on their card,
+   * refused by policy, failed) and that are not among {@link sources}. Such a
+   * page was not read, so it is never shown as read and never offered for
+   * trust. It still counts against every "only source" exemption
+   * ({@link onlySourceIs}) and against lifting the taint, because a failed
+   * navigation may have loaded part of the page: an attempt can add
+   * protection, never remove it.
+   */
+  attempted?: string[]
+  /**
    * Origin of the most recent page read, when known. Informational only: no
    * exemption keys on it (see {@link onlySourceIs}).
    */
@@ -167,6 +177,9 @@ export class TaintTracker {
       const record = raw as Partial<TaintRecord>
       this.records.set(key, {
         sources: Array.isArray(record.sources) ? record.sources.filter((origin): origin is string => typeof origin === 'string') : [],
+        ...Array.isArray(record.attempted) && record.attempted.length > 0
+          ? { attempted: record.attempted.filter((origin): origin is string => typeof origin === 'string') }
+          : {},
         ...typeof record.lastReadOrigin === 'string' ? { lastReadOrigin: record.lastReadOrigin } : {},
         firstTool: typeof record.firstTool === 'string' ? record.firstTool : 'unknown',
         since: typeof record.since === 'number' ? record.since : this.now(),
@@ -178,8 +191,11 @@ export class TaintTracker {
    * Mark a session tainted by content from `origins` (may be empty).
    * `pageOrigin` is the top page's origin, recorded as the page last read; it
    * is never guessed from a multi-origin list (an iframe must not set it).
+   * `attempted` are destinations the call tried to reach without success
+   * ({@link TaintRecord.attempted}); one that is (or later becomes) a source
+   * is kept only as a source.
    */
-  mark(sessionId: string | undefined, tool: string, origins: readonly string[], pageOrigin?: string): void {
+  mark(sessionId: string | undefined, tool: string, origins: readonly string[], pageOrigin?: string, attempted: readonly string[] = []): void {
     const key = taintKey(sessionId)
     const existing = this.records.get(key)
     const sources = new Set(existing?.sources ?? [])
@@ -192,14 +208,17 @@ export class TaintTracker {
       this.persistExempt()
     }
     const lastReadOrigin = pageOrigin ?? existing?.lastReadOrigin
+    const tried = [...new Set([...existing?.attempted ?? [], ...attempted])].filter((origin) => !sources.has(origin)).sort()
     const next: TaintRecord = {
       sources: [...sources].sort(),
+      ...tried.length === 0 ? {} : { attempted: tried },
       ...lastReadOrigin === undefined ? {} : { lastReadOrigin },
       firstTool: existing?.firstTool ?? tool,
       since: existing?.since ?? this.now(),
     }
     const changed = existing === undefined
       || existing.sources.length !== next.sources.length
+      || (existing.attempted?.length ?? 0) !== tried.length
       || existing.lastReadOrigin !== next.lastReadOrigin
     this.records.set(key, next)
     if (changed) this.changed(key)
@@ -224,7 +243,8 @@ export class TaintTracker {
     const record = this.records.get(key)
     if (record === undefined) return false
     this.records.delete(key)
-    this.noteExemptRead(sessionId, record.sources)
+    // Attempted destinations are remembered too: they keep counting against "only source".
+    this.noteExemptRead(sessionId, [...record.sources, ...record.attempted ?? []])
     this.changed(key)
     return true
   }
@@ -275,10 +295,17 @@ export interface TaintCallFacts {
  * the session read, searching the site it read) moves nothing off-site. An
  * unknown or mixed source set never qualifies, and the most recently read page
  * is deliberately not enough — one plain navigation to an attacker page must
- * not make that page the exempt sink for everything read before.
+ * not make that page the exempt sink for everything read before. Neither is
+ * a navigation that was only attempted: a destination the session tried to
+ * reach is not a read (it alone never makes that origin the only source), and
+ * an attempted destination other than `origin` disqualifies it, exactly as a
+ * read of it would.
  */
 export function onlySourceIs(taint: TaintRecord, origin: string | undefined): boolean {
-  return origin !== undefined && taint.sources.length > 0 && taint.sources.every((source) => source === origin)
+  return origin !== undefined
+    && taint.sources.length > 0
+    && taint.sources.every((source) => source === origin)
+    && (taint.attempted ?? []).every((source) => source === origin)
 }
 
 /** Whether a `browser_press` call types characters (rather than a navigation or editing key). */
