@@ -52,13 +52,10 @@ cd dsh-browser-agent
 
 安装器会安装桥插件和 Chrome 扩展。它下载一个带标签的发布版本，把每个下载的文件与该版本的 `SHA256SUMS` 逐一比对，校验通过后才解压并从源码构建。校验值不符、缺少 `SHA256SUMS` 或下载不完整时，安装会在解压或执行任何内容之前停止。
 
-> [!NOTE]
-> 仓库目前是私有的，`v0.1.5` 也尚未发布。在此之前，下面的下载命令会返回 404。请改为从 checkout 安装（见[安装或更新](#安装或更新)），或者先让安装器获得访问权限：运行 `gh auth login`，或 `export DSH_BROWSER_GITHUB_TOKEN=<可读取该仓库的 token>`，然后在 checkout 中以 `--release v0.1.5` 运行 `install.sh`。
-
 macOS 与 Linux。先下载安装器，用已发布的校验值核对，再运行：
 
 ```sh
-tag=v0.1.5
+tag=v0.2.0
 base=https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag
 curl --proto '=https' --tlsv1.2 -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS"
 grep ' install.sh$' SHA256SUMS | sha256sum -c -    # macOS: shasum -a 256 -c -
@@ -68,7 +65,7 @@ bash install.sh --release "$tag"
 Windows（PowerShell；`install.ps1` 的发布版本路径尚未在 Windows 机器上运行过）：
 
 ```powershell
-$tag = 'v0.1.5'
+$tag = 'v0.2.0'
 $base = "https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag"
 irm "$base/install.ps1" -OutFile install.ps1; irm "$base/SHA256SUMS" -OutFile SHA256SUMS
 $want = (Select-String -Path SHA256SUMS -Pattern ' install\.ps1$').Line.Split(' ')[0]
@@ -79,7 +76,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --release $tag
 同样的校验值也印在每个[发布版本](https://github.com/natgurlain/dsh-browser-agent/releases)的说明里。下面的简短形式不会先核对安装脚本本身；安装器下载的内容仍会被校验：
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.1.5/install.sh | bash -s -- --release v0.1.5
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.2.0/install.sh | bash -s -- --release v0.2.0
 ```
 
 `--release latest` 安装最新的发布版本，而不是指定的版本。`SHA256SUMS` 与文件来自同一个发布版本，因此它能发现损坏、截断或被替换的下载，但不能防范接管了仓库或发布流程的人所发布的版本；见 [RELEASING.md](RELEASING.md#what-verification-covers)。
@@ -179,7 +176,7 @@ Playwright / 扩展的配对耗时比为 **1.24**（95% CI **1.16–1.34**）：
 更新时，在侧栏打开**设置 → 软件更新**。检查会把当前版本与 GitHub 上的最新发布版本比较，并给出一条用本机已有的安装器安装该版本的命令，例如：
 
 ```sh
-DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.1.5
+DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.2.0
 ```
 
 安装器选项：
@@ -193,7 +190,7 @@ DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release
 | | `DSH_DESKTOP_APP=<路径>` 或 `none` | DeepSeek Harness 桌面应用的位置；`none` 表示不处理桌面应用（适用于 `install.sh` 和卸载器）。 |
 | `--lang en` 或 `--lang zh` | `DSH_BROWSER_LANG` | 安装器和卸载器的输出语言。每次运行只输出一种语言：默认英文，系统语言为中文时输出中文。 |
 
-如需从源码 checkout 安装（不下载任何文件；仓库私有期间也用这种方式安装）：
+如需从源码 checkout 安装（不下载任何文件）：
 
 ```sh
 git clone https://github.com/natgurlain/dsh-browser-agent.git
@@ -210,13 +207,13 @@ Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版�
 记录了安装位置的安装由本机已有的卸载器移除。否则，命令会获取与扩展自身版本一同发布的卸载器；它从该发布版本下载 `uninstall.mjs`，只有在其 SHA-256 与 `SHA256SUMS` 一致后才运行。macOS 或 Linux：
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.1.5/uninstall.sh | bash -s -- --release v0.1.5
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.2.0/uninstall.sh | bash -s -- --release v0.2.0
 ```
 
 Windows 请运行：
 
 ```powershell
-& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.1.5/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s --release v0.1.5 } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
+& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.2.0/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s --release v0.2.0 } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
 ```
 
 在源码目录中运行 `bash scripts/uninstall.sh` 或 `.\scripts\uninstall.ps1`。
@@ -269,7 +266,7 @@ Chrome 本机使用无需配置：安装器会把桥接 token 放到已安装的
 - 两侧证明都绑定扩展实际拨号的地址和端口，桥接会与它接受的套接字核对，因此从其他端口转发握手的本地进程无法完成握手。握手之后每一帧（双向）都带有按连接派生的密钥和严格递增序号的 MAC；未封装、重放、乱序或篡改的帧会直接断开连接。帧只做认证、不加密。经端口转发（Docker `-p`、SSH 隧道）以不同端口访问桥接时会被拒绝，除非在插件配置 `forwardedPorts` 中列出该回环端口**并且**设置 `allowForwardedPorts: true`。在转发端口上监听的程序位于中间，可以读取每一帧（会话记录、页面内容），因此只列出你控制的转发：在列出的端口空闲时绑定它的本地进程可以借它中转。双方声明的能力（caps）也绑定在两侧证明中（协议 v4），即使是受信任的转发也无法开启开发者工具组或修改快照上限。桥接 URL 中的 DNS 名称仅在桥接监听回环地址时被接受；局域网或远程桥接必须用 IP 地址连接。
 - 插件配置中固定的 `token` 至少 32 个可打印字符且具备足够熵（例如 `openssl rand -hex 32`），否则插件启动失败，因为截获的握手可让本地观察者离线猜测弱 token。
 - Chrome 连接只接受 manifest key 固定的扩展 ID（`klmdgljhcjbbpjcplbanjeclilghnaoh`）。其他构建（Web Store 或 Brave 安装的版本）在用户把其侧边栏显示的配对码输入 DSH 后即被接受，其 ID 记录在 `~/.dsh/browser-paired-extensions.json`；bridge-browser 插件配置中的 `allowedChromeExtensionIds` 仍可用于不经配对直接允许某个构建。用 `pnpm --filter dsh-browser-extension run build:store` 构建商店包，该命令会去掉商店不接受的 `key`。
-- 桥只转发扩展实际用到的 Host 方法。扩展只能在桥接自己创建的会话中发送提示、修改设置、注入页面快照或删除会话：`session.create` 总是新建会话（忽略扩展传入的 `sessionId`、`cwd`、`workspaceId`），归属记录在 `~/.dsh/browser-bridge-sessions.json` 和桥接工作区目录中。桌面端和 CLI 会话不再出现在侧边栏的历史列表中；它们驱动浏览器时，仍可查看历史（用于审批）和停止，但不能从浏览器发送提示。子代理会话始终不可访问。
+- 桥只转发扩展实际用到的 Host 方法。扩展只能在桥接自己创建的会话中发送提示、修改设置、注入页面快照或删除会话：`session.create` 总是新建会话（忽略扩展传入的 `sessionId`、`cwd`、`workspaceId`），归属记录在 `~/.dsh/browser-bridge-sessions.json` 和桥接工作区目录中。桌面端和 CLI 会话不出现在侧边栏的历史列表中；它们驱动浏览器时，仍可查看历史（用于审批）和停止，但不能从浏览器发送提示。子代理会话始终不可访问。
 - 新的浏览器会话即使宿主默认是完全访问，也会以受限预设启动；切换到完全访问预设，以及在当前运行完全访问预设的会话中发送提示、注入或执行命令都会被拒绝。只有宿主预设表中沙箱为 `read-only` 或 `workspace-write` 的预设（或列在 `safePermissionPresets` 中的预设）被视为受限；未知预设、改名的完全访问预设以及 `custom` 都会被拒绝，`/permission` 只接受严格的 `/permission <preset>` 形式。在插件配置中设置 `allowDangerFullAccess: true` 可解除这些限制。
 - 中转站的已存密钥只会发送到保存时的地址：用不同地址测试模型列表需要重新输入密钥；修改中转站地址但未重新输入密钥时，已存密钥会被清除。
 

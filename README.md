@@ -52,13 +52,10 @@ No address or password to enter: the installer gives the extension what it needs
 
 The installer installs the bridge plugin and Chrome extension. It downloads one tagged release, checks every downloaded file against that release's `SHA256SUMS`, and only then unpacks it and builds it from source. A digest mismatch, a missing `SHA256SUMS` or an incomplete download stops the install before anything is unpacked or run.
 
-> [!NOTE]
-> The repository is private for now and `v0.1.5` has not been published yet. Until it is, the download commands below answer 404. Install from a checkout instead (see [Install or update](#install-or-update)), or give the installer access first: `gh auth login`, or `export DSH_BROWSER_GITHUB_TOKEN=<a token that can read the repository>`, then run `install.sh` from a checkout with `--release v0.1.5`.
-
 macOS and Linux. Download the installer, check it against the published digest, then run it:
 
 ```sh
-tag=v0.1.5
+tag=v0.2.0
 base=https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag
 curl --proto '=https' --tlsv1.2 -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS"
 grep ' install.sh$' SHA256SUMS | sha256sum -c -    # macOS: shasum -a 256 -c -
@@ -68,7 +65,7 @@ bash install.sh --release "$tag"
 Windows, in PowerShell (the release path of `install.ps1` has not been run on a Windows machine yet):
 
 ```powershell
-$tag = 'v0.1.5'
+$tag = 'v0.2.0'
 $base = "https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag"
 irm "$base/install.ps1" -OutFile install.ps1; irm "$base/SHA256SUMS" -OutFile SHA256SUMS
 $want = (Select-String -Path SHA256SUMS -Pattern ' install\.ps1$').Line.Split(' ')[0]
@@ -79,7 +76,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --release $tag
 The same digests are printed in the notes of each [release](https://github.com/natgurlain/dsh-browser-agent/releases). The shorter form below runs the installer without checking the script first; what the installer downloads is still verified:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.1.5/install.sh | bash -s -- --release v0.1.5
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.2.0/install.sh | bash -s -- --release v0.2.0
 ```
 
 `--release latest` installs the newest release instead of a named one. `SHA256SUMS` comes from the same release as the files, so it catches a corrupted, truncated or substituted download, not a release that was itself published by someone who took over the repository or its release workflow; see [RELEASING.md](RELEASING.md#what-verification-covers).
@@ -179,7 +176,7 @@ The summary at the end lists where the bridge was registered and what was skippe
 To update, open **Settings → Updates** in the side panel. The check compares the running version with the latest GitHub release and offers a command that installs exactly that release with the installer already on disk, for example:
 
 ```sh
-DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.1.5
+DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.2.0
 ```
 
 Installer options:
@@ -193,7 +190,7 @@ Installer options:
 | | `DSH_DESKTOP_APP=<path>` or `none` | Where the DeepSeek Harness desktop app is, or `none` to leave it alone (`install.sh` and the uninstaller). |
 | `--lang en` or `--lang zh` | `DSH_BROWSER_LANG` | Language of the installer and uninstaller output. One language is printed per run: English by default, Chinese when the system locale is Chinese. |
 
-To install from a source checkout instead (nothing is downloaded; this is also the way to install while the repository is private):
+To install from a source checkout instead (nothing is downloaded):
 
 ```sh
 git clone https://github.com/natgurlain/dsh-browser-agent.git
@@ -210,13 +207,13 @@ Open **Settings → Uninstall dsh-browser** in the extension, copy the command, 
 An installation that recorded its location is removed by the uninstaller it has on disk. Otherwise the command fetches the uninstaller published with the extension's own release; it downloads `uninstall.mjs` from that release and runs it only after its SHA-256 matched `SHA256SUMS`. On macOS or Linux:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.1.5/uninstall.sh | bash -s -- --release v0.1.5
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.2.0/uninstall.sh | bash -s -- --release v0.2.0
 ```
 
 On Windows:
 
 ```powershell
-& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.1.5/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s --release v0.1.5 } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
+& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.2.0/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s --release v0.2.0 } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
 ```
 
 From a checkout, run `bash scripts/uninstall.sh` or `.\scripts\uninstall.ps1`.
@@ -269,7 +266,7 @@ Local Chrome use requires no configuration: the installer places the bridge toke
 - Both proofs bind the address and port the extension dialed, and the bridge checks them against the socket it accepted, so a local process that relays the handshake from another port cannot complete it. Every later frame in both directions carries a MAC under a per-connection key and a strict sequence number; an unsealed, replayed, reordered, or altered frame closes the connection. Frames are authenticated, not encrypted: another local process able to observe loopback traffic can still read them. Because of the endpoint binding, a bridge reached through a port forward (Docker `-p`, SSH tunnels) on a different port is refused unless that loopback port is listed in the plugin config's `forwardedPorts` **and** `allowForwardedPorts: true` is set. Whatever listens on a forwarded port sits in the middle and can read every frame (session transcripts, page content), so list only forwards you control: a local process that binds a listed port while it is free can relay through it. The advertised capabilities are bound into both proofs too (protocol v4), so even a trusted forward cannot switch the developer-tools group on or change snapshot limits. A DNS name in the bridge URL is accepted only when the bridge listens on loopback; LAN or remote bridges must be dialed by IP address.
 - A token pinned in the plugin config must be at least 32 printable characters with real entropy (for example `openssl rand -hex 32`); a weaker token stops the plugin at startup, since a captured handshake would let a local observer guess it offline.
 - Chrome connections are accepted only from the extension ID fixed by the manifest key (`klmdgljhcjbbpjcplbanjeclilghnaoh`). Any other build (a Web Store or Brave install) is admitted once the user types the code its panel shows into DSH, which records its ID in `~/.dsh/browser-paired-extensions.json`; `allowedChromeExtensionIds` in the bridge-browser plugin config remains for allowing a build without pairing. Build a store package with `pnpm --filter dsh-browser-extension run build:store`, which omits the `key` the store rejects.
-- The bridge forwards only the Host methods the extension uses. It acts only in sessions it created itself: `session.create` always mints a fresh session (any `sessionId`, `cwd`, or `workspaceId` from the extension is dropped), ownership is remembered in `~/.dsh/browser-bridge-sessions.json` and by the bridge workspace directory, and only those sessions can be prompted, changed, injected into, or deleted from the browser. Desktop and CLI sessions no longer appear in the panel's history picker; when one of them drives the browser, its history can still be shown (for an approval) and stopped, but not prompted. Subagent sessions are never reachable.
+- The bridge forwards only the Host methods the extension uses. It acts only in sessions it created itself: `session.create` always mints a fresh session (any `sessionId`, `cwd`, or `workspaceId` from the extension is dropped), ownership is remembered in `~/.dsh/browser-bridge-sessions.json` and by the bridge workspace directory, and only those sessions can be prompted, changed, injected into, or deleted from the browser. Desktop and CLI sessions do not appear in the panel's history picker; when one of them drives the browser, its history can still be shown (for an approval) and stopped, but not prompted. Subagent sessions are never reachable.
 - Full access stays out of the browser's reach: new browser sessions start on a restricted preset even when the Host default is full access; switching to a full-access preset, and prompting, injecting into, or running commands in a session that currently runs one, is refused. A preset counts as restricted only when the Host's preset table bundles a `read-only` or `workspace-write` sandbox (or you list it in `safePermissionPresets`); unknown presets, renamed full-access presets, and `custom` are refused, and `/permission` lines are accepted only in the exact `/permission <preset>` form. Set `allowDangerFullAccess: true` in the plugin config to lift these limits.
 - A stored relay key is spent only against the address it was saved for: model discovery with a different address needs the key re-entered, and changing a relay's address without re-entering its key clears the stored key.
 
