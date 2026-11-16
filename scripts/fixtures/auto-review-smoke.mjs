@@ -180,7 +180,7 @@ export async function runAutoReviewSmoke(ctx) {
   assert.equal(await chat.locator('.timeline-step-auto-reason').first().textContent(), 'Approved by Auto review')
   await shot(chat, 'auto-review-approved-row.png')
   autoModel.setReviewer(honestReviewer)
-  results.push('Auto review on: a low-risk click ran with no card, showed "Reviewing…" while the conversation\'s model decided, then the Auto badge and the reviewer\'s reason')
+  results.push('Auto review on: a low-risk click ran with no card, showed "Reviewing…" while the conversation\'s model decided, then the Auto badge and the fixed "Approved by Auto review" line')
 
   // ---- 2. The reviewer asks: the ordinary card, with its line ----
   await send('AR2 Have a look at the note form.')
@@ -193,7 +193,7 @@ export async function runAutoReviewSmoke(ctx) {
   await chat.getByRole('button', { name: 'Deny', exact: true }).click()
   await turnDone('AR2')
   assert.equal(await page.evaluate(() => window.counts.sent), 0, 'the submit the user never asked for did not run')
-  results.push('a reviewer "ask" shows the ordinary card with "Auto review asked: <reason>", and the user decides')
+  results.push('a reviewer "ask" shows the ordinary card with a fixed "Auto review asked: …" sentence (never model text), and the user decides')
 
   // ---- 3. A forced card still appears with Auto on, and is never reviewed ----
   const host = new URL(autoPage).host
