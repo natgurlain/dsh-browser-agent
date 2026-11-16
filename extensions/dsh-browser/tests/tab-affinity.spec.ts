@@ -295,6 +295,27 @@ describe('TabAffinityController', () => {
     expect(lost.bindInitial(tab(5))).toBe(false)
   })
 
+  it('leaves another conversation where it is when a new chat binds itself to the active tab', () => {
+    const affinity = new TabAffinityController()
+    affinity.observeActive(tab(1))
+    expect(affinity.bindInitial(tab(1), 'session-with-card')).toBe(true)
+
+    // The user looks at another tab and a new chat starts there (what a panel does when it opens).
+    affinity.observeActive(tab(2))
+    expect(affinity.bindNewSession('session-new-chat', tab(2))).toBe(true)
+
+    // The first conversation, and anything waiting on its tab (an open program
+    // card), is untouched: its calls still resolve to tab 1 and only tab 1.
+    expect(affinity.resolveTarget('session-with-card')).toEqual({ kind: 'target', tab: tab(1) })
+    expect(affinity.allowsTarget(1, 'session-with-card')).toBe(true)
+    expect(affinity.allowsTarget(2, 'session-with-card')).toBe(false)
+    expect(affinity.resolveTarget('session-new-chat')).toEqual({ kind: 'target', tab: tab(2) })
+    // What does move is the panel's own view (the focused conversation), which
+    // is also what a call without a session follows.
+    expect(affinity.snapshot()).toMatchObject({ status: 'following', controlled: { tabId: 2 } })
+    expect(affinity.resolveTarget()).toEqual({ kind: 'target', tab: tab(2) })
+  })
+
   it('supports independent per-session tab affinity for concurrent sessions', () => {
     const affinity = new TabAffinityController()
     affinity.observeActive(tab(1))
