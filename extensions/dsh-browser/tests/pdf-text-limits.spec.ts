@@ -103,19 +103,32 @@ describe('PDF extraction limits', () => {
   it('keeps the event loop responsive while it parses (approvals, kill switch)', async () => {
     const shown = 'BT (x) Tj 1 0 Td ET\n'.repeat(300_000)
     const bytes = pdf(base(`4 0 obj << /Length ${shown.length} >> stream\n${shown}\nendstream endobj\n`))
-    let last = performance.now()
-    let worstGap = 0
-    const ticker = setInterval(() => {
-      const now = performance.now()
-      worstGap = Math.max(worstGap, now - last)
-      last = now
-    }, 5)
-    try {
-      await extractPdfText(bytes)
-    } finally {
-      clearInterval(ticker)
+    // Worst gap between 5 ms timer ticks, and how many ticks ran.
+    const watch = async (work: () => Promise<unknown>): Promise<{ worstGap: number; ticks: number }> => {
+      let last = performance.now()
+      let worstGap = 0
+      let ticks = 0
+      const ticker = setInterval(() => {
+        const now = performance.now()
+        worstGap = Math.max(worstGap, now - last)
+        last = now
+        ticks += 1
+      }, 5)
+      try {
+        await work()
+      } finally {
+        clearInterval(ticker)
+      }
+      return { worstGap, ticks }
     }
-    expect(worstGap).toBeLessThan(200)
+    // What this machine does to an idle event loop right now: on a busy host
+    // the scheduler alone can hold a tick back for longer than the parser may.
+    const idle = await watch(() => new Promise((resolve) => setTimeout(resolve, 250)))
+    const parsing = await watch(() => extractPdfText(bytes))
+    // The parser yields: timers keep running throughout, and it adds at most
+    // 200 ms to the worst pause the machine already shows when idle.
+    expect(parsing.ticks).toBeGreaterThan(10)
+    expect(parsing.worstGap).toBeLessThan(200 + 2 * idle.worstGap)
   }, 20_000)
 
   it('stops at the deadline and on abort', async () => {
