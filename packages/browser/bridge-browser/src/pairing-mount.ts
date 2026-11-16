@@ -157,7 +157,7 @@ export async function runPairingCommand(controls: PairingControls, rawInput: str
         status.paused
           ? `Pairing is paused${status.pauseReason === 'failures' ? ' after too many wrong codes' : ''}. /${PAIRING_COMMAND_NAME} resume allows it again.`
           : waiting,
-        ...status.requests.map(request => `  ${request.official ? 'DSH Browser Agent (official)' : 'Unknown extension, not the published DSH extension'}: ${request.origin} (says it is ${request.name})`),
+        ...status.requests.map(request => `  ${request.official ? 'dsh Browser Agent (official)' : 'Unknown extension, not the published DSH extension'}: ${request.origin} (says it is ${request.name})`),
         paired.length === 0 ? 'No extension has been paired.' : `Paired extensions: ${paired.join(', ')} (/${PAIRING_COMMAND_NAME} unpair <extension> removes one).`,
       ].join('\n'),
     }

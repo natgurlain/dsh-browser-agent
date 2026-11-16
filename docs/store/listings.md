@@ -4,9 +4,9 @@ The same product text works for both stores. Field limits are noted where a stor
 
 ## Name
 
-**DSH Browser Assistant** (Chrome: up to 75 characters)
+**dsh Browser Agent** (Chrome: up to 75 characters)
 
-*The current `_locales/en/messages.json` name, "dsh Browser Assistant", should match the listing. Decide on the capitalization once, in both places.*
+*The current `_locales/en/messages.json` name, "dsh Browser Agent", should match the listing. Decide on the capitalization once, in both places.*
 
 ## Short description / summary
 
@@ -21,7 +21,7 @@ The same product text works for both stores. Field limits are noted where a stor
 
 ## Detailed description
 
-> **DSH Browser Assistant connects your browser to the DSH agent running on your own computer.** Hand a tab to the agent from the side panel, ask it for something in plain language, and watch it work: it reads the page as structured text, clicks, types, fills forms, extracts tables and moves between tabs.
+> **dsh Browser Agent connects your browser to the DSH agent running on your own computer.** Hand a tab to the agent from the side panel, ask it for something in plain language, and watch it work: it reads the page as structured text, clicks, types, fills forms, extracts tables and moves between tabs.
 >
 > **You stay in control**
 > • Approval cards show exactly what will be typed, clicked or navigated to, before it happens. A card is bound to the exact action, so it cannot be swapped afterwards.
@@ -31,7 +31,7 @@ The same product text works for both stores. Field limits are noted where a stor
 > • Every action goes into a tamper-evident audit log on your computer.
 >
 > **Local by design**
-> The extension talks only to the DSH bridge on 127.0.0.1, authenticated by a mutual handshake. Pages reach the AI model only through the DSH runtime you configured. There are no publisher servers and no telemetry.
+> The extension talks to the DSH bridge on 127.0.0.1, authenticated by a mutual handshake. Its only other connection is to api.github.com, when you press Check for updates, to read the latest release number. Pages reach the AI model only through the DSH runtime you configured. There are no publisher servers and no telemetry.
 >
 > **For developers**
 > Optional developer tools (console, network, element inspection) are available after consent per site, in Chrome only. A dev loop feeds console errors and failed requests from your localhost app back to your coding session. A local MCP endpoint lets Claude Code, Cursor or Codex use the same approval-gated browser.

@@ -589,7 +589,7 @@ export interface PanelCopy {
 }
 
 const EN: PanelCopy = {
-  documentTitle: 'dsh Browser Assistant',
+  documentTitle: 'dsh Browser Agent',
   status: {
     connected: 'Connected',
     connecting: 'Connecting…',
@@ -763,7 +763,7 @@ const EN: PanelCopy = {
   },
   settings: {
     back: 'Back to chat',
-    eyebrow: 'Browser assistant',
+    eyebrow: 'Browser agent',
     title: 'Settings',
     token: 'Token',
     pageSnapshots: 'Page snapshots',
@@ -904,7 +904,7 @@ const EN: PanelCopy = {
     availableManagedBody: 'Copy the update command and run it in Terminal. It installs exactly this release and verifies its checksums first.',
     availableCheckoutBody: 'Pull or switch to the revision you want in the original checkout, then rerun its installer.',
     availableUnknownBody: 'This copy predates install-source metadata. Use the same update flow you originally installed with; no command will be copied.',
-    reloadReminder: 'After updating, open chrome://extensions, find “dsh Browser Assistant,” click the rotating-arrow Reload button on its card, then restart dsh.',
+    reloadReminder: 'After updating, open chrome://extensions, find “dsh Browser Agent,” click the rotating-arrow Reload button on its card, then restart dsh.',
     loadingInstall: 'Identifying install…',
     managedInstall: 'Managed install',
     checkoutInstall: 'Local checkout',

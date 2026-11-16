@@ -90,7 +90,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-
 
 `--release latest` installs the newest release instead of a named one. `SHA256SUMS` comes from the same release as the files, so it catches a corrupted, truncated or substituted download, not a release that was itself published by someone who took over the repository or its release workflow; see [RELEASING.md](RELEASING.md#what-verification-covers).
 
-When the installer opens `chrome://extensions`, follow its instructions to load or reload **dsh Browser Assistant**. If dsh is already running, restart it after installation. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
+When the installer opens `chrome://extensions`, follow its instructions to load or reload **dsh Browser Agent**. If dsh is already running, restart it after installation. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
 
 > [!IMPORTANT]
 > The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project is not currently published as an npm package; use the installer above.
@@ -171,7 +171,7 @@ Run the [release install commands](#install-from-a-release), or `./scripts/insta
 
 The summary at the end lists where the bridge was registered and what was skipped. `install.ps1` on Windows registers the `web` profile only and looks for Chrome or Chromium only. Restart dsh if it is already running.
 
-To update, open **Settings → Updates** in the side panel. The check compares the running version with the latest GitHub release and offers a command that installs exactly that release with the installer already on disk, for example:
+To update, open **Settings → About** in the side panel. The check compares the running version with the latest GitHub release and offers a command that installs exactly that release with the installer already on disk, for example:
 
 ```sh
 DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.2.0
@@ -245,7 +245,7 @@ From a source checkout, run `pnpm start` in the repository root. The default tes
 npx @deepseek-ai/dsh@0.2.2-rc.2 web
 ```
 
-Local Chrome use requires no configuration: the installer places the bridge token in the installed extension directory, and the plugin keeps that copy current. Firefox requires the local bridge token described above. Open a page, click the DeepSeek whale icon, and wait for **Connected**. Existing HTTP(S) tabs are instrumented on the first action. On browser-protected pages and extension stores, the model can read tab metadata and use browser-level HTTP(S) navigation, back, forward, and reload, but it cannot inspect or operate the protected page DOM.
+Local Chrome use requires no configuration: the installer places the bridge token in the installed extension directory, and the plugin keeps that copy current. Firefox connects by pairing (the panel shows a short code to type into DSH) or with the local bridge token described above. Open a page, click the DeepSeek whale icon, and wait for **Connected**. Existing HTTP(S) tabs are instrumented on the first action. On browser-protected pages and extension stores, the model can read tab metadata and use browser-level HTTP(S) navigation, back, forward, and reload, but it cannot inspect or operate the protected page DOM.
 
 ## Troubleshooting
 

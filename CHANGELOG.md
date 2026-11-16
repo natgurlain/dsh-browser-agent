@@ -138,7 +138,6 @@ other's protocol version when they connect.
   temporary add-on and connects by pairing or by pasting the token.
 - Pairing is covered by automated tests against a real DSH host; it has not yet been tried
   by hand in the desktop app, Brave or Firefox.
-- The benchmark numbers in the README are dsh-browser's and have not been re-measured here.
 - The learning features are experimental and off by default.
 - GitHub Actions has not run for this repository; the checks were run locally with
   `pnpm gate`.

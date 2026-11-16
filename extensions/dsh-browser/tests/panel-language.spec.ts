@@ -93,7 +93,7 @@ describe('panel UI language setting', () => {
     await choose(chinese, 'en')
     expect(set).toHaveBeenLastCalledWith({ dshPanelUiLocale: 'en' })
     expect(document.documentElement.lang).toBe('en')
-    expect(document.title).toBe('dsh Browser Assistant')
+    expect(document.title).toBe('dsh Browser Agent')
     expect(document.body.textContent).toContain('Language')
   })
 })

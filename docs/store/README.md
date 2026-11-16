@@ -69,7 +69,7 @@ In a terminal-only DSH session, steps 2 and 3 are one command: `/browser-pair 4F
 
 DSH never shows a code. The code exists only in the extension's panel and in what the user types, so enter a code only when you opened the extension yourself and it is showing one.
 
-The card names the extension that is asking. The published build reads "DSH Browser Agent (official)". Any other extension reads "Unknown extension <id> — not the published DSH extension", in warning style: enter a code for it only if you installed that extension yourself and trust it, because a paired extension can drive DSH. After pairing, the card says which extension was paired and has an **Unpair** button next to it. The label goes by the extension ID the browser reports; it tells extensions apart, and it is not what stops a local program (the code is).
+The card names the extension that is asking. The published build reads "dsh Browser Agent (official)". Any other extension reads "Unknown extension <id> — not the published DSH extension", in warning style: enter a code for it only if you installed that extension yourself and trust it, because a paired extension can drive DSH. After pairing, the card says which extension was paired and has an **Unpair** button next to it. The label goes by the extension ID the browser reports; it tells extensions apart, and it is not what stops a local program (the code is).
 
 ### What protects it
 

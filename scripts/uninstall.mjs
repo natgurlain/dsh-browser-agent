@@ -176,7 +176,7 @@ function inspect(home, desktopApp) {
   if (extensionStat && !(info?.application === 'dsh-browser' && info.dshHome !== undefined)) {
     const manifest = json(join(extension, 'manifest.json'))
     const messages = json(join(extension, '_locales', 'en', 'messages.json'))
-    if (!(manifest?.name === '__MSG_extensionName__' && messages?.extensionName?.message === 'dsh Browser Assistant')) {
+    if (!(manifest?.name === '__MSG_extensionName__' && ['dsh Browser Agent', 'dsh Browser Assistant'].includes(messages?.extensionName?.message))) {
       fail(`无法确认扩展目录的归属：${extension}`, `Cannot establish ownership of extension directory: ${extension}`)
     }
   }
@@ -383,7 +383,7 @@ async function main() {
       `Kept the audit log and session workspaces; delete them by hand if you want: ${kept.join(', ')}`)
   }
   pair('请在浏览器扩展管理页面移除“dsh 浏览器助手”，完成卸载。',
-    'Remove dsh Browser Assistant from your browser to finish uninstalling.')
+    'Remove dsh Browser Agent from your browser to finish uninstalling.')
   console.log('Chrome: chrome://extensions · Edge: edge://extensions · Firefox: about:addons')
   pair('如果 DSH 正在运行，请重启 DSH。', 'If DSH is running, restart it.')
   if (plan.desktop) {

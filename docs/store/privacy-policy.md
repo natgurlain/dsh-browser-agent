@@ -7,7 +7,7 @@
 
 ## What the extension does
 
-The DSH Browser Assistant connects your browser to the DSH agent runtime that you run on your own computer. When you hand a tab to the agent, the agent can read that page as text and act on it: click, type, navigate. You approve these actions according to your settings.
+The dsh Browser Agent connects your browser to the DSH agent runtime that you run on your own computer. When you hand a tab to the agent, the agent can read that page as text and act on it: click, type, navigate. You approve these actions according to your settings.
 
 ## Data the extension handles
 

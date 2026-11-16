@@ -148,7 +148,7 @@ export function hostApprovalReason(request: ApprovalRequest): string | undefined
   // panel, and only the panel can show its rows.
   if (request.browserOnly === true) return undefined
   const sections: string[] = [
-    `Browser ${request.kind === 'read' ? 'page read' : 'action'} awaiting approval (dsh browser assistant; the side panel is closed).`,
+    `Browser ${request.kind === 'read' ? 'page read' : 'action'} awaiting approval (dsh browser agent; the side panel is closed).`,
     `Tool: ${request.action}`,
     `Summary: ${request.summary}`,
   ]

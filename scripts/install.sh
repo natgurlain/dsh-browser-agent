@@ -1343,7 +1343,7 @@ if [ "$IS_UPDATE" -eq 1 ]; then
   printf '\n'
   print_pair "    地址栏输入 $BROWSER_URL" "    Type $BROWSER_URL in the address bar"
   printf '\n'
-  print_pair "如果页面上已有“dsh 浏览器助手”卡片：" "If the “dsh Browser Assistant” card is already listed:"
+  print_pair "如果页面上已有“dsh 浏览器助手”卡片：" "If the “dsh Browser Agent” card is already listed:"
   print_pair "  点击卡片上的“重新加载”按钮，让扩展加载新文件。" "  Click “Reload” on that card so it picks up the updated files."
   printf '\n'
   print_pair "如果没有该卡片（例如从未加载过）：" "If the card is not listed (e.g. it was never loaded):"
@@ -1352,7 +1352,7 @@ if [ "$IS_UPDATE" -eq 1 ]; then
   print_pair "  选择这个目录：" "  Select this directory:"
   printf '   %s\n' "$DIST_DIR"
   printf '\n'
-  print_pair "出现 “dsh 浏览器助手” 卡片即成功。" "When the “dsh Browser Assistant” card appears, it is loaded."
+  print_pair "出现 “dsh 浏览器助手” 卡片即成功。" "When the “dsh Browser Agent” card appears, it is loaded."
 else
   if [ "$BROWSER_OPENED" -eq 1 ]; then
     print_pair "$BROWSER_NAME 扩展管理页（${BROWSER_URL}）已打开，请完成以下操作：" "$BROWSER_NAME Extensions ($BROWSER_URL) is open. Complete these steps:"

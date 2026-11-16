@@ -4,7 +4,7 @@ The Chrome Web Store asks for one justification per permission, plus a "single p
 
 **Single purpose:** The extension lets a DSH agent running on the user's own computer read and operate pages in the user's browser, at the user's request, with per-action approval. The DSH agent is the local AI coding/assistant runtime the user installs separately.
 
-**Remote code:** None. All extension code ships in the package. The extension connects only to the DSH bridge on `127.0.0.1` and exchanges data with it, never code. `browser_console_eval` runs JavaScript that the user approves on a per-call card in the page under inspection. It is page-context evaluation through `chrome.debugger`, not extension code, and it is off unless the user enables developer tools.
+**Remote code:** None. All extension code ships in the package. The extension connects to the DSH bridge on `127.0.0.1` and exchanges data with it, never code; the update check reads the latest release number from `api.github.com`. `browser_console_eval` runs JavaScript that the user approves on a per-call card in the page under inspection. It is page-context evaluation through `chrome.debugger`, not extension code, and it is off unless the user enables developer tools.
 
 | Permission | Chrome | Firefox | Justification |
 |---|---|---|---|

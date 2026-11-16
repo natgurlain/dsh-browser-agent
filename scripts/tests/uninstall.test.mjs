@@ -467,7 +467,7 @@ test('platform entry script forwards arguments and runs the actual uninstaller',
 // Han characters, CJK punctuation and the full-width forms the Chinese messages use.
 const CJK = /[⺀-鿿豈-﫿︰-﹏＀-￯]/u
 const ENGLISH_ONLY = ['Uninstall target', 'Remove web profile bridges', 'Delete:', 'Uninstalling dsh-browser',
-  'Kept the audit log', 'Remove dsh Browser Assistant', 'If DSH is running', 'Specify an absolute path', 'accepts en or zh']
+  'Kept the audit log', 'Remove dsh Browser Agent', 'If DSH is running', 'Specify an absolute path', 'accepts en or zh']
 // The locale decides only when DSH_BROWSER_LANG is not set.
 const LOCALE = { DSH_BROWSER_LANG: '', LC_ALL: '', LC_MESSAGES: '', LANG: '' }
 // The fixture directories have Chinese names on purpose; what is checked is the messages around them.
@@ -543,7 +543,7 @@ test('language: uninstall.mjs prints English, or Chinese for a Chinese locale, D
 
   const result = uninstall(fixture)
   assert.equal(result.status, 0, result.stdout + result.stderr)
-  for (const line of ['Uninstalling dsh-browser…', 'Remove dsh Browser Assistant from your browser to finish uninstalling.',
+  for (const line of ['Uninstalling dsh-browser…', 'Remove dsh Browser Agent from your browser to finish uninstalling.',
     'If DSH is running, restart it.']) {
     assert.equal(result.stdout.split('\n').includes(line), true, result.stdout)
   }
