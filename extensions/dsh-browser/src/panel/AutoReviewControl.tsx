@@ -41,7 +41,10 @@ export function AutoReviewControl({ api, copy, sessionId, disabled }: {
   const [now, setNow] = useState(() => Date.now())
   const ref = useRef<HTMLDivElement>(null)
 
-  useEffect(() => api.onAutoReviewState(setState), [api])
+  useEffect(() => api.onAutoReviewState((next) => {
+    setState(next)
+    setNow(Date.now())
+  }), [api])
   // The status depends on the conversation and the bridge; ask again when either changes.
   useEffect(() => {
     if (sessionId === null || !state.offered) {
@@ -71,7 +74,7 @@ export function AutoReviewControl({ api, copy, sessionId, disabled }: {
   const session = sessionId === null ? undefined : state.sessions[sessionId]
   const on = session?.on === true
   const blocker = autoReviewBlocker(state, availability, copy)
-  const minutesLeft = session?.expiresAt === undefined ? 0 : Math.max(1, Math.ceil((session.expiresAt - now) / 60_000))
+  const minutesLeft = session?.expiresAt === undefined ? 0 : Math.min(60, Math.max(1, Math.ceil((session.expiresAt - now) / 60_000)))
   const ended = !on && session?.ended !== undefined && session.ended !== 'user' ? copy.autoReview.ended[session.ended] : undefined
 
   const turnOn = async (): Promise<void> => {
