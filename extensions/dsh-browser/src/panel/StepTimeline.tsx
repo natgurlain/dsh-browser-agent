@@ -74,7 +74,8 @@ const TimelineStep = memo(function TimelineStep({
   reviewing: boolean
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
-  const expandable = step.args !== undefined || step.result !== undefined || (step.images?.length ?? 0) > 0
+  const autoNote = step.decision === 'auto-reviewed' && step.autoReason !== undefined && step.autoReason !== '' ? step.autoReason : undefined
+  const expandable = step.args !== undefined || step.result !== undefined || (step.images?.length ?? 0) > 0 || autoNote !== undefined
   const autoReviewed = step.decision === 'auto-reviewed'
   const decision = step.decision === undefined || autoReviewed ? undefined : copy.timeline.decisions[step.decision] ?? step.decision
   const tone = step.decision === undefined ? 'neutral' : DECISION_TONE[step.decision] ?? 'neutral'
@@ -117,9 +118,8 @@ const TimelineStep = memo(function TimelineStep({
           </span>
         </span>
       </button>
-      {step.autoReason !== undefined && step.autoReason !== '' && (step.decision === 'auto-reviewed' || reviewing) && (
-        <p className="timeline-step-auto-reason">{copy.autoReview.reasonPrefix}: {step.autoReason}</p>
-      )}
+      {/* A fixed line; the reviewer's own words are behind the details, clearly attributed. */}
+      {step.decision === 'auto-reviewed' && <p className="timeline-step-auto-reason">{copy.autoReview.approvedLine}</p>}
       {(step.images?.length ?? 0) > 0 && !open && (
         <div className="timeline-step-thumb" aria-label={copy.timeline.screenshot}>
           <MessageImages images={step.images!.slice(0, 1)} sessionId={sessionId} api={api} align="start" copy={copy} />
@@ -127,6 +127,12 @@ const TimelineStep = memo(function TimelineStep({
       )}
       {open && (
         <div className="timeline-step-details" id={detailsId}>
+          {autoNote !== undefined && (
+            <>
+              <span className="timeline-detail-label">{copy.autoReview.reasonPrefix}</span>
+              <p className="timeline-step-auto-note">{autoNote}</p>
+            </>
+          )}
           {step.args !== undefined && (
             <>
               <span className="timeline-detail-label">{copy.timeline.arguments}</span>

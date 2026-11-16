@@ -10,12 +10,17 @@
  * @module
  */
 
+import type { CommitClass, ReviewCode } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+
 /** How long Auto stays on after it was turned on; then the user turns it on again. */
 export const AUTO_REVIEW_TTL_MS = 60 * 60_000
 /** Auto-approved actions per user turn; the next eligible card asks to continue. */
 export const AUTO_REVIEW_TURN_LIMIT = 25
 /** Auto-approved actions without any new user message; then Auto pauses until one arrives. */
 export const AUTO_REVIEW_MESSAGE_LIMIT = 100
+/** Reviews (model calls) per conversation per hour, approved or not: a cost bound. */
+export const AUTO_REVIEW_ATTEMPT_LIMIT = 120
+const ATTEMPT_WINDOW_MS = 60 * 60_000
 /** `chrome.storage.session` key of the state. */
 export const AUTO_REVIEW_STORAGE_KEY = 'dshAutoReview'
 /** Labels of recent Auto approvals kept per conversation (sent to the reviewer, capped there too). */
@@ -46,7 +51,7 @@ export interface AutoReviewView {
 }
 
 /** Whether a further Auto approval is allowed now. */
-export type AutoReviewBudget = 'ok' | 'turn-limit' | 'message-limit'
+export type AutoReviewBudget = 'ok' | 'turn-limit' | 'message-limit' | 'attempt-limit'
 
 interface Store {
   read(): Promise<unknown>
@@ -81,6 +86,14 @@ export class AutoReviewRegistry {
   private readonly ended = new Map<string, AutoReviewEnd>()
   private readonly reviews = new Map<string, Set<AbortController>>()
   private readonly queues = new Map<string, Promise<void>>()
+  private readonly attempts = new Map<string, number[]>()
+  /**
+   * Ends that happened before the stored state finished loading: the load
+   * must not bring those conversations back (a kill switch or take-over that
+   * arrives while the worker starts).
+   */
+  private readonly endedAt = new Map<string, number>()
+  private endedAllAt = Number.NEGATIVE_INFINITY
   readonly ready: Promise<void>
 
   constructor(
@@ -88,7 +101,13 @@ export class AutoReviewRegistry {
     private readonly now: () => number = Date.now,
     private readonly changed: () => void = () => {},
   ) {
-    this.ready = store.read().then((raw) => { this.sessions = { ...readSessions(raw), ...this.sessions } }, () => {})
+    this.ready = store.read().then((raw) => {
+      const loaded = readSessions(raw)
+      for (const [id, entry] of Object.entries(loaded)) {
+        if (entry.enabledAt <= this.endedAllAt || entry.enabledAt <= (this.endedAt.get(id) ?? Number.NEGATIVE_INFINITY)) delete loaded[id]
+      }
+      this.sessions = { ...loaded, ...this.sessions }
+    }, () => {})
   }
 
   private persist(): void {
@@ -137,6 +156,7 @@ export class AutoReviewRegistry {
 
   /** Turn Auto off for one conversation and abort its in-flight reviews (their cards show). */
   end(sessionId: string, cause: AutoReviewEnd): void {
+    this.endedAt.set(sessionId, this.now())
     const had = this.sessions[sessionId] !== undefined
     delete this.sessions[sessionId]
     this.abortReviews(sessionId)
@@ -148,6 +168,7 @@ export class AutoReviewRegistry {
 
   /** Turn Auto off everywhere (kill switch, take-over, managed policy, Setting off). */
   endAll(cause: AutoReviewEnd): void {
+    this.endedAllAt = this.now()
     for (const id of Object.keys(this.sessions)) this.end(id, cause)
     for (const id of [...this.reviews.keys()]) this.abortReviews(id)
   }
@@ -157,6 +178,8 @@ export class AutoReviewRegistry {
     const entry = this.get(sessionId)
     if (entry === undefined) return 'ok'
     if (entry.sinceMessage >= AUTO_REVIEW_MESSAGE_LIMIT) return 'message-limit'
+    const since = this.now() - ATTEMPT_WINDOW_MS
+    if ((this.attempts.get(sessionId) ?? []).filter((at) => at > since).length >= AUTO_REVIEW_ATTEMPT_LIMIT) return 'attempt-limit'
     if (entry.turnCount >= AUTO_REVIEW_TURN_LIMIT) return 'turn-limit'
     return 'ok'
   }
@@ -189,6 +212,12 @@ export class AutoReviewRegistry {
       entry.recent = []
     }
     this.persist()
+  }
+
+  /** One review (a model call) is about to be made. */
+  noteAttempt(sessionId: string): void {
+    const since = this.now() - ATTEMPT_WINDOW_MS
+    this.attempts.set(sessionId, [...(this.attempts.get(sessionId) ?? []).filter((at) => at > since), this.now()])
   }
 
   /** Auto approved one action. */
@@ -250,3 +279,43 @@ export class AutoReviewRegistry {
     return total
   }
 }
+
+/** What each commit class means, for the card's fixed sentence (EN, ZH). */
+const COMMIT_CLASS_PHRASES: Record<CommitClass, [string, string]> = {
+  none: ['a page action', '一个页面操作'],
+  send: ['sending something', '发送内容'],
+  delete: ['deleting, removing or archiving something', '删除、移除或归档内容'],
+  save: ['saving a change', '保存更改'],
+  submit: ['submitting a form or posting something', '提交表单或发布内容'],
+  share: ['sharing something or changing who can see it', '分享内容或更改可见范围'],
+  account: ['an account action (signing in or out, following, subscribing)', '账户操作（登录或退出、关注、订阅）'],
+  change: ['changing a setting, moving or approving something', '更改设置、移动或批准内容'],
+  confirm: ['confirming something', '确认某项操作'],
+  unknown: ['pressing a button whose effect is not clear from its name', '点击一个名称看不出作用的按钮'],
+  type: ['typing text into a site this conversation has read', '向本对话读取过的网站输入文本'],
+  address: ['entering a recipient, address, link or amount', '填写收件人、地址、链接或金额'],
+}
+
+/**
+ * The card's one Auto review line: a FIXED sentence chosen by code from the
+ * bridge's outcome code and the extension's own commit class. The reviewer's
+ * own words never reach the card the user decides on.
+ */
+export function autoReviewSentence(code: ReviewCode | 'turn-limit' | 'message-limit' | 'attempt-limit' | 'changed', commitClass: CommitClass, zh: boolean): string {
+  const phrase = COMMIT_CLASS_PHRASES[commitClass][zh ? 1 : 0]
+  switch (code) {
+    case 'high-risk': return zh ? '自动审核请您决定：支付、购买、安全与账户设置始终需要您本人确认。' : 'Auto review asked: payments, purchases, security and account settings always need you.'
+    case 'under-rated':
+    case 'no-instruction': return zh ? `自动审核请您决定：这看起来是${phrase}，而您最新的消息没有要求这样做。` : `Auto review asked: this looks like ${phrase}, and your latest message did not ask for that.`
+    case 'restricted': return zh ? '自动审核请您决定：您最新的消息要求不要做出更改。' : 'Auto review asked: your latest message asked not to make changes.'
+    case 'model-ask': return zh ? '自动审核请您决定：审核模型不确定这是否符合您的请求。' : 'Auto review asked: the reviewer was not sure this fits your request.'
+    case 'no-user-message': return zh ? '自动审核请您决定：您在此面板中发送的消息里没有授权页面操作的内容。' : 'Auto review asked: no message you sent from this panel authorizes page actions.'
+    case 'timeout': return zh ? '自动审核未能及时回答。' : 'Auto review did not answer in time.'
+    case 'turn-limit': return zh ? '自从您上一条消息以来，自动审核已批准 25 个操作。批准此操作即可让它继续。' : 'Auto review has approved 25 actions since your last message. Approve this one to let it continue.'
+    case 'message-limit': return zh ? '自动审核已暂停，直到您发送新消息。' : 'Auto review is paused until you send a message.'
+    case 'attempt-limit': return zh ? '自动审核在这一小时内的审核次数已达上限，此后的操作由您决定。' : 'Auto review reached its review limit for this hour; you decide the next actions.'
+    case 'changed': return zh ? '自动审核请您决定：审核期间情况发生了变化。' : 'Auto review asked: something changed while it was reviewing.'
+    default: return zh ? '自动审核未能做出判断。' : 'Auto review could not decide.'
+  }
+}
+

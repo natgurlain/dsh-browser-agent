@@ -98,8 +98,8 @@ export interface AuditEntryInput {
   model?: string
   /** `auto-review` entries: the approval binding the review answered. */
   binding?: string
-  /** `auto-review` entries: a deterministic floor that overrode the reviewer, or why the review failed. */
-  floor?: string
+  /** `auto-review` entries: why the review ended as it did (fixed vocabulary), and why it failed. */
+  code?: string
   failure?: string
 }
 
@@ -653,7 +653,7 @@ export interface AuditReview {
   model?: string
   latencyMs: number
   binding: string
-  floor?: string
+  code: string
   failure?: string
 }
 
@@ -781,7 +781,7 @@ export class ToolCallAuditor implements BridgeAuditObserver {
       ...(review.model === undefined ? {} : { model: review.model.slice(0, 200) }),
       durationMs: Math.max(0, Math.round(review.latencyMs)),
       binding: review.binding,
-      ...(review.floor === undefined ? {} : { floor: review.floor }),
+      code: review.code,
       ...(review.failure === undefined ? {} : { failure: redactUrlsInText(review.failure).slice(0, MAX_ERROR_MESSAGE) }),
     })
   }

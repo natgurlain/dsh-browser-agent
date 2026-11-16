@@ -364,6 +364,12 @@ export interface BridgeServerDeps {
    * `autoReview` cap, and the review RPCs are refused as unsupported.
    */
   autoReview?: AutoReviewService
+  /**
+   * The extension's panel submitted a prompt (`session.prompt`) that the Host
+   * accepted, with the request id DSH stamps on its user source. Auto review
+   * trusts only these prompts as the user's own words.
+   */
+  onPanelPrompt?: (sessionId: string, requestId: string) => void
   /** Clock seam for tests. */
   now?: () => number
   /**
@@ -1379,6 +1385,12 @@ export class BridgeServer {
       // prompt (an unauthorized prompt must not steer another session's tools).
       const prompted = frame.method === 'session.prompt' ? orderedSessionId(frame) : undefined
       if (prompted !== undefined && result.ok) this.sessionAffinity.set(prompted, conn.key)
+      if (prompted !== undefined && result.ok) {
+        // The request id DSH puts on the prompt's user source (remote-host-api.ts: requestId = rpcId).
+        const payload = frame.payload as Record<string, unknown>
+        const requestId = typeof payload.requestId === 'string' && payload.requestId !== '' ? payload.requestId : frame.id
+        try { this.deps.onPanelPrompt?.(prompted, requestId) } catch { /* observer only */ }
+      }
       sendFrame(conn, {
         t: 'rpc.result',
         id: frame.id,
@@ -1529,13 +1541,13 @@ export class BridgeServer {
     try {
       record = await service.review(tool.sessionId, action, controller.signal)
     } catch (error: unknown) {
-      record = { decision: 'ask', reason: 'Auto review could not decide.', latencyMs: 0, failure: errorMessage(error) }
+      record = { decision: 'ask', reason: 'Auto review could not decide.', code: 'failed', latencyMs: 0, failure: errorMessage(error) }
     } finally {
       if (tool.reviews.get(reviewId) === controller) tool.reviews.delete(reviewId)
     }
     // Only a review of the still-pending, unaborted call may allow.
     if (controller.signal.aborted || this.pendingTools.get(callId) !== tool) {
-      record = { ...record, decision: 'ask', reason: 'The review was cancelled.', failure: record.failure ?? 'cancelled' }
+      record = { ...record, decision: 'ask', reason: 'The review was cancelled.', code: 'cancelled', failure: record.failure ?? 'cancelled' }
     }
     this.auditSafely(audit => {
       audit.reviewed?.(callId, {
@@ -1545,7 +1557,7 @@ export class BridgeServer {
         ...(record.model === undefined ? {} : { model: record.model }),
         latencyMs: record.latencyMs,
         binding,
-        ...(record.floor === undefined ? {} : { floor: record.floor }),
+        code: record.code,
         ...(record.failure === undefined ? {} : { failure: record.failure }),
       })
     })

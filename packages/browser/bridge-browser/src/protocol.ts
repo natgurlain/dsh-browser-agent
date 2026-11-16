@@ -126,11 +126,30 @@ export const AUTO_REVIEW_VERBS = ['click', 'double-click', 'right-click', 'type'
 /** How the reviewed element presents itself (derived from its kind, never page prose). */
 export const AUTO_REVIEW_TARGET_CLASSES = ['link', 'button', 'field', 'control', 'other', 'none'] as const
 
-/** Longest untrusted (page- or agent-authored) string a review request may carry. */
+/** Longest untrusted (page- or agent-authored) string a review request may carry (UTF-16 code units). */
 export const MAX_REVIEW_UNTRUSTED_CHARS = 200
 
 /** Most recent Auto-approved step labels a review request may carry. */
 export const MAX_REVIEW_RECENT = 3
+
+/**
+ * What an action would commit, as the extension classified it from the
+ * page's structure and words (docs/auto-review-design.md §9). `none` is the
+ * only class the reviewer may allow on its own judgement (low risk); every
+ * other class is at least medium and needs the user's own words for that
+ * kind of action on that target (the bridge checks this deterministically).
+ *
+ * - `confirm`: a generic confirmer (Done, OK, Continue, Yes).
+ * - `unknown`: a button-like control whose name says nothing clear.
+ * - `type`: typing page data into a site the conversation has read.
+ * - `address`: a recipient, address, link or amount field.
+ */
+export const COMMIT_CLASSES = ['none', 'send', 'delete', 'save', 'submit', 'share', 'account', 'change', 'confirm', 'unknown', 'type', 'address'] as const
+
+export type CommitClass = typeof COMMIT_CLASSES[number]
+
+/** Key modifiers a reviewed key press may carry (any other modifier makes it ineligible). */
+export const AUTO_REVIEW_MODIFIERS = ['Shift'] as const
 
 /**
  * One pending page action as the extension computed it, for the reviewer.
@@ -144,35 +163,44 @@ export interface ReviewAction {
   /** Element kind from the fixed vocabulary, or 'none' (navigation, key press to the page). */
   targetKind: string
   targetClass: typeof AUTO_REVIEW_TARGET_CLASSES[number]
+  /** What the action would commit (see {@link COMMIT_CLASSES}). */
+  commitClass: CommitClass
   /** Native structure says this likely submits a form (submit button, Enter in a form field). */
   formSubmitLikely: boolean
-  /** Commit-like by structure or by its EN/ZH name (submit, send, save, delete, …). */
-  commitLike: boolean
-  /** Payment, purchase, account-security or credential words in its name or context. */
+  /** Payment, purchase, account-security, credential or access words in its name, context, options or address. */
   highRiskWords: boolean
-  /** For navigation: the destination is the current page's origin. Otherwise true. */
-  sameOrigin: boolean
+  /**
+   * Present only where the extension computed it: whether a navigation, a
+   * link's destination or a form's action stays on the current page's origin.
+   */
+  sameOrigin?: boolean
   /** The conversation has read web pages that taint it. */
   tainted: boolean
   /** Actions Auto review approved since the user's last message. */
   approvedThisTurn: number
   /** For browser_type: how many characters will be typed. */
   typedChars?: number
-  /** For browser_press: the key chord (agent-authored, short). */
+  /** For browser_press: the key (agent-authored, short), its modifiers and repeat count. */
   key?: string
+  modifiers?: string[]
+  repeat?: number
   untrusted: {
     name?: string
     context?: string
     title?: string
     url?: string
+    /** Navigation destination, link destination or form action: origin and path only. */
     destination?: string
     typed?: string
+    /** The option labels the page shows for a selection. */
     options?: string[]
+    /** The element a drag drops onto. */
+    dropTarget?: string
     recent?: string[]
   }
 }
 
-const UNTRUSTED_KEYS = ['name', 'context', 'title', 'url', 'destination', 'typed'] as const
+const UNTRUSTED_KEYS = ['name', 'context', 'title', 'url', 'destination', 'typed', 'dropTarget'] as const
 
 /**
  * Validate a review action received over the wire. Every field is checked
@@ -182,18 +210,23 @@ const UNTRUSTED_KEYS = ['name', 'context', 'title', 'url', 'destination', 'typed
 export function parseReviewAction(value: unknown): ReviewAction | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const raw = value as Record<string, unknown>
-  const allowed = new Set(['tool', 'verb', 'targetKind', 'targetClass', 'formSubmitLikely', 'commitLike', 'highRiskWords', 'sameOrigin', 'tainted', 'approvedThisTurn', 'typedChars', 'key', 'untrusted'])
+  const allowed = new Set(['tool', 'verb', 'targetKind', 'targetClass', 'commitClass', 'formSubmitLikely', 'highRiskWords', 'sameOrigin', 'tainted', 'approvedThisTurn', 'typedChars', 'key', 'modifiers', 'repeat', 'untrusted'])
   if (Object.keys(raw).some((key) => !allowed.has(key))) return undefined
   if (!(AUTO_REVIEW_TOOLS as readonly unknown[]).includes(raw.tool)) return undefined
   if (!(AUTO_REVIEW_VERBS as readonly unknown[]).includes(raw.verb)) return undefined
   if (typeof raw.targetKind !== 'string' || !/^[a-z]{1,16}$/u.test(raw.targetKind)) return undefined
   if (!(AUTO_REVIEW_TARGET_CLASSES as readonly unknown[]).includes(raw.targetClass)) return undefined
-  for (const flag of ['formSubmitLikely', 'commitLike', 'highRiskWords', 'sameOrigin', 'tainted'] as const) {
+  if (!(COMMIT_CLASSES as readonly unknown[]).includes(raw.commitClass)) return undefined
+  for (const flag of ['formSubmitLikely', 'highRiskWords', 'tainted'] as const) {
     if (typeof raw[flag] !== 'boolean') return undefined
   }
+  if (raw.sameOrigin !== undefined && typeof raw.sameOrigin !== 'boolean') return undefined
   if (typeof raw.approvedThisTurn !== 'number' || !Number.isSafeInteger(raw.approvedThisTurn) || raw.approvedThisTurn < 0 || raw.approvedThisTurn > 10_000) return undefined
   if (raw.typedChars !== undefined && (typeof raw.typedChars !== 'number' || !Number.isSafeInteger(raw.typedChars) || raw.typedChars < 0 || raw.typedChars > 1_000_000)) return undefined
   if (raw.key !== undefined && (typeof raw.key !== 'string' || raw.key.length > 40)) return undefined
+  if (raw.modifiers !== undefined && (!Array.isArray(raw.modifiers) || raw.modifiers.length > 4
+    || !raw.modifiers.every((entry) => (AUTO_REVIEW_MODIFIERS as readonly unknown[]).includes(entry)))) return undefined
+  if (raw.repeat !== undefined && (typeof raw.repeat !== 'number' || !Number.isSafeInteger(raw.repeat) || raw.repeat < 1 || raw.repeat > 100)) return undefined
   const untrusted = raw.untrusted
   if (typeof untrusted !== 'object' || untrusted === null || Array.isArray(untrusted)) return undefined
   const fields = untrusted as Record<string, unknown>
@@ -218,25 +251,40 @@ export function parseReviewAction(value: unknown): ReviewAction | undefined {
     verb: raw.verb as ReviewAction['verb'],
     targetKind: raw.targetKind,
     targetClass: raw.targetClass as ReviewAction['targetClass'],
+    commitClass: raw.commitClass as CommitClass,
     formSubmitLikely: raw.formSubmitLikely as boolean,
-    commitLike: raw.commitLike as boolean,
     highRiskWords: raw.highRiskWords as boolean,
-    sameOrigin: raw.sameOrigin as boolean,
+    ...raw.sameOrigin === undefined ? {} : { sameOrigin: raw.sameOrigin as boolean },
     tainted: raw.tainted as boolean,
     approvedThisTurn: raw.approvedThisTurn,
     ...raw.typedChars === undefined ? {} : { typedChars: raw.typedChars as number },
     ...raw.key === undefined ? {} : { key: raw.key as string },
+    ...raw.modifiers === undefined ? {} : { modifiers: [...raw.modifiers] as string[] },
+    ...raw.repeat === undefined ? {} : { repeat: raw.repeat as number },
     untrusted: out,
   }
 }
+
+/**
+ * Why a review ended as it did: a fixed vocabulary the extension turns into
+ * a fixed sentence on the card. Model text never reaches the card.
+ */
+export const REVIEW_CODES = [
+  'allowed', 'model-ask', 'high-risk', 'under-rated', 'no-instruction', 'restricted',
+  'timeout', 'failed', 'cancelled', 'superseded', 'no-user-message', 'unavailable',
+] as const
+
+export type ReviewCode = typeof REVIEW_CODES[number]
 
 /** A review's outcome as the bridge answers it. */
 export interface ReviewAnswer {
   reviewId: string
   binding: string
   decision: 'allow' | 'ask'
+  /** Why (fixed vocabulary): the card's sentence is chosen from it. */
+  code: ReviewCode
   risk?: 'low' | 'medium' | 'high'
-  /** One short sentence from the reviewer (or the bridge, on failure); shown to the user only. */
+  /** The reviewer's own sentence: timeline details and audit log only, never the card. */
   reason: string
   /** Opaque marker of the newest user message the reviewer saw. */
   userTurn?: string

@@ -121,6 +121,20 @@ function pickChoices(choices: Choice[], request: SelectRequest): Choice[] {
   })
 }
 
+/**
+ * The labels of the options a request would choose in a native select, read
+ * from the page (never from the call's own words), or undefined when the
+ * request does not resolve. Approval cards and Auto review show these.
+ */
+export function nativeChoiceLabels(select: HTMLSelectElement, args: Record<string, unknown>): string[] | undefined {
+  try {
+    const choices = [...select.options].map((option) => ({ element: option, label: clean(option.label || option.text), value: option.value }))
+    return pickChoices(choices, parseSelectRequest(args)).map((choice) => choice.label)
+  } catch {
+    return undefined
+  }
+}
+
 /** Set a native select through its value setter and fire input + change. */
 function selectNative(select: HTMLSelectElement, request: SelectRequest): SelectOutcome {
   if (select.disabled) throw new SelectError('action-failed', 'The select is disabled.')

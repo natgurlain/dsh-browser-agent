@@ -76,6 +76,8 @@ export function AutoReviewControl({ api, copy, sessionId, disabled }: {
   const blocker = autoReviewBlocker(state, availability, copy)
   const minutesLeft = session?.expiresAt === undefined ? 0 : Math.min(60, Math.max(1, Math.ceil((session.expiresAt - now) / 60_000)))
   const ended = !on && session?.ended !== undefined && session.ended !== 'user' ? copy.autoReview.ended[session.ended] : undefined
+  // Auto approves only in the conversation a panel shows; say where else it is on, with one click off.
+  const others = Object.entries(state.sessions).filter(([id, view]) => id !== sessionId && view.on).length
 
   const turnOn = async (): Promise<void> => {
     setMenu(false)
@@ -141,6 +143,12 @@ export function AutoReviewControl({ api, copy, sessionId, disabled }: {
         <div className="composer-chip-note">{blocker}</div>
       ) : ended !== undefined ? (
         <div className="composer-chip-note">{ended}</div>
+      ) : null}
+      {others > 0 ? (
+        <div className="composer-chip-note auto-review-others" role="status">
+          <span>{copy.autoReview.otherOn(others)}</span>
+          <button type="button" onClick={() => { void api.setAutoReviewAll(false) }}>{copy.autoReview.turnAllOff}</button>
+        </div>
       ) : null}
       {explaining ? (
         <div className="approval-backdrop">

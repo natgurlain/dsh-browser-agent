@@ -45,6 +45,7 @@ export function fakePanelApi(overrides: Partial<PanelApi> = {}): PanelApi {
     autoReviewStatus: vi.fn(async () => ({ available: true, model: 'scripted/model' })),
     onAutoReviewState: vi.fn(() => unsubscribe),
     onAutoReviewing: vi.fn(() => unsubscribe),
+    setAutoReviewAll: vi.fn(async () => {}),
     ...overrides,
   }
 }

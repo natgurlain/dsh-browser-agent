@@ -25,7 +25,8 @@ import { composedParent, cssEscape, deepActiveElement } from './dom.ts'
 import { accessibleName, clean, clip } from './extract.ts'
 import type { ElementIds } from './ids.ts'
 import { isSensitiveField } from './privacy.ts'
-import { MAX_TARGET_CONTEXT_CHARS, MAX_TARGET_NAME_CHARS, TARGET_KINDS, type TargetDescription, type TargetKind, type TargetSlots } from '../shared/target-description.ts'
+import { nativeChoiceLabels } from './select.ts'
+import { MAX_CHOSEN, MAX_DESTINATION_PATH_CHARS, MAX_TARGET_CONTEXT_CHARS, MAX_TARGET_NAME_CHARS, TARGET_KINDS, type TargetDescription, type TargetDestination, type TargetKind, type TargetSlots } from '../shared/target-description.ts'
 
 type FoundTarget = Extract<TargetDescription, { found: true }>
 
@@ -221,6 +222,35 @@ export function fieldInForm(el: Element): boolean {
   return el instanceof HTMLInputElement && IMPLICIT_SUBMIT_TYPES.has(el.type) && el.form !== null
 }
 
+/** Where a URL goes, without its query or fragment values. */
+export function destinationOf(href: string): TargetDestination {
+  try {
+    const url = new URL(href, document.baseURI)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return { other: true }
+    const path = url.pathname.slice(0, MAX_DESTINATION_PATH_CHARS)
+    return { origin: url.origin, path, query: url.search !== '' || url.hash !== '' || href.includes('?') }
+  } catch {
+    return { other: true }
+  }
+}
+
+/** The link an element is (or sits in). */
+function linkOf(el: Element): HTMLAnchorElement | HTMLAreaElement | undefined {
+  const link = el.closest('a[href], area[href]')
+  return link instanceof HTMLAnchorElement || link instanceof HTMLAreaElement ? link : undefined
+}
+
+/** For a submit control: where its form goes, and how. */
+function formOf(el: Element): (TargetDestination & { method?: 'get' | 'post' | 'dialog' }) | undefined {
+  const control = el instanceof HTMLLabelElement ? el.control : el.closest('button, input[type="submit"], input[type="image"]') ?? el
+  if (!(control instanceof HTMLButtonElement) && !(control instanceof HTMLInputElement)) return undefined
+  const form = control.form
+  if (form === null) return undefined
+  const destination = destinationOf(control.formAction || form.action || document.baseURI)
+  const method = (control.formMethod || form.method || 'get').toLowerCase()
+  return 'other' in destination ? destination : { ...destination, ...(method === 'get' || method === 'post' || method === 'dialog' ? { method } : {}) }
+}
+
 /** Describe one element for an approval card. */
 export function describeElement(el: Element): FoundTarget {
   const kind = targetKind(el)
@@ -234,6 +264,25 @@ export function describeElement(el: Element): FoundTarget {
     ...(isSensitiveField(el) ? { sensitive: true as const } : {}),
     ...(submitsForm(el) ? { submits: true as const } : {}),
     ...(fieldInForm(el) ? { inForm: true as const } : {}),
+    ...(() => {
+      const link = linkOf(el)
+      return link === undefined ? {} : { href: destinationOf(link.getAttribute('href') ?? '') }
+    })(),
+    ...(() => {
+      const form = submitsForm(el) ? formOf(el) : undefined
+      return form === undefined ? {} : { form }
+    })(),
+  }
+}
+
+/** For browser_select on a native select: the labels it would choose, and whether the page acts on change. */
+function selectFacts(el: Element, args: Record<string, unknown>): Pick<Extract<TargetDescription, { found: true }>, 'chosen' | 'autoSubmit'> {
+  const select = el instanceof HTMLSelectElement ? el : el instanceof HTMLLabelElement && el.control instanceof HTMLSelectElement ? el.control : undefined
+  if (select === undefined) return {}
+  const chosen = nativeChoiceLabels(select, args)
+  return {
+    ...(chosen === undefined ? {} : { chosen: chosen.slice(0, MAX_CHOSEN).map((label) => clip(label, MAX_TARGET_NAME_CHARS)) }),
+    ...(select.hasAttribute('onchange') || select.form?.hasAttribute('onchange') === true ? { autoSubmit: true as const } : {}),
   }
 }
 
@@ -276,7 +325,11 @@ function describeSlot(action: string, slot: string, args: Record<string, unknown
   }
   if (!(el instanceof Element) || !el.isConnected) return { found: false }
   const key = locatorKey(action, slot, args)
-  const description: FoundTarget = { ...describeElement(el), ...(located ? {} : { focused: true as const }) }
+  const description: FoundTarget = {
+    ...describeElement(el),
+    ...(located ? {} : { focused: true as const }),
+    ...(action === 'browser_select' ? selectFacts(el, args) : {}),
+  }
   if (!recheck) {
     remember(key, el)
     return description

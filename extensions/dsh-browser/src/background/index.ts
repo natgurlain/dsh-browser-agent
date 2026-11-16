@@ -74,6 +74,8 @@
 
 import {
   AUTO_REVIEW_CAPS_VERSION,
+  REVIEW_CODES,
+  type ReviewCode,
   BRIDGE_REVIEW_ASK_METHOD,
   BRIDGE_REVIEW_CANCEL_METHOD,
   BRIDGE_REVIEW_STATUS_METHOD,
@@ -201,8 +203,8 @@ import {
 import { approvalFailureMessage } from './answers.ts'
 import { auditedAuthorize, auditedPolicy, auditNote, noteCallTarget, type AuditedCall } from './audit.ts'
 import { StepLabels, STEP_LABELS_STORAGE_KEY } from '../shared/step-labels.ts'
-import { AUTO_REVIEW_STORAGE_KEY, AutoReviewRegistry } from './auto-review.ts'
-import { autoReviewEligibility, buildReviewAction, reviewReasonForCard } from '../security/auto-review.ts'
+import { AUTO_REVIEW_STORAGE_KEY, AutoReviewRegistry, autoReviewSentence } from './auto-review.ts'
+import { autoReviewEligibility, buildReviewAction } from '../security/auto-review.ts'
 import { createDevLoopPanelRpc } from './dev-loop.ts'
 
 /** User settings persisted in chrome.storage.local. */
@@ -2446,14 +2448,29 @@ interface AutoReviewRequest {
 /** Longest a review RPC may take; the bridge answers "ask" after 9 s itself. */
 const AUTO_REVIEW_RPC_TIMEOUT_MS = 15_000
 
-function autoReviewLine(kind: 'asked' | 'failed' | 'turn-limit' | 'message-limit', reason = ''): string {
-  const zh = getUiLocale() === 'zh'
-  switch (kind) {
-    case 'asked': return zh ? `自动审核请您决定：${reason}` : `Auto review asked: ${reason}`
-    case 'failed': return zh ? `自动审核未能做出判断${reason === '' ? '' : `：${reason}`}` : `Auto review could not decide${reason === '' ? '.' : `: ${reason}`}`
-    case 'turn-limit': return zh ? '自从您上一条消息以来，自动审核已批准 25 个操作。批准此操作即可让它继续。' : 'Auto review has approved 25 actions since your last message. Approve this one to let it continue.'
-    case 'message-limit': return zh ? '自动审核已暂停，直到您发送新消息。' : 'Auto review is paused until you send a message.'
-  }
+/** A side panel is open and showing this conversation. */
+function autoReviewVisible(sessionId: string | undefined): boolean {
+  if (sessionId === undefined) return false
+  for (const port of panelPorts) if (panelActiveSessions.get(port) === sessionId) return true
+  return false
+}
+
+function autoReviewFloor(prompt: ApprovalPrompt, request: AutoReviewRequest): ReturnType<typeof autoReviewEligibility> {
+  const { call } = request
+  const sessionId = call.sessionId
+  return autoReviewEligibility(prompt, {
+    enabled: autoReviewOn(sessionId),
+    // Nobody watching (no panel, or another conversation in front): the card waits as usual.
+    visible: autoReviewVisible(sessionId),
+    ...sessionId === undefined ? {} : { sessionId },
+    external: isExternalSessionId(sessionId),
+    pageAction: true,
+    program: request.program || call.program !== undefined,
+    fleetChild: request.approvalSession !== sessionId,
+    tainted: call.tainted === true || policyRuntime.get(sessionId) !== undefined,
+    tool: call.name,
+    args: call.args,
+  })
 }
 
 /**
@@ -2465,22 +2482,15 @@ function autoReviewLine(kind: 'asked' | 'failed' | 'turn-limit' | 'message-limit
 async function autoReviewCard(prompt: ApprovalPrompt, request: AutoReviewRequest, signal: AbortSignal): Promise<{ kind: 'approved' } | { kind: 'card'; note?: string; limit?: true }> {
   const { call } = request
   const sessionId = call.sessionId
-  const eligibility = autoReviewEligibility(prompt, {
-    enabled: autoReviewOn(sessionId),
-    ...sessionId === undefined ? {} : { sessionId },
-    external: isExternalSessionId(sessionId),
-    pageAction: true,
-    program: request.program || call.program !== undefined,
-    fleetChild: request.approvalSession !== sessionId,
-    tool: call.name,
-    args: call.args,
-  })
+  const zh = getUiLocale() === 'zh'
+  const eligibility = autoReviewFloor(prompt, request)
   if (!eligibility.eligible || sessionId === undefined) return { kind: 'card' }
+  const { commitClass } = eligibility.assessment
   const budget = autoReviews.budget(sessionId)
-  if (budget === 'turn-limit') return { kind: 'card', note: autoReviewLine('turn-limit'), limit: true }
-  if (budget === 'message-limit') return { kind: 'card', note: autoReviewLine('message-limit') }
+  if (budget === 'turn-limit') return { kind: 'card', note: autoReviewSentence('turn-limit', commitClass, zh), limit: true }
+  if (budget !== 'ok') return { kind: 'card', note: autoReviewSentence(budget, commitClass, zh) }
   const client = rpc
-  if (client === null || prompt.binding === undefined) return { kind: 'card', note: autoReviewLine('failed') }
+  if (client === null || prompt.binding === undefined) return { kind: 'card', note: autoReviewSentence('failed', commitClass, zh) }
   const binding = prompt.binding
   const controller = new AbortController()
   const onAbort = (): void => { controller.abort() }
@@ -2491,37 +2501,44 @@ async function autoReviewCard(prompt: ApprovalPrompt, request: AutoReviewRequest
   try {
     return await autoReviews.serialized(sessionId, controller, async () => {
       if (controller.signal.aborted || !autoReviewOn(sessionId)) return { kind: 'card' as const }
+      // Every review costs a model call: they are capped per hour, not only the approvals.
+      autoReviews.noteAttempt(sessionId)
       const counts = autoReviews.counts(sessionId)
       const action = buildReviewAction(prompt, eligibility.tool, call.args, {
         tainted: call.tainted === true || policyRuntime.get(sessionId) !== undefined,
         approvedThisTurn: counts.turn,
         ...request.title === undefined ? {} : { title: request.title },
         recent: counts.recent,
-      })
+      }, eligibility.assessment)
       const cancel = (): void => { void client.request(BRIDGE_REVIEW_CANCEL_METHOD, { toolCallId: call.id, reviewId }).catch(() => {}) }
       controller.signal.addEventListener('abort', cancel, { once: true })
-      let answer: { reviewId?: unknown; binding?: unknown; decision?: unknown; reason?: unknown; userTurn?: unknown } | null
+      let answer: { reviewId?: unknown; binding?: unknown; decision?: unknown; code?: unknown; userTurn?: unknown } | null
       try {
         answer = await client.request(BRIDGE_REVIEW_ASK_METHOD, { toolCallId: call.id, reviewId, binding, action }, AUTO_REVIEW_RPC_TIMEOUT_MS) as typeof answer
       } catch {
-        return { kind: 'card' as const, note: autoReviewLine('failed') }
+        return { kind: 'card' as const, note: autoReviewSentence('failed', commitClass, zh) }
       } finally {
         controller.signal.removeEventListener('abort', cancel)
       }
       // Turned off, a new message, the call cancelled: whatever came back, the user decides.
       if (controller.signal.aborted || !autoReviewOn(sessionId)) return { kind: 'card' as const }
       // Only an answer about exactly this card counts.
-      if (answer?.reviewId !== reviewId || answer.binding !== binding) return { kind: 'card' as const, note: autoReviewLine('failed') }
+      if (answer?.reviewId !== reviewId || answer.binding !== binding) return { kind: 'card' as const, note: autoReviewSentence('failed', commitClass, zh) }
       if (typeof answer.userTurn === 'string') autoReviews.noteUserTurn(sessionId, answer.userTurn)
-      const reason = reviewReasonForCard(answer.reason)
-      if (answer.decision === 'allow' && autoReviews.budget(sessionId) === 'ok') {
+      const code: ReviewCode = (REVIEW_CODES as readonly unknown[]).includes(answer.code) ? answer.code as ReviewCode : 'failed'
+      if (answer.decision === 'allow' && code === 'allowed') {
+        // Nobody may have been watching while the model thought: decide the floor again now.
+        const again = autoReviewFloor(prompt, request)
+        if (!again.eligible) return { kind: 'card' as const, ...again.reason === 'not-visible' || again.reason === 'off' ? {} : { note: autoReviewSentence('changed', commitClass, zh) } }
+        if (again.assessment.commitClass !== commitClass) return { kind: 'card' as const, note: autoReviewSentence('changed', commitClass, zh) }
+        if (autoReviews.budget(sessionId) !== 'ok') return { kind: 'card' as const, note: autoReviewSentence('message-limit', commitClass, zh) }
         autoReviews.noteApproved(sessionId, label)
         return { kind: 'approved' as const }
       }
-      return { kind: 'card' as const, note: autoReviewLine('asked', reason === '' ? (getUiLocale() === 'zh' ? '需要您确认' : 'please decide') : reason) }
+      return { kind: 'card' as const, note: autoReviewSentence(code === 'allowed' ? 'failed' : code, commitClass, zh) }
     })
   } catch {
-    return { kind: 'card', note: autoReviewLine('failed') }
+    return { kind: 'card', note: autoReviewSentence('failed', commitClass, zh) }
   } finally {
     signal.removeEventListener('abort', onAbort)
     broadcastReviewing(sessionId, call.toolCallId, label, false)
@@ -2571,7 +2588,7 @@ async function authorizeToolCall(
   if (result.status !== 'decision') return result.status
   const { decision } = result
   // The user approved the "continue?" card: Auto may approve another batch this turn.
-  if (shown.autoReviewLimit === true && decision === 'allow-once' && options.autoReview?.call.sessionId !== undefined) {
+  if (shown.autoReviewLimit === true && decision !== 'deny' && options.autoReview?.call.sessionId !== undefined) {
     autoReviews.noteContinued(options.autoReview.call.sessionId)
   }
   if (prompt.devTools === true) {
@@ -4174,6 +4191,14 @@ chrome.runtime.onConnect.addListener((port) => {
         void Promise.all([settingsReady, autoReviews.ready]).then(() => {
           if (request.enabled === true && autoReviewOffered()) autoReviews.enable(sid)
           else if (request.enabled === false) autoReviews.end(sid, 'user')
+          broadcastAutoReviewState()
+        })
+        break
+      }
+      case 'auto-review.set-all': {
+        // "Turn all off" from the panel's line about other conversations.
+        void autoReviews.ready.then(() => {
+          autoReviews.endAll('user')
           broadcastAutoReviewState()
         })
         break

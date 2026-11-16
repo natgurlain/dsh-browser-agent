@@ -324,8 +324,13 @@ export interface PanelCopy {
     reviewing: string
     /** Timeline badge of a step Auto review approved. */
     badge: string
-    /** Prefix of the reviewer's reason on a timeline row. */
+    /** Prefix of the reviewer's reason in a timeline row's details. */
     reasonPrefix: string
+    /** The fixed line under a row Auto review approved. */
+    approvedLine: string
+    /** Other conversations with Auto on (panel line), and its one-click off. */
+    otherOn: (count: number) => string
+    turnAllOff: string
     settingLabel: string
     settingHelp: string
     settingMore: string
@@ -1007,7 +1012,7 @@ const EN: PanelCopy = {
     optionAsk: 'Ask',
     optionAskHelp: 'You answer every approval card.',
     optionAuto: 'Auto review',
-    optionAutoHelp: 'This conversation\'s model approves ordinary page actions that fit your request, and asks you when unsure.',
+    optionAutoHelp: 'This conversation\'s model approves small page actions that fit your request; sending, saving, deleting and unclear buttons need your own words.',
     on: (minutes) => `Auto review on · ${minutes} min left`,
     turnOff: 'Turn off',
     ended: {
@@ -1031,19 +1036,22 @@ const EN: PanelCopy = {
     notStarted: 'Takes effect once this conversation has started.',
     dialogTitle: 'Turn on Auto review for this conversation?',
     dialogBody: [
-      'Ordinary page actions (clicks, typing into ordinary fields, choosing options, same-site navigation) are checked by this conversation\'s own model before they run. If it judges an action fits what you asked for, the action runs without a card. If it is unsure, you see the usual card with its reason.',
-      'Cards that protect your data still always ask: after the agent read web pages, data leaving the site, sensitive fields, payments and account settings, uploads, the clipboard, developer tools, and anything a site rule marks "ask". Submitting, sending or deleting is approved only when you asked for it in your own words.',
-      'A model can be wrong. Each reviewed action makes one extra call to this conversation\'s model through DSH (your account and quota). It sends your messages in this conversation, the action, the element\'s label and the page address.',
-      'Auto review ends after 60 minutes, when you stop the agent or take over, and after 25 approvals since your last message it asks before continuing.',
+      'While this conversation is open in the panel, its own model checks ordinary page actions before they run. Actions that only show, open or move around the page (expanding a section, a same-site link, typing into an ordinary field) run without a card when the model judges they fit your request.',
+      'Anything that sends, posts, saves, deletes, shares, confirms or presses a button whose effect is not clear runs only when your latest message asks for that action on that element; otherwise you see the usual card. Payments, purchases, security and account settings always ask, as do the cards that protect your data (sensitive fields, other sites, uploads, the clipboard, developer tools, site rules).',
+      'On the current site an approved action can do what your own click could do. The model can be wrong, and a page can label a control misleadingly. Each reviewed action makes one extra call to this conversation\'s model through DSH (your account and quota), sending your messages from this panel, the action, the element\'s label and the page address.',
+      'Auto review pauses while this conversation is not shown in a panel, ends after 60 minutes, when you stop the agent or take over, and asks before continuing after 25 approvals since your last message.',
     ],
     dialogConfirm: 'Turn on Auto review',
     dialogCancel: 'Keep asking',
     reviewing: 'Reviewing…',
     badge: 'Auto',
-    reasonPrefix: 'Auto review',
+    reasonPrefix: 'Auto review\'s note (model text)',
+    approvedLine: 'Approved by Auto review',
+    otherOn: (count) => `Auto review is on in ${count} other conversation${count === 1 ? '' : 's'}.`,
+    turnAllOff: 'Turn all off',
     settingLabel: 'Offer Auto review',
     settingHelp: 'Shows "Approvals: Auto" next to the composer. Every conversation still starts with Ask.',
-    settingMore: 'With Auto review on in a conversation, its own model approves ordinary page actions that fit your request. Each reviewed action costs one extra model call and sends your messages, the action, the element\'s label and the page address to that model. Protective cards always ask.',
+    settingMore: 'With Auto review on in a conversation (and that conversation open in a panel), its own model approves small page actions that fit your request; sending, saving, deleting, sharing and unclear buttons run only when your latest message asks for them. Each reviewed action costs one extra model call and sends your messages from the panel, the action, the element\'s label and the page address to that model. Protective cards always ask.',
     settingManaged: 'Your administrator turned Auto review off.',
   },
   audit: {
@@ -1709,7 +1717,7 @@ const ZH: PanelCopy = {
     optionAsk: '询问',
     optionAskHelp: '每个审批卡片都由您决定。',
     optionAuto: '自动审核',
-    optionAutoHelp: '由本对话的模型批准符合您请求的普通页面操作，不确定时询问您。',
+    optionAutoHelp: '由本对话的模型批准符合您请求的小型页面操作；发送、保存、删除及作用不明的按钮需要您亲口要求。',
     on: (minutes) => `自动审核已开启 · 剩余 ${minutes} 分钟`,
     turnOff: '关闭',
     ended: {
@@ -1733,19 +1741,22 @@ const ZH: PanelCopy = {
     notStarted: '对话开始后生效。',
     dialogTitle: '为本对话开启自动审核？',
     dialogBody: [
-      '普通页面操作（点击、在普通字段中输入、选择选项、同站跳转）在执行前由本对话自己的模型检查。若模型判断操作符合您的请求，操作将直接执行，不再弹出卡片；若不确定，您会看到常规卡片及其理由。',
-      '保护数据的卡片始终会询问：代理读取网页后数据离开站点、敏感字段、支付与账户设置、上传文件、剪贴板、开发者工具，以及站点规则标为“询问”的操作。提交、发送或删除只有在您亲口要求时才会被批准。',
-      '模型可能判断错误。每个被审核的操作会通过 DSH 额外调用一次本对话的模型（使用您的账户和额度），发送内容包括您在本对话中的消息、操作本身、元素标签和页面地址。',
-      '自动审核在 60 分钟后、您停止代理或接管页面时结束；自您上一条消息起批准 25 个操作后，会先询问您是否继续。',
+      '当本对话在面板中打开时，由它自己的模型在执行前检查普通页面操作。只是显示、打开或在页面内移动的操作（展开某一部分、同站链接、在普通字段中输入），若模型判断符合您的请求，将直接执行，不再弹出卡片。',
+      '发送、发布、保存、删除、分享、确认，或点击名称看不出作用的按钮，只有在您最新的消息要求对该元素执行这类操作时才会执行；否则您会看到常规卡片。支付、购买、安全与账户设置始终询问；保护数据的卡片（敏感字段、其他站点、上传、剪贴板、开发者工具、站点规则）也始终询问。',
+      '在当前站点上，被批准的操作能做到您亲手点击能做到的事。模型可能判断错误，页面也可能给控件起误导性的名称。每个被审核的操作会通过 DSH 额外调用一次本对话的模型（使用您的账户和额度），发送您在此面板中的消息、操作本身、元素标签和页面地址。',
+      '本对话不在面板中显示时自动审核暂停；60 分钟后、您停止代理或接管页面时结束；自您上一条消息起批准 25 个操作后，会先询问您是否继续。',
     ],
     dialogConfirm: '开启自动审核',
     dialogCancel: '继续逐一询问',
     reviewing: '正在审核…',
     badge: '自动',
-    reasonPrefix: '自动审核',
+    reasonPrefix: '自动审核的说明（模型文本）',
+    approvedLine: '由自动审核批准',
+    otherOn: (count) => `另有 ${count} 个对话开启了自动审核。`,
+    turnAllOff: '全部关闭',
     settingLabel: '提供自动审核',
     settingHelp: '在输入框旁显示“审批：自动”。每个对话仍默认为询问。',
-    settingMore: '在某个对话中开启自动审核后，由该对话自己的模型批准符合您请求的普通页面操作。每个被审核的操作需要额外调用一次模型，并向该模型发送您的消息、操作、元素标签和页面地址。保护性卡片始终会询问。',
+    settingMore: '在某个对话中开启自动审核（且该对话在面板中打开）后，由它自己的模型批准符合您请求的小型页面操作；发送、保存、删除、分享及作用不明的按钮只有在您最新的消息要求时才会执行。每个被审核的操作需要额外调用一次模型，并向该模型发送您在面板中的消息、操作、元素标签和页面地址。保护性卡片始终会询问。',
     settingManaged: '管理员已关闭自动审核。',
   },
   audit: {

@@ -386,6 +386,8 @@ export interface PanelApi {
   onPauseState(callback: (state: AgentPauseState) => void): () => void
   /** Turn Auto review on or off for one conversation. */
   setAutoReview(sessionId: string, enabled: boolean): Promise<void>
+  /** Turn Auto review off in every conversation. */
+  setAutoReviewAll(enabled: false): Promise<void>
   /** Ask whether one conversation can be reviewed (the toggle's disabled reason). */
   autoReviewStatus(sessionId: string): Promise<AutoReviewAvailability>
   onAutoReviewState(callback: (state: AutoReviewState) => void): () => void
@@ -910,6 +912,9 @@ export function connectPanel(): PanelApi {
     },
     setAutoReview(sessionId, enabled) {
       return send({ type: 'auto-review.set', sessionId, enabled })
+    },
+    setAutoReviewAll() {
+      return send({ type: 'auto-review.set-all', enabled: false })
     },
     autoReviewStatus(sessionId) {
       const id = crypto.randomUUID()

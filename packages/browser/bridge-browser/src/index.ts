@@ -70,7 +70,7 @@ import {
 } from './remote-host-api.ts'
 import type { BrowserHostApi } from './host-api.ts'
 import { mountMcpEndpoint, type McpConfig } from './mcp-mount.ts'
-import { AutoReviewer, isLlmLike } from './auto-review.ts'
+import { AutoReviewer, isLlmLike, PanelPrompts } from './auto-review.ts'
 import { createMcpToolHost, type ToolRegistryLike } from './mcp-tools.ts'
 import { registerBrowserDelegateTool, registerBrowserPreset, registerBrowserSkills } from './browser-agent.ts'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -349,6 +349,8 @@ function mountBridge(
     ctx.get('attachments')?.imageLimits,
   )
   const browserContext = new BrowserContextInjector(ctx.agents)
+  // Prompts the extension's panel submitted, by session (Auto review's trust anchor).
+  const panelPrompts = new PanelPrompts()
   // Untrusted web content in a session makes its harness tools read-only
   // until the user clears it in the panel (session-taint.ts).
   const taint = new SessionTaintRegistry()
@@ -484,7 +486,10 @@ function mountBridge(
     ),
     maxApprovalHoldMs: DEFAULT_MAX_APPROVAL_HOLD_MS,
     // Auto review runs here on the Host, with the conversation's own model (auto-review.ts).
+    // Only prompts this bridge forwarded from the panel count as the user's words.
+    onPanelPrompt: (sessionId, requestId) => { panelPrompts.record(sessionId, requestId) },
     autoReview: new AutoReviewer({
+      fromPanel: (sessionId, rpcId) => panelPrompts.has(sessionId, rpcId),
       llm: () => {
         const llm = ctx.get('llm' as never) as unknown
         return isLlmLike(llm) ? llm : undefined

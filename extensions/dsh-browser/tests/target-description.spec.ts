@@ -49,7 +49,7 @@ describe('describing the element in the page (content script)', () => {
     })
     expect(describeElement(document.querySelector('button')!)).toEqual({
       // A submit button of the form (native structure; Auto review treats it as commit-like).
-      found: true, kind: 'button', name: 'Save settings', context: { kind: 'section', text: 'Notifications' }, submits: true,
+      found: true, kind: 'button', name: 'Save settings', context: { kind: 'section', text: 'Notifications' }, submits: true, form: expect.objectContaining({ method: 'get' }),
     })
   })
 

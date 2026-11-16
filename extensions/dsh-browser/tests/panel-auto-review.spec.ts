@@ -145,7 +145,9 @@ describe('the timeline', () => {
     const html = renderToStaticMarkup(createElement(StepTimeline, { row: decorated!, sessionId: 's1', api: fakePanelApi(), copy: PANEL_COPY.en }))
     expect(html).toContain('auto-review-badge')
     expect(html).toContain('>Auto<')
-    expect(html).toContain('Auto review: Opens the list you asked for.')
+    // A fixed line on the row; the reviewer's own words only in the details.
+    expect(html).toContain('Approved by Auto review')
+    expect(html).not.toContain('Opens the list')
   })
 
   it('shows "Reviewing…" on the running step instead of a card', () => {

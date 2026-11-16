@@ -410,7 +410,16 @@ function boundTargets(context: ApprovalContext): unknown {
   const bound = (state: TargetState | undefined): unknown => state === undefined
     ? undefined
     : state.state === 'found'
-      ? { state: state.state, kind: state.kind, name: state.name, ...state.submits === true ? { submits: true } : {}, ...state.inForm === true ? { inForm: true } : {} }
+      ? {
+          state: state.state, kind: state.kind, name: state.name,
+          ...state.submits === true ? { submits: true } : {},
+          ...state.inForm === true ? { inForm: true } : {},
+          // Where a link or a form goes, and what a selection chooses: a page that
+          // retargets the element after the card was answered voids the approval.
+          ...state.href === undefined ? {} : { href: state.href },
+          ...state.form === undefined ? {} : { form: state.form },
+          ...state.chosen === undefined ? {} : { chosen: state.chosen },
+        }
       : { state: state.state }
   const targets = context.targets ?? {}
   return {
