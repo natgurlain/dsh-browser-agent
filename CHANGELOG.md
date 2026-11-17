@@ -10,8 +10,9 @@ Unreleased (version numbers are not bumped yet).
 - **Auto review (opt-in, per conversation).** *Approvals: Ask · Auto* under the composer lets
   the conversation's own model approve page actions while the conversation is open in a
   panel — only when **you named it, or it is plainly harmless**. Named: your latest panel
-  message contains the control's full name, the options, both drag ends, or the exact text
-  to type. Plainly harmless: hover, a same-site link, a *Show more*-style disclosure,
+  message asks for it by the name you see, with a verb ("click Save settings"; the row too
+  when the name repeats), or gives the text to type in quotes; each name lets one action
+  through, and a question or a "don't"/"before"/"until" clause never counts. Plainly harmless: hover, a same-site link, a *Show more*-style disclosure,
   navigation keys in a text field. Holding-back words ("only read", "don't", "tell me if",
   "draft") stop it; payments and account settings, forced cards, sensitive fields,
   developer tools, uploads, clipboard, dialogs, programs, fleets, MCP conversations, other

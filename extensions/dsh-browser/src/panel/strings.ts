@@ -1036,8 +1036,8 @@ const EN: PanelCopy = {
     notStarted: 'Takes effect once this conversation has started.',
     dialogTitle: 'Turn on Auto review for this conversation?',
     dialogBody: [
-      'Auto approves an action only when you named it, or it is plainly harmless. Named: your latest message contains the button\'s or option\'s full name ("click Save settings") or the exact text to type. Plainly harmless: a same-site link, "Show more"-style controls, hovering, moving around in a text field.',
-      'This conversation\'s model then checks the action fits your request and can always ask you instead. Anything else shows the usual card, with a line saying what to write next time. Words like "only read", "don\'t", "tell me if" or "draft" in your message stop it. Payments, purchases, security and account settings always ask, as do the cards that protect your data (sensitive fields, other sites, uploads, the clipboard, developer tools, site rules).',
+      'Auto approves an action only when you named it, or it is plainly harmless. Named: your latest message asks for it by the name you see ("click Save settings"), or gives the text to type in quotes (type "hello world"). Each name lets one action through; if several buttons share a name, say which ("click Delete on Bob\'s mail"). Plainly harmless: a same-site link, "Show more"-style controls, hovering, moving around in a text field.',
+      'This conversation\'s model then checks the action fits your request and can always ask you instead. Anything else shows the usual card, with a line saying what to write next time. A question ("should I click Send?"), "don\'t", "before", "only read", "tell me if" or "draft" never authorises anything. Payments, purchases, security and account settings always ask, as do the cards that protect your data (sensitive fields, other sites, uploads, the clipboard, developer tools, site rules).',
       'On the current site an approved action can do what your own click could do, and a page can give a harmful control the name you used. Each reviewed action makes one extra call to this conversation\'s model through DSH (your account and quota), sending your messages from this panel, the action, the element\'s label and the page address.',
       'Auto review pauses while this conversation is not shown in a panel, ends after 60 minutes, when you stop the agent or take over, and asks before continuing after 25 approvals since your last message.',
     ],
@@ -1741,8 +1741,8 @@ const ZH: PanelCopy = {
     notStarted: '对话开始后生效。',
     dialogTitle: '为本对话开启自动审核？',
     dialogBody: [
-      '自动审核只批准您点名的操作，或明显无害的操作。点名：您最新的消息里包含按钮或选项的完整名称（“点击保存设置”），或要输入的原文。明显无害：同站链接、“显示更多”一类的控件、悬停、在文本框内移动光标。',
-      '随后由本对话的模型检查该操作是否符合您的请求，它随时可以改为询问您。其他操作都会显示常规卡片，并附一句下次该怎么说。消息中出现“只看”“不要”“告诉我是否”“草拟”等字眼时不会自动批准。支付、购买、安全与账户设置始终询问；保护数据的卡片（敏感字段、其他站点、上传、剪贴板、开发者工具、站点规则）也始终询问。',
+      '自动审核只批准您点名的操作，或明显无害的操作。点名：您最新的消息用您看到的名称要求它（“点击保存设置”），或把要输入的文字放在引号里（输入“你好”）。每次点名只放行一次；多个按钮同名时请说明是哪一个（“点击 Bob 那封邮件的删除”）。明显无害：同站链接、“显示更多”一类的控件、悬停、在文本框内移动光标。',
+      '随后由本对话的模型检查该操作是否符合您的请求，它随时可以改为询问您。其他操作都会显示常规卡片，并附一句下次该怎么说。疑问句（“要不要点发送？”）以及“不要”“之前”“只看”“告诉我是否”“草拟”等字眼永远不会授权任何操作。支付、购买、安全与账户设置始终询问；保护数据的卡片（敏感字段、其他站点、上传、剪贴板、开发者工具、站点规则）也始终询问。',
       '在当前站点上，被批准的操作能做到您亲手点击能做到的事，页面也可能给有害的控件起您用过的名字。每个被审核的操作会通过 DSH 额外调用一次本对话的模型（使用您的账户和额度），发送您在此面板中的消息、操作本身、元素标签和页面地址。',
       '本对话不在面板中显示时自动审核暂停；60 分钟后、您停止代理或接管页面时结束；自您上一条消息起批准 25 个操作后，会先询问您是否继续。',
     ],

@@ -1,7 +1,7 @@
 # Auto review for page actions: design
 
-Status: implemented for v0.3.0 (unreleased). Revised after two independent
-security reviews (findings F1–F8 and R2-1…R2-11, §14). This document is the
+Status: implemented for v0.3.0 (unreleased). Revised after three independent
+security reviews (findings F1–F8, R2-1…R2-11 and R3-F1…F8, §14). This document is the
 reference for security review; README.md / README.zh.md carry the user-facing
 text.
 
@@ -14,8 +14,10 @@ decides eligible ordinary approval cards. The promise to the user is short:
 
 * **The rules decide what CAN be approved.** Deterministic code in the
   extension and the bridge, not a model. "Named" means the user's newest panel
-  message contains the control's full name, the chosen options, both ends of a
-  drag, or the exact text to type, verbatim. "Plainly harmless" is a short
+  message asks for it — in an imperative clause with an action verb — by the
+  name a person sees: the control's full name (and, when the name repeats on
+  the page, its row), the chosen options, both ends of a drag; or gives the
+  text to type in quotes, exactly. Each name lets one action through. "Plainly harmless" is a short
   allowlist (§6.2).
 * **The model decides whether it SHOULD be.** The reviewer still runs; its
   "ask" always wins; its "allow" counts only when a rule holds.
@@ -44,9 +46,12 @@ Then, on the **current site**, Auto review can still let through:
   details/close/cancel and a few UI nouns; navigation keys in a text field or
   on a link or button; a same-site navigation without a query before the
   conversation read any web page;
-* **anything you named**, verbatim, in your newest panel message, unless that
-  message holds back ("only read", "don't …", "tell me if …", "wait for me",
-  "I'll do it myself", "draft", 不要/别/只看/等我 …).
+* **anything you named**, verbatim, once, in an imperative clause of the
+  first 600 characters of your newest panel message (before any pasted
+  block), unless that message holds back anywhere ("only read", "don't …",
+  "tell me if …", "wait for me", "I'll do it myself", "draft", 不要/别/只看/等我
+  …). A question or a clause with not/before/after/until/if/when/wait/later
+  never names anything.
 
 Residues, stated plainly (each is the cost of not asking more often):
 
@@ -59,8 +64,18 @@ Residues, stated plainly (each is the cost of not asking more often):
 * **close / cancel / next** stay on the harmless list for disclosures: on a
   dialog's "Cancel" a page could discard a draft; on "Next" it could advance a
   wizard.
-* **Escape in a text area** is a navigation key: a page can bind it to discard
-  a draft.
+* **Escape in a text area** is a navigation key (not while a dialog is open):
+  a page can bind it to discard a draft.
+* **GET side effects**: a same-site link to an innocent-looking path can still
+  change something if the site does that on a plain visit.
+* **User activation**: an Auto-approved click is a trusted user gesture for
+  the page (it may open a popup or start a download the page wires to it).
+* **Hidden text the visibility check misses**: text the same colour as its
+  background, moved off-screen, or covered by another element still counts as
+  visible.
+* **Autosave by script**: a field that saves through `addEventListener` (not
+  an `onchange`/`oninput` attribute) is not detected; typing there is still
+  named and verbatim.
 * **Case and spacing are ignored** ("save settings" names "Save settings");
   Chinese names need 2 characters and are matched without word boundaries.
 * **Restrictions are lexical and over-cautious** ("don't forget to click
@@ -80,7 +95,10 @@ sensitive fields, site rules, strict mode), uploads, downloads, the
 clipboard, dialogs, developer tools, programs, new tabs, Enter in a text
 field, keyboard shortcuts, value changes by arrow keys or by dragging a
 slider, typing into a field that already holds text (unless replacing it), or
-anything without a panel showing the conversation.
+anything without a panel showing the conversation; clicks with modifiers,
+non-left buttons or more than one click; links opening a new tab; anything in
+a frame from another origin; typing other than plain insertion into a located
+text field; controls whose accessible name differs from their visible text.
 
 ## 3. Threat model
 
@@ -200,48 +218,74 @@ is shown and no model is called.
 | Action | Condition |
 |---|---|
 | Hover | always |
-| Link click | a **real** link: `describe.ts` drops empty, fragment-only, `javascript:` and same-document hrefs (those links are buttons, §6.3); same origin, no query; a name of ≥ 3 letters; no committing word in the path (`/logout`, `/items/7/delete` → named) |
-| Disclosure click | the element is a disclosure by its own markup (`aria-expanded`, `<summary>`, or a button with `aria-haspopup`/`aria-controls`) **and** every word of its name is one of show, more, less, expand, collapse, next, previous, back, menu, details, close, cancel, all, comments, replies, results, items, options, info, page(s), section, thread (digits allowed; ZH 显示/展开/收起/更多/下一页/上一页/返回/菜单/详情/关闭/取消 with an optional noun) |
-| Key press | Tab, arrows, Home/End, PageUp/PageDown, Escape, with at most Shift, only on a text field, text area, content-editable, email/url/tel field, link or button; `repeat` > 1 only in a text field, ≤ 10 |
+| Link click | a plain left click on a **real** link that opens in the same tab, its name equal to its visible text: `describe.ts` drops empty, fragment-only, `javascript:` and same-document hrefs (those links are buttons, §6.3); same origin, no query; a name of ≥ 3 letters; no committing word in the path (`/logout`, `/items/7/delete` → named) |
+| Disclosure click | a plain left click; the element itself is a disclosure by its own markup (`aria-expanded`, `<summary>`, or a button with `aria-haspopup`/`aria-controls`) **and** its visible text equals its name and every word of the visible text is one of show, more, less, expand, collapse, next, previous, back, menu, details, close, cancel, all, comments, replies, results, items, options, info, page(s), section, thread (digits allowed; ZH 显示/展开/收起/更多/下一页/上一页/返回/菜单/详情/关闭/取消 with an optional noun) |
+| Key press | Tab (not where the field offers suggestions), arrows, Home/End, PageUp/PageDown, Escape (not while a dialog is open), with at most Shift, only on a text field, text area, content-editable, email/url/tel field, link or button; `repeat` > 1 only in a text field, ≤ 10 |
 | Navigation | same origin, no query or fragment, no committing word in the path, not after reading web pages |
 
-### 6.3 Rule "named" (allowed only when the newest message names it verbatim)
+### 6.3 Rule "named" (allowed only when the newest message names it verbatim, once)
 
 | Action | What must appear in the user's newest panel message |
 |---|---|
-| Click on any other control (button, menu item, option, tree item, checkbox, radio, switch, tab, summary, link without a real destination, unknown element), submit controls, Space/Enter on a control | its full name (`mustName = [name]`) |
+| Plain left click (no modifier, one click) on any other control (button, menu item, option, tree item, checkbox, radio, switch, tab, summary, link without a real destination, unknown element), submit controls, Space/Enter on a control | its full name (`mustName = [name]`); when other visible, enabled controls in the document share the name, also its row or section (`mustContext`: the row's first cell, emphasised text or heading, or the labelled section) in the same clause |
 | Select (a native select whose chosen labels the page reported) | every chosen label |
 | Drag (element to element) | both ends' names |
-| Typing (3–500 characters, no control characters, `replace: true` or a field that was empty when described) | the full text, verbatim (`exactText`); into a recipient/address/link/amount field it must equal one whole whitespace-delimited word of the message (`exactToken`) |
+| Typing (3–500 characters, no control characters) into a located text field (textbox, search, email, url, tel, textarea, contenteditable host) with the default insertion path; the field empty, or a single-line field with `replace: true`; not autosaving | the full text as one whole quoted string (`exactText`, case kept); into a recipient/address/link/amount field one whole word (`exactToken`) |
 
-Never Auto (the card waits): a control without a name or with fewer than 3
-letters/digits (2 Han) — "OK", "×", an icon — or a name cut short when read;
-arrow keys on selects, radios, sliders, spin buttons, dates, comboboxes, tabs;
-Enter in a text field; character keys; shortcuts; drags by offset or onto a
-slider; typing longer than 500 characters or appending to a non-empty field.
+The name is the accessible name, which must **equal** the element's visible
+text (all lines, hidden parts skipped: `hidden`, aria-hidden, display none,
+visibility hidden, opacity 0, font size 0, a zero clip, no box). For a
+labelled field the visible text is its `<label>`s. An icon-only control has
+none and is never Auto. Disclosure markup counts only on the element itself.
 
-### 6.4 The verbatim check (bridge, `namesVerbatim` / `containsVerbatim`)
+Never Auto (the card waits): a control without a visible name or with fewer
+than 3 letters/digits (2 Han); a name cut short when read; a repeated name
+without a row to say; arrow keys on selects, radios, sliders, spin buttons,
+dates, comboboxes, tabs; Tab in a field that offers suggestions; Escape while
+a dialog is open; Enter in a text field; character keys; shortcuts; drags by
+offset or onto a slider; key-by-key, `insert`, trusted or focused-element
+typing; typing longer than 500 characters, appending to a non-empty field or
+replacing a multi-line one; fields that save on input; frames from another
+origin.
 
-Both sides are normalised (NFKC, case-folded, whitespace collapsed); the
-name's surrounding punctuation is stripped.
+### 6.4 The verbatim check (bridge, `namedCovers`)
 
-* A name of several words must occur as a whole phrase: no letter or digit
-  directly before or after it ("Send it later" is not named by "click send";
-  "Archive" is not named by "archived").
-* A name of one word must be quoted ("Archive", „Archive", 「归档」) or follow
-  click/press/tap/choose/select/pick (optionally "on", "the") or 点击/按/选择
-  directly. "Send me the summary" names no Send button; German "Lies meine
-  Post" names no Post button. A few very common words (the, and, button, …)
-  never name a control.
-* Typed text must be a substring of the message; address fields need a whole
-  word. Fewer than 3 letters/digits never match.
-* A restriction anywhere in the newest message vetoes every `named` action:
-  only/just read|look|check…, read-only, don't / do not / never / without /
-  avoid / no need to, tell me if/whether, wait for me, leave … as, I will /
-  I'll / I'm going to … myself|later, look but, no changes, 不要 别 只读 只看
-  不得 无需 不用 勿 等我 我自己 我来 保持原样 先别 告诉我是否 看看就好. Draft /
-  prepare / compose / write up (草拟 起草 准备) veto clicks and selections,
-  not typing.
+* **Folding**: NFKC; ’ ‘ ʼ ＇ ` ´ → '; curly and angled double quotes → ";
+  invisible format characters removed; case-folded for names.
+* **Veto**: the restriction list runs on the WHOLE newest message (never a
+  truncated copy): only/just read|look|check…, read-only, don't / do not /
+  never / without / avoid / no need to, tell me if/whether, wait for me/my,
+  leave … as, I will / I'll … myself|later, look but, no changes, 不要 别 只读
+  只看 不得 无需 不用 勿 等我 我自己 我来 保持原样 先别 告诉我是否 看看就好.
+  Draft / prepare / compose / write up veto clicks and selections, not typing.
+* **Authorising part**: the first 600 characters, cut before the first
+  blank-line-separated block that looks pasted (≥ 3 lines, or a line starting
+  with >, From:, Subject:, To:, Date:, ---).
+* **Clauses**: split at . ! ? ; followed by a space, at 。！？； and at line
+  breaks, with quoted strings lifted out first. A clause authorises only if
+  it is not a question (ends with ?, or starts with what/should/can/could/
+  would/will/do/does/is/are/how/why/when/where/which/who/if/whether/may/…)
+  and holds no negation, condition or deferral (not, n't, never, no,
+  nothing, without, unless, until, before, after, once, if, when, wait,
+  stop, hold, later, yet, myself, maybe, I will/I'll/I'd; 不 别 勿 等 之后 以后
+  如果 是否 吗 再).
+* **Names**: every required name, and the row (`mustContext`), in ONE such
+  clause that holds an action verb (click, press, tap, hit, choose, select,
+  pick, open, turn on/off, switch, enable, disable, check, uncheck, tick,
+  toggle, drag, drop, move; 点击 点 按 选择 选中 打开 开启 关闭 启用 停用 勾选 切换 拖).
+  A name is a quoted string that is not text to type, or follows the verb
+  directly (later names of a list may follow "and" or ","), or — for several
+  words — occurs as a whole phrase. A quoted string after
+  type/write/enter/search/say/reply/comment/fill/put/paste (输入 搜索 回复 写)
+  is text to type and names nothing. Common words (the, button, …) never name.
+* **Typed text**: equals a whole quoted string of an imperative clause
+  (whitespace collapsed, case kept); never a substring.
+* **Empty**: no names and no text, or an empty newest message (an image or
+  "Continue" only), authorises nothing.
+* **Newest message**: a prompt the panel sent that the history does not show
+  yet (queued behind a running turn) is the newest from the moment it was
+  sent; its minted id is the turn marker the extension's per-message limits
+  and "once" bookkeeping key on.
 
 ## 7. Limits and lifetime
 
@@ -264,8 +308,10 @@ anything else, a non-`stop` finish, an error, or 9 s → ask.
 1. `ask` → ask (`model-ask`). The reviewer's ask always wins.
 2. `highRiskWords` or a risk of high → ask (`high-risk`).
 3. `harmless` → allow.
-4. `named` → the newest panel message only: a restriction → ask
-   (`restricted`); a missing name or text → ask (`not-named`); else allow.
+4. `named` → the newest panel message only (§6.4): a restriction → ask
+   (`restricted`); a missing name, row or quoted text → ask (`not-named`);
+   else allow, and the extension then lets each name or quoted text through
+   once per message (a second use → card, "already used once").
 
 The rules decide what CAN be approved; the model whether it SHOULD be.
 
@@ -278,9 +324,12 @@ to the timeline details of Auto-approved rows and to the audit log.
 ## 9. What the extension reports and binds
 
 `describe.ts` reports, besides kind and name: `submits`, `inForm`, `href`
-(only for a real link, §6.2), `download`, `form`, `chosen`, `autoSubmit`,
-`disclosure` and, for text fields, `empty` (one bit; the value never leaves
-the page). All of these are folded into the approval binding, so a link that
+(only for a real link, §6.2), `download`, `form`, `chosen`, `autoSubmit`
+(selects; for text fields an onchange/oninput attribute), `disclosure` (on
+the element itself), `rendered` (visible text), `newTab`, `dialogOpen`, for
+text fields `empty` (one bit, measured on the editing host for editors) and
+`suggests`, and for clicks and key presses `sameName` (visible enabled
+controls sharing the name) and `rowKey`. All of these are folded into the approval binding, so a link that
 turns into a download, a select that starts submitting, a control that stops
 being a disclosure, or a field that is no longer empty after the review voids
 the approval when the dispatcher re-describes the element.
@@ -376,6 +425,28 @@ Second review (verbatim rules replace the verb-class/overlap gate):
 * **R2-11** caller-chosen trusted id → the bridge mints it, overwrites the
   payload's, binds it to its first event, forgets it on purge. Attempts are
   persisted.
+
+Third review (R3):
+
+* **F1** typing onto non-text controls by keystrokes → typing only into a
+  located caret field via the default path; keystrokes/insert/trusted/focused
+  never Auto.
+* **F2** the veto ran on a 2 000-character tail; curly apostrophes; names in
+  questions and deferrals → whole-message veto, folding, imperative clauses
+  with an action verb.
+* **F3** pasted mail and quoted dictation named controls; substrings typed →
+  600-character authorising part, paste detection, dictation quotes never
+  name, typed text equals a whole quoted string.
+* **F4** a name bound no instance and was never consumed → once per message,
+  row required for repeated names.
+* **F5** accessible name ≠ visible text; inherited disclosure → equality with
+  visible text, icon-only never Auto, disclosure on the element only.
+* **F6** modifiers/buttons/click counts, new-tab links, foreign frames →
+  never Auto.
+* **F7** replace on multi-line fields, editor emptiness on a child,
+  forwarding/recovery/payout addresses, autosaving fields → fixed.
+* **F8** Tab with suggestions, Escape with a dialog, text-less newer
+  messages, queued prompts, empty `mustName` → fixed.
 
 ## 15. Deferred
 
