@@ -1,7 +1,7 @@
 {
   "name": "@natgurlain/dsh-bridge-browser",
   "description": "Browser bridge: authenticated WebSocket transport, page controls, screenshots, and developer tools through the user's browser extension",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "author": "Yuxiang Lin",
   "license": "MIT",
   "homepage": "https://github.com/natgurlain/dsh-browser-agent#readme",

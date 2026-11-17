@@ -5,7 +5,10 @@ Each `## vX.Y.Z` section becomes the notes of that GitHub release
 
 ## v0.3.0
 
-Unreleased (version numbers are not bumped yet).
+Auto approve: an opt-in mode in which the agent works without asking. It is off by default,
+and with it off nothing changes from v0.2.1. With it on, a web page that tricks the model can
+make the agent do things you did not ask for; the first-time confirmation and the Setting say
+so.
 
 - **Auto approve.** Like DeepSeek Harness's auto-approve: click *Auto approve* under the
   message box and the agent works without asking. Ordinary steps (navigate, click, type,

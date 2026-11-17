@@ -14,8 +14,8 @@
    `README.md` and `README.zh.md` (the same test checks them), and add a `## vX.Y.Z`
    section to `CHANGELOG.md`. That section becomes the release notes.
 3. Run the gates and the local dry run (below).
-4. Tag and push: `git tag v0.2.1 && git push origin v0.2.1`. A tag containing `-`
-   (e.g. `v0.2.1-rc.1`) is published as a prerelease, with the notes of `v0.2.1`. A
+4. Tag and push: `git tag v0.3.0 && git push origin v0.3.0`. A tag containing `-`
+   (e.g. `v0.3.0-rc.1`) is published as a prerelease, with the notes of `v0.3.0`. A
    prerelease is never what `--release latest` or the panel's update check resolves to.
 5. `.github/workflows/release.yml` runs the checks and packages the assets in a `build`
    job (read-only token, no OIDC), then a separate `publish` job downloads those assets,
@@ -40,9 +40,9 @@ a clean checkout of the tag:
 
 ```sh
 pnpm install --frozen-lockfile && pnpm run check:runtime && pnpm run typecheck && pnpm run test
-node scripts/package-release.mjs --tag v0.2.1 --out release --notes release-notes.md
+node scripts/package-release.mjs --tag v0.3.0 --out release --notes release-notes.md
 (cd release && sha256sum -c SHA256SUMS)
-gh release create v0.2.1 release/* --verify-tag --title v0.2.1 --notes-file release-notes.md
+gh release create v0.3.0 release/* --verify-tag --title v0.3.0 --notes-file release-notes.md
 ```
 
 Anonymous downloads of a private repository's release answer 404. The installers say so
@@ -148,7 +148,7 @@ repository gets none (the workflow skips the step).
    download error.
 4. Only then unpack the source archive into `~/.dsh/dsh-browser`, hand over to the
    `scripts/install.sh` inside it, and build. `~/.dsh/dsh-browser/.managed-by-install-sh`
-   records what was installed, e.g. `release v0.2.1 (SHA256SUMS verified)`.
+   records what was installed, e.g. `release v0.3.0 (SHA256SUMS verified)`.
 
 Run inside a checkout without options, the installer installs that checkout and downloads
 nothing. `--unverified-branch <name>` / `DSH_BROWSER_UNVERIFIED_BRANCH` installs a branch
