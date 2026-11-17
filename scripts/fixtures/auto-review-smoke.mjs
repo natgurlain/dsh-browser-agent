@@ -483,8 +483,9 @@ export async function runAutoReviewSmoke(ctx) {
   // approval answer is fixed text and does not taint (taint.ts CONTENT_FREE_TOOLS), so typing
   // on the page the user demonstrated on raises no taint card.
   const GUESTS = 16
-  const guestName = (index) => `Guest ${String(index + 1).padStart(2, '0')}`
-  await page.goto(`${origin}/learn?v=1&rows=${String(GUESTS)}&who=Guest`)
+  // Its own names: the learning smoke later checks which "Guest" rows were invited.
+  const guestName = (index) => `Member ${String(index + 1).padStart(2, '0')}`
+  await page.goto(`${origin}/learn?v=1&rows=${String(GUESTS)}&who=Member`)
   await page.bringToFront()
   await chat.waitForTimeout(1_700)
   await chat.getByRole('button', { name: 'Watch me', exact: true }).click()

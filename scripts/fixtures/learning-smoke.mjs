@@ -45,7 +45,7 @@ export function handleLearningRequest(request, response) {
   const suffix = v === '1' ? '' : v
   // rows=N: a longer table, for a "do the remaining N" that exceeds one program.
   const rows = Number(url.searchParams.get('rows') ?? 0)
-  const people = rows > 0 ? manyPeople(rows, url.searchParams.get('who') === 'Guest' ? 'Guest' : 'Person') : PEOPLE
+  const people = rows > 0 ? manyPeople(rows, ['Guest', 'Member'].includes(url.searchParams.get('who')) ? url.searchParams.get('who') : 'Person') : PEOPLE
   response.setHeader('set-cookie', `csrftoken=${csrf}; Path=/`)
   response.end(`<!doctype html><title>Learn ${v}</title><meta name="csrf-token" content="${csrf}">
 <body><h1>Contacts</h1>
