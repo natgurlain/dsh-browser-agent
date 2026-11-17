@@ -822,6 +822,62 @@ describe('dispatchToolCall', () => {
   })
 })
 
+describe('an action that navigates the page while it runs', () => {
+  const CLOSED = 'A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received'
+
+  it('reports a click that submitted a navigating form as done, with the new page', async () => {
+    const frames = [
+      { frameId: 0, parentFrameId: -1, documentId: 'form-doc', url: 'https://crm.example/leads/new' },
+    ]
+    let emit: (() => void) | undefined
+    const chromeMock = mockChrome({
+      tab: { id: 41, url: 'https://crm.example/leads/new' },
+      frames,
+      respond: (message) => {
+        const action = (message as { action?: string }).action
+        if (action === 'browser_click') {
+          // The POST answer replaced the document before the content script could answer.
+          frames[0] = { frameId: 0, parentFrameId: -1, documentId: 'saved-doc', url: 'https://crm.example/leads/7' }
+          queueMicrotask(() => emit?.())
+          return new Error(CLOSED)
+        }
+        if (action === 'browser_snapshot') return { ok: true, result: { text: 'Title: Lead saved' } }
+        return undefined
+      },
+    })
+    emit = () => { chromeMock.emitContentReady(41, 0, 'saved-doc') }
+
+    const answer = await dispatchToolCall(
+      { id: 'tool-save', name: 'browser_click', args: { selector: '#save' } },
+      'auto',
+      { maxItems: 10, maxChars: 4_000 },
+      async () => 'approved',
+    )
+
+    expect(answer.ok).toBe(true)
+    const text = (answer.result as { text: string }).text
+    expect(text).toMatch(/^Clicked element \(#save\)\. The page navigated/)
+    expect(text).toContain('Lead saved')
+    expect(text).not.toContain('failed')
+  })
+
+  it('still reports the failure when the page did not navigate', async () => {
+    mockChrome({
+      tab: { id: 42, url: 'https://crm.example/leads/new' },
+      respond: (message) => (message as { action?: string }).action === 'browser_click' ? new Error(CLOSED) : undefined,
+    })
+
+    const answer = await dispatchToolCall(
+      { id: 'tool-save-2', name: 'browser_click', args: { selector: '#save' } },
+      'auto',
+      { maxItems: 10, maxChars: 4_000 },
+      async () => 'approved',
+    )
+
+    expect(answer.ok).toBe(false)
+  })
+})
+
 describe('dispatchOpenTab', () => {
   it('creates a blank tab, navigates after arming readiness, rebinds, and snapshots', async () => {
     const { dispatchOpenTab } = await import('../src/background/tools.ts')

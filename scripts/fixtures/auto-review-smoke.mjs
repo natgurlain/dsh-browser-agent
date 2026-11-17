@@ -36,6 +36,38 @@ export const AUTO_REVIEW_PAGE = `<!doctype html><title>Trip notes</title><body s
     document.querySelector('#noteForm').addEventListener('submit', (event) => { event.preventDefault(); window.counts.sent++; document.querySelector('#sent').textContent = 'Sent' });
   </script></body>`
 
+/** Leads the plain POST form saved (the form navigates: 303 to the saved page, like a server-rendered app). */
+export const leadSaves = []
+
+/**
+ * The navigating POST form: `/auto-review/lead` (the form), POST
+ * `/auto-review/lead/save` (saves, 303), `/auto-review/lead/saved`.
+ * @returns {boolean} whether the request was answered here.
+ */
+export function handleAutoReviewRequest(request, response) {
+  const path = new URL(request.url, 'http://fixture').pathname
+  if (path === '/auto-review/lead/save' && request.method === 'POST') {
+    let body = ''
+    request.on('data', chunk => { body += chunk })
+    request.on('end', () => {
+      leadSaves.push(body)
+      // At once: the new page replaces the form before the click's own answer is due.
+      response.writeHead(303, { location: '/auto-review/lead/saved' }).end()
+    })
+    return true
+  }
+  if (path === '/auto-review/lead/saved') {
+    response.end('<!doctype html><title>Lead saved</title><body style="font:14px sans-serif;padding:16px"><h1>Lead saved</h1><p id="saved">Marta Okafor is in your leads.</p></body>')
+    return true
+  }
+  if (path === '/auto-review/lead') {
+    response.end(`<!doctype html><title>New lead</title><body style="font:14px sans-serif;padding:16px"><h1>New lead</h1>
+      <form method="post" action="/auto-review/lead/save"><label>Name <input id="lead" name="name"></label> <button id="save">Save lead</button></form></body>`)
+    return true
+  }
+  return false
+}
+
 const text = message => typeof message?.content === 'string'
   ? message.content
   : Array.isArray(message?.content) ? message.content.map(part => part?.text ?? '').join('\n') : ''
@@ -61,6 +93,9 @@ export async function startAutoReviewModel() {
     }
     state.agentRequests += 1
     const messages = Array.isArray(body.messages) ? body.messages : []
+    // What the agent was told about its last step (the tool result it reads next).
+    const lastTool = messages.findLast(message => message.role === 'tool')
+    if (lastTool !== undefined) state.lastToolResult = text(lastTool)
     if (messages.some(message => message.role === 'user' && text(message).includes('Generate the session title'))) {
       streamReply(response, { text: 'Auto approve smoke' }, { model: AUTO_PROVIDER })
       return
@@ -251,6 +286,30 @@ export async function runAutoReviewSmoke(ctx) {
   await localQuestion.waitFor({ state: 'detached', timeout: 15_000 })
   results.push('with Auto approve on, the page read shows as one slim neutral line ("Web pages read · shell and file tools paused", Clear) with the full sentence one click away; the local-address question still shows')
   results.push('Auto approve on: navigate, click, type and a form submit ran with zero approval cards; only the submit was reviewed (silently, "Checking…" in the timeline), and the timeline marks every step Auto')
+
+  // ---- 1b. A plain POST form whose submit navigates (303 to the saved page): the step is done, not "Failed" ----
+  const saveLead = { name: 'browser_click', args: { selector: '#save' } }
+  autoModel.setTurn('AR6', [
+    { name: 'browser_navigate', args: { url: `${origin}/auto-review/lead` } },
+    { name: 'browser_type', args: { selector: '#lead', text: 'Marta Okafor' } },
+    saveLead,
+  ])
+  const cardsBeforeLead = await cardsSoFar()
+  const savesBefore = leadSaves.length
+  await send('AR6 Open the new lead form, type Marta Okafor as the name and save the lead.')
+  await turnDone('AR6')
+  assert.equal(await cardsSoFar(), cardsBeforeLead, 'the navigating save showed no card')
+  assert.deepEqual(leadSaves.slice(savesBefore), ['name=Marta+Okafor'], 'the lead was saved once')
+  assert.equal(new URL(page.url()).pathname, '/auto-review/lead/saved')
+  const leadSteps = chat.locator('.step-timeline').last().locator('.timeline-step')
+  assert.equal(await leadSteps.count(), 3)
+  const saveStep = leadSteps.nth(2)
+  assert.equal(await saveStep.locator('.timeline-step-failed').count(), 0, 'the save step is not shown as Failed')
+  assert.match(await saveStep.getAttribute('class'), /\bok\b/u, 'the save step is done')
+  assert.match(autoModel.state.lastToolResult ?? '', /The page navigated to a new document/u, 'the agent is told the page navigated')
+  await saveStep.scrollIntoViewIfNeeded()
+  await themedShots(chat, 'auto-approve-post-submit-step')
+  results.push('a click that submits a navigating POST form (303) is a done step, not "Failed", and the agent is told the page navigated')
 
   // ---- 2. Latency: ordinary steps under Auto against the trusted-site baseline; the reviewed step ----
   autoModel.setTurn('AR2', [more, more, more, { name: 'browser_click', args: { selector: '#submit' } }])

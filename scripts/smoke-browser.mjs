@@ -21,7 +21,7 @@ const { chromium } = bridgeRequire('playwright-core')
 const { PINNED_CHROME_EXTENSION_ID } = await import(pathToFileURL(join(bridge, 'lib/protocol.js')).href)
 const { startScriptedModel } = await import(pathToFileURL(join(root, 'scripts/fixtures/scripted-model.mjs')).href)
 const { runAgentUxSmoke, assertKillSwitchAudited } = await import(pathToFileURL(join(root, 'scripts/fixtures/agent-ux-smoke.mjs')).href)
-const { AUTO_PROVIDER, AUTO_REVIEW_PAGE, runAutoReviewSmoke, startAutoReviewModel } = await import(pathToFileURL(join(root, 'scripts/fixtures/auto-review-smoke.mjs')).href)
+const { AUTO_PROVIDER, AUTO_REVIEW_PAGE, handleAutoReviewRequest, runAutoReviewSmoke, startAutoReviewModel } =await import(pathToFileURL(join(root, 'scripts/fixtures/auto-review-smoke.mjs')).href)
 const { runPhase3Smoke } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-smoke.mjs')).href)
 const { phase3Reply } = await import(pathToFileURL(join(root, 'scripts/fixtures/phase3-model.mjs')).href)
 const { runPairingSmoke } = await import(pathToFileURL(join(root, 'scripts/fixtures/pairing-browser-smoke.mjs')).href)
@@ -285,6 +285,7 @@ const server = createServer((request, response) => {
     return
   }
   if (request.url.startsWith('/inner')) { response.end(inner); return }
+  if (handleAutoReviewRequest(request, response)) return
   if (request.url.startsWith('/auto-review')) { response.end(AUTO_REVIEW_PAGE); return }
   if (request.url.startsWith('/content-tools')) { response.end(contentToolsPage); return }
   if (request.url.startsWith('/ledger')) { response.end(tablePage(Number(new URL(request.url, 'http://x').searchParams.get('page') ?? 1))); return }
