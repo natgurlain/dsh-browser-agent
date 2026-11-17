@@ -1655,7 +1655,7 @@ try {
   await waitFor(async () => await badge(tabId) === 'AI', 'controlled tab badge after reconnect')
   results.push('the kill switch cancels pending approvals and calls, drops the bridge until Reconnect, and the badge shows OFF / AI')
   await page.bringToFront()
-  await assertKillSwitchAudited({ env, bridge, page, panel, waitFor, delay })
+  await assertKillSwitchAudited({ env, bridge, page, panel, waitFor, delay, tool })
   results.push('a real click on the page pill\'s Stop engages the kill switch, and every engagement is in the audit log without typed text')
 
   // ---- Panel-free runtime ----

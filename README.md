@@ -148,7 +148,7 @@ Before every click the target's center is hit-tested; a target covered by anothe
 
 - **Approval cards** show exactly what will be clicked, typed or opened before it happens, and each card is bound to that one action.
 - **Pause / take over.** *Pause after this step* lets the current action finish and holds the next one until you resume. *Take over* pauses the agent so you can use the page yourself; resume hands control back, and the model is told what changed.
-- **Agent overlay.** A ghost cursor and outline mark each target before the agent acts, and controlled tabs get a colored frame with a Stop button (Settings can turn the overlay off).
+- **Agent overlay.** A ghost cursor and outline mark each target before the agent acts, and while a turn is acting on a tab, the tab gets a colored frame with a Stop button; an idle tab shows nothing (Settings can turn the overlay off).
 - **Step timeline and audit log.** The side panel lists each step of a run. Every action, approval and kill-switch engagement is written to a tamper-evident audit log under `~/.dsh/browser-audit/`, which you can export from Settings.
 - **Site rules.** In Settings, mark a site as blocked, read-only, always ask or trusted. After the agent reads untrusted content, writes to other sites need a fresh approval (taint rules). Your own local pages and sites you marked trusted do not count as untrusted content; see [Security](#security).
 - **Strict mode** (Chrome). For sites you list, or for one agent session, the page's outgoing writes are held at the network layer until you approve them.

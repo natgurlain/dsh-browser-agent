@@ -206,16 +206,41 @@ describe('audit notes and the pause gate', () => {
     expect(env.pauseStates().at(-1)).toMatchObject({ mode: 'running', held: [] })
   })
 
+  it('shows the "AI controlling · Stop" pill only while a turn acts on the tab', async () => {
+    const env = await boot()
+    const control = () => env.tabMessages.filter(({ message }) => message.type === 'DSH_OVERLAY' && message.op === 'control').map(({ tabId, message }) => `${tabId}:${String(message.on)}`)
+    // Connected, with a conversation bound to the tab, and nothing asked yet: no pill.
+    await new Promise((resolve) => { setTimeout(resolve, 100) })
+    expect(control()).toEqual([])
+    // The turn's first tool call: the pill appears on the tab it acts on.
+    env.socket.receive({ t: 'tool.call', id: 'first', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 10_000, sessionId: 'session-live' })
+    await vi.waitFor(() => { expect(env.sent()).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'first' })) })
+    expect(control()).toEqual(['1:true'])
+    // Between two steps of the same turn it stays.
+    await new Promise((resolve) => { setTimeout(resolve, 100) })
+    expect(control()).toEqual(['1:true'])
+    // Another conversation's turn ending changes nothing; this one's ending removes it.
+    env.socket.receive({ t: 'event', frame: { method: 'session/event', payload: { sessionId: 'session-other', event: { type: 'turn/end' } } } })
+    await new Promise((resolve) => { setTimeout(resolve, 50) })
+    expect(control()).toEqual(['1:true'])
+    env.socket.receive({ t: 'event', frame: { method: 'session/event', payload: { sessionId: 'session-live', event: { type: 'turn/end' } } } })
+    await vi.waitFor(() => { expect(control()).toEqual(['1:true', '1:false']) })
+  })
+
   it('shows the takeover banner on the controlled tab; its Resume opens the panel, which resumes', async () => {
     const env = await boot()
     env.socket.receive({ t: 'tool.call', id: 'first', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 10_000, sessionId: 'session-live' })
     await vi.waitFor(() => { expect(env.sent()).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'first' })) })
+    // The turn is acting: the pill is on the controlled tab (the setting defaults to on).
+    expect(env.tabMessages).toContainEqual({ tabId: 1, message: expect.objectContaining({ type: 'DSH_OVERLAY', op: 'control', on: true }) })
     env.panel.emit({ type: 'agent.pause', mode: 'take-over' })
     await vi.waitFor(() => {
       expect(env.tabMessages).toContainEqual({ tabId: 1, message: expect.objectContaining({ type: 'DSH_OVERLAY', op: 'takeover', on: true }) })
     })
-    // The pill is on the controlled tab too (the setting defaults to on).
-    expect(env.tabMessages).toContainEqual({ tabId: 1, message: expect.objectContaining({ type: 'DSH_OVERLAY', op: 'control', on: true }) })
+    // The user took over: the banner replaces the pill.
+    await vi.waitFor(() => {
+      expect(env.tabMessages).toContainEqual({ tabId: 1, message: expect.objectContaining({ type: 'DSH_OVERLAY', op: 'control', on: false }) })
+    })
     env.content.emit({ type: 'DSH_AGENT_RESUME' }, { id: 'test-extension', tab: browserTab('https://example.com/start') }, () => {})
     // The in-page button is not authoritative: it only brings up the panel.
     await vi.waitFor(() => { expect(chrome.sidePanel.open).toHaveBeenCalled() })
