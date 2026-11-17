@@ -138,7 +138,13 @@ export async function runAgentUxSmoke(ctx) {
   await waitFor(async () => await chat.locator('.decision-badge').count() === 2, 'audit decision badges')
   await chat.locator('.timeline-step-thumb img').first().waitFor({ timeout: 15_000 })
   // The click passed the trusted-site rule without a card; the screenshot was approved on one.
-  assert.deepEqual(await chat.locator('.decision-badge').allTextContents(), ['Trusted', 'Approved'])
+  // Read once the list has settled: the timeline is drawn again when the screenshot's
+  // thumbnail arrives, and a single read in that moment can see no rows at all.
+  const badges = await waitFor(async () => {
+    const texts = await chat.locator('.decision-badge').allTextContents()
+    return texts.length === 2 ? texts : undefined
+  }, 'both audit decision badges after the thumbnail loaded')
+  assert.deepEqual(badges, ['Trusted', 'Approved'])
   await shot(chat, 'panel-step-timeline.png')
   await chat.locator('.timeline-step-head').first().click()
   await chat.locator('.timeline-step-details').first().waitFor()
