@@ -684,6 +684,69 @@ chrome.tabs.onCreated?.addListener((tab) => {
   void commitGate.arm(tab.id).catch(() => { /* best effort: the opener's turn still gates the opener */ })
 })
 
+/**
+ * Per window, the foreground `browser_open_tab` calls creating a tab right
+ * now; each collects the ids of the tabs created meanwhile.
+ */
+const agentCreatingIn = new Map<number, Set<Set<number>>>()
+
+/** Mark a tab the agent itself opened, so its activation is not a user's tab switch. */
+function expectAgentOpenedTab(tabId: number): void {
+  if (!tabAffinity.expectAgentOpenedTab(tabId)) return
+  persistTabAffinity()
+  broadcastTabAffinity()
+}
+
+// Chrome announces the new tab (and may activate it) before `tabs.create` resolves.
+chrome.tabs.onCreated?.addListener((tab) => {
+  const opens = agentCreatingIn.get(tab.windowId)
+  if (tab.id === undefined || opens === undefined) return
+  for (const opened of opens) opened.add(tab.id)
+  expectAgentOpenedTab(tab.id)
+})
+
+/**
+ * Run a foreground `browser_open_tab` so the new tab's activation (blank,
+ * before the open binds it) raises no "Follow your current page?" question.
+ * When the open ends without binding the tab, a still-active tab the user
+ * kept is asked about as usual.
+ */
+async function withAgentOpenedTab(
+  windowId: number,
+  active: boolean,
+  run: (agentOpen: { creating: () => void; created: (tabId: number) => void } | undefined) => Promise<ToolAnswer>,
+): Promise<ToolAnswer> {
+  if (!active) return run(undefined)
+  const opened = new Set<number>()
+  const stopCreating = (): void => {
+    const opens = agentCreatingIn.get(windowId)
+    if (opens === undefined || !opens.delete(opened)) return
+    if (opens.size === 0) agentCreatingIn.delete(windowId)
+  }
+  try {
+    return await run({
+      creating: () => {
+        const opens = agentCreatingIn.get(windowId) ?? new Set<Set<number>>()
+        opens.add(opened)
+        agentCreatingIn.set(windowId, opens)
+      },
+      created: (tabId) => {
+        stopCreating()
+        opened.add(tabId)
+        expectAgentOpenedTab(tabId)
+      },
+    })
+  } finally {
+    stopCreating()
+    let changed = false
+    for (const tabId of opened) changed = tabAffinity.endAgentOpenedTab(tabId) || changed
+    if (changed) {
+      persistTabAffinity()
+      broadcastTabAffinity()
+    }
+  }
+}
+
 /** Run one agent call with the tab's commit gate armed and the agent turn marked. */
 async function withCommitGate(
   activeCall: ActiveToolCall,
@@ -3051,7 +3114,7 @@ function routeToolCall(call: ToolCall): void {
     : call.name === 'browser_open_tab'
     ? resolveOpenTabWindow(call.sessionId).then((target) => 'ok' in target
       ? target
-      : dispatchOpenTab(
+      : withAgentOpenedTab(target.windowId, call.args.active !== false, (agentOpen) => dispatchOpenTab(
           call,
           target.windowId,
           sharePageContent,
@@ -3062,7 +3125,8 @@ function routeToolCall(call: ToolCall): void {
           (tabId) => tabAffinity.allowsTarget(tabId, call.sessionId),
           commitAction,
           policy,
-        ))
+          agentOpen,
+        )))
     : call.name === 'browser_site_driver'
     ? resolveToolTab(call.sessionId).then((target) => 'ok' in target
       ? target

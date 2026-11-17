@@ -790,6 +790,18 @@ try {
   assert.match(popup, /The page opened a new tab \(tabId \d+\); call browser_follow_tab/)
   for (const opened of browser.pages().filter(candidate => candidate.url().includes('popup'))) await opened.close()
   await page.bringToFront()
+  // A foreground browser_open_tab: the tab is the agent's own, so the panel never asks
+  // "Follow your current page?", not even while the new tab is still blank.
+  const affinityFrom = await panel.evaluate(() => messages.length)
+  assert.match(succeed(await tool('browser_open_tab', { url: `${origin}/stock` })), /^Opened a new tab at /)
+  const openStates = await panel.evaluate(from => messages.slice(from).filter(message => message.type === 'tab-affinity').map(message => message.state.status), affinityFrom)
+  assert.ok(openStates.length > 0, 'the open was broadcast')
+  assert.ok(!openStates.includes('handoff'), `no handoff question for the agent's own tab (${openStates.join(', ')})`)
+  assert.equal(openStates.at(-1), 'following')
+  for (const opened of browser.pages().filter(candidate => candidate.url().endsWith('/stock'))) await opened.close()
+  await page.bringToFront()
+  succeed(await tool('browser_follow_tab', { tabId }))
+  results.push('a foreground browser_open_tab follows the new tab without the "Follow your current page?" question, even while the tab is blank')
   // Developer tools have been capturing this tab's console since browser_console_logs ran above.
   succeed(await tool('browser_console_logs', {}))
   const crashed = succeed(await tool('browser_click', { selector: '#crash' }))
