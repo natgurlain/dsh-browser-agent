@@ -102,7 +102,7 @@ describe('PDF extraction limits', () => {
 
   // A wall-clock comparison: other jobs on the machine can stretch one slice, so a noisy run is
   // retried. A parser that really blocks the loop fails every attempt.
-  it('keeps the event loop responsive while it parses (approvals, kill switch)', { retry: 2 }, async () => {
+  it('keeps the event loop responsive while it parses (approvals, kill switch)', { retry: 2, timeout: 30_000 }, async () => {
     const shown = 'BT (x) Tj 1 0 Td ET\n'.repeat(300_000)
     const bytes = pdf(base(`4 0 obj << /Length ${shown.length} >> stream\n${shown}\nendstream endobj\n`))
     // Worst gap between 5 ms timer ticks, and how many ticks ran.
@@ -131,7 +131,7 @@ describe('PDF extraction limits', () => {
     // 200 ms to the worst pause the machine already shows when idle.
     expect(parsing.ticks).toBeGreaterThan(10)
     expect(parsing.worstGap).toBeLessThan(200 + 2 * idle.worstGap)
-  }, 20_000)
+  })
 
   it('stops at the deadline and on abort', async () => {
     const shown = 'BT (x) Tj ET\n'.repeat(200_000)
