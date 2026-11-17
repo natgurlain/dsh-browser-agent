@@ -313,6 +313,17 @@ describe('taint banner with Auto approve', () => {
     expect(host.querySelector('[data-testid="taint-details"]')).toBeNull()
   })
 
+  it('switching Auto approve off with the details open shows the old banner closed, as before', async () => {
+    const sources = ['https://a.example', 'https://b.example', 'https://c.example', 'https://d.example']
+    const host = await banner(sources, {}, auto)
+    await click(summary(host))
+    await act(async () => { root!.render(createElement(TaintBanner, { sessionId: 's1', locale: 'en', acceptSyntheticClicks: true, autoApprove: false })) })
+    expect(host.querySelector('[data-testid="taint-sources"]')).toBeNull()
+    expect(buttons(host)).toEqual(['+1 more', 'Clear'])
+    await act(async () => { root!.render(createElement(TaintBanner, { sessionId: 's1', locale: 'en', acceptSyntheticClicks: true, autoApprove: true })) })
+    expect(summary(host).getAttribute('aria-expanded')).toBe('true')
+  })
+
   it('Auto on: Clear clears exactly the shown session, as before', async () => {
     const host = await banner(['https://seraph.quest'], sites(['https://seraph.quest']), auto)
     await click(button(host, 'Clear'))

@@ -174,6 +174,9 @@ export function TaintBanner({ sessionId, locale, onTrusted, autoApprove = false,
   const [expanded, setExpanded] = useState(false)
   const [listOpen, setListOpen] = useState(false)
   const [confirming, setConfirming] = useState<TaintTrustChoice | null>(null)
+  // The slim line's own toggles: switching Auto approve never opens the other look's lists.
+  const [quietOpen, setQuietOpen] = useState(false)
+  const [quietListOpen, setQuietListOpen] = useState(false)
   const quietId = useId()
   // Clear exactly the record shown: the session can change between render and click.
   const key = taintKey(sessionId ?? undefined)
@@ -198,11 +201,11 @@ export function TaintBanner({ sessionId, locale, onTrusted, autoApprove = false,
           <button
             type="button"
             className="taint-quiet-summary"
-            aria-expanded={expanded}
+            aria-expanded={quietOpen}
             aria-controls={`${quietId}-details`}
             aria-describedby={`${quietId}-full`}
             title={full}
-            onClick={() => setExpanded((open) => !open)}
+            onClick={() => setQuietOpen((open) => !open)}
           >
             <svg className="taint-quiet-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
               <path d="M8 1.5 2.75 3.5v4.1c0 3.2 2.2 5.9 5.25 6.9 3.05-1 5.25-3.7 5.25-6.9V3.5L8 1.5Z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
@@ -217,7 +220,7 @@ export function TaintBanner({ sessionId, locale, onTrusted, autoApprove = false,
           </button>
         </div>
         <span id={`${quietId}-full`} className="sr-only">{full}</span>
-        {expanded && (
+        {quietOpen && (
           <div id={`${quietId}-details`} className="taint-quiet-details" data-testid="taint-details">
             <p>{full}</p>
             {view.trust.length > 0 && view.trust.length <= TAINT_BANNER_MAX_TRUST_BUTTONS && (
@@ -231,12 +234,12 @@ export function TaintBanner({ sessionId, locale, onTrusted, autoApprove = false,
             )}
             {view.trust.length > TAINT_BANNER_MAX_TRUST_BUTTONS && (
               <div className="taint-banner-row">
-                <button type="button" className="secondary taint-trust" aria-expanded={listOpen} onClick={() => setListOpen((open) => !open)}>
+                <button type="button" className="secondary taint-trust" aria-expanded={quietListOpen} onClick={() => setQuietListOpen((open) => !open)}>
                   {copy.trustMany}
                 </button>
               </div>
             )}
-            {listOpen && view.trust.length > TAINT_BANNER_MAX_TRUST_BUTTONS && (
+            {quietListOpen && view.trust.length > TAINT_BANNER_MAX_TRUST_BUTTONS && (
               <ul className="taint-sources" data-testid="taint-trust-list">
                 {view.trust.map((choice) => (
                   <li key={choice.site}>
