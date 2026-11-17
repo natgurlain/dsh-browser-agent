@@ -148,6 +148,25 @@ export const COMMIT_CLASSES = ['none', 'send', 'delete', 'save', 'submit', 'shar
 
 export type CommitClass = typeof COMMIT_CLASSES[number]
 
+/**
+ * Which deterministic rule makes an action auto-approvable at all
+ * (docs/auto-review-design.md §8):
+ * - `harmless`: plainly harmless by the extension's own allowlist (a real
+ *   same-site link, a disclosure control, hover, a navigation key in a text
+ *   field). The reviewer may allow it on its judgement.
+ * - `named`: anything else that is eligible. Allowed only when the user's
+ *   newest panel message names the control(s) or contains the text verbatim.
+ */
+export const AUTO_REVIEW_RULES = ['harmless', 'named'] as const
+
+export type AutoReviewRule = typeof AUTO_REVIEW_RULES[number]
+
+/** Longest text a typing action may carry to the verbatim check (longer: never Auto). */
+export const MAX_REVIEW_EXACT_TEXT_CHARS = 500
+
+/** Most phrases a `named` action may require (a drag's two ends; a selection's options). */
+export const MAX_REVIEW_NAMES = 5
+
 /** Key modifiers a reviewed key press may carry (any other modifier makes it ineligible). */
 export const AUTO_REVIEW_MODIFIERS = ['Shift'] as const
 
@@ -163,7 +182,19 @@ export interface ReviewAction {
   /** Element kind from the fixed vocabulary, or 'none' (navigation, key press to the page). */
   targetKind: string
   targetClass: typeof AUTO_REVIEW_TARGET_CLASSES[number]
-  /** What the action would commit (see {@link COMMIT_CLASSES}). */
+  /** Which deterministic rule applies (see {@link AUTO_REVIEW_RULES}). */
+  rule: AutoReviewRule
+  /**
+   * For `named`: the phrases the newest panel message must contain verbatim
+   * (control names, chosen option labels, both ends of a drag), exactly as the
+   * page reported them.
+   */
+  mustName?: string[]
+  /** For `named` typing: the full text to be typed, which the message must contain verbatim. */
+  exactText?: string
+  /** For `named` typing into a recipient/address/link/amount field: the text must equal a whole token of the message. */
+  exactToken?: boolean
+  /** What the action would commit, for the prompt and the card's sentence (see {@link COMMIT_CLASSES}). */
   commitClass: CommitClass
   /** Native structure says this likely submits a form (submit button, Enter in a form field). */
   formSubmitLikely: boolean
@@ -210,13 +241,21 @@ const UNTRUSTED_KEYS = ['name', 'context', 'title', 'url', 'destination', 'typed
 export function parseReviewAction(value: unknown): ReviewAction | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const raw = value as Record<string, unknown>
-  const allowed = new Set(['tool', 'verb', 'targetKind', 'targetClass', 'commitClass', 'formSubmitLikely', 'highRiskWords', 'sameOrigin', 'tainted', 'approvedThisTurn', 'typedChars', 'key', 'modifiers', 'repeat', 'untrusted'])
+  const allowed = new Set(['tool', 'verb', 'targetKind', 'targetClass', 'rule', 'mustName', 'exactText', 'exactToken', 'commitClass', 'formSubmitLikely', 'highRiskWords', 'sameOrigin', 'tainted', 'approvedThisTurn', 'typedChars', 'key', 'modifiers', 'repeat', 'untrusted'])
   if (Object.keys(raw).some((key) => !allowed.has(key))) return undefined
   if (!(AUTO_REVIEW_TOOLS as readonly unknown[]).includes(raw.tool)) return undefined
   if (!(AUTO_REVIEW_VERBS as readonly unknown[]).includes(raw.verb)) return undefined
   if (typeof raw.targetKind !== 'string' || !/^[a-z]{1,16}$/u.test(raw.targetKind)) return undefined
   if (!(AUTO_REVIEW_TARGET_CLASSES as readonly unknown[]).includes(raw.targetClass)) return undefined
   if (!(COMMIT_CLASSES as readonly unknown[]).includes(raw.commitClass)) return undefined
+  if (!(AUTO_REVIEW_RULES as readonly unknown[]).includes(raw.rule)) return undefined
+  if (raw.mustName !== undefined && (!Array.isArray(raw.mustName) || raw.mustName.length === 0 || raw.mustName.length > MAX_REVIEW_NAMES
+    || !raw.mustName.every((entry) => typeof entry === 'string' && entry !== '' && entry.length <= MAX_REVIEW_UNTRUSTED_CHARS))) return undefined
+  if (raw.exactText !== undefined && (typeof raw.exactText !== 'string' || raw.exactText === '' || raw.exactText.length > MAX_REVIEW_EXACT_TEXT_CHARS)) return undefined
+  if (raw.exactToken !== undefined && typeof raw.exactToken !== 'boolean') return undefined
+  // A `named` action must say what has to be named; a `harmless` one must not.
+  if (raw.rule === 'named' && raw.mustName === undefined && raw.exactText === undefined) return undefined
+  if (raw.rule === 'harmless' && (raw.mustName !== undefined || raw.exactText !== undefined)) return undefined
   for (const flag of ['formSubmitLikely', 'highRiskWords', 'tainted'] as const) {
     if (typeof raw[flag] !== 'boolean') return undefined
   }
@@ -251,6 +290,10 @@ export function parseReviewAction(value: unknown): ReviewAction | undefined {
     verb: raw.verb as ReviewAction['verb'],
     targetKind: raw.targetKind,
     targetClass: raw.targetClass as ReviewAction['targetClass'],
+    rule: raw.rule as AutoReviewRule,
+    ...raw.mustName === undefined ? {} : { mustName: [...raw.mustName] as string[] },
+    ...raw.exactText === undefined ? {} : { exactText: raw.exactText as string },
+    ...raw.exactToken === undefined ? {} : { exactToken: raw.exactToken as boolean },
     commitClass: raw.commitClass as CommitClass,
     formSubmitLikely: raw.formSubmitLikely as boolean,
     highRiskWords: raw.highRiskWords as boolean,
@@ -270,7 +313,7 @@ export function parseReviewAction(value: unknown): ReviewAction | undefined {
  * a fixed sentence on the card. Model text never reaches the card.
  */
 export const REVIEW_CODES = [
-  'allowed', 'model-ask', 'high-risk', 'under-rated', 'no-instruction', 'restricted',
+  'allowed', 'model-ask', 'high-risk', 'not-named', 'restricted',
   'timeout', 'failed', 'cancelled', 'superseded', 'no-user-message', 'unavailable',
 ] as const
 

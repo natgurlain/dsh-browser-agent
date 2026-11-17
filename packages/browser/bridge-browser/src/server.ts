@@ -1374,23 +1374,30 @@ export class BridgeServer {
       }
       return
     }
+    // A panel prompt: the bridge mints the request id DSH stamps on its user
+    // source (overwriting any the payload carries), so the id Auto review trusts
+    // is never the caller's choice.
+    const minted = frame.method === 'session.prompt' && this.deps.onPanelPrompt !== undefined
+      && typeof frame.payload === 'object' && frame.payload !== null && !Array.isArray(frame.payload)
+      ? randomUUID()
+      : undefined
+    // Recorded before the Host runs the prompt (its turn may raise cards before
+    // the call returns); an id that never reaches the history trusts nothing.
+    const panelSession = minted === undefined ? undefined : orderedSessionId(frame)
+    if (panelSession !== undefined && minted !== undefined) {
+      try { this.deps.onPanelPrompt?.(panelSession, minted) } catch { /* observer only */ }
+    }
     try {
       const result = await this.deps.api.call({
         rpcId: frame.id,
         method: frame.method,
-        payload: frame.payload,
+        payload: minted === undefined ? frame.payload : { ...(frame.payload as Record<string, unknown>), requestId: minted },
         signal: conn.abort.signal,
       })
       // Bind the session to this browser only once the Host accepted the
       // prompt (an unauthorized prompt must not steer another session's tools).
       const prompted = frame.method === 'session.prompt' ? orderedSessionId(frame) : undefined
       if (prompted !== undefined && result.ok) this.sessionAffinity.set(prompted, conn.key)
-      if (prompted !== undefined && result.ok) {
-        // The request id DSH puts on the prompt's user source (remote-host-api.ts: requestId = rpcId).
-        const payload = frame.payload as Record<string, unknown>
-        const requestId = typeof payload.requestId === 'string' && payload.requestId !== '' ? payload.requestId : frame.id
-        try { this.deps.onPanelPrompt?.(prompted, requestId) } catch { /* observer only */ }
-      }
       sendFrame(conn, {
         t: 'rpc.result',
         id: frame.id,

@@ -419,6 +419,13 @@ function boundTargets(context: ApprovalContext): unknown {
           ...state.href === undefined ? {} : { href: state.href },
           ...state.form === undefined ? {} : { form: state.form },
           ...state.chosen === undefined ? {} : { chosen: state.chosen },
+          // What Auto review relied on: a link that turns into a download, a
+          // select that starts submitting, a field that was empty and no
+          // longer is, or a control that stops being a disclosure.
+          ...state.download === true ? { download: true } : {},
+          ...state.autoSubmit === true ? { autoSubmit: true } : {},
+          ...state.disclosure === true ? { disclosure: true } : {},
+          ...state.empty === undefined ? {} : { empty: state.empty },
         }
       : { state: state.state }
   const targets = context.targets ?? {}

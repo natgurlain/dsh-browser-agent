@@ -241,6 +241,49 @@ function linkOf(el: Element): HTMLAnchorElement | HTMLAreaElement | undefined {
 }
 
 /**
+ * Whether a link goes somewhere real: not an empty `href`, not a fragment of
+ * this page, not `javascript:`, and not this same document. A link that does
+ * not is a button whose page code decides what it does, and is described
+ * without a destination.
+ */
+export function realLink(link: HTMLAnchorElement | HTMLAreaElement): boolean {
+  const raw = (link.getAttribute('href') ?? '').trim()
+  if (raw === '' || raw.startsWith('#') || /^javascript:/iu.test(raw.replace(/[\u0000-\u0020]/gu, ''))) return false
+  try {
+    const url = new URL(raw, document.baseURI)
+    const here = new URL(document.URL)
+    if (url.protocol === 'javascript:') return false
+    return !(url.origin === here.origin && url.pathname === here.pathname && url.search === here.search)
+  } catch {
+    return true
+  }
+}
+
+/**
+ * Whether the element only shows or hides part of the page, by its own
+ * structure: it carries `aria-expanded`, is a `<summary>`, or is a button
+ * (native or role) with `aria-haspopup` or `aria-controls`. A page can lie
+ * about this; Auto review only trusts it for names in a short harmless list.
+ */
+export function isDisclosure(el: Element): boolean {
+  const control = el.closest('button, [role="button"], summary, [aria-expanded]') ?? el
+  if (control.tagName === 'SUMMARY') return true
+  if (control.hasAttribute('aria-expanded')) return true
+  const button = control instanceof HTMLButtonElement || (control.getAttribute('role') ?? '').trim().toLowerCase() === 'button'
+  const popup = (control.getAttribute('aria-haspopup') ?? '').trim().toLowerCase()
+  return button && ((popup !== '' && popup !== 'false') || (control.getAttribute('aria-controls') ?? '').trim() !== '')
+}
+
+/** For a text field: whether it holds nothing yet (one bit; the value never leaves the page). */
+function fieldEmpty(el: Element): boolean | undefined {
+  if (el instanceof HTMLTextAreaElement) return el.value === ''
+  if (el instanceof HTMLInputElement) return IMPLICIT_SUBMIT_TYPES.has(el.type) ? el.value === '' : undefined
+  const editable = (el instanceof HTMLElement && el.isContentEditable) || (el.getAttribute('contenteditable') !== null && el.getAttribute('contenteditable') !== 'false')
+  if (editable) return (el.textContent ?? '').trim() === ''
+  return undefined
+}
+
+/**
  * Where an element's form goes, and how: for a submit control its own
  * formaction/formmethod first, for a field or select the form's.
  */
@@ -271,7 +314,15 @@ export function describeElement(el: Element): FoundTarget {
     ...(fieldInForm(el) ? { inForm: true as const } : {}),
     ...(() => {
       const link = linkOf(el)
-      return link === undefined ? {} : { href: destinationOf(link.getAttribute('href') ?? ''), ...link.hasAttribute('download') ? { download: true as const } : {} }
+      if (link === undefined) return {}
+      // A download writes a file to disk whatever its address: always reported.
+      const download = link.hasAttribute('download') ? { download: true as const } : {}
+      return realLink(link) ? { href: destinationOf(link.getAttribute('href') ?? ''), ...download } : download
+    })(),
+    ...(isDisclosure(el) ? { disclosure: true as const } : {}),
+    ...(() => {
+      const empty = fieldEmpty(el)
+      return empty === undefined ? {} : { empty }
     })(),
     ...(() => {
       // Submit controls, fields where Enter submits, and selects in a form: where their form goes.

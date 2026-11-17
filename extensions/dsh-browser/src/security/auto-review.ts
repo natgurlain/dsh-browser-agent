@@ -1,33 +1,39 @@
 /**
- * Auto review's deterministic floor (docs/auto-review-design.md §5, §9).
+ * Auto review's deterministic rules (docs/auto-review-design.md §5, §8, §9).
  *
  * Decided by the extension BEFORE any model is asked, and never widened by
  * the reviewer's answer: which approval cards a reviewer may decide at all,
- * what each action would commit (its commit class), and the structured
- * action the reviewer is shown. Pure functions only, so every rule is
- * unit-tested.
+ * and by which rule. The promise to the user is short: Auto approves an
+ * action only when **you named it, or it is plainly harmless**.
  *
- * The rule of thumb: only actions the extension can show to be harmless are
- * "low" (the reviewer may allow them when they fit the task). Everything that
- * commits something, and every button whose name does not clearly say it is
- * harmless, is at least "medium": the bridge then lets it through only when
- * the user's newest message asks for that kind of action on that target. A
- * word list can never be complete, so the default for buttons is "needs your
- * words", not "harmless".
+ * - `harmless` (this file decides): a real same-site link, a control that
+ *   only shows or hides part of the page and is called so ("Show more"),
+ *   hover, and moving around inside a text field with navigation keys.
+ * - `named` (the bridge checks against the user's newest panel message):
+ *   everything else that is eligible. The action carries the exact phrases
+ *   the message must contain — the control's full name, every chosen option,
+ *   both ends of a drag — or the exact text to be typed.
+ * - Anything else is never Auto: the card waits for the user.
+ *
+ * The rules decide what CAN be approved; the conversation's model then
+ * decides whether it SHOULD be. Pure functions only, so every rule is
+ * unit-tested.
  *
  * @module
  */
 
 import {
   AUTO_REVIEW_TOOLS,
+  MAX_REVIEW_EXACT_TEXT_CHARS,
   MAX_REVIEW_RECENT,
   MAX_REVIEW_UNTRUSTED_CHARS,
+  type AutoReviewRule,
   type AutoReviewTool,
   type CommitClass,
   type ReviewAction,
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ApprovalPrompt } from './approval.ts'
-import { pageTextForCard, type TargetDestination, type TargetKind, type TargetState } from '../shared/target-description.ts'
+import { MAX_TARGET_NAME_CHARS, pageTextForCard, type TargetDestination, type TargetKind, type TargetState } from '../shared/target-description.ts'
 
 /** Why a card is not reviewed (stable codes; tests and the audit read them). */
 export type IneligibleReason =
@@ -54,19 +60,33 @@ export type IneligibleReason =
   | 'sensitive-target'
   | 'cross-origin-navigation'
   | 'navigation-query'
+  | 'navigation-words'
   | 'tainted-navigation'
   | 'typed-line-break'
+  | 'typed-length'
+  | 'field-not-empty'
   | 'link-destination'
   | 'form-destination'
   | 'data-in-path'
   | 'press-key'
   | 'select-unresolved'
   | 'download'
+  | 'unnamed'
+  | 'drag-offset'
 
 /** What the extension concluded about an eligible action. */
 export interface Assessment {
+  /** Which rule makes it auto-approvable (see {@link AutoReviewRule}). */
+  rule: AutoReviewRule
+  /** For `named`: the phrases the newest panel message must contain verbatim. */
+  mustName?: string[]
+  /** For `named` typing: the full text, which the message must contain verbatim. */
+  exactText?: string
+  /** For `named` typing into a recipient/address/link/amount field: a whole-token match. */
+  exactToken?: boolean
+  /** What it would commit, for the reviewer's prompt and the card's sentence. */
   commitClass: CommitClass
-  /** Native structure: a submit control, or Enter in a field with a form owner. */
+  /** Native structure: a submit control, or a select whose page acts on change. */
   formSubmitLikely: boolean
   /** Payment, purchase, security, credential or access words in the name, context, options or address. */
   highRiskWords: boolean
@@ -99,7 +119,7 @@ export interface ReviewCallContext {
   tainted?: boolean
   /** The call's tool name. */
   tool: string
-  /** The call's arguments (for navigation's destination and the key of a press). */
+  /** The call's arguments (for navigation's destination, the typed text and the key of a press). */
   args: Record<string, unknown>
 }
 
@@ -112,14 +132,22 @@ const NEVER_KINDS: ReadonlySet<TargetKind> = new Set(['password', 'file'])
 const TEXT_KINDS: ReadonlySet<TargetKind> = new Set([
   'textbox', 'searchbox', 'spinbutton', 'textarea', 'email', 'tel', 'url', 'number', 'date', 'editable', 'combobox',
 ])
-/** Kinds that are pressed and whose effect only their page code knows. */
-const BUTTON_KINDS: ReadonlySet<TargetKind> = new Set(['button', 'menuitem', 'clickable', 'element', 'image', 'label'])
-/** Kinds that hold a choice or open a section: low unless their words say otherwise. */
-const CHOICE_KINDS: ReadonlySet<TargetKind> = new Set(['checkbox', 'radio', 'switch', 'slider', 'tab', 'option', 'summary', 'select', 'listbox', 'color'])
+/**
+ * Where navigation keys only move the caret, focus or scroll: free-text
+ * fields, links and buttons. On a select, radio group, slider, spin button,
+ * date or combobox an arrow key changes the value, so it is never Auto.
+ */
+const NAVIGATION_TARGETS: ReadonlySet<TargetKind> = new Set(['textbox', 'searchbox', 'textarea', 'editable', 'email', 'url', 'tel', 'link', 'button'])
+/** Text fields where a repeated navigation key is still only caret movement. */
+const CARET_FIELDS: ReadonlySet<TargetKind> = new Set(['textbox', 'searchbox', 'textarea', 'editable', 'email', 'url', 'tel'])
+/** Most repeats of a navigation key Auto may approve (in a text field only). */
+const MAX_NAVIGATION_REPEAT = 10
 
 /**
  * Commit classes by the words of a name or a path, EN and ZH, matched on
- * stems. Checked in order; the first match wins.
+ * stems. Checked in order; the first match wins. They only label the action
+ * for the reviewer and the card's sentence, and turn a same-site link into a
+ * `named` action; they never make anything approvable.
  */
 const CLASS_WORDS: ReadonlyArray<readonly [CommitClass, RegExp]> = [
   ['delete', /\b(?:delet\w*|remov\w*|trash\w*|bin|archiv\w*|discard\w*|eras\w*|purg\w*|destroy\w*|empty|clear(?:ed)?|wipe\w*)\b|删除|移除|回收站|废纸篓|垃圾箱|归档|清空|丢弃|销毁/iu],
@@ -144,30 +172,29 @@ const HIGH_RISK_WORDS = new RegExp([
 /** Address paths that say payment, account security, credentials, administration, or destruction. */
 const HIGH_RISK_PATHS = /\/(?:checkout|payment|payments|pay|billing|purchase|security|password|passwords|2fa|mfa|tokens|keys|credentials|admin|permissions|members|ownership)(?:\/|$)/iu
 
-/** Selection options that hand out access. */
-const SHARE_OPTIONS = /\b(?:public|private|everyone|anyone|editor|member|viewer|guest|collaborator|commenter|maintainer|developer|write|access)\b|公开|私密|所有人|任何人|编辑者|成员|查看者|访客/iu
-
 /** Fields where typed text decides who or what receives something: recipients, addresses, links, amounts. */
 const ADDRESS_FIELD = /\b(?:to|cc|bcc|recipients?|e-?mail|address|url|link|website|amount|quantity|qty|price|share\s+with|invite|phone)\b|收件人|抄送|密送|邮箱|地址|网址|链接|金额|数量|价格|分享给|邀请/iu
 const ADDRESS_KINDS: ReadonlySet<TargetKind> = new Set(['email', 'url', 'tel', 'number', 'spinbutton'])
 
 /**
- * The words a harmless button's name may consist of (EN): verbs that only
- * show, hide or move around, and the UI nouns they act on. A button is low
- * only when EVERY word of its name is one of these ("Show more", "Next
- * page", "Expand all comments"); "Close issue", "Cancel membership" or "Go
- * live" are not. Any other button is at least medium.
+ * The words a harmless disclosure's name may consist of: a few verbs that
+ * only show or hide, and the UI nouns they act on. Only for elements that are
+ * disclosures by their own markup (aria-expanded, `<summary>`, a popup
+ * button), and only when EVERY word of the name is listed ("Show more",
+ * "Show 12 replies", "Details"). Deliberately short: "toggle", "open",
+ * "read", "hide", "go", "dismiss", "answer", "up" and "down" are not here,
+ * because a page can attach anything to them. "Close", "cancel" and "next"
+ * are kept and documented as residues: on a disclosure they rarely do more
+ * than close or page, but the page decides.
  */
 const HARMLESS_WORDS = new Set([
-  'open', 'show', 'view', 'see', 'expand', 'collapse', 'more', 'less', 'load', 'read', 'next', 'previous', 'prev', 'back', 'close',
-  'dismiss', 'hide', 'menu', 'options', 'details', 'info', 'help', 'filter', 'filters', 'sort', 'preview', 'zoom', 'in', 'out',
-  'toggle', 'refresh', 'scroll', 'page', 'pages', 'all', 'comments', 'replies', 'results', 'items', 'list', 'panel', 'dialog',
-  'sidebar', 'navigation', 'nav', 'section', 'thread', 'up', 'down', 'top', 'bottom', 'first', 'last', 'older', 'newer', 'the',
-  'a', 'an', 'cancel', 'go', 'to', 'tab', 'tabs', 'image', 'images', 'photo', 'photos', 'text', 'description', 'answer', 'answers',
+  'show', 'more', 'less', 'expand', 'collapse', 'next', 'previous', 'prev', 'back', 'menu', 'details', 'close', 'cancel',
+  'all', 'comments', 'replies', 'results', 'items', 'options', 'info', 'page', 'pages', 'section', 'thread',
+  'the', 'a', 'an', 'of',
 ])
-const HARMLESS_ZH = /^(?:打开|显示|查看|展开|收起|更多|下一页|上一页|返回|关闭|菜单|详情|帮助|筛选|排序|刷新|预览|加载)(?:更多|详情|菜单|全部|评论|回复|内容|结果)?$/u
+const HARMLESS_ZH = /^(?:显示|展开|收起|更多|下一页|上一页|返回|菜单|详情|关闭|取消)(?:更多|详情|菜单|全部|评论|回复|内容|结果)?$/u
 
-/** Keys that only move focus, scroll or dismiss. */
+/** Keys that only move focus, the caret, or scroll (on the kinds in {@link NAVIGATION_TARGETS}). */
 const NAVIGATION_KEYS = new Set(['Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Escape', 'Esc', 'PageUp', 'PageDown', 'Home', 'End', 'Up', 'Down', 'Left', 'Right'])
 const ENTER_KEYS = new Set(['Enter', 'Return', 'NumpadEnter'])
 const SPACE_KEYS = new Set([' ', 'Space', 'Spacebar'])
@@ -233,12 +260,26 @@ export function classOfWords(...texts: Array<string | undefined>): CommitClass |
   return undefined
 }
 
-/** Whether a button's own name says it only shows, hides or moves around. */
-export function harmlessButtonName(name: string): boolean {
+/** Whether a disclosure's own name says it only shows or hides (every word in the short list). */
+export function harmlessDisclosureName(name: string): boolean {
   const trimmed = name.trim()
   if (HARMLESS_ZH.test(trimmed)) return true
   const words = trimmed.toLowerCase().match(/[\p{L}\p{N}']+/gu) ?? []
   return words.length > 0 && words.every((word) => HARMLESS_WORDS.has(word) || /^\d+$/u.test(word))
+    && words.some((word) => !/^\d+$/u.test(word) && !['the', 'a', 'an', 'of'].includes(word))
+}
+
+/**
+ * Whether a name can be required verbatim: at least 3 letters or digits (2
+ * for Chinese), as the bridge's check requires, and not cut short when it was
+ * read (a cut name would let a message naming only its start through). A
+ * control that cannot be named ("OK", an icon) is never Auto: its card simply
+ * waits, without a model call.
+ */
+function nameable(name: string): boolean {
+  const count = name.match(/[\p{L}\p{N}]/gu)?.length ?? 0
+  if (count < (/\p{Script=Han}/u.test(name) ? 2 : 3)) return false
+  return !([...name].length >= MAX_TARGET_NAME_CHARS && name.endsWith('…'))
 }
 
 function highRisk(...texts: Array<string | undefined>): boolean {
@@ -255,58 +296,57 @@ function no(reason: IneligibleReason): { reason: IneligibleReason } {
   return { reason }
 }
 
+/** A `named` assessment that requires the given phrases. */
+function named(mustName: string[], rest: Omit<Assessment, 'rule' | 'mustName'>): Classified {
+  if (mustName.length === 0 || !mustName.every(nameable)) return no('unnamed')
+  return { rule: 'named', mustName, ...rest }
+}
+
 /** A click (or Space/Enter on a focused control) on one found element. */
 function classifyClick(target: Extract<TargetState, { state: 'found' }>, topOrigin: string | undefined, tainted: boolean): Classified {
   const name = target.name
   const context = target.context?.text
-  // A link: where it goes decides. Cross-origin, query-carrying or non-web destinations are the user's call.
+  // A download writes a file to the user's disk: never Auto.
+  if (target.download === true) return no('download')
+  // A real link (describe drops empty, fragment-only, javascript: and same-document ones): where it goes decides.
   if (target.href !== undefined) {
-    // A download writes a file to the user's disk: never Auto.
-    if (target.download === true) return no('download')
     const href = target.href
     if ('other' in href || topOrigin === undefined || href.origin !== topOrigin || href.query) return no('link-destination')
     if (tainted && pathCarriesData(href.path)) return no('data-in-path')
-    const cls = classOfWords(name, pathWords(href.path))
-    return {
-      commitClass: cls ?? (target.kind === 'link' || CHOICE_KINDS.has(target.kind) || harmlessButtonName(name) ? 'none' : 'unknown'),
+    if (!nameable(name)) return no('unnamed')
+    // The path, not the name, says what a GET does ("/logout", "/items/7/delete").
+    const cls = classOfWords(pathWords(href.path))
+    const facts = {
+      commitClass: cls ?? 'none' as CommitClass,
       formSubmitLikely: false,
       highRiskWords: highRisk(name, context, href.path) || HIGH_RISK_PATHS.test(href.path),
       sameOrigin: true,
       destination: destinationText(href),
     }
+    // A link whose path says it commits something needs the user's words.
+    return cls === undefined ? { rule: 'harmless', ...facts } : named([name], facts)
   }
   // A submit control: where its form goes decides too, and it is at least a submission.
   if (target.submits === true) {
     const form = target.form
     if (form === undefined || 'other' in form || topOrigin === undefined || form.origin !== topOrigin) return no('form-destination')
-    return {
+    return named([name], {
       commitClass: classOfWords(name, pathWords(form.path)) ?? 'submit',
       formSubmitLikely: true,
       highRiskWords: highRisk(name, context, form.path) || HIGH_RISK_PATHS.test(form.path),
       sameOrigin: true,
       destination: destinationText(form),
-    }
+    })
   }
   const cls = classOfWords(name)
-  // A link the page reported no destination for is an unclear button.
-  if (BUTTON_KINDS.has(target.kind) || target.kind === 'link') {
-    // The structural default: a button that does not clearly say it is harmless needs the user's words.
-    return { commitClass: cls ?? (name !== '' && harmlessButtonName(name) ? 'none' : 'unknown'), formSubmitLikely: false, highRiskWords: highRisk(name, context) }
+  // A disclosure called "Show more" only shows more; anything else it might do is the page's residue.
+  if (target.disclosure === true && nameable(name) && harmlessDisclosureName(name)) {
+    return { rule: 'harmless', commitClass: 'none', formSubmitLikely: false, highRiskWords: highRisk(name, context) }
   }
-  // Checkboxes, switches, tabs and options name a preference, not an action
-  // ("Email notifications"): only words that change who can see something count.
-  return { commitClass: cls === 'share' ? 'share' : 'none', formSubmitLikely: false, highRiskWords: highRisk(name, context) }
-}
-
-/** Typing (or a character key) into a found text field. */
-function classifyTyping(target: Extract<TargetState, { state: 'found' }>, tainted: boolean): Classified {
-  const address = ADDRESS_KINDS.has(target.kind) || ADDRESS_FIELD.test(target.name)
-  return {
-    // Typing page data into the site it came from needs the user's words too.
-    commitClass: address ? 'address' : tainted ? 'type' : 'none',
-    formSubmitLikely: false,
-    highRiskWords: highRisk(target.name, target.context?.text),
-  }
+  // Every other control — button, menu item, option, tree item, checkbox,
+  // radio, switch, tab, summary, a link without a real destination, an
+  // unknown element — needs its full name in the user's message.
+  return named([name], { commitClass: cls ?? 'unknown', formSubmitLikely: false, highRiskWords: highRisk(name, context) })
 }
 
 /** The key of a press and its modifiers, from `key` (a chord) and `modifiers`. */
@@ -314,21 +354,21 @@ export function parseKeyPress(args: Record<string, unknown>): { key: string; mod
   const raw = args.key
   if (typeof raw !== 'string' || raw === '') return undefined
   let key = raw
-  let named: unknown[] = []
+  let listed: unknown[] = []
   if (raw.length > 1 && raw.includes('+')) {
     const parts = raw.split('+')
     if (raw.endsWith('++')) {
       key = '+'
-      named = parts.slice(0, -2)
+      listed = parts.slice(0, -2)
     } else {
       key = parts.at(-1)!
-      named = parts.slice(0, -1)
+      listed = parts.slice(0, -1)
     }
     if (key === '') return undefined
   }
-  named = [...named, ...Array.isArray(args.modifiers) ? args.modifiers : []]
+  listed = [...listed, ...Array.isArray(args.modifiers) ? args.modifiers : []]
   const modifiers: string[] = []
-  for (const name of named) {
+  for (const name of listed) {
     if (typeof name !== 'string') return undefined
     const canonical = MODIFIER_NAMES[name.trim().toLowerCase()]
     if (canonical === undefined) return undefined
@@ -337,41 +377,63 @@ export function parseKeyPress(args: Record<string, unknown>): { key: string; mod
   return { key, modifiers }
 }
 
+/** The repeat count of a press (1 when absent); undefined when malformed. */
+function repeatOf(args: Record<string, unknown>): number | undefined {
+  if (args.repeat === undefined) return 1
+  return typeof args.repeat === 'number' && Number.isSafeInteger(args.repeat) && args.repeat >= 1 ? args.repeat : undefined
+}
+
 /** A key press on the focused (or addressed) element. */
 function classifyPress(target: Extract<TargetState, { state: 'found' }>, args: Record<string, unknown>, topOrigin: string | undefined, tainted: boolean): Classified {
   if (args.action !== undefined && args.action !== 'press') return no('press-key')
   const press = parseKeyPress(args)
-  if (press === undefined) return no('press-key')
+  const repeat = repeatOf(args)
+  if (press === undefined || repeat === undefined) return no('press-key')
   // Control, Alt and Meta make app shortcuts with unknown effects.
   if (press.modifiers.some((modifier) => modifier !== 'Shift')) return no('press-key')
   const { key } = press
-  const field = TEXT_KINDS.has(target.kind)
-  if (NAVIGATION_KEYS.has(key)) return { commitClass: 'none', formSubmitLikely: false, highRiskWords: false }
-  if (ENTER_KEYS.has(key) && field) {
-    // Shift+Enter in a multi-line field is a line break: typing.
-    if (press.modifiers.includes('Shift') && (target.kind === 'textarea' || target.kind === 'editable')) return classifyTyping(target, tainted)
-    if (target.inForm === true) {
-      // Enter submits the field's form: where that form goes decides too.
-      const form = target.form
-      if (form === undefined || 'other' in form || topOrigin === undefined || form.origin !== topOrigin) return no('form-destination')
-      return { commitClass: classOfWords(pathWords(form.path)) ?? 'submit', formSubmitLikely: true, highRiskWords: highRisk(target.name, target.context?.text, form.path) || HIGH_RISK_PATHS.test(form.path), sameOrigin: true, destination: destinationText(form) }
-    }
-    // Enter in a message box sends; in any other field its page code decides.
-    return { commitClass: target.kind === 'textarea' || target.kind === 'editable' ? 'send' : 'submit', formSubmitLikely: false, highRiskWords: highRisk(target.name, target.context?.text) }
+  if (NAVIGATION_KEYS.has(key)) {
+    // On a select, radio, slider or spin button an arrow changes the value.
+    if (!NAVIGATION_TARGETS.has(target.kind)) return no('press-key')
+    if (repeat > 1 && (!CARET_FIELDS.has(target.kind) || repeat > MAX_NAVIGATION_REPEAT)) return no('press-key')
+    return { rule: 'harmless', commitClass: 'none', formSubmitLikely: false, highRiskWords: false }
   }
-  if ((ENTER_KEYS.has(key) || SPACE_KEYS.has(key)) && !field) {
-    // Space or Enter on a button, link or control is a click on it.
+  const field = TEXT_KINDS.has(target.kind)
+  // Space or Enter on a button, link or control is a click on it, once.
+  if ((ENTER_KEYS.has(key) || SPACE_KEYS.has(key)) && !field && press.modifiers.length === 0 && repeat === 1) {
     return classifyClick(target, topOrigin, tainted)
   }
-  // A character (Space included) into a text field is typing.
-  if (field && ([...key].length === 1 || SPACE_KEYS.has(key))) return classifyTyping(target, tainted)
-  // Single-key app shortcuts (#, e, Delete, …) on anything else: their effect is unknown.
+  // Enter in a field submits or sends; a character key is typing one
+  // character, which can never be named (three characters at least): the
+  // user decides both.
   return no('press-key')
 }
 
+/** Typing into a found text field. */
+function classifyTyping(target: Extract<TargetState, { state: 'found' }>, args: Record<string, unknown>, tainted: boolean): Classified {
+  const text = args.text
+  if (typeof text !== 'string') return no('typed-length')
+  // A line break typed key by key can press Enter and submit the form, a tab
+  // can move focus onto a button that a typed space then presses.
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001F\u007F]/u.test(text)) return no('typed-line-break')
+  if (text.length > MAX_REVIEW_EXACT_TEXT_CHARS || (text.match(/[\p{L}\p{N}]/gu)?.length ?? 0) < 3) return no('typed-length')
+  // Appending to what is there could finish a sentence the page or an earlier step began.
+  if (args.replace !== true && target.empty !== true) return no('field-not-empty')
+  const address = ADDRESS_KINDS.has(target.kind) || ADDRESS_FIELD.test(target.name)
+  return {
+    rule: 'named',
+    exactText: text,
+    ...address ? { exactToken: true } : {},
+    commitClass: address ? 'address' : tainted ? 'type' : 'none',
+    formSubmitLikely: false,
+    highRiskWords: highRisk(target.name, target.context?.text),
+  }
+}
+
 /**
- * The eligibility floor and the classification together: whether Auto
- * review may decide this card, and what the action would commit.
+ * The deterministic rules: whether Auto review may decide this card, and by
+ * which rule.
  */
 export function autoReviewEligibility(prompt: ApprovalPrompt, call: ReviewCallContext): Eligibility {
   const refuse = (reason: IneligibleReason): Eligibility => ({ eligible: false, reason })
@@ -413,8 +475,11 @@ export function autoReviewEligibility(prompt: ApprovalPrompt, call: ReviewCallCo
       // After reading web pages, a navigation can carry what was read: always the user's call.
       if (tainted) return refuse('tainted-navigation')
       const path = pathOf(call.args.url as string)
+      // A typed address names no control: one whose path says it commits something is the user's call.
+      if (classOfWords(pathWords(path)) !== undefined) return refuse('navigation-words')
       classified = {
-        commitClass: classOfWords(pathWords(path)) ?? 'none',
+        rule: 'harmless',
+        commitClass: 'none',
         formSubmitLikely: false,
         highRiskWords: highRisk(pathWords(path)) || (path !== undefined && HIGH_RISK_PATHS.test(path)),
         sameOrigin: true,
@@ -427,7 +492,7 @@ export function autoReviewEligibility(prompt: ApprovalPrompt, call: ReviewCallCo
       const target = found('target')
       if (typeof target === 'string') return refuse(target)
       classified = tool === 'browser_hover'
-        ? { commitClass: 'none', formSubmitLikely: false, highRiskWords: false }
+        ? { rule: 'harmless', commitClass: 'none', formSubmitLikely: false, highRiskWords: false }
         : classifyClick(target, facts.topOrigin, tainted)
       break
     }
@@ -436,11 +501,7 @@ export function autoReviewEligibility(prompt: ApprovalPrompt, call: ReviewCallCo
       if (typeof target === 'string') return refuse(target)
       // Undefined means "not inspected", which counts as sensitive.
       if (facts.typedTargetSensitive !== false) return refuse('sensitive-target')
-      // A line break typed key by key can press Enter and submit the form, a tab
-      // can move focus onto a button that a typed space then presses: the user decides.
-      // eslint-disable-next-line no-control-regex
-      if (typeof call.args.text === 'string' && /[\u0000-\u001F\u007F]/u.test(call.args.text)) return refuse('typed-line-break')
-      classified = classifyTyping(target, tainted)
+      classified = classifyTyping(target, call.args, tainted)
       break
     }
     case 'browser_press': {
@@ -457,21 +518,28 @@ export function autoReviewEligibility(prompt: ApprovalPrompt, call: ReviewCallCo
       // A select whose page code submits on change: its form must stay on this origin.
       if (target.autoSubmit === true && target.form !== undefined && ('other' in target.form || facts.topOrigin === undefined || target.form.origin !== facts.topOrigin)) return refuse('form-destination')
       const chosen = target.chosen.join(' · ')
-      const cls = classOfWords(target.name, chosen) ?? (SHARE_OPTIONS.test(chosen) ? 'share' : target.autoSubmit === true ? 'submit' : 'none')
-      classified = { commitClass: cls, formSubmitLikely: target.autoSubmit === true, highRiskWords: highRisk(target.name, target.context?.text, chosen) }
+      // Every chosen option, verbatim.
+      classified = named([...target.chosen], {
+        commitClass: classOfWords(target.name, chosen) ?? (target.autoSubmit === true ? 'submit' : 'none'),
+        formSubmitLikely: target.autoSubmit === true,
+        highRiskWords: highRisk(target.name, target.context?.text, chosen),
+      })
       break
     }
     case 'browser_drag': {
       const from = found('from')
       if (typeof from === 'string') return refuse(from)
-      const dropsOnElement = !(typeof call.args.toOffset === 'object' && call.args.toOffset !== null)
-      const to = dropsOnElement ? found('to') : undefined
+      // A drag by offset (a slider, a canvas) moves a value nobody named.
+      if (typeof call.args.toOffset === 'object' && call.args.toOffset !== null) return refuse('drag-offset')
+      const to = found('to')
       if (typeof to === 'string') return refuse(to)
-      classified = {
-        commitClass: classOfWords(to?.name, from.name) ?? 'none',
+      if (from.kind === 'slider' || to.kind === 'slider') return refuse('drag-offset')
+      // Both ends, verbatim.
+      classified = named([from.name, to.name], {
+        commitClass: classOfWords(to.name, from.name) ?? 'unknown',
         formSubmitLikely: false,
-        highRiskWords: highRisk(from.name, to?.name, to?.context?.text),
-      }
+        highRiskWords: highRisk(from.name, to.name, to.context?.text),
+      })
       break
     }
   }
@@ -578,6 +646,11 @@ export function buildReviewAction(prompt: ApprovalPrompt, tool: AutoReviewTool, 
     verb: verbOf(tool, args),
     targetKind: found?.kind ?? 'none',
     targetClass: targetClass(found),
+    rule: assessment.rule,
+    // The phrases and text the bridge checks verbatim: exactly as the page reported them, uncut.
+    ...assessment.rule === 'named' && assessment.mustName !== undefined ? { mustName: [...assessment.mustName] } : {},
+    ...assessment.rule === 'named' && assessment.exactText !== undefined ? { exactText: assessment.exactText } : {},
+    ...assessment.rule === 'named' && assessment.exactToken === true ? { exactToken: true } : {},
     commitClass: assessment.commitClass,
     formSubmitLikely: assessment.formSubmitLikely,
     highRiskWords: assessment.highRiskWords,

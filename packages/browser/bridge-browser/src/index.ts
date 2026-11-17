@@ -373,7 +373,11 @@ function mountBridge(
     learning: () => learning,
     warn: (message) => { ctx.logger.warn(message) },
   })
-  const purgeSession = createSessionPurger(ctx, api, SESSIONS_ROOT, forgetSession)
+  // A purged conversation's panel prompts are forgotten with it.
+  const purgeSession = createSessionPurger(ctx, api, SESSIONS_ROOT, (sessionId: string) => {
+    panelPrompts.forget(sessionId)
+    return forgetSession(sessionId)
+  })
 
   // Least privilege: the extension reaches only what its panel uses, in scope.
   const fenced = withBridgePolicy(api, {
@@ -489,7 +493,7 @@ function mountBridge(
     // Only prompts this bridge forwarded from the panel count as the user's words.
     onPanelPrompt: (sessionId, requestId) => { panelPrompts.record(sessionId, requestId) },
     autoReview: new AutoReviewer({
-      fromPanel: (sessionId, rpcId) => panelPrompts.has(sessionId, rpcId),
+      fromPanel: (sessionId, rpcId, seq) => panelPrompts.has(sessionId, rpcId, seq),
       llm: () => {
         const llm = ctx.get('llm' as never) as unknown
         return isLlmLike(llm) ? llm : undefined

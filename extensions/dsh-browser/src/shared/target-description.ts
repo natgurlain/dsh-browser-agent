@@ -74,6 +74,10 @@ export type TargetDescription =
       chosen?: string[]
       /** A native select whose page code submits or acts on change (an onchange handler on it or its form). */
       autoSubmit?: true
+      /** By its own markup, it only shows or hides part of the page (aria-expanded, summary, a popup or controls button). */
+      disclosure?: true
+      /** For a text field: whether it was empty when described. */
+      empty?: boolean
       /** On a re-check: whether the locator still names the element first described. */
       same?: boolean
     }
@@ -94,6 +98,7 @@ export type TargetState =
   | {
     state: 'found'; kind: TargetKind; name: string; context?: { kind: 'row' | 'section'; text: string }; sensitive?: true; focused?: true; submits?: true; inForm?: true
     href?: TargetDestination; download?: true; form?: TargetDestination & { method?: 'get' | 'post' | 'dialog' }; chosen?: string[]; autoSubmit?: true
+    disclosure?: true; empty?: boolean
   }
   | { state: 'missing' }
   | { state: 'unknown' }
@@ -167,6 +172,8 @@ function readDescription(raw: unknown): TargetState {
       ? { chosen: value.chosen.slice(0, MAX_CHOSEN).map((label) => pageTextForCard(label, MAX_CHOSEN_LABEL_CHARS)) }
       : {}),
     ...(value.autoSubmit === true ? { autoSubmit: true as const } : {}),
+    ...(value.disclosure === true ? { disclosure: true as const } : {}),
+    ...(typeof value.empty === 'boolean' ? { empty: value.empty } : {}),
   }
 }
 

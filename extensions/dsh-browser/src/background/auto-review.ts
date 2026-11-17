@@ -10,7 +10,9 @@
  * @module
  */
 
-import type { CommitClass, ReviewCode } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import type { AutoReviewTool, ReviewCode } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import type { Assessment } from '../security/auto-review.ts'
+import type { TargetKind } from '../shared/target-description.ts'
 
 /** How long Auto stays on after it was turned on; then the user turns it on again. */
 export const AUTO_REVIEW_TTL_MS = 60 * 60_000
@@ -53,12 +55,32 @@ export interface AutoReviewView {
 /** Whether a further Auto approval is allowed now. */
 export type AutoReviewBudget = 'ok' | 'turn-limit' | 'message-limit' | 'attempt-limit'
 
-interface Store {
-  read(): Promise<unknown>
-  write(value: Record<string, AutoReviewSession>): Promise<void>
+/** What is stored: the conversations, and the review attempts of the last hour (a worker restart must not reset the cost bound). */
+export interface AutoReviewStored {
+  v: 2
+  sessions: Record<string, AutoReviewSession>
+  attempts: Record<string, number[]>
 }
 
-function readSessions(raw: unknown): Record<string, AutoReviewSession> {
+interface Store {
+  read(): Promise<unknown>
+  write(value: AutoReviewStored): Promise<void>
+}
+
+function readAttempts(raw: unknown): Map<string, number[]> {
+  const out = new Map<string, number[]>()
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return out
+  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(value)) continue
+    const times = value.filter((at): at is number => typeof at === 'number' && Number.isFinite(at)).slice(-AUTO_REVIEW_ATTEMPT_LIMIT)
+    if (times.length > 0) out.set(id, times)
+  }
+  return out
+}
+
+function readSessions(stored: unknown): Record<string, AutoReviewSession> {
+  // Version 2 wraps the sessions; version 1 was the sessions object itself.
+  const raw = typeof stored === 'object' && stored !== null && (stored as { v?: unknown }).v === 2 ? (stored as { sessions?: unknown }).sessions : stored
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return {}
   const out: Record<string, AutoReviewSession> = {}
   for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
@@ -103,6 +125,11 @@ export class AutoReviewRegistry {
   ) {
     this.ready = store.read().then((raw) => {
       const loaded = readSessions(raw)
+      const attempts = readAttempts(typeof raw === 'object' && raw !== null && (raw as { v?: unknown }).v === 2 ? (raw as { attempts?: unknown }).attempts : undefined)
+      for (const [id, times] of attempts) {
+        const live = this.attempts.get(id) ?? []
+        this.attempts.set(id, [...times, ...live].slice(-AUTO_REVIEW_ATTEMPT_LIMIT))
+      }
       for (const [id, entry] of Object.entries(loaded)) {
         if (entry.enabledAt <= this.endedAllAt || entry.enabledAt <= (this.endedAt.get(id) ?? Number.NEGATIVE_INFINITY)) delete loaded[id]
       }
@@ -111,7 +138,13 @@ export class AutoReviewRegistry {
   }
 
   private persist(): void {
-    void this.store.write({ ...this.sessions }).catch(() => {})
+    const since = this.now() - ATTEMPT_WINDOW_MS
+    const attempts: Record<string, number[]> = {}
+    for (const [id, times] of this.attempts) {
+      const recent = times.filter((at) => at > since)
+      if (recent.length > 0) attempts[id] = recent
+    }
+    void this.store.write({ v: 2, sessions: { ...this.sessions }, attempts }).catch(() => {})
     this.changed()
   }
 
@@ -218,6 +251,7 @@ export class AutoReviewRegistry {
   noteAttempt(sessionId: string): void {
     const since = this.now() - ATTEMPT_WINDOW_MS
     this.attempts.set(sessionId, [...(this.attempts.get(sessionId) ?? []).filter((at) => at > since), this.now()])
+    this.persist()
   }
 
   /** Auto approved one action. */
@@ -280,35 +314,75 @@ export class AutoReviewRegistry {
   }
 }
 
-/** What each commit class means, for the card's fixed sentence (EN, ZH). */
-const COMMIT_CLASS_PHRASES: Record<CommitClass, [string, string]> = {
-  none: ['a page action', '一个页面操作'],
-  send: ['sending something', '发送内容'],
-  delete: ['deleting, removing or archiving something', '删除、移除或归档内容'],
-  save: ['saving a change', '保存更改'],
-  submit: ['submitting a form or posting something', '提交表单或发布内容'],
-  share: ['sharing something or changing who can see it', '分享内容或更改可见范围'],
-  account: ['an account action (signing in or out, following, subscribing)', '账户操作（登录或退出、关注、订阅）'],
-  change: ['changing a setting, moving or approving something', '更改设置、移动或批准内容'],
-  confirm: ['confirming something', '确认某项操作'],
-  unknown: ['pressing a button whose effect is not clear from its name', '点击一个名称看不出作用的按钮'],
-  type: ['typing text into a site this conversation has read', '向本对话读取过的网站输入文本'],
-  address: ['entering a recipient, address, link or amount', '填写收件人、地址、链接或金额'],
+/** What the card's sentence is about: the action, as the extension's rules saw it. */
+export interface ReviewSubject {
+  tool: AutoReviewTool
+  /** The element's kind, when there is one. */
+  kind?: TargetKind
+  assessment: Pick<Assessment, 'rule' | 'mustName' | 'exactText' | 'exactToken' | 'commitClass'>
+}
+
+/** What a control is called on the card's sentence (EN, ZH). */
+function controlWord(kind: TargetKind | undefined): [string, string] {
+  switch (kind) {
+    case 'checkbox': return ['checkbox', '复选框']
+    case 'switch': return ['switch', '开关']
+    case 'radio':
+    case 'option': return ['option', '选项']
+    case 'menuitem': return ['menu item', '菜单项']
+    case 'tab': return ['tab', '标签页']
+    case 'link': return ['link', '链接']
+    default: return ['button', '按钮']
+  }
+}
+
+/**
+ * Teach the rule that held a `named` action back: which words the user's
+ * message would have needed, in the words the user would say.
+ */
+function notNamedSentence(subject: ReviewSubject, zh: boolean): string {
+  const { tool, assessment } = subject
+  const names = assessment.mustName ?? []
+  if (tool === 'browser_type') {
+    if (assessment.exactToken === true) {
+      return zh
+        ? '自动审核请您决定：您的消息里没有原样写出要填写的这个收件人、地址、链接或金额。下次在消息中原样写出它即可放行。'
+        : 'Auto review asked: your message did not contain this exact recipient, address, link or amount. Write it out exactly in your message to let it through next time.'
+    }
+    return zh
+      ? '自动审核请您决定：您的消息里没有原样包含要输入的全部文字。下次把要输入的文字原样写进消息（例如放在引号里）即可放行。'
+      : 'Auto review asked: your message did not contain the exact text to type. Put the whole text in your message (in quotes, say) to let it through next time.'
+  }
+  if (tool === 'browser_select') {
+    const list = names.join(zh ? '、' : ', ')
+    return zh
+      ? `自动审核请您决定：您的消息没有说出要选择的每个选项。下次说“选择${list}”即可放行。`
+      : `Auto review asked: your message did not name every option to choose. Say “select ${list}” to let it through next time.`
+  }
+  if (tool === 'browser_drag' && names.length === 2) {
+    return zh
+      ? `自动审核请您决定：您的消息没有说出拖动的起点和终点。下次说“把${names[0]}拖到${names[1]}”即可放行。`
+      : `Auto review asked: your message did not name both ends of this drag. Say “drag ${names[0]} to ${names[1]}” to let it through next time.`
+  }
+  const [en, cn] = controlWord(subject.kind)
+  const name = names[0] ?? ''
+  return zh
+    ? `自动审核请您决定：您的消息没有说出这个${cn}的名称。下次说“点击${name}”即可放行。`
+    : `Auto review asked: your message did not name this ${en}. Say “click ${name}” to let it through next time.`
 }
 
 /**
  * The card's one Auto review line: a FIXED sentence chosen by code from the
- * bridge's outcome code and the extension's own commit class. The reviewer's
- * own words never reach the card the user decides on.
+ * bridge's outcome code and the extension's own facts (the names in it are
+ * the ones the card already shows). The reviewer's own words never reach the
+ * card the user decides on.
  */
-export function autoReviewSentence(code: ReviewCode | 'turn-limit' | 'message-limit' | 'attempt-limit' | 'changed', commitClass: CommitClass, zh: boolean): string {
-  const phrase = COMMIT_CLASS_PHRASES[commitClass][zh ? 1 : 0]
+export function autoReviewSentence(code: ReviewCode | 'turn-limit' | 'message-limit' | 'attempt-limit' | 'changed', subject: ReviewSubject, zh: boolean): string {
   switch (code) {
     case 'high-risk': return zh ? '自动审核请您决定：支付、购买、安全与账户设置始终需要您本人确认。' : 'Auto review asked: payments, purchases, security and account settings always need you.'
-    case 'under-rated':
-    case 'no-instruction': return zh ? `自动审核请您决定：这看起来是${phrase}，而您最新的消息没有要求这样做。` : `Auto review asked: this looks like ${phrase}, and your latest message did not ask for that.`
-    case 'restricted': return zh ? '自动审核请您决定：您最新的消息要求不要做出更改。' : 'Auto review asked: your latest message asked not to make changes.'
-    case 'model-ask': return zh ? '自动审核请您决定：审核模型不确定这是否符合您的请求。' : 'Auto review asked: the reviewer was not sure this fits your request.'
+    case 'not-named': return notNamedSentence(subject, zh)
+    case 'restricted': return zh ? '自动审核请您决定：您最新的消息要求先不要动手（例如“不要”“只看”“草拟”）。' : 'Auto review asked: your latest message asked to hold back (“don’t”, “only read”, “draft”…), so you decide.'
+    case 'model-ask': return zh ? '自动审核请您决定：审核模型认为这不一定符合您的请求。' : 'Auto review asked: the reviewer was not sure this fits your request.'
     case 'no-user-message': return zh ? '自动审核请您决定：您在此面板中发送的消息里没有授权页面操作的内容。' : 'Auto review asked: no message you sent from this panel authorizes page actions.'
     case 'timeout': return zh ? '自动审核未能及时回答。' : 'Auto review did not answer in time.'
     case 'turn-limit': return zh ? '自从您上一条消息以来，自动审核已批准 25 个操作。批准此操作即可让它继续。' : 'Auto review has approved 25 actions since your last message. Approve this one to let it continue.'
@@ -318,4 +392,3 @@ export function autoReviewSentence(code: ReviewCode | 'turn-limit' | 'message-li
     default: return zh ? '自动审核未能做出判断。' : 'Auto review could not decide.'
   }
 }
-
