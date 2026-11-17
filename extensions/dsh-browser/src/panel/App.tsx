@@ -151,6 +151,7 @@ import {
   resultFromEvent,
   stepFromCall,
   mergeHistoryRows,
+  reconcileRows,
   pendingQuestionFromFrame,
   resolvedQuestionFromFrame,
   rowFromEvent,
@@ -1799,7 +1800,9 @@ export function App(): React.JSX.Element {
     void refreshSessionPermissions(id)
     const historyTitle = latestSessionTitle(events)
     if (historyTitle !== undefined) setSessionTitle(historyTitle)
-    setRows(mergeHistoryRows(events, nextSeq, locale))
+    // Laid over what is shown: rows are updated in place, not remounted (no blink, open details and thumbnails kept).
+    const reloaded = mergeHistoryRows(events, nextSeq, locale)
+    setRows((shown) => reconcileRows(shown, reloaded))
     scheduleStepAudit(id, 0)
     // Only the baseline correlated with this history may have a newer live
     // suffix. A view left by a previous follower is stale, even when revisiting

@@ -346,9 +346,22 @@ export async function runAutoReviewSmoke(ctx) {
   const cardsBeforeLead = await cardsSoFar()
   const savesBefore = leadSaves.length
   await chat.setViewportSize({ width: 400, height: 600 })
+  // The timeline is updated in place: nothing in it is taken out of the page while the turn
+  // runs or when the history is read again at its end (no blink, details and badges stay).
+  await chat.evaluate(() => {
+    globalThis.smokeTimelineRemovals = []
+    new MutationObserver((records) => {
+      for (const record of records) for (const node of record.removedNodes) {
+        if (node instanceof Element && (node.matches('.timeline-step, .decision-badge') || node.querySelector('.timeline-step, .decision-badge') !== null)) {
+          globalThis.smokeTimelineRemovals.push(`${node.className}: ${String(node.textContent).slice(0, 60)}`)
+        }
+      }
+    }).observe(document.querySelector('.messages'), { childList: true, subtree: true })
+  })
   await send('AR6 Open the new lead form, type Marta Okafor as the name and save the lead.')
   await turnDone('AR6')
-  await chat.waitForTimeout(300)
+  await chat.waitForTimeout(1_500)
+  assert.deepEqual(await chat.evaluate(() => globalThis.smokeTimelineRemovals), [], 'no timeline row or badge was taken out of the page (the history reload at the turn\'s end updates rows in place)')
   const afterLead = await threadGap()
   assert.ok(afterLead.gap <= 2, `the next turn is followed to its newest message (${afterLead.gap} px from the bottom)`)
   assert.equal(await chat.locator('.scroll-to-bottom').count(), 0)
