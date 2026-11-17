@@ -52,7 +52,7 @@ test('the gate commands are the documented ones, with a bounded worker count for
   const command = (id, options) => gateSteps(options).find((step) => step.id === id).command.join(' ')
   assert.equal(command('install'), 'pnpm install --frozen-lockfile')
   assert.equal(command('typecheck'), 'pnpm -r typecheck')
-  assert.equal(command('unit-bridge'), 'pnpm --filter @natgurlain/dsh-bridge-browser exec vitest run --maxWorkers=4')
+  assert.equal(command('unit-bridge'), 'pnpm --filter dsh-browser-agent exec vitest run --maxWorkers=4')
   assert.equal(command('unit-extension', { maxWorkers: 2 }), 'pnpm --filter dsh-browser-extension exec vitest run --maxWorkers=2')
   assert.equal(command('unit-mcp'), 'pnpm --filter @natgurlain/dsh-browser-mcp run test')
   assert.equal(command('build'), 'pnpm build')
@@ -174,7 +174,7 @@ test('the result records commit, date, and every step with its status and counts
   assert.deepEqual(result.steps[3], {
     id: 'unit-bridge',
     title: 'Bridge unit tests',
-    command: 'pnpm --filter @natgurlain/dsh-bridge-browser exec vitest run --maxWorkers=4',
+    command: 'pnpm --filter dsh-browser-agent exec vitest run --maxWorkers=4',
     status: 'failed',
     exitCode: 1,
     durationMs: 1234,

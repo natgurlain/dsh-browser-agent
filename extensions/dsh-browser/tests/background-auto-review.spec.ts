@@ -18,7 +18,7 @@ import {
   BRIDGE_REVIEW_ASK_METHOD,
   BRIDGE_REVIEW_CANCEL_METHOD,
   type BridgeCaps,
-} from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+} from 'dsh-browser-agent/src/protocol.ts'
 import { completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
 import { FakeWebSocket } from './support/fake-websocket.ts'
 import { chromeEvent } from './support/chrome.ts'

@@ -8,14 +8,19 @@
    `BRIDGE_PACKAGE_VERSION` in its `src/index.ts`. All of them carry the same version, the
    one in the release tag; `scripts/package-release.mjs` and
    `scripts/tests/release-consistency.test.mjs` refuse otherwise. After the GitHub release,
-   publish the plugin to npm from `packages/browser/bridge-browser` with
-   `pnpm publish --access public`.
+   publish the plugin to npm as `dsh-browser-agent` from `packages/browser/bridge-browser`
+   with `pnpm publish --access public` (check the name, version and file list first with
+   `pnpm publish --dry-run --no-git-checks`).
+
+   The package was named `@natgurlain/dsh-bridge-browser` up to v0.3.0; on npm that name
+   ends at 0.2.1. Once, with the first `dsh-browser-agent` release, deprecate it:
+   `npm deprecate @natgurlain/dsh-bridge-browser "Renamed to dsh-browser-agent"`.
 2. Replace the previous tag with the new one in the install and uninstall commands of
    `README.md` and `README.zh.md` (the same test checks them), and add a `## vX.Y.Z`
    section to `CHANGELOG.md`. That section becomes the release notes.
 3. Run the gates and the local dry run (below).
-4. Tag and push: `git tag v0.3.0 && git push origin v0.3.0`. A tag containing `-`
-   (e.g. `v0.3.0-rc.1`) is published as a prerelease, with the notes of `v0.3.0`. A
+4. Tag and push: `git tag v0.3.1 && git push origin v0.3.1`. A tag containing `-`
+   (e.g. `v0.3.1-rc.1`) is published as a prerelease, with the notes of `v0.3.1`. A
    prerelease is never what `--release latest` or the panel's update check resolves to.
 5. `.github/workflows/release.yml` runs the checks and packages the assets in a `build`
    job (read-only token, no OIDC), then a separate `publish` job downloads those assets,
@@ -40,9 +45,9 @@ a clean checkout of the tag:
 
 ```sh
 pnpm install --frozen-lockfile && pnpm run check:runtime && pnpm run typecheck && pnpm run test
-node scripts/package-release.mjs --tag v0.3.0 --out release --notes release-notes.md
+node scripts/package-release.mjs --tag v0.3.1 --out release --notes release-notes.md
 (cd release && sha256sum -c SHA256SUMS)
-gh release create v0.3.0 release/* --verify-tag --title v0.3.0 --notes-file release-notes.md
+gh release create v0.3.1 release/* --verify-tag --title v0.3.1 --notes-file release-notes.md
 ```
 
 Anonymous downloads of a private repository's release answer 404. The installers say so
@@ -82,7 +87,7 @@ is refused.
 | `uninstall.sh`, `uninstall.ps1`, `uninstall.mjs` | The uninstaller; the two shell entry points download and verify `uninstall.mjs` when it is not next to them |
 | `dsh-browser-chrome-<tag>.zip` | Chrome build; manifest `key` stripped so Chrome Web Store uploads are accepted |
 | `dsh-browser-firefox-<tag>.zip` | Firefox build (`dist-firefox/`); manifest `key` stripped |
-| `dsh-bridge-browser-<tag>.tgz` | `pnpm pack` of the bridge plugin (`@natgurlain/dsh-bridge-browser`) |
+| `dsh-browser-agent-plugin-<tag>.tgz` | `pnpm pack` of the bridge plugin (npm package `dsh-browser-agent`) |
 | `SHA256SUMS` | One `<64 hex>  <file name>` line per asset above, sorted by name; `sha256sum -c` compatible |
 
 The installers build from the source archive rather than use the prebuilt zips: the zips
@@ -148,7 +153,7 @@ repository gets none (the workflow skips the step).
    download error.
 4. Only then unpack the source archive into `~/.dsh/dsh-browser`, hand over to the
    `scripts/install.sh` inside it, and build. `~/.dsh/dsh-browser/.managed-by-install-sh`
-   records what was installed, e.g. `release v0.3.0 (SHA256SUMS verified)`.
+   records what was installed, e.g. `release v0.3.1 (SHA256SUMS verified)`.
 
 Run inside a checkout without options, the installer installs that checkout and downloads
 nothing. `--unverified-branch <name>` / `DSH_BROWSER_UNVERIFIED_BRANCH` installs a branch

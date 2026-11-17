@@ -7,7 +7,7 @@ import {
   BridgeFrameChannel,
   computeBridgeProof,
   createBridgeNonce,
-} from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+} from 'dsh-browser-agent/src/protocol.ts'
 import { BridgeClient, INSTALLED_TOKEN_PATH, InstalledTokenUnreadableError, loadInstalledToken, type BridgeState } from '../src/background/bridge.ts'
 import { challengeUntilHello, completeHandshake, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
 import { FakeWebSocket } from './support/fake-websocket.ts'

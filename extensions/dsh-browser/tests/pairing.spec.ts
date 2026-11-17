@@ -8,7 +8,7 @@ import {
   PINNED_CHROME_EXTENSION_ID,
   bridgeEndpointOfUrl,
   createBridgeNonce,
-} from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+} from 'dsh-browser-agent/src/protocol.ts'
 import {
   PAIRING_PRIME_HEX,
   createPairingShare,
@@ -21,8 +21,8 @@ import {
   verifyPairingClientConfirmation,
   verifyPairingDone,
   type PairingContext,
-} from '@natgurlain/dsh-bridge-browser/src/pairing.ts'
-import { PAIRING_REQUEST_TTL_MS, PairingDesk } from '@natgurlain/dsh-bridge-browser/src/pairing-host.ts'
+} from 'dsh-browser-agent/src/pairing.ts'
+import { PAIRING_REQUEST_TTL_MS, PairingDesk } from 'dsh-browser-agent/src/pairing-host.ts'
 import {
   TEST_CAPS,
   TEST_TOKEN,

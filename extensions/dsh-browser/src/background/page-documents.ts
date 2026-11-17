@@ -7,7 +7,7 @@
  * @module
  */
 
-import type { ToolError } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import type { ToolError } from 'dsh-browser-agent/src/protocol.ts'
 import { extractPdfText, looksLikePdf, PdfTextError } from './pdf-text.ts'
 import { wrapUntrustedContent } from '../security/untrusted.ts'
 import type { ToolAnswer } from './answers.ts'

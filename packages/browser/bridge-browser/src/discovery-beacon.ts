@@ -14,7 +14,7 @@
  * the answer), rejects a foreign `Host` header (DNS rebinding), and carries
  * nothing secret — the bridge WebSocket still authenticates every client.
  *
- * @module @natgurlain/dsh-bridge-browser/src/discovery-beacon
+ * @module dsh-browser-agent/src/discovery-beacon
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'

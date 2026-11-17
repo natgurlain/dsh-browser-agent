@@ -18,7 +18,7 @@
  * @module
  */
 
-import { resolveDriverTokens, type DriverRequest } from '@natgurlain/dsh-bridge-browser/src/learning/site-drivers.ts'
+import { resolveDriverTokens, type DriverRequest } from 'dsh-browser-agent/src/learning/site-drivers.ts'
 import { cssEscape, deepActiveElement, resolveSelectorAll } from './dom.ts'
 import { accessibleName, clip } from './extract.ts'
 import { roleOfElement, uniqueSelectorFor } from './find.ts'

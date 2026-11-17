@@ -48,7 +48,7 @@ import {
 } from './support/bridge-client.ts'
 import { BROWSER_CONTEXT_KIND } from '../src/browser-context.ts'
 
-const BRIDGE = '@natgurlain/dsh-bridge-browser'
+const BRIDGE = 'dsh-browser-agent'
 const TOKEN = '3c9f0a7e51b2d846e0f3a9c17b5d2e68'
 
 let root: string | undefined
@@ -171,7 +171,7 @@ const RemoteApiHost = {
 
 /** Write a dist fixture and the composition cordis.yml, then boot it through the real Loader. */
 async function loadComposition(options: { deferSessionCreate?: boolean } = {}): Promise<{ ctx: Context; configPath: string; port: number }> {
-  root = await mkdtemp(join(tmpdir(), 'dsh-bridge-browser-'))
+  root = await mkdtemp(join(tmpdir(), 'dsh-browser-agent-'))
   // The bridge keeps its session ledger under the dsh home: never the real one.
   vi.stubEnv('DSH_HOME', join(root, 'dsh-home'))
   const configPath = join(root, 'cordis.yml')

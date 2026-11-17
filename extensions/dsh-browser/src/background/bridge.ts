@@ -30,7 +30,7 @@
  * @module
  */
 
-import type { BridgeCaps, BridgeEndpoint, ClientFrame, ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import type { BridgeCaps, BridgeEndpoint, ClientFrame, ServerFrame } from 'dsh-browser-agent/src/protocol.ts'
 import {
   BRIDGE_CLOSE_CODES,
   BRIDGE_PROTOCOL_VERSION,
@@ -43,7 +43,7 @@ import {
   createBridgeNonce,
   isServerFrame,
   parseBridgeFrame,
-} from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+} from 'dsh-browser-agent/src/protocol.ts'
 
 /** Extension-relative path of the token file provisioned for zero-config installs. */
 export const INSTALLED_TOKEN_PATH = 'bridge-token'

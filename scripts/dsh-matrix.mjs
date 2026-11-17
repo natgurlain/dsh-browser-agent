@@ -45,7 +45,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const BRIDGE = 'packages/browser/bridge-browser'
-const BRIDGE_PACKAGE = '@natgurlain/dsh-bridge-browser'
+const BRIDGE_PACKAGE = 'dsh-browser-agent'
 const EXTENSION_PACKAGE = 'dsh-browser-extension'
 const MCP_PACKAGE = '@natgurlain/dsh-browser-mcp'
 const DSH_PACKAGE = /^@deepseek-ai\/dsh(?:-|$)/

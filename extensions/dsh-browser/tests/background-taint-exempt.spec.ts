@@ -10,7 +10,7 @@ import {
   BRIDGE_AUDIT_RECORD_METHOD,
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
   BRIDGE_TAINT_CLEAR_METHOD,
-} from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+} from 'dsh-browser-agent/src/protocol.ts'
 import { completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
 import { FakeWebSocket } from './support/fake-websocket.ts'
 import { chromeEvent } from './support/chrome.ts'

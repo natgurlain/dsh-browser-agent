@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { validateWorkflow } from '@natgurlain/dsh-bridge-browser/src/learning/workflow.ts'
+import { validateWorkflow } from 'dsh-browser-agent/src/learning/workflow.ts'
 import { buildWorkflow, type RecordedStep } from '../src/shared/workflow-build.ts'
 import { buildProgram, detectRepetition, generalizeSelectors, instantiate, nextSelectors, type WatchEvent } from '../src/shared/repetition.ts'
 

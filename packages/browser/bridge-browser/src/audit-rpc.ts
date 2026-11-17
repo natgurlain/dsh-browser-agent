@@ -4,7 +4,7 @@
  * server yields, so an annotation sent ahead of its `tool.result` frame is
  * always written ahead of the result entry.
  *
- * @module @natgurlain/dsh-bridge-browser/src/audit-rpc
+ * @module dsh-browser-agent/src/audit-rpc
  */
 
 import type { AuditAnnotation, BridgeAuditObserver } from './audit-log.ts'

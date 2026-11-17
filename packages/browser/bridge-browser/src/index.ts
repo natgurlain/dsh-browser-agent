@@ -1,5 +1,5 @@
 /**
- * `@natgurlain/dsh-bridge-browser`: token-authenticated WebSocket bridge for
+ * `dsh-browser-agent`: token-authenticated WebSocket bridge for
  * the browser extension plus the text-only `browser_*` tool set.
  *
  * The bridge mounts its own upgrade route (`/ext/bridge`) on the host
@@ -14,7 +14,7 @@
  * Opt-in by design: nothing is registered unless this plugin appears in the
  * composition. No dsh core code is touched.
  *
- * @module @natgurlain/dsh-bridge-browser
+ * @module dsh-browser-agent
  */
 
 import { randomUUID } from 'node:crypto'
@@ -120,7 +120,7 @@ const DEFAULT_DEFER_SESSION_CREATE = true
 const DEFAULT_BEACON = true
 
 /** Reported to MCP clients as the server version; manifest.spec checks it equals package.json's. */
-export const BRIDGE_PACKAGE_VERSION = '0.3.0'
+export const BRIDGE_PACKAGE_VERSION = '0.3.1'
 
 /** Instance metadata the discovery endpoints advertise for the extension's picker. */
 const INSTANCE_INFO = { pid: process.pid, startedAt: new Date().toISOString() }

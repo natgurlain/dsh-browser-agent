@@ -28,7 +28,7 @@
  * - `settings.describe` projected down to the fields the panel reads, so other
  *   plugins' configuration (including secrets) never reaches the extension.
  *
- * @module @natgurlain/dsh-bridge-browser/src/bridge-policy
+ * @module dsh-browser-agent/src/bridge-policy
  */
 
 import type { BrowserHostApi, HostRpcCall, HostRpcFailure, HostRpcResult } from './host-api.ts'

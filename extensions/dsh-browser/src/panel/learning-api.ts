@@ -7,7 +7,7 @@
 
 import type { LearningSettings } from '../background/learning.ts'
 import type { RecordedStep } from '../shared/workflow-build.ts'
-import type { SiteDriver } from '@natgurlain/dsh-bridge-browser/src/learning/site-drivers.ts'
+import type { SiteDriver } from 'dsh-browser-agent/src/learning/site-drivers.ts'
 import type { ProgramStep } from '../shared/repetition.ts'
 import { openSidePort } from './side-port.ts'
 

@@ -3,6 +3,23 @@
 Each `## vX.Y.Z` section becomes the notes of that GitHub release
 (`scripts/package-release.mjs --notes`), followed by the SHA-256 digests of its assets.
 
+## v0.3.1
+
+The plugin package has the repository's name. No change in behaviour from v0.3.0.
+
+- **Plugin package `dsh-browser-agent`.** The bridge plugin is now `dsh-browser-agent` on
+  npm, the same name as the repository. The old package `@natgurlain/dsh-bridge-browser`
+  ends at 0.2.1 and is deprecated in favour of `dsh-browser-agent`. The plugin file in the
+  release is `dsh-browser-agent-plugin-v0.3.1.tgz`.
+- **Updating.** Run the installer as usual. It removes the registration under the old name
+  from the `web` profile and the DeepSeek Harness app's `desktop` profile and registers the
+  new one, so exactly one bridge stays registered. Settings saved for the old name in DSH's
+  plugin settings (for example `autoReview: false`) are carried over to the new name.
+  Pairings, the bridge token, workflows, schedules and the audit log are kept: none of them
+  depends on the package name, and a v0.3.0 extension works with the renamed plugin.
+- **Plugin-only installs.** If you added the plugin with `dsh plugin add`, remove the old one
+  first (`dsh plugin --profile web remove @natgurlain/dsh-bridge-browser`); see the README.
+
 ## v0.3.0
 
 Auto approve: an opt-in mode in which the agent works without asking. It is off by default,

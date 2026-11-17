@@ -8,7 +8,7 @@
  * @module
  */
 
-import { BRIDGE_WATCH_FIRE_METHOD } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import { BRIDGE_WATCH_FIRE_METHOD } from 'dsh-browser-agent/src/protocol.ts'
 import { isExtensionPageSender } from './policy-runtime.ts'
 import { httpOrigin } from '../security/web-url.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'

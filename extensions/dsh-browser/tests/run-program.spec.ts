@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import { PROGRAM_STEP_TOOLS as BRIDGE_STEP_TOOLS } from '@natgurlain/dsh-bridge-browser/src/run-program.ts'
+import { PROGRAM_STEP_TOOLS as BRIDGE_STEP_TOOLS } from 'dsh-browser-agent/src/run-program.ts'
 import {
   approveProgram,
   coverByProgram,

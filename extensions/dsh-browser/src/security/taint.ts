@@ -19,7 +19,7 @@
  * @module
  */
 
-import { EXTERNAL_SESSION_PREFIX } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import { EXTERNAL_SESSION_PREFIX } from 'dsh-browser-agent/src/protocol.ts'
 import { analyzeUrl, type UrlAnalysis } from './url-risk.ts'
 
 /**

@@ -11,7 +11,7 @@
  * @module
  */
 
-import type { ToolError, ToolErrorCode } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import type { ToolError, ToolErrorCode } from 'dsh-browser-agent/src/protocol.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 
 /** The wire answer for one tool call. */

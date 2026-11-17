@@ -10,7 +10,7 @@
  * with sensitive values masked and scripts removed. Nothing here re-reads
  * the page; the bridge only validates and writes.
  *
- * @module @natgurlain/dsh-bridge-browser/src/learning/fixtures
+ * @module dsh-browser-agent/src/learning/fixtures
  */
 
 import { maskAuditArgs, redactAuditUrl } from '../audit-log.ts'

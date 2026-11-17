@@ -30,7 +30,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
-const BRIDGE = '@natgurlain/dsh-bridge-browser'
+const BRIDGE = 'dsh-browser-agent'
 const EXTENSION = 'dsh-browser-extension'
 const MCP = '@natgurlain/dsh-browser-mcp'
 export const DEFAULT_MAX_WORKERS = 4

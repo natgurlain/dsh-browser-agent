@@ -10,7 +10,7 @@
  * version (each demonstrated the flaw it now rules out).
  */
 import { describe, expect, it, vi } from 'vitest'
-import { MAX_SERIES_STEPS as BRIDGE_MAX_SERIES_STEPS, MAX_PROGRAM_STEPS as BRIDGE_MAX_PROGRAM_STEPS, SERIES_STEP_TOOLS as BRIDGE_SERIES_STEP_TOOLS } from '@natgurlain/dsh-bridge-browser/src/run-program.ts'
+import { MAX_SERIES_STEPS as BRIDGE_MAX_SERIES_STEPS, MAX_PROGRAM_STEPS as BRIDGE_MAX_PROGRAM_STEPS, SERIES_STEP_TOOLS as BRIDGE_SERIES_STEP_TOOLS } from 'dsh-browser-agent/src/run-program.ts'
 import {
   approveProgram,
   describeSeriesRow,

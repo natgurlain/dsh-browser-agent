@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
-import { PINNED_CHROME_EXTENSION_ID } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import { PINNED_CHROME_EXTENSION_ID } from 'dsh-browser-agent/src/protocol.ts'
 import { extensionIdFromKey, storeManifest } from '../src/shared/manifest-key.ts'
 
 async function readJson(relativePath: string): Promise<Record<string, unknown>> {

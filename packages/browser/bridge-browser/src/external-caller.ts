@@ -21,7 +21,7 @@ export interface ExternalCaller {
   requester: string
 }
 
-const EXTERNAL_CALLER = Symbol('dsh-bridge-browser.external-caller')
+const EXTERNAL_CALLER = Symbol('dsh-browser-agent.external-caller')
 
 /**
  * Tag an execution object as an external caller's.

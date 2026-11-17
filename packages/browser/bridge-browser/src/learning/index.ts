@@ -14,7 +14,7 @@
  * switch, payload-bound approval card, audit log). Files are written only
  * through `writeWorkspaceFile`.
  *
- * @module @natgurlain/dsh-bridge-browser/src/learning
+ * @module dsh-browser-agent/src/learning
  */
 
 import type { Context } from '@deepseek-ai/cordis'

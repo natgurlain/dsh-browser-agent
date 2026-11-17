@@ -14,7 +14,7 @@
  *   resolved from the page at execution time;
  * - only a small allowlist of plain headers is kept.
  *
- * @module @natgurlain/dsh-bridge-browser/src/learning/site-drivers
+ * @module dsh-browser-agent/src/learning/site-drivers
  */
 
 import { isRecord } from '../host-api.ts'

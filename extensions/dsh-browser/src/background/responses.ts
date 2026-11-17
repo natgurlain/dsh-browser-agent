@@ -1,4 +1,4 @@
-import type { ServerFrame } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+import type { ServerFrame } from 'dsh-browser-agent/src/protocol.ts'
 
 type ResponseReceipt = Extract<ServerFrame, { t: 'respond.result' }>
 

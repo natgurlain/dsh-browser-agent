@@ -23,8 +23,8 @@
  * @module
  */
 
-import { describeDriverRequest, buildDriverRequest, parseSiteDriverImport, proposeSiteDriver, validateSiteDriver, type SiteDriver, type SiteDriverProposal, type TypedValue } from '@natgurlain/dsh-bridge-browser/src/learning/site-drivers.ts'
-import { REPLAYABLE_TOOLS, ELEMENT_TOOLS } from '@natgurlain/dsh-bridge-browser/src/learning/workflow.ts'
+import { describeDriverRequest, buildDriverRequest, parseSiteDriverImport, proposeSiteDriver, validateSiteDriver, type SiteDriver, type SiteDriverProposal, type TypedValue } from 'dsh-browser-agent/src/learning/site-drivers.ts'
+import { REPLAYABLE_TOOLS, ELEMENT_TOOLS } from 'dsh-browser-agent/src/learning/workflow.ts'
 import { getUiLocale } from '../i18n.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import type { CallPolicyDecision, CallPolicyTargets } from '../security/call-policy.ts'

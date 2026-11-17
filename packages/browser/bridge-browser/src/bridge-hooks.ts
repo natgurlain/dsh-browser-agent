@@ -9,7 +9,7 @@
  * - {@link createSessionForgetter}: after a purge, drop what the bridge kept
  *   per session.
  *
- * @module @natgurlain/dsh-bridge-browser/src/bridge-hooks
+ * @module dsh-browser-agent/src/bridge-hooks
  */
 
 import type { BrowserContextReason } from './browser-context.ts'

@@ -40,8 +40,8 @@ $ManagedRoot = Join-Path $DshHomeDir 'dsh-browser'
 # Same marker filename as scripts/install.sh: one managed root, one definition of "managed".
 $ManagedMarker = Join-Path $ManagedRoot '.managed-by-install-sh'
 # Earlier package names of this bridge (upstream and its origin); scripts/uninstall.mjs knows the same names.
-$LegacyPlugins = @('@deepseek-ai/dsh-bridge-browser', '@yuxianglin/dsh-bridge-browser')
-$BridgePlugin = '@natgurlain/dsh-bridge-browser'
+$LegacyPlugins = @('@natgurlain/dsh-bridge-browser', '@deepseek-ai/dsh-bridge-browser', '@yuxianglin/dsh-bridge-browser')
+$BridgePlugin = 'dsh-browser-agent'
 $InstallArguments = @($args)
 
 # >>> release-fetch
@@ -882,6 +882,15 @@ $ProfileJson = ($ProfileManifest | ConvertTo-Json -Depth 20) + "`n"
   $WebProfileManifest,
   $ProfileJson,
   (New-Object System.Text.UTF8Encoding $false))
+
+# Settings saved under the previous package name (cordis.patch.yml rows naming
+# @natgurlain/dsh-bridge-browser) are rewritten to the current name, now that the old
+# name is neither a dependency nor a selected bundle; DSH skips a row whose name does
+# not match the running plugin.
+& node (Join-Path $Root 'scripts\migrate-bridge-name.mjs') --lang $ReleaseLang $DshHomeDir 'web'
+if ($LASTEXITCODE -ne 0) {
+  Stop-Install "无法迁移 web profile 中已保存的桥插件设置。" "Could not carry over the bridge settings saved in the web profile."
+}
 
 Write-Step 3 "构建 Chrome 扩展" "Build the Chrome extension"
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', 'dsh-browser-extension', 'run', 'build') `

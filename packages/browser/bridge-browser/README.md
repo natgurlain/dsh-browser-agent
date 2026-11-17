@@ -1,6 +1,8 @@
-# @natgurlain/dsh-bridge-browser
+# dsh-browser-agent
 
 English | [中文](README.zh.md)
+
+The plugin of [dsh Browser Agent](https://github.com/natgurlain/dsh-browser-agent). Up to v0.3.0 this package was named `@natgurlain/dsh-bridge-browser`; that name is deprecated.
 
 The **browser-operation bridge** for dsh mounts a token-authenticated WebSocket carrier (`/ext/bridge`) for the browser extension, projects its calls onto DSH Typert Remotes, follows Session and Remote Event streams, and registers tools for reading and operating the controlled tab, capturing screenshots, and using developer tools. The browser retains its login state, and the side panel provides the conversation UI.
 
@@ -94,7 +96,7 @@ permission switch and answers `provisional-session` for everything else.
 
 ## Wire protocol
 
-Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/protocol.ts) and shared with the extension through the workspace package's `./src/*` export. The built package exposes `@natgurlain/dsh-bridge-browser/protocol` for external consumers.
+Frames are JSON objects discriminated by `t`, defined in [`protocol.ts`](src/protocol.ts) and shared with the extension through the workspace package's `./src/*` export. The built package exposes `dsh-browser-agent/protocol` for external consumers.
 
 - Client → server: `hello` (auth + caps), `rpc` (gateway method passthrough), `respond` (resolve a host interaction by its RPC id), `tool.result`, `pong`.
 - Server → client: `hello.ok` (echoes negotiated caps), `rpc.result`, `respond.result` (correlated acceptance or error), `event` (bridge-owned projection of dsh Remote streams and waterfalls), `tool.call`, `tool.cancel`, `ping`, `error`.

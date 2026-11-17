@@ -15,7 +15,7 @@
  * child counts as owned only while its parent does, so a subagent of a
  * session this bridge does not own is never reachable.
  *
- * @module @natgurlain/dsh-bridge-browser/src/session-ledger
+ * @module dsh-browser-agent/src/session-ledger
  */
 
 import { errorMessage } from './host-api.ts'

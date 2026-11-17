@@ -21,7 +21,7 @@ import {
   type AutoReviewVerb,
   type ConsequenceReason,
   type ReviewAction,
-} from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
+} from 'dsh-browser-agent/src/protocol.ts'
 import type { ApprovalPrompt } from './approval.ts'
 import { pageTextForCard, type TargetDestination, type TargetState } from '../shared/target-description.ts'
 

@@ -18,7 +18,7 @@
  * name exactly. Anything else stops the replay with `needs-model`: the model
  * is called only when a step breaks.
  *
- * @module @natgurlain/dsh-bridge-browser/src/learning/replay
+ * @module dsh-browser-agent/src/learning/replay
  */
 
 import { wrapUntrustedPageText } from '../protocol.ts'
