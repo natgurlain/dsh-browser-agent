@@ -1242,7 +1242,7 @@ export function App(): React.JSX.Element {
   const engageKillSwitch = useCallback(() => { setKillSwitchEngaged(true); void api.engageKillSwitch().catch(() => {}) }, [api])
 
   // Auto approve's state, for the taint banner's wording (the toggle reads it itself).
-  const [autoApproveState, setAutoApproveState] = useState<AutoReviewState>({ offered: false, startOn: false, reviewer: false, sessions: {} })
+  const [autoApproveState, setAutoApproveState] = useState<AutoReviewState>({ offered: false, startOn: false, reviewer: false, sessions: {}, panel: [] })
   useEffect(() => api.onAutoReviewState(setAutoApproveState), [api])
 
   // Steps Auto approve's reviewer is checking right now ("Checking…" in the timeline, never a card).

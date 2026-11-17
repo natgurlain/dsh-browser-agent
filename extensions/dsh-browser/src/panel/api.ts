@@ -201,6 +201,8 @@ export interface AutoReviewState {
   reviewer: boolean
   /** The user's explicit choice per conversation (true: on). */
   sessions: Record<string, boolean>
+  /** Conversations prompted or created from the side panel: only these follow `startOn`. */
+  panel: string[]
 }
 
 /** A review is running (or finished) for one step. */
@@ -227,6 +229,7 @@ export function parseAutoReviewState(value: unknown): AutoReviewState {
     startOn: raw.startOn === true,
     reviewer: raw.reviewer === true,
     sessions,
+    panel: Array.isArray(raw.panel) ? raw.panel.filter((id): id is string => typeof id === 'string') : [],
   }
 }
 

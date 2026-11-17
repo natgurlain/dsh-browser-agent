@@ -12,7 +12,7 @@ import { BRIDGE_WATCH_FIRE_METHOD } from '@natgurlain/dsh-bridge-browser/src/pro
 import { isExtensionPageSender } from './policy-runtime.ts'
 import { httpOrigin } from '../security/web-url.ts'
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
-import type { ToolCall } from './tools.ts'
+import type { CallPolicyHook, ToolCall } from './tools.ts'
 import {
   armedFor,
   selectorSyntaxError,
@@ -52,6 +52,8 @@ export interface WatchCallDeps {
   resolveTab: (sessionId: string | undefined) => Promise<{ id?: number; url?: string; title?: string; windowId?: number } | { ok: boolean; error?: { message: string } }>
   allowsTab: (tabId: number, sessionId: string | undefined) => boolean
   authorize: (prompt: ApprovalPrompt, windowId: number) => Promise<ApprovalAuthorization>
+  /** Site and managed policy (and taint) for the watched page. */
+  policy?: CallPolicyHook
   signal: AbortSignal
 }
 
@@ -138,6 +140,7 @@ export class PageWatcherRuntime {
         return typeof error === 'string' ? error : undefined
       },
       authorize: deps.authorize,
+      ...deps.policy === undefined ? {} : { policy: deps.policy },
       signal: deps.signal,
     })
   }

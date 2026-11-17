@@ -122,6 +122,66 @@ describe('Auto approve: off, ordinary, consequential', () => {
     expect(autoApprovePath(prompt, ctx(prompt.action, {}, overrides))).toEqual({ kind: 'card', reason })
   })
 
+  it('typing: an inspected ordinary field stays ordinary; a field not inspected counts as sensitive (L3)', () => {
+    const typed = (context: ApprovalContext) => consequenceReasons(card('browser_type', { index: 1, text: 'hi' }, context), 'browser_type', { index: 1, text: 'hi' })
+    expect(typed({ targets: { target: found('textbox', 'Name') }, typedTargetSensitive: false })).toEqual([])
+    expect(typed({ targets: { target: found('textbox', 'Name') } })).toEqual(['sensitive-field'])
+    // Other tools never had a sensitivity probe: no reason from its absence.
+    expect(consequenceReasons(card('browser_click', { index: 1 }, at(found('button', 'Add'))), 'browser_click', { index: 1 })).toEqual([])
+  })
+
+  it('the binding covers "sensitive": a field that turns sensitive after the decision voids it (L3)', () => {
+    const bind = (target: TargetState) => card('browser_type', { index: 1, text: 'hi' }, { targets: { target }, typedTargetSensitive: false }).binding
+    expect(bind(found('textbox', 'Name', { sensitive: true }))).not.toBe(bind(found('textbox', 'Name')))
+  })
+
+  it('a site driver request on a site set to "Always ask" is left to the user (F1)', async () => {
+    const { LearningRuntime } = await import('../src/background/learning.ts')
+    const { memoryStorage } = await import('./support/chrome.ts')
+    vi.stubGlobal('chrome', {
+      tabs: { sendMessage: vi.fn(), get: vi.fn(async (id: number) => ({ id, url: 'https://crm.example/new', windowId: 1 })) },
+      permissions: { contains: vi.fn(async () => false) },
+      storage: { local: memoryStorage().area },
+    })
+    try {
+      const driver = { format: 'dsh-site-driver/v1', origin: 'https://crm.example', name: 'add', description: '', method: 'POST', path: '/api/add', body: { type: 'json', template: '{"name":"{{name}}"}' }, headers: { 'content-type': 'application/json' }, tokens: [], params: [{ name: 'name' }] }
+      const storage = memoryStorage({ dshLearningSettings: { siteDrivers: true, siteDriverOrigins: ['https://crm.example'] }, dshSiteDrivers: [driver] })
+      const learning = new LearningRuntime({
+        rpc: () => ({ request: vi.fn() }), bridgeConnected: () => true, agentActiveOnTab: () => false, halted: () => false,
+        fixtureAllowed: () => true, capturedRequests: () => undefined, siteDriversSupported: true,
+        activeTab: async () => ({ id: 7 } as chrome.tabs.Tab), storage: storage.area,
+      } as ConstructorParameters<typeof LearningRuntime>[0])
+      await learning.ready
+      const seen: ApprovalPrompt[] = []
+      const dispatch = (policy: () => ReturnType<NonNullable<Parameters<typeof learning.dispatchSiteDriver>[2]>>) => learning.dispatchSiteDriver(
+        { id: 'c1', name: 'browser_site_driver', args: { origin: driver.origin, driver: 'add', params: { name: 'x' } }, sessionId: 's1' },
+        { id: 7, url: 'https://crm.example/new' }, policy, async (prompt) => { seen.push(prompt); return 'denied' }, new AbortController().signal)
+      await dispatch(() => ({ kind: 'force', reasons: ['Site policy asks before every agent call on https://crm.example (your site policy).'], causes: ['site-ask'] }))
+      expect(seen[0]!.forcedBy).toEqual(['site-ask'])
+      expect(autoApprovePath(seen[0]!, ctx('browser_site_driver'))).toEqual({ kind: 'card', reason: 'site-rule' })
+      // Without a site rule a site driver request is a standing grant: reviewed.
+      await dispatch(() => ({ kind: 'default' }))
+      expect(seen[1]!.forcedBy).toBeUndefined()
+      expect(autoApprovePath(seen[1]!, ctx('browser_site_driver'))).toEqual({ kind: 'review', reasons: ['standing'] })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('every forced prompt built from a policy decision carries its causes (F1, F2)', () => {
+    // Element actions, navigation and new tabs (tools.ts), fleets (fleet.ts), developer tools (index.ts) share
+    // forcedApprovalPrompt / fleetApprovalPrompt; site drivers and watchers are tested above.
+    const askOnly = forcedApprovalPrompt(call('browser_click', { index: 1 }), FRAMES, ['ask'], 'en', at(found('button', 'Add')), ['site-ask'])
+    expect(askOnly.forcedBy).toEqual(['site-ask'])
+    expect(autoApprovePath(askOnly, ctx('browser_click', { index: 1 }))).toEqual({ kind: 'card', reason: 'site-rule' })
+    for (const name of ['browser_navigate', 'browser_open_tab']) {
+      const prompt = forcedApprovalPrompt(call(name, { url: 'https://crm.example/' }), [], ['ask'], 'en', {}, ['site-ask'])
+      expect(autoApprovePath(prompt, ctx(name, { url: 'https://crm.example/' }))).toEqual({ kind: 'card', reason: 'site-rule' })
+    }
+    const fleet = fleetApprovalPrompt({ tasks: [{ url: 'https://crm.example/', instruction: 'read' }], children: ['c1'], allowActions: false }, ['Page 1: ask'], ['site-ask'])
+    expect(autoApprovePath(fleet, ctx('browser_fanout'))).toEqual({ kind: 'card', reason: 'site-rule' })
+  })
+
   it('Save, Continue, OK, Accept and Apply stay ordinary (no review, no latency)', () => {
     for (const name of ['Save', 'Continue', 'OK', 'Accept', 'Apply', 'Next', 'Done', 'Sign up for updates later']) {
       expect(consequenceReasons(card('browser_click', { index: 1 }, at(found('button', name))), 'browser_click', { index: 1 })).toEqual([])
@@ -177,11 +237,16 @@ describe('the registry', () => {
     let value: unknown = initial
     return { read: vi.fn(async () => value), write: vi.fn(async (next: AutoApproveStored) => { value = next }), get value() { return value } }
   }
+  function panelStore(initial?: string[]) {
+    let value: unknown = initial
+    return { read: vi.fn(async () => value), write: vi.fn(async (ids: string[]) => { value = ids }), get value() { return value } }
+  }
 
   it('the Setting decides a conversation the user never switched; an explicit choice wins and is kept', async () => {
     const kept = store({ v: 1, sessions: { a: false } })
-    const registry = new AutoApproveRegistry(kept)
+    const registry = new AutoApproveRegistry(kept, Date.now, () => {}, panelStore())
     await registry.ready
+    registry.notePanel('fresh')
     expect(registry.isOn('fresh', false)).toBe(false)
     expect(registry.isOn('fresh', true)).toBe(true)
     // Switched off stays off, even when new conversations start on.
@@ -196,6 +261,48 @@ describe('the registry', () => {
     registry.forget('b')
     expect(registry.choice('b')).toBeUndefined()
     expect(registry.isOn(undefined, true)).toBe(false)
+  })
+
+  it('the Setting applies only to conversations prompted or created in the side panel, also after a restart', async () => {
+    const kept = store()
+    const panel = panelStore()
+    const registry = new AutoApproveRegistry(kept, Date.now, () => {}, panel)
+    await registry.ready
+    // A DSH session from the terminal or the CLI (not "mcp-") can drive the browser too: it never starts in Auto.
+    expect(registry.isOn('tui-session', true)).toBe(false)
+    registry.notePanel('panel-session')
+    expect(registry.isOn('panel-session', true)).toBe(true)
+    // An explicit choice still applies to any conversation.
+    registry.set('tui-session', true)
+    expect(registry.isOn('tui-session', false)).toBe(true)
+    // A service-worker restart reads them back (session storage; a browser restart forgets them until the next panel prompt).
+    expect(panel.value).toEqual(['panel-session'])
+    const again = new AutoApproveRegistry(kept, Date.now, () => {}, panel)
+    await again.ready
+    expect(again.isOn('panel-session', true)).toBe(true)
+    expect(again.panelSessions()).toEqual(['panel-session'])
+  })
+
+  it('before the stored choices load, a stored "off" never reads as the Setting\'s "on" (L1)', async () => {
+    let release!: (value: unknown) => void
+    const registry = new AutoApproveRegistry({ read: () => new Promise((resolve) => { release = resolve }), write: async () => {} }, Date.now, () => {}, panelStore(['conv-x', 'conv-y']))
+    const early = registry.isOn('conv-x', true)
+    release({ v: 1, sessions: { 'conv-x': false } })
+    await registry.ready
+    expect(early).toBe(false)
+    expect(registry.isOn('conv-x', true)).toBe(false)
+    expect(registry.isOn('conv-y', true)).toBe(true)
+  })
+
+  it('an explicit "off" outlives 500 newer "on" choices (L2)', async () => {
+    const registry = new AutoApproveRegistry(store(), Date.now, () => {}, panelStore())
+    await registry.ready
+    registry.notePanel('conv-off')
+    registry.set('conv-off', false)
+    for (let index = 0; index < AUTO_APPROVE_KEPT; index += 1) registry.set(`c${String(index)}`, true)
+    expect(registry.choice('conv-off')).toBe(false)
+    expect(registry.isOn('conv-off', true)).toBe(false)
+    expect(Object.keys(registry.views())).toHaveLength(AUTO_APPROVE_KEPT)
   })
 
   it('keeps a bounded number of choices', async () => {

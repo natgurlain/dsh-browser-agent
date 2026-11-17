@@ -19,6 +19,7 @@ import {
 } from '../src/background/watchers.ts'
 import { evaluateCondition, PageWatchObserver } from '../src/content/watch.ts'
 import { resolveApprovalGate } from '../src/background/authorization.ts'
+import type { ApprovalPrompt } from '../src/security/approval.ts'
 
 function memoryStorage(initial: Record<string, unknown> = {}): WatchStorage & { data: Record<string, unknown> } {
   const data = { ...initial }
@@ -160,6 +161,28 @@ describe('browser_watch / browser_watches', () => {
     expect(JSON.stringify(answer)).not.toContain(PAGE)
     expect(deps.authorize).not.toHaveBeenCalled()
     expect(registry.list()).toEqual([])
+  })
+
+  it('applies the watched page\'s site rules: deny refuses, "Always ask" marks the card so Auto approve leaves it to the user', async () => {
+    const { autoApprovePath } = await import('../src/security/auto-review.ts')
+    const denied = toolDeps(new WatcherRegistry(memoryStorage()), { policy: () => ({ kind: 'deny', message: 'shop.example is read-only.' }) })
+    expect(await createWatcher({ id: 'c', name: 'browser_watch', args: { condition: { text: 'x' }, prompt: 'p' }, sessionId: 's1' }, denied))
+      .toMatchObject({ ok: false, error: { message: 'shop.example is read-only.' } })
+    expect(denied.authorize).not.toHaveBeenCalled()
+    const policy = vi.fn(() => ({ kind: 'force' as const, reasons: ['Site policy asks before every agent call on https://shop.example (your site policy).'], causes: ['site-ask' as const] }))
+    const ask = toolDeps(new WatcherRegistry(memoryStorage()), { policy })
+    await createWatcher({ id: 'c', name: 'browser_watch', args: { condition: { text: 'x' }, prompt: 'p' }, sessionId: 's1' }, ask)
+    expect(policy).toHaveBeenCalledWith(expect.objectContaining({ name: 'browser_watch' }), expect.objectContaining({ reads: ['https://shop.example'], urls: [PAGE] }))
+    const prompt = (ask.authorize.mock.calls as unknown as ApprovalPrompt[][])[0]![0]!
+    expect(prompt.forcedBy).toEqual(['site-ask'])
+    expect(JSON.stringify(prompt.details)).toContain('Site policy asks before every agent call')
+    expect(autoApprovePath(prompt, { on: true, external: false, tool: 'browser_watch', args: {} })).toEqual({ kind: 'card', reason: 'site-rule' })
+    // Without a site rule the watcher card is a standing grant: Auto approve sends it to the reviewer.
+    const plain = toolDeps(new WatcherRegistry(memoryStorage()), { policy: () => ({ kind: 'default' }) })
+    await createWatcher({ id: 'c', name: 'browser_watch', args: { condition: { text: 'x' }, prompt: 'p' }, sessionId: 's1' }, plain)
+    const ordinary = (plain.authorize.mock.calls as unknown as ApprovalPrompt[][])[0]![0]!
+    expect(ordinary.forcedBy).toBeUndefined()
+    expect(autoApprovePath(ordinary, { on: true, external: false, tool: 'browser_watch', args: {} })).toEqual({ kind: 'review', reasons: ['standing'] })
   })
 
   it('refuses a selector that can never parse before showing a card, accepting the shadow >>> form', async () => {

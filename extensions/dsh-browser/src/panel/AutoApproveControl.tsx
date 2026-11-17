@@ -30,7 +30,7 @@ export function AutoApproveControl({ api, copy, sessionId, disabled }: {
   /** The composer is not ready (no session yet, switching). */
   disabled: boolean
 }): React.JSX.Element | null {
-  const [state, setState] = useState<AutoReviewState>({ offered: false, startOn: false, reviewer: false, sessions: {} })
+  const [state, setState] = useState<AutoReviewState>({ offered: false, startOn: false, reviewer: false, sessions: {}, panel: [] })
   const [confirming, setConfirming] = useState(false)
 
   useEffect(() => api.onAutoReviewState(setState), [api])

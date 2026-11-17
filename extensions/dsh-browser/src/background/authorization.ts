@@ -413,6 +413,8 @@ function boundTargets(context: ApprovalContext): unknown {
       ? {
           state: state.state, kind: state.kind, name: state.name,
           ...state.submits === true ? { submits: true } : {},
+          // A field that becomes sensitive after the card (or Auto approve) saw it voids the approval.
+          ...state.sensitive === true ? { sensitive: true } : {},
           ...state.inForm === true ? { inForm: true } : {},
           // Where a link or a form goes, and what a selection chooses: a page that
           // retargets the element after the card was answered voids the approval.

@@ -60,7 +60,7 @@ reason sends the action to the reviewer:
 | `commit-words` | The control's name (or a chosen option, a drag end, a dialog being accepted), its link path, the path of the form it submits, or a navigation path says send, delete/remove/trash/discard/erase/purge/destroy/wipe, submit, post, publish, share, unsubscribe, transfer, withdraw, deactivate, invite, cancel order/subscription/plan/account/booking (and 发送 删除 移除 清空 销毁 提交 发布 发表 分享 退订 取消订阅 转账 提现 邀请 注销). |
 | `high-risk-words` | Payments and purchases (pay, buy, checkout, place order, billing, invoice, subscription, card number, bank, IBAN, wallet, payee, payout), credentials and account security (password, passcode, passkey, 2FA/MFA, recovery, API key, access token, credentials, secret), access (permissions, grant access, add member, ownership, delete/close account), mail forwarding; paths such as `/checkout`, `/billing`, `/password`, `/permissions`. Also the name of a field being typed into. |
 | `submits-form` | A click on a submit control, or Enter in a form field, that submits a form with `method=post`. |
-| `sensitive-field` | A password field, or a field the content script marks sensitive (payment, one-time code). |
+| `sensitive-field` | A password field, or a field the content script marks sensitive (payment, one-time code). For typing, a field the content script did not inspect counts as sensitive (as the card masks it); on a normal page every typing target is inspected, so ordinary typing stays ordinary. `sensitive` is part of the approval binding. |
 | `tainted` | The taint rules force a card for this step (security/taint.ts): typing or pasting into a site other than the one untrusted content came from, a URL carrying data, writing the clipboard, writing a file, an upload, a dialog prompt — after the conversation read untrusted web pages. |
 | `files` | An upload, a download (a `download` link or `browser_downloads`), `browser_save_pdf`, `browser_extract` with `saveTo`. |
 | `program` | A `browser_run` program or a "do the remaining N" series card, and `browser_workflow_run`: its ordinary steps then run without their own cards. |
@@ -95,7 +95,7 @@ Cards that can still appear with Auto approve on:
 | A consequential step the reviewer denied, or could not review (timeout, error, no reviewer on an old bridge or host) | The design: the reviewer's "no" or silence goes to the user, with one line saying why. |
 | The developer-tools allowance (console, DOM edits, network) | A consent of its own (and its own Settings switch), unchanged by Auto approve. |
 | The first download (`permission: 'downloads'`) | Chrome grants an optional permission only from a user gesture on the card. Later downloads are covered. |
-| A site the user or an administrator set to **Always ask** | The user's own, narrower instruction for that site wins. It is also the way to keep a site out of Auto approve. |
+| A site the user or an administrator set to **Always ask** | The user's own, narrower instruction for that site wins. It is also the way to keep a site out of Auto approve. Every forced card built from a policy decision carries its causes (`forcedBy`): element actions, navigation, new tabs, fleets, developer tools, site-driver requests and page watchers (a watcher now evaluates the watched page's site rules: a blocked or read-only page refuses it, an "Always ask" page keeps its card). |
 | Strict mode's commit gate (a site or session in strict mode) | Strict mode is the user's explicit "hold every write on this site for me". |
 | Conversations of other apps (MCP clients) | The toggle belongs to the side panel's conversations; MCP cards name the client that asks. |
 | The runaway guard (300 Auto approvals in one minute in one conversation) | A loop gone wrong. An agent waits for each action to settle, so normal use stays far below it (unit-tested). |
@@ -160,12 +160,22 @@ tools read-only in a session tainted by web pages until the user clears it
   never again. While on: "Auto approve is on: the agent acts without asking."
   with a one-click **Turn off**.
 * **It stays on** for the conversation until the user turns it off: the
-  choice is kept in `chrome.storage.local` (500 most recent conversations),
+  choice is kept in `chrome.storage.local` (500 conversations),
   so service-worker and browser restarts do not turn it off. No timer, no
   per-message or per-hour caps.
 * **Setting:** Permissions & safety → "Start conversations in Auto approve"
-  (default off): every conversation the user did not switch starts on. A
-  conversation switched off stays off. Trade-off sentence: *With Auto approve
+  (default off): every side-panel conversation the user did not switch starts
+  on. A conversation switched off stays off. It applies only to conversations
+  the side panel created or the user prompted from it: a DeepSeek Harness
+  session started in the terminal or the CLI with the browser plugin can also
+  drive the browser (the bridge sends an unbound session's calls to the most
+  recently active browser, and only `mcp-` sessions count as external), and
+  such a session never starts in Auto approve; the toggle can still turn it
+  on explicitly. The list of panel conversations is kept in `chrome.storage.session` (it survives service-worker restarts; after a browser restart a conversation joins it again with its next panel prompt).
+* **Restarts:** until the stored choices have loaded, nothing counts as on
+  unless chosen in this worker, and the decision waits for them, so a
+  conversation switched off never briefly reads as the Setting's "on". Over
+  500 stored choices, the oldest "on" is dropped first; an "off" is kept. Trade-off sentence: *With Auto approve
   on, the agent acts without asking; a web page that tricks the model can
   make it do things you did not ask for.*
 * **Off takes effect on the next action.** A review in flight is aborted.

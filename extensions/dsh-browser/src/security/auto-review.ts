@@ -149,7 +149,9 @@ export function consequenceReasons(prompt: ApprovalPrompt, tool: string, args: R
   if (target?.download === true) reasons.add('files')
 
   // Credentials and payment fields.
-  if (target?.kind === 'password' || target?.sensitive === true || facts?.typedTargetSensitive === true) reasons.add('sensitive-field')
+  // For typing, a field the content script did not clear as non-sensitive counts as sensitive (as the card masks it).
+  // An ordinary field on a normal page is always inspected (false), so ordinary typing stays ordinary.
+  if (target?.kind === 'password' || target?.sensitive === true || (tool === 'browser_type' && facts?.typedTargetSensitive !== false)) reasons.add('sensitive-field')
 
   // Words: the control's name, the chosen options, where its link or form goes, the navigation address.
   const linkPath = destinationPath(target?.href)

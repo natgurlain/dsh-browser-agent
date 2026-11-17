@@ -21,7 +21,7 @@
 
 import type { ApprovalAuthorization, ApprovalPrompt } from '../security/approval.ts'
 import { approvalBinding } from '../security/payload-binding.ts'
-import type { ToolCall } from './tools.ts'
+import type { CallPolicyHook, ToolCall } from './tools.ts'
 import { httpOrigin, isRecord } from '../security/web-url.ts'
 import { cancelledAnswer, fail, notApprovedAnswer, type SettledAnswer } from './answers.ts'
 
@@ -168,7 +168,7 @@ export function parseWatchRequest(args: Record<string, unknown>): WatchRequest |
  * The creation card: always its own decision (forced), naming the page, the
  * condition, the prompt that will be sent back, and how long it lasts.
  */
-export function watchApprovalPrompt(request: WatchRequest, page: { url: string; origin: string; title?: string }): ApprovalPrompt {
+export function watchApprovalPrompt(request: WatchRequest, page: { url: string; origin: string; title?: string }, forced: { reasons: readonly string[]; causes?: ReadonlyArray<'site-ask' | 'taint'> } = { reasons: [] }): ApprovalPrompt {
   const lifetime = request.expiresInMinutes >= 60
     ? `${String(Math.round(request.expiresInMinutes / 6) / 10)} h`
     : `${String(Math.round(request.expiresInMinutes))} min`
@@ -181,8 +181,10 @@ export function watchApprovalPrompt(request: WatchRequest, page: { url: string; 
     canTrust: false,
     forced: true,
     perCallOnly: true,
+    // A site set to "Always ask" (or taint) also forced it: Auto approve leaves a site-ask card to the user.
+    ...forced.causes === undefined || forced.causes.length === 0 ? {} : { forcedBy: [...new Set(forced.causes)] },
     details: [
-      { kind: 'text', label: 'Why this needs your approval', masked: false, value: 'A watcher keeps reading this page in the background and can start the agent later, without a new message from you.' },
+      { kind: 'text', label: 'Why this needs your approval', masked: false, value: ['A watcher keeps reading this page in the background and can start the agent later, without a new message from you.', ...forced.reasons].join('\n') },
       { kind: 'text', label: 'Page', masked: false, value: page.url },
       { kind: 'text', label: 'Condition', masked: false, value: describeCondition(request.condition) },
       { kind: 'text', label: 'Prompt sent to the agent when it fires', masked: false, value: request.prompt },
@@ -374,6 +376,8 @@ export interface WatchToolDeps {
   changed: () => void
   /** Site policy hides the page from the agent (blocked / managed-disallowed). */
   pageHidden?: (url: string) => boolean
+  /** Site policy, managed policy and taint for the watched page (a watcher reads it): deny refuses, force adds its reasons. */
+  policy?: CallPolicyHook
   /**
    * Check a selector's syntax in the tab's page (the worker has no DOM):
    * resolves an error message for one that can never match, else undefined.
@@ -436,8 +440,11 @@ export async function createWatcher(call: ToolCall, deps: WatchToolDeps): Promis
     const invalid = await deps.validateSelector(tab.id, request.condition.selector)
     if (invalid !== undefined) return failed(`condition.selector ${invalid}.`, 'bad-args')
   }
+  // A watcher reads the page: the page's site rules apply like to any read.
+  const decision = deps.policy?.(call, { reads: [origin], acts: [], urls: [tab.url], pageOrigin: origin }) ?? { kind: 'default' as const }
+  if (decision.kind === 'deny') return failed(decision.message)
   const page = { url: tab.url, origin, ...(tab.title === undefined ? {} : { title: tab.title }) }
-  const prompt = watchApprovalPrompt(request, page)
+  const prompt = watchApprovalPrompt(request, page, decision.kind === 'force' ? { reasons: decision.reasons, ...decision.causes === undefined ? {} : { causes: decision.causes } } : { reasons: [] })
   const authorization = await deps.authorize(prompt, tab.windowId ?? 0)
   if (deps.signal.aborted) return cancelledAnswer()
   if (authorization !== 'approved') return notApprovedAnswer('The user declined the page watcher.', 'The page watcher', authorization)

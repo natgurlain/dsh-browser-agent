@@ -63,7 +63,7 @@ function controllableApi(): { api: PanelApi & { setAutoReview: ReturnType<typeof
 }
 
 const toggle = () => host.querySelector<HTMLButtonElement>('.auto-approve-toggle')!
-const STATE: AutoReviewState = { offered: true, startOn: false, reviewer: true, sessions: {} }
+const STATE: AutoReviewState = { offered: true, startOn: false, reviewer: true, sessions: {}, panel: ['s1'] }
 
 describe('the Auto approve toggle', () => {
   it('confirms once the first time, then one click turns it on or off; the line offers one-click off', async () => {
@@ -106,14 +106,16 @@ describe('the Auto approve toggle', () => {
     expect(toggle().getAttribute('aria-pressed')).toBe('false')
     push({ ...STATE, startOn: true, reviewer: false })
     expect(host.querySelector('.auto-review-indicator')!.textContent).toContain('Steps that send, delete or pay still ask')
-    push({ offered: false, unavailable: 'managed', startOn: true, reviewer: true, sessions: {} })
+    push({ offered: false, unavailable: 'managed', startOn: true, reviewer: true, sessions: {}, panel: ['s1'] })
     expect(host.querySelector('.auto-approve-toggle')).toBeNull()
   })
 
   it('reads the background state defensively; every string exists in both languages', () => {
     expect(parseAutoReviewState({ offered: 'yes', unavailable: 'nope', startOn: 1, sessions: { a: true, b: 'x', c: { on: true } } }))
-      .toEqual({ offered: false, startOn: false, reviewer: false, sessions: { a: true } })
-    expect(autoApproveOnFor({ ...STATE, startOn: true }, 'new')).toBe(true)
+      .toEqual({ offered: false, startOn: false, reviewer: false, sessions: { a: true }, panel: [] })
+    expect(autoApproveOnFor({ ...STATE, startOn: true, panel: ['new'] }, 'new')).toBe(true)
+    // The Setting applies only to side-panel conversations (a terminal or CLI session stays off).
+    expect(autoApproveOnFor({ ...STATE, startOn: true }, 'tui-session')).toBe(false)
     expect(autoApproveOnFor({ ...STATE, startOn: true, offered: false }, 'new')).toBe(false)
     expect(autoApproveOnFor({ ...STATE, sessions: { a: true } }, 'a')).toBe(true)
     expect(autoApproveOnFor(STATE, null)).toBe(false)
@@ -176,10 +178,10 @@ describe('the panel API', () => {
     const port = { postMessage, onMessage: { addListener: vi.fn((listener: (message: unknown) => void) => { receive = listener }) }, onDisconnect: { addListener: vi.fn() } }
     vi.stubGlobal('chrome', { runtime: { connect: vi.fn(() => port) } })
     const api = connectPanel()
-    receive?.({ type: 'auto-review.state', offered: true, startOn: false, reviewer: true, sessions: { s1: true } })
+    receive?.({ type: 'auto-review.state', offered: true, startOn: false, reviewer: true, sessions: { s1: true }, panel: ['s1'] })
     const seen: AutoReviewState[] = []
     api.onAutoReviewState((state) => { seen.push(state) })
-    expect(seen).toEqual([{ offered: true, startOn: false, reviewer: true, sessions: { s1: true } }])
+    expect(seen).toEqual([{ offered: true, startOn: false, reviewer: true, sessions: { s1: true }, panel: ['s1'] }])
     void api.setAutoReview('s1', false)
     expect(postMessage.mock.calls.map(([message]) => message as Record<string, unknown>)).toContainEqual(expect.objectContaining({ type: 'auto-review.set', sessionId: 's1', enabled: false }))
     const reviewing: unknown[] = []

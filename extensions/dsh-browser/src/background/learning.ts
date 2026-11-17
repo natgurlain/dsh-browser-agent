@@ -666,6 +666,8 @@ export class LearningRuntime {
       canTrust: false,
       forced: true,
       perCallOnly: true,
+      // Which policy rules forced it: a site set to "Always ask" keeps this card out of Auto approve.
+      ...decision.kind === 'force' && decision.causes !== undefined && decision.causes.length > 0 ? { forcedBy: [...new Set(decision.causes)] } : {},
       details: [
         { kind: 'text', value: reasons.join('\n'), masked: false, label: zh() ? '为何需要您的批准' : 'Why this needs your approval' },
         { kind: 'payload', value: described },

@@ -17,6 +17,8 @@ import type { ReviewCode } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 
 /** `chrome.storage.local` key of the explicit choices. */
 export const AUTO_APPROVE_STORAGE_KEY = 'dshAutoApprove'
+/** `chrome.storage.session` key of the side-panel conversations (kept across worker restarts; a new prompt adds one again). */
+export const AUTO_APPROVE_PANEL_KEY = 'dshAutoApprovePanel'
 /** Most conversations whose choice is kept (the oldest choice is dropped first). */
 export const AUTO_APPROVE_KEPT = 500
 /**
@@ -40,6 +42,20 @@ interface Store {
   write(value: AutoApproveStored): Promise<void>
 }
 
+/**
+ * Where the side-panel conversations are kept: only these follow "Start
+ * conversations in Auto approve" (a DSH session driven from the terminal,
+ * the CLI or another app never starts in Auto approve).
+ */
+interface PanelStore {
+  read(): Promise<unknown>
+  write(ids: string[]): Promise<void>
+}
+
+function readPanel(list: unknown): Set<string> {
+  return new Set(Array.isArray(list) ? list.filter((id): id is string => typeof id === 'string' && id !== '' && id.length <= 256).slice(-AUTO_APPROVE_KEPT) : [])
+}
+
 function readStored(raw: unknown): Map<string, boolean> {
   const out = new Map<string, boolean>()
   if (typeof raw !== 'object' || raw === null || (raw as { v?: unknown }).v !== 1) return out
@@ -54,6 +70,9 @@ function readStored(raw: unknown): Map<string, boolean> {
 /** The background's Auto approve registry. */
 export class AutoApproveRegistry {
   private choices = new Map<string, boolean>()
+  private panel = new Set<string>()
+  /** The stored choices have loaded: until then nothing counts as on unless chosen in this worker. */
+  private loaded = false
   private readonly reviews = new Map<string, Set<AbortController>>()
   private readonly approvals = new Map<string, number[]>()
   readonly ready: Promise<void>
@@ -62,18 +81,40 @@ export class AutoApproveRegistry {
     private readonly store: Store,
     private readonly now: () => number = Date.now,
     private readonly changed: () => void = () => {},
+    private readonly panelStore?: PanelStore,
   ) {
-    this.ready = store.read().then((raw) => {
-      // Choices made while the stored ones loaded win.
-      const loaded = readStored(raw)
-      for (const [id, on] of this.choices) loaded.set(id, on)
-      this.choices = loaded
-    }, () => {})
+    this.ready = Promise.all([
+      store.read().then((raw) => {
+        // Choices made while the stored ones loaded win.
+        const loaded = readStored(raw)
+        for (const [id, on] of this.choices) loaded.set(id, on)
+        this.choices = loaded
+      }, () => {}),
+      (panelStore?.read() ?? Promise.resolve(undefined)).then((raw) => {
+        const panel = readPanel(raw)
+        for (const id of this.panel) { panel.delete(id); panel.add(id) }
+        this.panel = panel
+      }, () => {}),
+    ]).then(() => {}).finally(() => { this.loaded = true })
   }
 
   private persist(): void {
-    while (this.choices.size > AUTO_APPROVE_KEPT) this.choices.delete(this.choices.keys().next().value!)
+    // Over the bound, drop the oldest "on" first: a dropped "off" would fall
+    // back to the Setting and could turn Auto approve on again.
+    while (this.choices.size > AUTO_APPROVE_KEPT) {
+      let victim: string | undefined
+      for (const [id, on] of this.choices) {
+        if (on) { victim = id; break }
+      }
+      this.choices.delete(victim ?? this.choices.keys().next().value!)
+    }
     void this.store.write({ v: 1, sessions: Object.fromEntries(this.choices) }).catch(() => {})
+    this.changed()
+  }
+
+  private persistPanel(): void {
+    while (this.panel.size > AUTO_APPROVE_KEPT) this.panel.delete(this.panel.values().next().value!)
+    void this.panelStore?.write([...this.panel]).catch(() => {})
     this.changed()
   }
 
@@ -82,10 +123,29 @@ export class AutoApproveRegistry {
     return this.choices.get(sessionId)
   }
 
-  /** Whether Auto approve is on for one conversation: its explicit choice, else the Setting. */
+  /**
+   * Whether Auto approve is on for one conversation: its explicit choice,
+   * else the Setting, which applies only to conversations prompted from the
+   * side panel. Before the stored choices load, only a choice made in this
+   * worker counts (a stored "off" must not read as the Setting's "on").
+   */
   isOn(sessionId: string | undefined, startOn: boolean): boolean {
     if (sessionId === undefined || sessionId === '') return false
-    return this.choices.get(sessionId) ?? startOn
+    const choice = this.choices.get(sessionId)
+    if (choice !== undefined) return choice
+    return this.loaded && startOn && this.panel.has(sessionId)
+  }
+
+  /** The user prompted this conversation from the side panel: the Setting applies to it. */
+  notePanel(sessionId: string): void {
+    if (this.panel.has(sessionId)) return
+    this.panel.add(sessionId)
+    this.persistPanel()
+  }
+
+  /** Conversations prompted from the side panel (the panel's toggle reads it). */
+  panelSessions(): string[] {
+    return [...this.panel]
   }
 
   /** Every explicit choice, for the panel. */
@@ -105,6 +165,7 @@ export class AutoApproveRegistry {
   forget(sessionId: string): void {
     this.abortReviews(sessionId)
     if (this.choices.delete(sessionId)) this.persist()
+    if (this.panel.delete(sessionId)) this.persistPanel()
     this.approvals.delete(sessionId)
   }
 

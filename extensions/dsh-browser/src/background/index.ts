@@ -202,7 +202,7 @@ import {
 import { approvalFailureMessage } from './answers.ts'
 import { auditedAuthorize, auditedPolicy, auditNote, noteCallTarget, type AuditedCall } from './audit.ts'
 import { StepLabels, STEP_LABELS_STORAGE_KEY } from '../shared/step-labels.ts'
-import { AUTO_APPROVE_STORAGE_KEY, AutoApproveRegistry, autoApproveNote } from './auto-review.ts'
+import { AUTO_APPROVE_PANEL_KEY, AUTO_APPROVE_STORAGE_KEY, AutoApproveRegistry, autoApproveNote } from './auto-review.ts'
 import { autoApprovePath, buildReviewAction } from '../security/auto-review.ts'
 import { createDevLoopPanelRpc } from './dev-loop.ts'
 
@@ -780,7 +780,10 @@ const stepLabels = new StepLabels({
 const autoApprovals = new AutoApproveRegistry({
   read: async () => (await chrome.storage.local.get(AUTO_APPROVE_STORAGE_KEY))[AUTO_APPROVE_STORAGE_KEY],
   write: async (value) => { await chrome.storage.local.set({ [AUTO_APPROVE_STORAGE_KEY]: value }) },
-}, Date.now, () => { broadcastAutoReviewState() })
+}, Date.now, () => { broadcastAutoReviewState() }, {
+  read: async () => (await chrome.storage.session.get(AUTO_APPROVE_PANEL_KEY))[AUTO_APPROVE_PANEL_KEY],
+  write: async (ids) => { await chrome.storage.session.set({ [AUTO_APPROVE_PANEL_KEY]: ids }) },
+})
 const pageSessionContexts = new PageSessionContextTracker({
   read: async () => (await chrome.storage.session.get(PAGE_SESSION_CONTEXT_STORAGE_KEY))[PAGE_SESSION_CONTEXT_STORAGE_KEY],
   write: async (value) => {
@@ -1492,6 +1495,7 @@ function autoReviewStatePayload(): Record<string, unknown> {
     startOn: settingsLoaded && settings.autoApproveDefault,
     reviewer: reviewerReady(),
     sessions: autoApprovals.views(),
+    panel: autoApprovals.panelSessions(),
   }
 }
 
@@ -2459,6 +2463,10 @@ async function autoApproveCard(prompt: ApprovalPrompt, options: AuthorizeOptions
   const call = options.auto?.call
   const tool = call?.name ?? prompt.action
   const args = call?.args ?? {}
+  // After a worker restart the stored choices may still be loading: decide on them, not on a guess
+  // (already settled in normal use, so this adds no wait).
+  await autoApprovals.ready
+  if (signal.aborted) return { kind: 'card' }
   const path = autoApprovePath(prompt, {
     on: autoApproveOn(sessionId),
     external: isExternalSessionId(sessionId) || isExternalSessionId(call?.sessionId),
@@ -3024,6 +3032,8 @@ function routeToolCall(call: ToolCall): void {
         resolveTab: (sessionId) => resolveToolTab(sessionId),
         allowsTab: (tabId, sessionId) => tabAffinity.allowsTarget(tabId, sessionId),
         authorize: authorizeFor(call.sessionId),
+        // The watched page's site rules: a site set to "Always ask" keeps the watcher's card out of Auto approve.
+        policy,
         signal: controller.signal,
       })
     : call.name === 'browser_run'
@@ -3273,7 +3283,7 @@ async function dispatchDevToolsTool(call: ToolCall, activeCall: ActiveToolCall, 
   // Devtools keep their own consent surface: site trust never skips it, but
   // an ask site or a taint rule makes every call ask.
   const prompt = decision.kind === 'force'
-    ? forcedApprovalPrompt(call, frames, decision.reasons)
+    ? forcedApprovalPrompt(call, frames, decision.reasons, undefined, {}, decision.causes)
     : devToolsApprovalForCall(call, frames)
   const authorization = await auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(
     shown, signal, target.windowId ?? 0, { sessionId: call.sessionId, tabId: target.id, toolCallId: call.id, onPrompt },
@@ -3956,6 +3966,8 @@ chrome.runtime.onConnect.addListener((port) => {
         // A session prompted from this browser keeps its panel-free runtime
         // alive while it works, even after the panel closes.
         if (rpcMsg.method === 'session.prompt' && typeof rpcSessionId === 'string') noteRuntimeSession(rpcSessionId)
+        // A conversation the user prompts from the panel follows "Start conversations in Auto approve".
+        if (rpcMsg.method === 'session.prompt' && typeof rpcSessionId === 'string' && !isExternalSessionId(rpcSessionId)) autoApprovals.notePanel(rpcSessionId)
         // The conversation is deleted: its Auto approve choice goes with it.
         if (rpcMsg.method === BRIDGE_SESSION_PURGE_METHOD && typeof rpcSessionId === 'string') autoApprovals.forget(rpcSessionId)
         const prepare = rpcMsg.method === 'session.prompt'
@@ -4173,6 +4185,8 @@ chrome.runtime.onConnect.addListener((port) => {
           panelActiveSessions.delete(port)
         } else {
           panelActiveSessions.set(port, sid)
+          // A conversation this panel just created is a panel conversation from the start.
+          if (session.isNew === true && !isExternalSessionId(sid)) void autoApprovals.ready.then(() => { autoApprovals.notePanel(sid) })
           if (session.isNew === true) {
             const bind = Promise.all([affinityReady, pageSessionContexts.ready]).then(async () => {
               const tab = await syncActiveTab()

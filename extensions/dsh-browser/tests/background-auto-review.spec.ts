@@ -172,7 +172,10 @@ async function fresh<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-describe('Auto approve in the background', () => {
+// The first test of this file pays the cold transform of the whole background
+// worker (src/background/index.ts, ~5 s on a loaded machine), which is more than
+// vitest's default 5 s; later tests take well under a second.
+describe('Auto approve in the background', { timeout: 30_000 }, () => {
   it('off: the ordinary card, and no review', async () => {
     const env = await boot()
     click(env, 'c0')
@@ -193,6 +196,8 @@ describe('Auto approve in the background', () => {
     await vi.waitFor(() => { env.answerPlumbing(); expect(audited(env, 'c1')).toMatchObject({ decision: 'auto-approved' }) })
     // The choice is kept across restarts (chrome.storage.local).
     expect(env.localData.dshAutoApprove).toEqual({ v: 1, sessions: { 'session-live': true } })
+    // The panel created this conversation (session.active isNew): it follows the Setting too (session storage).
+    expect(env.sessionData.dshAutoApprovePanel).toEqual(['session-live'])
   })
 
   it('"Start conversations in Auto approve": on without touching the toggle; an explicit off wins', async () => {
@@ -206,6 +211,16 @@ describe('Auto approve in the background', () => {
     const env = await boot({ settings: { autoApproveDefault: true }, local: { dshAutoApprove: { v: 1, sessions: { 'session-live': false } } } })
     click(env, 'd2')
     await vi.waitFor(() => { env.answerPlumbing(); expect(env.posted('approval.request')).toHaveLength(1) })
+  })
+
+  it('"Start conversations in Auto approve" reaches only conversations the side panel created or prompted', async () => {
+    const env = await boot({ settings: { autoApproveDefault: true } })
+    // boot: the panel created session-live (session.active isNew). Viewing another conversation does not make it a panel one.
+    env.panel.emit({ type: 'session.active', sessionId: 'session-from-tui' })
+    await vi.waitFor(() => { expect(env.posted('auto-review.state').at(-1)).toMatchObject({ startOn: true, panel: ['session-live'] }) })
+    // Prompting it from the panel does.
+    env.panel.emit({ type: 'rpc', id: 'p1', method: 'session.prompt', payload: { sessionId: 'session-from-tui', content: [{ type: 'text', text: 'hi' }] } })
+    await vi.waitFor(() => { env.answerPlumbing(); expect(env.posted('auto-review.state').at(-1)).toMatchObject({ panel: ['session-live', 'session-from-tui'] }) })
   })
 
   it('on: a consequential click is reviewed silently; allow runs it with no card, audited auto-reviewed', async () => {
