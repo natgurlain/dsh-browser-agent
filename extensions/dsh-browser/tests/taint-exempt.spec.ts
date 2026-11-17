@@ -736,6 +736,21 @@ describe('the banner\'s one-click choices', () => {
     expect(read(h, 's2', [EVIL])).toMatchObject({ exempt: true })
   })
 
+  it('names the sources that are exempt now, so the banner lists only what tainted the conversation', async () => {
+    const h = harness()
+    expect(read(h, 's1', [LOCAL])).toMatchObject({ exempt: true }) // the user's own local page
+    read(h, 's1', [EVIL])
+    // The local page stays a source (never the "only source" shortcut) ...
+    expect(h.policy.get('s1')?.sources).toEqual([EVIL, LOCAL].sort())
+    // ... but it is named as exempt, for display only.
+    expect(h.policy.exemptSources()).toEqual({ s1: [LOCAL] })
+    const { posted, emit } = panel(h.policy)
+    emit({ type: 'taint.subscribe' })
+    await vi.waitFor(() => { expect(posted.some((message) => message.type === 'taint.state')).toBe(true) })
+    const state = posted.filter((message) => message.type === 'taint.state').at(-1)
+    expect(state?.exemptSources).toEqual({ s1: [LOCAL] })
+  })
+
   it('F3: lifting the taint by Trust keeps its sources: a page read later is never the only source', async () => {
     const h = harness()
     const A = 'https://a-site.example'

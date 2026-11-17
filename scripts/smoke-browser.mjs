@@ -1089,6 +1089,9 @@ try {
   succeed(await tool('browser_get_text', {}))
   await waitFor(async () => (await taintRecords())['(no-session)']?.sources.includes(externalOrigin), 'taint after reading a page that is not local')
   assert.deepEqual((await taintRecords())['(no-session)'].sources, [origin, crossSiteOrigin, externalOrigin].sort())
+  // The banner names only what tainted it: the user's own local pages are marked exempt, not listed.
+  assert.deepEqual(await panel.evaluate(() => policyMessages.filter(message => message.type === 'taint.state').at(-1)?.exemptSources?.['(no-session)']),
+    [origin, crossSiteOrigin].sort(), 'the local pages are named exempt in the taint state')
   // Tainted now: sending data to a loopback address asks like anywhere else.
   ;[policyRequest, policyResult] = await answerApproval(tool('browser_navigate', { url: dataUrl('tainted') }), 'deny')
   assert.equal(policyRequest.forced, true)
@@ -1107,7 +1110,7 @@ try {
   await page.goto(`${lookalikeOrigin}/inner?lookalike`)
   succeed(await tool('browser_get_text', {}))
   await waitFor(async () => (await taintRecords())['(no-session)']?.sources.includes(lookalikeOrigin), 'a look-alike localhost host name taints')
-  results.push('local pages do not taint a session; a non-local or look-alike host does, the earlier local reads become sources, and a tainted session still asks before sending data to a loopback address')
+  results.push('local pages do not taint a session; a non-local or look-alike host does, the earlier local reads become sources (marked exempt, so the banner does not name them), and a tainted session still asks before sending data to a loopback address')
 
   // A local address the user never said is theirs taints like any page.
   const unconfirmedOrigin = `http://localhost:${server.address().port}`
