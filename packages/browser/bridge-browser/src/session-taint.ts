@@ -94,7 +94,12 @@ export const TAINT_WORKSPACE_READ_TOOLS: ReadonlyMap<string, { arg: string; opti
   ['grep', { arg: 'path', optional: true }],
 ])
 
-/** Browser tool results that never quote a page. Mirrors the extension's list. */
+/**
+ * Browser tool results that never quote a page. The extension's list has one
+ * more entry, `browser_run`: there it is the approval answer (fixed text);
+ * here it is the model-facing tool whose result carries the steps' output,
+ * so it taints.
+ */
 const CONTENT_FREE_TOOLS: ReadonlySet<string> = new Set([
   'browser_devtools_network',
   'browser_follow_tab',

@@ -281,14 +281,14 @@ Turning Auto approve off restores the ordinary cards; setting a site to
   type and a POST form submit complete with zero cards (only the submit is
   reviewed); measured latency; a denied step's card; a reviewer timeout;
   Auto off mid-turn; the Setting; light and dark screenshots; Watch me under
-  Auto approve: two rows invited by hand, a real click on "Do the remaining
-  28 like this", and the 28-click series (more than one `browser_run`) runs
-  with zero cards, reviewed once with the panel line in its trusted part.
-  Known limit: a series with typing steps still meets the taint rules on
-  those steps (the program's own approval answer counts as a page read
-  from an unknown origin, so typing is taint-forced and, with Auto approve
-  on, goes to the reviewer as `tainted`); changing that is a change to the
-  taint rules, not to Auto approve, and is left for a separate decision.
+  Auto approve: two rows filled in and invited by hand, a real click on "Do
+  the remaining 14 like this", and the 28-step series of typing and clicks
+  (more than one `browser_run`) runs with zero cards, reviewed once with the
+  panel line in its trusted part. A program's approval answer is fixed text
+  and does not taint the conversation (extension `security/taint.ts`,
+  `CONTENT_FREE_TOOLS`); each step taints with the page it touched. So a
+  typing step is taint-forced only when the conversation also holds content
+  from another site, exactly as for typing outside a program.
 * Model-free check (`benchmark/model-free-check.mjs` §4): the injection
   matrix with Auto approve on (taint-flagged steps reach the reviewer, its
   denial is the card, the canary is stopped); an ordinary task with zero

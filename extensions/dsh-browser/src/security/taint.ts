@@ -52,11 +52,25 @@ export function urlCarriesDataUnderTaint(url: UrlAnalysis): boolean {
 /** Session key used for calls that carry no agent session (probes, tests). */
 export const NO_SESSION_KEY = '(no-session)'
 
-/** Tool results that never contain page-authored text. */
+/**
+ * Tool results that never contain page-authored text.
+ *
+ * `browser_run` here is the extension's own answer to a program's approval
+ * call (background/run-program.ts `approveProgram`): one of two fixed
+ * sentences and the call's own id, never anything a page wrote. Each step of
+ * the program is an ordinary call (click, type, select, read) that taints
+ * with the origins it touched, so what a program reads is tracked step by
+ * step. Counting the approval answer as a read of unknown origin added no
+ * protection and made every typing step of a program taint-forced, on the
+ * very page the user was working on. (The bridge keeps `browser_run` tainting
+ * on its side: there it is the model-facing tool, whose result carries the
+ * steps' output.)
+ */
 export const CONTENT_FREE_TOOLS: ReadonlySet<string> = new Set([
   'browser_devtools_network',
   'browser_follow_tab',
   'browser_close_tab',
+  'browser_run',
 ])
 
 /** Per-session taint state; absent means untainted. */

@@ -415,7 +415,7 @@ describe('local pages do not taint', () => {
   it('content of unknown source always taints: no origin, a non-web destination, host lineage, an attachment without a URL', () => {
     const h = harness()
     // A result with no origin at all (a tool this layer has no provenance for).
-    expect(h.policy.recordResult({ id: 'x1', name: 'browser_run', sessionId: 's1' }, true)).toEqual({ exempt: false })
+    expect(h.policy.recordResult({ id: 'x1', name: 'browser_fanout', sessionId: 's1' }, true)).toEqual({ exempt: false })
     expect(h.policy.get('s1')).toBeDefined()
     const { call } = navigate(h, 's2', 'about:blank')
     expect(h.policy.recordResult(call, true, LOCAL, { top: LOCAL, frames: [LOCAL], opaque: false })).toEqual({ exempt: false })
@@ -432,11 +432,20 @@ describe('local pages do not taint', () => {
       // Also on the path the worker takes for them: no recorded targets, only the tab.
       expect(h.policy.recordResult({ ...devtools, id: `${devtools.id}-bare`, sessionId: `${devtools.sessionId}-bare` }, true, undefined, { top: LOCAL, frames: [LOCAL], opaque: false }), name).toEqual({ exempt: false })
     }
-    // A program or series approval, a fleet and a watcher taint as before, even with only local frames in the tab.
-    for (const name of ['browser_run', 'browser_fanout', 'browser_watch', 'browser_watches']) {
+    // A fleet and a watcher taint as before, even with only local frames in the tab.
+    for (const name of ['browser_fanout', 'browser_watch', 'browser_watches']) {
       expect(h.policy.recordResult({ id: `np-${name}`, name, sessionId: `np-${name}` }, true, LOCAL, { top: LOCAL, frames: [LOCAL], opaque: false }), name).toEqual({ exempt: false })
       expect(h.policy.get(`np-${name}`), name).toBeDefined()
     }
+    // A program or series approval answers with fixed text: it neither taints nor vouches for anything.
+    expect(h.policy.recordResult({ id: 'np-run', name: 'browser_run', sessionId: 'np-run' }, true, EVIL, { top: EVIL, frames: [EVIL], opaque: false })).toEqual({ exempt: false })
+    expect(h.policy.get('np-run')).toBeUndefined()
+    // In a session that already read a page, it adds no source: that page stays the only one.
+    read(h, 'np-run-2', [EVIL])
+    const sourcesBefore = h.policy.get('np-run-2')?.sources
+    expect(sourcesBefore).toEqual([EVIL])
+    h.policy.recordResult({ id: 'np-run-2', name: 'browser_run', sessionId: 'np-run-2' }, true)
+    expect(h.policy.get('np-run-2')?.sources).toEqual(sourcesBefore)
     // A step of an approved program or series is the plain click, type or select it is.
     for (const name of ['browser_click', 'browser_type', 'browser_select']) {
       const step = { id: `step-${name}`, name, args: { index: 1 }, sessionId: `step-${name}`, program: { id: 'p1', step: 0 } }

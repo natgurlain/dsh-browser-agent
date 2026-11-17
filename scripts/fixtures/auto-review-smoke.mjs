@@ -477,19 +477,23 @@ export async function runAutoReviewSmoke(ctx) {
   assert.equal(await learningSetting(true), true)
   // A clean start: what the earlier steps read is cleared by the user (the line's Clear).
   if (await taintLine.count() > 0) await taintLine.getByRole('button', { name: 'Clear', exact: true }).click()
-  // The learning smoke's table, 30 rows: the user invites two, and the remaining 28 clicks are
-  // longer than one browser_run (25 steps), so they run as a series under one review.
-  // Clicks only, as in approving timesheet rows: a typing step of a program meets the taint
-  // rules on its own (the program's approval answer counts as a page read with no known
-  // origin), which is not what this checks.
-  const GUESTS = 30
-  await page.goto(`${origin}/learn?v=1&rows=${String(GUESTS)}`)
+  // The learning smoke's table, 16 rows: the user fills in and invites two, and the remaining
+  // 14 rows (28 steps: type the email, click Invite) are longer than one browser_run (25 steps),
+  // so they run as a series under one review. The series types into fields: the program's
+  // approval answer is fixed text and does not taint (taint.ts CONTENT_FREE_TOOLS), so typing
+  // on the page the user demonstrated on raises no taint card.
+  const GUESTS = 16
+  const guestName = (index) => `Guest ${String(index + 1)}`
+  await page.goto(`${origin}/learn?v=1&rows=${String(GUESTS)}&who=Guest`)
   await page.bringToFront()
   await chat.waitForTimeout(1_700)
   await chat.getByRole('button', { name: 'Watch me', exact: true }).click()
   await chat.getByRole('button', { name: 'Stop watching', exact: true }).waitFor()
   // The user does two rows by hand.
-  for (const index of [0, 1]) await page.locator('.invite').nth(index).click()
+  for (const index of [0, 1]) {
+    await page.locator('#people input').nth(index).fill(guestName(index))
+    await page.locator('.invite').nth(index).click()
+  }
   const offer = chat.getByRole('button', { name: `Do the remaining ${String(GUESTS - 2)} like this`, exact: true })
   await offer.waitFor({ timeout: 30_000 })
   const cardsBeforeWatch = await cardsSoFar()
@@ -522,15 +526,16 @@ export async function runAutoReviewSmoke(ctx) {
     throw new Error(`the Watch me run did not finish: ${JSON.stringify(evidence, null, 1)}`, { cause: error })
   }
   assert.equal(await chat.evaluate(() => globalThis.smokeCardsSeen), 0, 'no approval card appeared during the Watch me run')
+  assert.deepEqual(await page.locator('#people input').evaluateAll((inputs) => inputs.map((input) => input.value)), Array.from({ length: GUESTS }, (_unused, index) => guestName(index)), 'every row got its own email typed')
   assert.equal(await cardsSoFar(), cardsBeforeWatch, 'the extension raised no card for the series')
   const watchReviews = autoModel.state.reviews.slice(reviewsBeforeWatch)
   assert.equal(watchReviews.length, 1, `the series was reviewed once (${watchReviews.length})`)
   const watchTrusted = watchReviews[0].input.split('<untrusted_page_data')[0]
-  assert.match(watchTrusted, new RegExp(`USER_PANEL_ACTION \\(recorded by the browser bridge for this very action\\):\\nTRUSTED: The user clicked the offer to do the remaining rows like this in the browser panel for this program: ${String(GUESTS - 2)} rows, ${String(GUESTS - 2)} steps`, 'u'))
+  assert.match(watchTrusted, new RegExp(`USER_PANEL_ACTION \\(recorded by the browser bridge for this very action\\):\\nTRUSTED: The user clicked the offer to do the remaining rows like this in the browser panel for this program: ${String(GUESTS - 2)} rows, ${String((GUESTS - 2) * 2)} steps`, 'u'))
   assert.match(watchTrusted, /"tool": "browser_run"/u)
   assert.equal(watchReviews[0].answer.decision, 'allow')
   await learningSetting(false)
-  results.push(`Watch me under Auto approve: a real click on "Do the remaining ${String(GUESTS - 2)} like this" ran the ${String(GUESTS - 2)}-step series (more than one browser_run) with zero cards; the honest reviewer saw the bridge's TRUSTED line for that click and allowed it`)
+  results.push(`Watch me under Auto approve: a real click on "Do the remaining ${String(GUESTS - 2)} like this" ran the ${String((GUESTS - 2) * 2)}-step series of typing and clicks (more than one browser_run) with zero cards; the honest reviewer saw the bridge's TRUSTED line for that click and allowed it`)
 
   // The audit log records each review: decision, reason, model and binding.
   const reviews = (await audit()).filter(entry => entry.kind === 'auto-review')

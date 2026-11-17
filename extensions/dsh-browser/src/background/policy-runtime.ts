@@ -94,10 +94,11 @@ const WHOLE_TAB_PROVENANCE_TOOLS: ReadonlySet<string> = new Set(['browser_dialog
  */
 const NEVER_EXEMPT_TOOLS: ReadonlySet<string> = new Set([
   'browser_downloads', 'browser_screenshot', 'browser_save_pdf',
-  // Their own results carry no frame provenance (a program or series approval, a fleet, a watcher):
-  // they taint as before, whatever the tab shows. The steps of a program or series are ordinary
-  // calls (click, type, select) and are judged as such.
-  'browser_run', 'browser_fanout', 'browser_watch', 'browser_watches',
+  // Their own results carry no frame provenance (a fleet, a watcher): they taint, whatever the
+  // tab shows. A program or series approval (`browser_run`) is not here: its answer is fixed text
+  // and does not taint at all (taint.ts CONTENT_FREE_TOOLS); its steps are ordinary calls (click,
+  // type, select) and are judged as such.
+  'browser_fanout', 'browser_watch', 'browser_watches',
 ])
 
 /** What the caller knows about a settled result beyond its targets. */
