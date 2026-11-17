@@ -12,9 +12,6 @@ import { completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './suppo
 import { FakeWebSocket } from './support/fake-websocket.ts'
 import { chromeEvent, memoryStorage, panelPort } from './support/chrome.ts'
 
-// These tests import the whole background worker; on a loaded machine that cold import alone
-// can exceed vitest's 5 s default (the same reason background-auto-review.spec.ts uses 30 s).
-vi.setConfig({ testTimeout: 30_000 })
 
 const REMOTE = 'wss://bridge.example/ext/bridge'
 const LOCAL = 'ws://127.0.0.1:3999/ext/bridge'

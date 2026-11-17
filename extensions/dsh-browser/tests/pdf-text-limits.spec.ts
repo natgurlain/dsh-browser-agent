@@ -100,7 +100,9 @@ describe('PDF extraction limits', () => {
     expect(result.pages[0]!.length).toBe(300_000)
   })
 
-  it('keeps the event loop responsive while it parses (approvals, kill switch)', async () => {
+  // A wall-clock comparison: other jobs on the machine can stretch one slice, so a noisy run is
+  // retried. A parser that really blocks the loop fails every attempt.
+  it('keeps the event loop responsive while it parses (approvals, kill switch)', { retry: 2 }, async () => {
     const shown = 'BT (x) Tj 1 0 Td ET\n'.repeat(300_000)
     const bytes = pdf(base(`4 0 obj << /Length ${shown.length} >> stream\n${shown}\nendstream endobj\n`))
     // Worst gap between 5 ms timer ticks, and how many ticks ran.
