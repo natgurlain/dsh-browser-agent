@@ -288,6 +288,32 @@ export async function runAutoReviewSmoke(ctx) {
     const box = await taintLine.boundingBox()
     assert.ok(box !== null && box.height <= 32, `the taint line is one line at ${width} px (${box?.height} px tall)`)
   }
+  // The header's connection status fits a narrow panel: its dot alone (the label for screen
+  // readers and as its tooltip), never clipped, never over the title.
+  for (const width of [360, 460]) {
+    await chat.setViewportSize({ width, height: 860 })
+    const header = await chat.evaluate(() => {
+      const pill = document.querySelector('.connection')
+      const label = pill.querySelector('.connection-label')
+      return {
+        pillRight: pill.getBoundingClientRect().right,
+        titleLeft: document.querySelector('.session-menu-trigger').getBoundingClientRect().left,
+        titleRight: document.querySelector('.session-menu-trigger').getBoundingClientRect().right,
+        actionsLeft: document.querySelector('.topbar-actions').getBoundingClientRect().left,
+        labelShown: label.getBoundingClientRect().width > 1,
+        clipped: label.getBoundingClientRect().width > 1 && label.scrollWidth > label.clientWidth + 1,
+        title: pill.getAttribute('title'),
+        text: label.textContent,
+      }
+    })
+    assert.ok(header.pillRight <= header.titleLeft, `the status pill stays clear of the title at ${width} px (${JSON.stringify(header)})`)
+    assert.ok(header.titleRight <= header.actionsLeft, `the header buttons stay clear of the title at ${width} px (${JSON.stringify(header)})`)
+    assert.equal(header.clipped, false, `the status label is not cut off at ${width} px`)
+    assert.equal(header.labelShown, width >= 420, `the status shows its label only when it fits (${width} px)`)
+    assert.equal(header.title, 'Connected')
+    assert.equal(header.text, 'Connected')
+    if (width === 360) await themedShots(chat, 'panel-header-narrow')
+  }
   await chat.setViewportSize({ width: 400, height: 860 })
   await themedShots(chat, 'auto-approve-taint-line')
   await taintSummary.click()

@@ -380,7 +380,8 @@ textarea:focus-visible {
   display: grid;
   min-height: 58px;
   flex: 0 0 auto;
-  grid-template-columns: minmax(70px, 1fr) minmax(0, 1.75fr) minmax(106px, 1fr);
+  /* The buttons on the right always get their full width, so they never sit on the title. */
+  grid-template-columns: minmax(26px, 1fr) minmax(0, 1.75fr) minmax(max-content, 1fr);
   align-items: center;
   gap: 8px;
   padding: 10px 14px;
@@ -703,6 +704,28 @@ textarea:focus-visible {
 .connection-label {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* A narrow panel (the side panel's default width is about 360 px): the status
+   is its coloured dot alone, so it never clips or crowds the title. The label
+   stays for screen readers and as the pill's tooltip. */
+@media (max-width: 419px) {
+  .connection {
+    justify-content: center;
+    gap: 0;
+    min-width: 26px;
+    padding-inline: 8px;
+  }
+
+  .connection-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 
 .session-menu-trigger {
