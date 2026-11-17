@@ -590,6 +590,41 @@ function answerNavigationPending(answer: ToolAnswer): boolean {
     && (answer.result as { navigationPending?: unknown }).navigationPending === true
 }
 
+/**
+ * Whether the frame an action was sent to now holds another document (or is
+ * gone): the action's own answer was lost because the page navigated.
+ */
+async function frameNavigatedAway(tabId: number, frame: TabFrame): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 300))
+    let frames: chrome.webNavigation.GetAllFrameResultDetails[] | null | undefined
+    try {
+      frames = await chrome.webNavigation.getAllFrames({ tabId })
+    } catch {
+      return false
+    }
+    if (frames === null || frames === undefined || frames.length === 0) return false
+    const current = frames.find((candidate) => candidate.frameId === frame.frameId)
+    if (current === undefined) return frame.frameId !== 0
+    if (frame.documentId !== undefined && current.documentId !== undefined) {
+      if (current.documentId !== frame.documentId) return true
+    } else if (current.url !== frame.url) {
+      return true
+    }
+  }
+  return false
+}
+
+/** The status of an action whose page navigated before the content script could answer. */
+function navigatedDuringActionStatus(call: ToolCall): string {
+  const verb = call.name === 'browser_click' ? 'Clicked'
+    : call.name === 'browser_press' ? 'Pressed a key on'
+      : call.name === 'browser_select' ? 'Chose an option in'
+        : call.name === 'browser_type' ? 'Typed into'
+          : 'Acted on'
+  return `${verb} ${describeTarget(call.args)}. The page navigated to a new document while the action ran (for example, a form was submitted). Call browser_snapshot again after the page loads.`
+}
+
 /** Keep extension-authored action status outside the nonce-bound page-data boundary. */
 function wrapActionDelta(status: string, pageContent: string, frame: TabFrame, maxChars: number): string {
   const prefix = `${status}\n${ACTION_DELTA_GUIDANCE}`
@@ -1296,10 +1331,18 @@ async function dispatchOnceArmed(
     dialogDuringAction = guarded.dialog
   } catch (error: unknown) {
     if (stateChangingAction && contentScriptReceiverMissing(error)) rollbackActionCommit?.()
-    navigationWait?.cancel()
-    tabWatch?.stop()
-    endPendingWatch()
-    throw error
+    // A click that submits a form (or a handler that navigates) can replace
+    // the document before the content script answers: the action ran and the
+    // page moved on. Report that, not a failure.
+    const navigated = stateChangingAction && !contentScriptReceiverMissing(error) && !isCancelled(call, signal)
+      && await frameNavigatedAway(tabId, frame)
+    if (!navigated) {
+      navigationWait?.cancel()
+      tabWatch?.stop()
+      endPendingWatch()
+      throw error
+    }
+    response = { ok: true, result: { text: navigatedDuringActionStatus(call), navigationPending: true } }
   }
   const openedTabs = tabWatch?.stop() ?? []
   if (isCancelled(call, signal)) {
