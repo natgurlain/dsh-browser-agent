@@ -124,7 +124,7 @@ function pickChoices(choices: Choice[], request: SelectRequest): Choice[] {
 /**
  * The labels of the options a request would choose in a native select, read
  * from the page (never from the call's own words), or undefined when the
- * request does not resolve. Approval cards and Auto review show these.
+ * request does not resolve. Approval cards show these, and Auto approve reads them.
  */
 export function nativeChoiceLabels(select: HTMLSelectElement, args: Record<string, unknown>): string[] | undefined {
   try {

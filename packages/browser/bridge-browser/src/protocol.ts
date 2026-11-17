@@ -84,21 +84,21 @@ export const MAX_HOST_APPROVAL_REASON_CHARS = 32 * 1024
 export const HOST_APPROVALS_CAPS_VERSION = 1
 
 /**
- * Version of Auto review (docs/auto-review-design.md) advertised in server
- * caps. Present only when the bridge can review at all: the plugin config
- * allows it, the Host composes an LLM service, and its session history reader
- * is the one this bridge knows. An extension offers the per-conversation
- * toggle only for this exact version.
+ * Version of the Auto approve reviewer (docs/auto-approve-design.md)
+ * advertised in server caps. Present only when the bridge can review at all:
+ * the plugin config allows it and the Host composes an LLM service. Auto
+ * approve itself works without it; only consequential actions need the
+ * reviewer, and without it they show the ordinary card.
  */
 export const AUTO_REVIEW_CAPS_VERSION = 1
 
 /**
- * Bridge-handled RPC: review one pending ordinary approval card
- * (`{ toolCallId, reviewId, binding, action }` →
- * `{ reviewId, binding, decision: 'allow' | 'ask', risk?, reason, userTurn? }`).
- * The session and tool come from the bridge's own record of that call, never
- * from the payload. The extension applies an `allow` only for the review id
- * and payload binding it asked about, exactly like the user's "Allow once".
+ * Bridge-handled RPC: silently review one consequential action while Auto
+ * approve is on (`{ toolCallId, reviewId, binding, action }` →
+ * `{ reviewId, binding, decision: 'allow' | 'deny', code, reason }`). The
+ * session and tool come from the bridge's own record of that call, never from
+ * the payload. The extension applies an `allow` only for the review id and
+ * payload binding it asked about, exactly like the user's "Allow once".
  */
 export const BRIDGE_REVIEW_ASK_METHOD = 'bridge.review.ask'
 
@@ -106,137 +106,82 @@ export const BRIDGE_REVIEW_ASK_METHOD = 'bridge.review.ask'
 export const BRIDGE_REVIEW_CANCEL_METHOD = 'bridge.review.cancel'
 
 /**
- * Bridge-handled RPC: whether Auto review can run for one conversation
+ * Bridge-handled RPC: whether the reviewer can run for one conversation
  * (`{ sessionId }` → `{ available: true, model }` or
- * `{ available: false, reason }`). Grants nothing; it only lets the panel
- * disable its toggle with a reason.
+ * `{ available: false, reason }`). Grants nothing; the panel only says so.
  */
 export const BRIDGE_REVIEW_STATUS_METHOD = 'bridge.review.status'
 
-/** Tools whose ordinary cards Auto review may decide (the extension's floor narrows it further). */
-export const AUTO_REVIEW_TOOLS = [
-  'browser_click', 'browser_type', 'browser_select', 'browser_hover', 'browser_press', 'browser_drag', 'browser_navigate',
+/** The verbs a reviewed action is described with. */
+export const AUTO_REVIEW_VERBS = [
+  'click', 'type', 'select', 'press', 'drag', 'hover', 'navigate', 'open-tab', 'upload', 'download', 'clipboard',
+  'dialog', 'run-program', 'watch', 'fan-out', 'site-request', 'save-file', 'other',
 ] as const
 
-export type AutoReviewTool = typeof AUTO_REVIEW_TOOLS[number]
+export type AutoReviewVerb = typeof AUTO_REVIEW_VERBS[number]
 
-/** The verbs a reviewed action is described with. */
-export const AUTO_REVIEW_VERBS = ['click', 'double-click', 'right-click', 'type', 'select', 'hover', 'press', 'drag', 'navigate'] as const
+/**
+ * Why an action is consequential and goes to the reviewer (the extension's
+ * own classification, docs/auto-approve-design.md §3):
+ * - `commit-words`: the control's name, its link or form address says send,
+ *   delete, submit, publish, share, unsubscribe, transfer...
+ * - `high-risk-words`: payments, purchases, credentials, account security, access.
+ * - `submits-form`: the click submits a form whose control or address says so.
+ * - `sensitive-field`: a password, payment or one-time-code field.
+ * - `tainted`: the product's taint rules flag this action after the
+ *   conversation read untrusted page content (typing into another site, a URL
+ *   carrying data, the clipboard, a file write, an upload).
+ * - `files`: an upload, a download or a file written to the workspace.
+ * - `program`: a `browser_run` program or a "do the remaining N" series.
+ * - `standing`: a watcher that can start the agent later, or a site driver request.
+ * - `url-risk`: the destination address carries a long or high-entropy value.
+ */
+export const CONSEQUENCE_REASONS = [
+  'commit-words', 'high-risk-words', 'submits-form', 'sensitive-field', 'tainted', 'files', 'program', 'standing', 'url-risk',
+] as const
 
-/** How the reviewed element presents itself (derived from its kind, never page prose). */
-export const AUTO_REVIEW_TARGET_CLASSES = ['link', 'button', 'field', 'control', 'other', 'none'] as const
+export type ConsequenceReason = typeof CONSEQUENCE_REASONS[number]
 
 /** Longest untrusted (page- or agent-authored) string a review request may carry (UTF-16 code units). */
 export const MAX_REVIEW_UNTRUSTED_CHARS = 200
 
-/** Most recent Auto-approved step labels a review request may carry. */
-export const MAX_REVIEW_RECENT = 3
-
 /**
- * What an action would commit, as the extension classified it from the
- * page's structure and words (docs/auto-review-design.md §9). `none` is the
- * only class the reviewer may allow on its own judgement (low risk); every
- * other class is at least medium and needs the user's own words for that
- * kind of action on that target (the bridge checks this deterministically).
- *
- * - `confirm`: a generic confirmer (Done, OK, Continue, Yes).
- * - `unknown`: a button-like control whose name says nothing clear.
- * - `type`: typing page data into a site the conversation has read.
- * - `address`: a recipient, address, link or amount field.
- */
-export const COMMIT_CLASSES = ['none', 'send', 'delete', 'save', 'submit', 'share', 'account', 'change', 'confirm', 'unknown', 'type', 'address'] as const
-
-export type CommitClass = typeof COMMIT_CLASSES[number]
-
-/**
- * Which deterministic rule makes an action auto-approvable at all
- * (docs/auto-review-design.md §8):
- * - `harmless`: plainly harmless by the extension's own allowlist (a real
- *   same-site link, a disclosure control, hover, a navigation key in a text
- *   field). The reviewer may allow it on its judgement.
- * - `named`: anything else that is eligible. Allowed only when the user's
- *   newest panel message names the control(s) or contains the text verbatim.
- */
-export const AUTO_REVIEW_RULES = ['harmless', 'named'] as const
-
-export type AutoReviewRule = typeof AUTO_REVIEW_RULES[number]
-
-/** Longest text a typing action may carry to the verbatim check (longer: never Auto). */
-export const MAX_REVIEW_EXACT_TEXT_CHARS = 500
-
-/** Most phrases a `named` action may require (a drag's two ends; a selection's options). */
-export const MAX_REVIEW_NAMES = 5
-
-/** Key modifiers a reviewed key press may carry (any other modifier makes it ineligible). */
-export const AUTO_REVIEW_MODIFIERS = ['Shift'] as const
-
-/**
- * One pending page action as the extension computed it, for the reviewer.
- * Booleans and enums are the extension's own facts; everything under
- * `untrusted` was authored by the page or the agent and is only ever shown to
- * the reviewer as data.
+ * One consequential action as the extension computed it, for the reviewer.
+ * The enums and booleans are the extension's own facts; everything under
+ * `untrusted` was authored by the page or the agent, is length-capped, and is
+ * only ever shown to the reviewer as fenced data.
  */
 export interface ReviewAction {
-  tool: AutoReviewTool
-  verb: typeof AUTO_REVIEW_VERBS[number]
-  /** Element kind from the fixed vocabulary, or 'none' (navigation, key press to the page). */
+  /** The pending call's tool name (must equal the bridge's own record). */
+  tool: string
+  verb: AutoReviewVerb
+  /** Element kind from the fixed vocabulary, or 'none'. */
   targetKind: string
-  targetClass: typeof AUTO_REVIEW_TARGET_CLASSES[number]
-  /** Which deterministic rule applies (see {@link AUTO_REVIEW_RULES}). */
-  rule: AutoReviewRule
-  /**
-   * For `named`: the phrases the newest panel message must contain verbatim
-   * (control names, chosen option labels, both ends of a drag), exactly as the
-   * page reported them.
-   */
-  mustName?: string[]
-  /**
-   * For `named` clicks on a control whose name repeats on the page: the row
-   * or section that says which one, which must appear in the same clause.
-   */
-  mustContext?: string
-  /** For `named` typing: the full text to be typed, which the message must contain verbatim. */
-  exactText?: string
-  /** For `named` typing into a recipient/address/link/amount field: the text must equal a whole token of the message. */
-  exactToken?: boolean
-  /** What the action would commit, for the prompt and the card's sentence (see {@link COMMIT_CLASSES}). */
-  commitClass: CommitClass
-  /** Native structure says this likely submits a form (submit button, Enter in a form field). */
-  formSubmitLikely: boolean
-  /** Payment, purchase, account-security, credential or access words in its name, context, options or address. */
-  highRiskWords: boolean
-  /**
-   * Present only where the extension computed it: whether a navigation, a
-   * link's destination or a form's action stays on the current page's origin.
-   */
-  sameOrigin?: boolean
-  /** The conversation has read web pages that taint it. */
+  /** Why it is consequential (at least one). */
+  reasons: ConsequenceReason[]
+  /** The conversation has read untrusted web page content. */
   tainted: boolean
-  /** Actions Auto review approved since the user's last message. */
-  approvedThisTurn: number
-  /** For browser_type: how many characters will be typed. */
-  typedChars?: number
-  /** For browser_press: the key (agent-authored, short), its modifiers and repeat count. */
-  key?: string
-  modifiers?: string[]
-  repeat?: number
   untrusted: {
+    /** The control's visible name. */
     name?: string
+    /** The row or section the control is in. */
     context?: string
+    /** Page title. */
     title?: string
+    /** Page address: origin and path only. */
     url?: string
     /** Navigation destination, link destination or form action: origin and path only. */
     destination?: string
+    /** Text the agent will type (its first characters). */
     typed?: string
-    /** The option labels the page shows for a selection. */
-    options?: string[]
-    /** The element a drag drops onto. */
-    dropTarget?: string
-    recent?: string[]
+    /** The key the agent will press. */
+    key?: string
+    /** The card's one-line summary, for actions without an element (programs, watchers). */
+    summary?: string
   }
 }
 
-const UNTRUSTED_KEYS = ['name', 'context', 'title', 'url', 'destination', 'typed', 'dropTarget'] as const
+const UNTRUSTED_KEYS = ['name', 'context', 'title', 'url', 'destination', 'typed', 'key', 'summary'] as const
 
 /**
  * Validate a review action received over the wire. Every field is checked
@@ -246,36 +191,18 @@ const UNTRUSTED_KEYS = ['name', 'context', 'title', 'url', 'destination', 'typed
 export function parseReviewAction(value: unknown): ReviewAction | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const raw = value as Record<string, unknown>
-  const allowed = new Set(['tool', 'verb', 'targetKind', 'targetClass', 'rule', 'mustName', 'mustContext', 'exactText', 'exactToken', 'commitClass', 'formSubmitLikely', 'highRiskWords', 'sameOrigin', 'tainted', 'approvedThisTurn', 'typedChars', 'key', 'modifiers', 'repeat', 'untrusted'])
+  const allowed = new Set(['tool', 'verb', 'targetKind', 'reasons', 'tainted', 'untrusted'])
   if (Object.keys(raw).some((key) => !allowed.has(key))) return undefined
-  if (!(AUTO_REVIEW_TOOLS as readonly unknown[]).includes(raw.tool)) return undefined
+  if (typeof raw.tool !== 'string' || !/^[a-z][a-z_]{1,63}$/u.test(raw.tool)) return undefined
   if (!(AUTO_REVIEW_VERBS as readonly unknown[]).includes(raw.verb)) return undefined
   if (typeof raw.targetKind !== 'string' || !/^[a-z]{1,16}$/u.test(raw.targetKind)) return undefined
-  if (!(AUTO_REVIEW_TARGET_CLASSES as readonly unknown[]).includes(raw.targetClass)) return undefined
-  if (!(COMMIT_CLASSES as readonly unknown[]).includes(raw.commitClass)) return undefined
-  if (!(AUTO_REVIEW_RULES as readonly unknown[]).includes(raw.rule)) return undefined
-  if (raw.mustName !== undefined && (!Array.isArray(raw.mustName) || raw.mustName.length === 0 || raw.mustName.length > MAX_REVIEW_NAMES
-    || !raw.mustName.every((entry) => typeof entry === 'string' && entry !== '' && entry.length <= MAX_REVIEW_UNTRUSTED_CHARS))) return undefined
-  if (raw.exactText !== undefined && (typeof raw.exactText !== 'string' || raw.exactText === '' || raw.exactText.length > MAX_REVIEW_EXACT_TEXT_CHARS)) return undefined
-  if (raw.exactToken !== undefined && typeof raw.exactToken !== 'boolean') return undefined
-  if (raw.mustContext !== undefined && (typeof raw.mustContext !== 'string' || raw.mustContext === '' || raw.mustContext.length > MAX_REVIEW_UNTRUSTED_CHARS || raw.mustName === undefined)) return undefined
-  // A `named` action must say what has to be named; a `harmless` one must not.
-  if (raw.rule === 'named' && raw.mustName === undefined && raw.exactText === undefined) return undefined
-  if (raw.rule === 'harmless' && (raw.mustName !== undefined || raw.exactText !== undefined)) return undefined
-  for (const flag of ['formSubmitLikely', 'highRiskWords', 'tainted'] as const) {
-    if (typeof raw[flag] !== 'boolean') return undefined
-  }
-  if (raw.sameOrigin !== undefined && typeof raw.sameOrigin !== 'boolean') return undefined
-  if (typeof raw.approvedThisTurn !== 'number' || !Number.isSafeInteger(raw.approvedThisTurn) || raw.approvedThisTurn < 0 || raw.approvedThisTurn > 10_000) return undefined
-  if (raw.typedChars !== undefined && (typeof raw.typedChars !== 'number' || !Number.isSafeInteger(raw.typedChars) || raw.typedChars < 0 || raw.typedChars > 1_000_000)) return undefined
-  if (raw.key !== undefined && (typeof raw.key !== 'string' || raw.key.length > 40)) return undefined
-  if (raw.modifiers !== undefined && (!Array.isArray(raw.modifiers) || raw.modifiers.length > 4
-    || !raw.modifiers.every((entry) => (AUTO_REVIEW_MODIFIERS as readonly unknown[]).includes(entry)))) return undefined
-  if (raw.repeat !== undefined && (typeof raw.repeat !== 'number' || !Number.isSafeInteger(raw.repeat) || raw.repeat < 1 || raw.repeat > 100)) return undefined
+  if (!Array.isArray(raw.reasons) || raw.reasons.length === 0 || raw.reasons.length > CONSEQUENCE_REASONS.length
+    || !raw.reasons.every((reason) => (CONSEQUENCE_REASONS as readonly unknown[]).includes(reason))) return undefined
+  if (typeof raw.tainted !== 'boolean') return undefined
   const untrusted = raw.untrusted
   if (typeof untrusted !== 'object' || untrusted === null || Array.isArray(untrusted)) return undefined
   const fields = untrusted as Record<string, unknown>
-  const known = new Set<string>([...UNTRUSTED_KEYS, 'options', 'recent'])
+  const known = new Set<string>(UNTRUSTED_KEYS)
   if (Object.keys(fields).some((key) => !known.has(key))) return undefined
   const out: ReviewAction['untrusted'] = {}
   for (const key of UNTRUSTED_KEYS) {
@@ -284,45 +211,18 @@ export function parseReviewAction(value: unknown): ReviewAction | undefined {
     if (typeof field !== 'string' || field.length > MAX_REVIEW_UNTRUSTED_CHARS) return undefined
     out[key] = field
   }
-  for (const key of ['options', 'recent'] as const) {
-    const list = fields[key]
-    if (list === undefined) continue
-    if (!Array.isArray(list) || list.length > (key === 'recent' ? MAX_REVIEW_RECENT : 5)
-      || !list.every((entry) => typeof entry === 'string' && entry.length <= MAX_REVIEW_UNTRUSTED_CHARS)) return undefined
-    out[key] = [...list] as string[]
-  }
   return {
-    tool: raw.tool as AutoReviewTool,
-    verb: raw.verb as ReviewAction['verb'],
+    tool: raw.tool,
+    verb: raw.verb as AutoReviewVerb,
     targetKind: raw.targetKind,
-    targetClass: raw.targetClass as ReviewAction['targetClass'],
-    rule: raw.rule as AutoReviewRule,
-    ...raw.mustName === undefined ? {} : { mustName: [...raw.mustName] as string[] },
-    ...raw.mustContext === undefined ? {} : { mustContext: raw.mustContext as string },
-    ...raw.exactText === undefined ? {} : { exactText: raw.exactText as string },
-    ...raw.exactToken === undefined ? {} : { exactToken: raw.exactToken as boolean },
-    commitClass: raw.commitClass as CommitClass,
-    formSubmitLikely: raw.formSubmitLikely as boolean,
-    highRiskWords: raw.highRiskWords as boolean,
-    ...raw.sameOrigin === undefined ? {} : { sameOrigin: raw.sameOrigin as boolean },
-    tainted: raw.tainted as boolean,
-    approvedThisTurn: raw.approvedThisTurn,
-    ...raw.typedChars === undefined ? {} : { typedChars: raw.typedChars as number },
-    ...raw.key === undefined ? {} : { key: raw.key as string },
-    ...raw.modifiers === undefined ? {} : { modifiers: [...raw.modifiers] as string[] },
-    ...raw.repeat === undefined ? {} : { repeat: raw.repeat as number },
+    reasons: [...new Set(raw.reasons as ConsequenceReason[])],
+    tainted: raw.tainted,
     untrusted: out,
   }
 }
 
-/**
- * Why a review ended as it did: a fixed vocabulary the extension turns into
- * a fixed sentence on the card. Model text never reaches the card.
- */
-export const REVIEW_CODES = [
-  'allowed', 'model-ask', 'high-risk', 'not-named', 'restricted',
-  'timeout', 'failed', 'cancelled', 'superseded', 'no-user-message', 'unavailable',
-] as const
+/** Why a review ended as it did. Only `allowed` lets the action run without a card. */
+export const REVIEW_CODES = ['allowed', 'denied', 'timeout', 'failed', 'cancelled', 'unavailable'] as const
 
 export type ReviewCode = typeof REVIEW_CODES[number]
 
@@ -330,17 +230,13 @@ export type ReviewCode = typeof REVIEW_CODES[number]
 export interface ReviewAnswer {
   reviewId: string
   binding: string
-  decision: 'allow' | 'ask'
-  /** Why (fixed vocabulary): the card's sentence is chosen from it. */
+  decision: 'allow' | 'deny'
   code: ReviewCode
-  risk?: 'low' | 'medium' | 'high'
-  /** The reviewer's own sentence: timeline details and audit log only, never the card. */
+  /** One short line: the reviewer's own for allow/deny (sanitized, capped), the bridge's on failure. */
   reason: string
-  /** Opaque marker of the newest user message the reviewer saw. */
-  userTurn?: string
 }
 
-/** Why Auto review is not available for a conversation. */
+/** Why the reviewer is not available for a conversation. */
 export type ReviewUnavailableReason = 'host-unsupported' | 'no-model' | 'external-session' | 'disabled' | 'not-started'
 
 /**

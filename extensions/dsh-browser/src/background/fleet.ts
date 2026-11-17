@@ -21,7 +21,7 @@
  */
 
 import type { ApprovalAuthorization, ApprovalDetail, ApprovalPrompt } from '../security/approval.ts'
-import type { CallPolicyDecision } from '../security/call-policy.ts'
+import type { CallPolicyDecision, ForceCause } from '../security/call-policy.ts'
 import { approvalBinding } from '../security/payload-binding.ts'
 import { analyzeUrl } from '../security/url-risk.ts'
 import type { CallPolicyHook, ToolCall } from './tools.ts'
@@ -146,23 +146,27 @@ export function parseFleetRequest(args: Record<string, unknown>): FleetRequest |
 }
 
 /** Per-task policy outcome for the fleet card. */
-export type FleetPolicy = { kind: 'deny'; message: string } | { kind: 'ok'; forced: string[] }
+export type FleetPolicy = { kind: 'deny'; message: string } | { kind: 'ok'; forced: string[]; causes?: ForceCause[] }
 
 /** Judge every task URL as a `browser_open_tab` to it (deny wins; force reasons collect per page). */
 export function evaluateFleetPolicy(call: Pick<ToolCall, 'id' | 'sessionId'>, request: FleetRequest, policy: CallPolicyHook | undefined): FleetPolicy {
   if (policy === undefined) return { kind: 'ok', forced: [] }
   const forced: string[] = []
+  const causes = new Set<ForceCause>()
   for (const [index, task] of request.tasks.entries()) {
     const openCall: ToolCall = { id: call.id, name: 'browser_open_tab', args: { url: task.url, active: false }, ...(call.sessionId === undefined ? {} : { sessionId: call.sessionId }) }
     const decision: CallPolicyDecision = policy(openCall, { reads: [], acts: [], destination: task.url })
     if (decision.kind === 'deny') return { kind: 'deny', message: `Page ${String(index + 1)} (${task.url}): ${decision.message}` }
-    if (decision.kind === 'force') forced.push(...decision.reasons.map((reason) => `Page ${String(index + 1)}: ${reason}`))
+    if (decision.kind === 'force') {
+      forced.push(...decision.reasons.map((reason) => `Page ${String(index + 1)}: ${reason}`))
+      for (const cause of decision.causes ?? []) causes.add(cause)
+    }
   }
-  return { kind: 'ok', forced }
+  return { kind: 'ok', forced, ...causes.size === 0 ? {} : { causes: [...causes] } }
 }
 
 /** The one card for a whole fleet: every URL (decoded, risk-flagged) and its instruction. */
-export function fleetApprovalPrompt(request: FleetRequest, forcedReasons: readonly string[] = []): ApprovalPrompt {
+export function fleetApprovalPrompt(request: FleetRequest, forcedReasons: readonly string[] = [], forcedBy: readonly ForceCause[] = []): ApprovalPrompt {
   const origins = [...new Set(request.tasks.map((task) => new URL(task.url).origin))]
   const analyses = request.tasks.map((task) => analyzeUrl(task.url))
   const risky = analyses.some((analysis) => analysis?.risky === true)
@@ -177,7 +181,7 @@ export function fleetApprovalPrompt(request: FleetRequest, forcedReasons: readon
     // A long or high-entropy value in any task URL: trusted origins never skip the card.
     ...risky ? { urlRisk: true as const } : {},
     // Site policy or taint demands a fresh decision: unrestricted access never skips it.
-    ...forcedReasons.length > 0 ? { forced: true as const, perCallOnly: true as const } : {},
+    ...forcedReasons.length > 0 ? { forced: true as const, perCallOnly: true as const, ...forcedBy.length === 0 ? {} : { forcedBy: [...forcedBy] } } : {},
     details: [
       ...forcedReasons.length > 0 ? [{ kind: 'text' as const, label: 'Why this needs your approval', masked: false, value: forcedReasons.join('\n') }] : [],
       ...request.tasks.flatMap((task, index): ApprovalDetail[] => {
@@ -265,7 +269,7 @@ export class FleetRegistry {
     const policy = evaluateFleetPolicy(call, request, deps.policy)
     if (policy.kind === 'deny') return failed(policy.message)
     const windowId = await deps.parentWindow(call.sessionId)
-    const prompt = fleetApprovalPrompt(request, policy.forced)
+    const prompt = fleetApprovalPrompt(request, policy.forced, policy.causes)
     const authorization = await deps.authorize(prompt, windowId ?? 0)
     if (deps.signal.aborted) return cancelledAnswer()
     if (authorization !== 'approved') return notApprovedAnswer('The user declined the tab fleet.', 'The tab fleet', authorization)

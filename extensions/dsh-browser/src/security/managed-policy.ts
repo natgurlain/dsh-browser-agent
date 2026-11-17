@@ -29,7 +29,7 @@ export interface ManagedPolicy {
   disableLocalTaintExemption: boolean
   /** Sites the user trusts taint a session like any other page (taint-exempt.ts). */
   disableTrustedTaintExemption: boolean
-  /** Auto review (docs/auto-review-design.md) is not offered: every card goes to the user. */
+  /** Auto approve (docs/auto-approve-design.md) is not offered: every card goes to the user. */
   disableAutoReview: boolean
   /**
    * Pinned web origins (exact or `*.` wildcard): the agent may read, act on,
@@ -84,8 +84,6 @@ export interface ManagedOverridable {
   allowDevTools: boolean
   unrestrictedBrowserAccess: boolean
   siteDefaultsEnabled: boolean
-  /** Settings that can offer Auto review carry it; managed `disableAutoReview` pins it off. */
-  offerAutoReview?: boolean
 }
 
 /** Apply managed overrides to user settings (managed wins). */
@@ -95,7 +93,6 @@ export function applyManagedOverrides<T extends ManagedOverridable>(settings: T,
     allowDevTools: settings.allowDevTools && !managed.disableDevTools,
     unrestrictedBrowserAccess: settings.unrestrictedBrowserAccess && !managed.disableUnrestricted,
     siteDefaultsEnabled: settings.siteDefaultsEnabled || managed.enforceSiteDefaults,
-    ...settings.offerAutoReview === undefined ? {} : { offerAutoReview: settings.offerAutoReview && !managed.disableAutoReview },
   }
 }
 

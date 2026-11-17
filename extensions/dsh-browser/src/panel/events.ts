@@ -42,8 +42,9 @@ export interface ToolStep {
   /** Strict mode (`armed`, `refused`). */
   strict?: string
   /**
-   * Auto review's one-line reason for this step (docs/auto-review-design.md
-   * §11), from the audit log. Model text, shown attributed and plain.
+   * Auto approve's reviewer's one-line reason for this step
+   * (docs/auto-approve-design.md), from the audit log. Model text, shown
+   * attributed and plain.
    */
   autoReason?: string
   /** Screenshot (or other image) the step returned. */
@@ -360,7 +361,7 @@ export interface StepAudit {
   durationMs?: number
   policy?: string
   strict?: string
-  /** The reviewer's reason, when Auto review decided this step. */
+  /** The reviewer's reason, when Auto approve's reviewer checked this step. */
   autoReason?: string
 }
 

@@ -90,8 +90,6 @@ export interface AuditEntryInput {
   durationMs?: number
   /** Step of a `browser_run` program: the program's approval call id and the 0-based step. */
   program?: { id: string; step: number }
-  /** `auto-review` entries: the reviewer's risk class. */
-  risk?: string
   /** `auto-review` entries: the reviewer's one-sentence reason (or the bridge's, on failure). */
   reason?: string
   /** `auto-review` entries: `provider/model` of the reviewer. */
@@ -641,14 +639,13 @@ export interface BridgeAuditObserver {
   settled(id: string, outcome: { ok: true; result: unknown } | { ok: false; error: { code: string; message: string } }): void
   /** The kill switch: one entry in every session with calls in flight on `connection` (any, when undefined), else in the unscoped log. */
   killSwitch(connection?: string): void
-  /** Auto review decided one card of call `id` (docs/auto-review-design.md §11). */
+  /** The Auto approve reviewer decided one action of call `id` (docs/auto-approve-design.md). */
   reviewed?(id: string, review: AuditReview): void
 }
 
-/** What one Auto review records. */
+/** What one Auto approve review records. */
 export interface AuditReview {
-  decision: 'allow' | 'ask'
-  risk?: string
+  decision: 'allow' | 'deny'
   reason: string
   model?: string
   latencyMs: number
@@ -669,7 +666,7 @@ interface TrackedCall {
   url?: string
 }
 
-const PROMPT_DECISIONS = new Set(['allowed', 'auto-allowed', 'auto-reviewed', 'denied', 'timed-out', 'unavailable', 'cancelled', 'held-expired', 'program-approved'])
+const PROMPT_DECISIONS = new Set(['allowed', 'auto-allowed', 'auto-approved', 'auto-reviewed', 'denied', 'timed-out', 'unavailable', 'cancelled', 'held-expired', 'program-approved'])
 const MAX_ERROR_MESSAGE = 240
 
 /** Turns bridge tool traffic into audit entries. Write failures never reach a tool call. */
@@ -776,7 +773,6 @@ export class ToolCallAuditor implements BridgeAuditObserver {
       ...(call.toolCallId === undefined ? {} : { toolCallId: call.toolCallId }),
       tool: call.name,
       decision: review.decision,
-      ...(review.risk === undefined ? {} : { risk: review.risk }),
       reason: redactUrlsInText(review.reason).slice(0, 300),
       ...(review.model === undefined ? {} : { model: review.model.slice(0, 200) }),
       durationMs: Math.max(0, Math.round(review.latencyMs)),

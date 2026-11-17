@@ -30,6 +30,7 @@ function StepIcon({ name }: { name: string }): React.JSX.Element {
 const DECISION_TONE: Record<string, 'neutral' | 'good' | 'bad' | 'warn'> = {
   'not-required': 'neutral',
   'auto-allowed': 'neutral',
+  'auto-approved': 'good',
   'auto-reviewed': 'good',
   'program-approved': 'good',
   allowed: 'good',
@@ -70,14 +71,15 @@ const TimelineStep = memo(function TimelineStep({
   sessionId: string
   api: PanelApi
   copy: PanelCopy
-  /** Auto review is deciding this step right now. */
+  /** Auto approve's reviewer is checking this step right now. */
   reviewing: boolean
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const autoNote = step.decision === 'auto-reviewed' && step.autoReason !== undefined && step.autoReason !== '' ? step.autoReason : undefined
   const expandable = step.args !== undefined || step.result !== undefined || (step.images?.length ?? 0) > 0 || autoNote !== undefined
-  const autoReviewed = step.decision === 'auto-reviewed'
-  const decision = step.decision === undefined || autoReviewed ? undefined : copy.timeline.decisions[step.decision] ?? step.decision
+  // Auto approve ran it: the Auto badge and one line, never the generic decision badge.
+  const autoApproved = step.decision === 'auto-approved' || step.decision === 'auto-reviewed'
+  const decision = step.decision === undefined || autoApproved ? undefined : copy.timeline.decisions[step.decision] ?? step.decision
   const tone = step.decision === undefined ? 'neutral' : DECISION_TONE[step.decision] ?? 'neutral'
   const detailsId = `step-${step.callId}-details`
   return (
@@ -106,7 +108,7 @@ const TimelineStep = memo(function TimelineStep({
               <span key={badge.key} className={`decision-badge policy ${badge.tone}`}>{badge.label}</span>
             ))}
             {decision !== undefined && <span className={`decision-badge ${tone}`}>{decision}</span>}
-            {autoReviewed && <span className="decision-badge auto-review-badge" title={copy.timeline.decisions['auto-reviewed']}>{copy.autoReview.badge}</span>}
+            {autoApproved && <span className="decision-badge auto-review-badge" title={copy.timeline.decisions[step.decision!]}>{copy.autoReview.badge}</span>}
             {step.status === 'running' && reviewing
               ? <span className="timeline-step-reviewing" role="status"><span className="spinner" aria-hidden="true" />{copy.autoReview.reviewing}</span>
               : step.status === 'running'
@@ -118,8 +120,8 @@ const TimelineStep = memo(function TimelineStep({
           </span>
         </span>
       </button>
-      {/* A fixed line; the reviewer's own words are behind the details, clearly attributed. */}
-      {step.decision === 'auto-reviewed' && <p className="timeline-step-auto-reason">{copy.autoReview.approvedLine}</p>}
+      {/* A fixed line; a reviewer's own words are behind the details, clearly attributed. */}
+      {autoApproved && <p className="timeline-step-auto-reason">{step.decision === 'auto-reviewed' ? copy.autoReview.reviewedLine : copy.autoReview.approvedLine}</p>}
       {(step.images?.length ?? 0) > 0 && !open && (
         <div className="timeline-step-thumb" aria-label={copy.timeline.screenshot}>
           <MessageImages images={step.images!.slice(0, 1)} sessionId={sessionId} api={api} align="start" copy={copy} />
@@ -169,7 +171,7 @@ export const StepTimeline = memo(function StepTimeline({
   sessionId: string
   api: PanelApi
   copy: PanelCopy
-  /** Model tool-call ids Auto review is deciding right now. */
+  /** Model tool-call ids Auto approve's reviewer is checking right now. */
   reviewing?: ReadonlySet<string>
 }): React.JSX.Element {
   const steps = row.steps ?? []

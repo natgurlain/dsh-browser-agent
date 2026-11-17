@@ -189,21 +189,24 @@ interface KillSwitchMessage {
   engaged: boolean
 }
 
-/** Auto review (docs/auto-review-design.md) as the background reports it. */
+/** Auto approve (docs/auto-approve-design.md) as the background reports it. */
 export interface AutoReviewState {
-  /** This browser offers the control now (Setting, managed policy, bridge cap, connection). */
+  /** Auto approve can be used (settings loaded, not turned off by the administrator). */
   offered: boolean
   /** Why not, when it is not offered. */
-  unavailable?: 'setting' | 'managed' | 'kill-switch' | 'disconnected' | 'bridge'
-  /** Conversations with Auto on, or that recently ended (and why). */
-  sessions: Record<string, { on: boolean; expiresAt?: number; ended?: string }>
+  unavailable?: 'managed' | 'loading'
+  /** "Start conversations in Auto approve": conversations without a choice are on. */
+  startOn: boolean
+  /** The bridge can review consequential steps now. */
+  reviewer: boolean
+  /** The user's explicit choice per conversation (true: on). */
+  sessions: Record<string, boolean>
 }
 
-/** Whether one conversation can be reviewed (the bridge's answer). */
-export interface AutoReviewAvailability {
-  available: boolean
-  reason?: string
-  model?: string
+/** Whether Auto approve is on for one conversation. */
+export function autoApproveOnFor(state: AutoReviewState, sessionId: string | null): boolean {
+  if (!state.offered || sessionId === null) return false
+  return state.sessions[sessionId] ?? state.startOn
 }
 
 /** A review is running (or finished) for one step. */
@@ -214,27 +217,21 @@ export interface AutoReviewing {
   active: boolean
 }
 
-/** Read the background's Auto review state defensively. */
+/** Read the background's Auto approve state defensively. */
 export function parseAutoReviewState(value: unknown): AutoReviewState {
   const raw = typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
   const sessions: AutoReviewState['sessions'] = {}
   if (typeof raw.sessions === 'object' && raw.sessions !== null) {
-    for (const [id, entry] of Object.entries(raw.sessions as Record<string, unknown>)) {
-      if (typeof entry !== 'object' || entry === null) continue
-      const view = entry as Record<string, unknown>
-      sessions[id] = {
-        on: view.on === true,
-        ...typeof view.expiresAt === 'number' ? { expiresAt: view.expiresAt } : {},
-        ...typeof view.ended === 'string' ? { ended: view.ended } : {},
-      }
+    for (const [id, on] of Object.entries(raw.sessions as Record<string, unknown>)) {
+      if (typeof on === 'boolean') sessions[id] = on
     }
   }
   const unavailable = raw.unavailable
   return {
     offered: raw.offered === true,
-    ...unavailable === 'setting' || unavailable === 'managed' || unavailable === 'kill-switch' || unavailable === 'disconnected' || unavailable === 'bridge'
-      ? { unavailable }
-      : {},
+    ...unavailable === 'managed' || unavailable === 'loading' ? { unavailable } : {},
+    startOn: raw.startOn === true,
+    reviewer: raw.reviewer === true,
     sessions,
   }
 }
@@ -276,12 +273,14 @@ interface DevToolsDetachResultMessage {
   error?: { message?: unknown }
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | TabAffinityReturnResultMessage | SelectionMessage | SessionResumeHintMessage | DevToolsStatusMessage | DevToolsDetachResultMessage | DiscoveryProgressMessage | DiscoveryResultMessage | PairCodeMessage | PairResultMessage | KillSwitchMessage | PauseStateMessage | AutoReviewStateMessage | AutoReviewingMessage | AutoReviewStatusResultMessage
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | TabAffinityReturnResultMessage | SelectionMessage | SessionResumeHintMessage | DevToolsStatusMessage | DevToolsDetachResultMessage | DiscoveryProgressMessage | DiscoveryResultMessage | PairCodeMessage | PairResultMessage | KillSwitchMessage | PauseStateMessage | AutoReviewStateMessage | AutoReviewingMessage
 
 interface AutoReviewStateMessage {
   type: 'auto-review.state'
   offered?: unknown
   unavailable?: unknown
+  startOn?: unknown
+  reviewer?: unknown
   sessions?: unknown
 }
 
@@ -291,14 +290,6 @@ interface AutoReviewingMessage {
   toolCallId?: unknown
   label?: unknown
   active?: unknown
-}
-
-interface AutoReviewStatusResultMessage {
-  type: 'auto-review.status.result'
-  id?: unknown
-  available?: unknown
-  reason?: unknown
-  model?: unknown
 }
 
 /** Structured gateway failure retained for product-level error handling. */
@@ -384,12 +375,8 @@ export interface PanelApi {
   /** Tell the agent what changed while paused, then release held actions. */
   resumeAgent(): Promise<void>
   onPauseState(callback: (state: AgentPauseState) => void): () => void
-  /** Turn Auto review on or off for one conversation. */
+  /** Turn Auto approve on or off for one conversation. */
   setAutoReview(sessionId: string, enabled: boolean): Promise<void>
-  /** Turn Auto review off in every conversation. */
-  setAutoReviewAll(enabled: false): Promise<void>
-  /** Ask whether one conversation can be reviewed (the toggle's disabled reason). */
-  autoReviewStatus(sessionId: string): Promise<AutoReviewAvailability>
   onAutoReviewState(callback: (state: AutoReviewState) => void): () => void
   onAutoReviewing(callback: (reviewing: AutoReviewing) => void): () => void
 }
@@ -430,7 +417,6 @@ export function connectPanel(): PanelApi {
   // The control mounts after the status that carried the state: replay the latest one to it.
   let lastAutoReviewState: AutoReviewState | undefined
   const autoReviewingListeners = new Set<(reviewing: AutoReviewing) => void>()
-  const pendingAutoReviewStatus = new Map<string, (value: AutoReviewAvailability) => void>()
   const pauseStateListeners = new Set<(state: AgentPauseState) => void>()
   const pendingDetaches = new Map<string, { resolve: () => void; reject: (error: Error) => void }>()
 
@@ -578,18 +564,6 @@ export function connectPanel(): PanelApi {
           active: msg.active === true,
         }
         for (const listener of autoReviewingListeners) listener(reviewing)
-        break
-      }
-      case 'auto-review.status.result': {
-        const statusId = typeof msg.id === 'string' ? msg.id : ''
-        const resolve = pendingAutoReviewStatus.get(statusId)
-        if (resolve === undefined) break
-        pendingAutoReviewStatus.delete(statusId)
-        resolve({
-          available: msg.available === true,
-          ...typeof msg.reason === 'string' ? { reason: msg.reason } : {},
-          ...typeof msg.model === 'string' ? { model: msg.model } : {},
-        })
         break
       }
       case 'agent.pause-state': {
@@ -912,24 +886,6 @@ export function connectPanel(): PanelApi {
     },
     setAutoReview(sessionId, enabled) {
       return send({ type: 'auto-review.set', sessionId, enabled })
-    },
-    setAutoReviewAll() {
-      return send({ type: 'auto-review.set-all', enabled: false })
-    },
-    autoReviewStatus(sessionId) {
-      const id = crypto.randomUUID()
-      return new Promise<AutoReviewAvailability>((resolve) => {
-        const timer = setTimeout(() => {
-          pendingAutoReviewStatus.delete(id)
-          resolve({ available: false, reason: 'bridge' })
-        }, 10_000)
-        pendingAutoReviewStatus.set(id, (value) => { clearTimeout(timer); resolve(value) })
-        void send({ type: 'auto-review.status', id, sessionId }).catch(() => {
-          pendingAutoReviewStatus.delete(id)
-          clearTimeout(timer)
-          resolve({ available: false, reason: 'bridge' })
-        })
-      })
     },
     onAutoReviewState(callback) {
       autoReviewStateListeners.add(callback)

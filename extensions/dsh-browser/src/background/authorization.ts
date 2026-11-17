@@ -8,7 +8,7 @@ import { analyzeUrl } from '../security/url-risk.ts'
 import { attributeRisk } from '../security/attribute-risk.ts'
 import type { DevToolsGrantKind } from './devtools-grants.ts'
 import { getUiLocale, type UiLocale } from '../i18n.ts'
-import type { CallPolicyTargets } from '../security/call-policy.ts'
+import type { CallPolicyTargets, ForceCause } from '../security/call-policy.ts'
 import type { TargetKind, TargetState, TargetStates } from '../shared/target-description.ts'
 
 const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text', 'browser_pdf_text'])
@@ -406,7 +406,7 @@ function unboundPromptForCall(
 function boundTargets(context: ApprovalContext): unknown {
   // `submits` / `inForm` only when set, so bindings of other elements are
   // unchanged: an element that turns into a submit control after the card
-  // (or Auto review) saw it voids the approval.
+  // (or Auto approve) saw it voids the approval.
   const bound = (state: TargetState | undefined): unknown => state === undefined
     ? undefined
     : state.state === 'found'
@@ -419,21 +419,8 @@ function boundTargets(context: ApprovalContext): unknown {
           ...state.href === undefined ? {} : { href: state.href },
           ...state.form === undefined ? {} : { form: state.form },
           ...state.chosen === undefined ? {} : { chosen: state.chosen },
-          // What Auto review relied on: a link that turns into a download, a
-          // select that starts submitting, a field that was empty and no
-          // longer is, or a control that stops being a disclosure.
+          // A link that turns into a download after the card (or Auto approve) saw it voids the approval.
           ...state.download === true ? { download: true } : {},
-          ...state.autoSubmit === true ? { autoSubmit: true } : {},
-          ...state.disclosure === true ? { disclosure: true } : {},
-          ...state.empty === undefined ? {} : { empty: state.empty },
-          // What a person sees, how many controls share the name and which row it is
-          // in, and whether it opens elsewhere: Auto review relied on these too.
-          ...state.rendered === undefined ? {} : { rendered: state.rendered },
-          ...state.sameName === undefined ? {} : { sameName: state.sameName },
-          ...state.rowKey === undefined ? {} : { rowKey: state.rowKey },
-          ...state.newTab === true ? { newTab: true } : {},
-          ...state.suggests === true ? { suggests: true } : {},
-          ...state.dialogOpen === true ? { dialogOpen: true } : {},
         }
       : { state: state.state }
   const targets = context.targets ?? {}
@@ -930,6 +917,7 @@ export function forcedApprovalPrompt(
   reasons: readonly string[],
   locale: UiLocale = getUiLocale(),
   context: ApprovalContext = {},
+  causes?: readonly ForceCause[],
 ): ApprovalPrompt {
   const base = call.name === 'browser_open_tab' || isDevToolsTool(call.name)
     ? undefined
@@ -951,6 +939,8 @@ export function forcedApprovalPrompt(
     canTrust: false,
     forced: true,
     perCallOnly: true,
+    // Which rules forced it (Auto approve tells a site rule from the taint rules); not bound.
+    ...causes === undefined || causes.length === 0 ? {} : { forcedBy: [...new Set(causes)] },
     details: [
       { kind: 'text', value: reasons.join('\n'), masked: false, label: localized(locale, 'Why this needs your approval', '为何需要您的批准') },
       ...prompt.details ?? [],

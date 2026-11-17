@@ -44,8 +44,8 @@
       "type": "boolean"
     },
     "disableAutoReview": {
-      "title": "Disable Auto review",
-      "description": "Auto review (a model deciding ordinary approval cards for a conversation) is not offered; every card goes to the user.",
+      "title": "Disable Auto approve",
+      "description": "Auto approve (the agent acting without approval cards, with consequential steps checked by the conversation's model) is not offered; every card goes to the user.",
       "type": "boolean"
     },
     "allowedOrigins": {

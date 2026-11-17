@@ -78,7 +78,6 @@ import {
   type ReviewCode,
   BRIDGE_REVIEW_ASK_METHOD,
   BRIDGE_REVIEW_CANCEL_METHOD,
-  BRIDGE_REVIEW_STATUS_METHOD,
   BRIDGE_SESSION_PURGE_METHOD,
   BRIDGE_APPROVAL_ASK_METHOD,
   BRIDGE_APPROVAL_WITHDRAW_METHOD,
@@ -203,8 +202,8 @@ import {
 import { approvalFailureMessage } from './answers.ts'
 import { auditedAuthorize, auditedPolicy, auditNote, noteCallTarget, type AuditedCall } from './audit.ts'
 import { StepLabels, STEP_LABELS_STORAGE_KEY } from '../shared/step-labels.ts'
-import { AUTO_REVIEW_STORAGE_KEY, AutoReviewRegistry, autoReviewSentence, type ReviewSubject } from './auto-review.ts'
-import { autoReviewEligibility, buildReviewAction, foldName } from '../security/auto-review.ts'
+import { AUTO_APPROVE_STORAGE_KEY, AutoApproveRegistry, autoApproveNote } from './auto-review.ts'
+import { autoApprovePath, buildReviewAction } from '../security/auto-review.ts'
 import { createDevLoopPanelRpc } from './dev-loop.ts'
 
 /** User settings persisted in chrome.storage.local. */
@@ -273,11 +272,11 @@ export interface Settings {
   /** Trusted site rules and always-allowed origins confirmed for the taint exemption (keys, taint-exempt.ts). */
   taintTrustConfirmed: string[]
   /**
-   * Make the per-conversation "Approvals: Auto" control available
-   * (docs/auto-review-design.md). Availability only: every conversation
-   * starts with Auto off. Managed `disableAutoReview` pins it off.
+   * "Start conversations in Auto approve" (docs/auto-approve-design.md): a
+   * conversation the user never switched starts with Auto approve on. Off by
+   * default. Managed `disableAutoReview` turns Auto approve off everywhere.
    */
-  offerAutoReview: boolean
+  autoApproveDefault: boolean
 }
 
 /** Current settings schema; see {@link Settings.settingsVersion}. */
@@ -307,7 +306,7 @@ const SETTINGS_DEFAULTS: Settings = {
   taintLocalOrigins: [],
   taintTrustedSites: [],
   taintTrustConfirmed: [],
-  offerAutoReview: true,
+  autoApproveDefault: false,
 }
 
 /** Longest no-panel approval window the bridge's hold can cover. */
@@ -524,7 +523,10 @@ const policyRuntime: PolicyRuntime = new PolicyRuntime({
     if (!settingsLoaded) return
     const revokeUnrestricted = settings.unrestrictedBrowserAccess && managed.disableUnrestricted
     const revokeDevTools = settings.allowDevTools && managed.disableDevTools
-    if (managed.disableAutoReview) autoReviews.endAll('managed')
+    if (managed.disableAutoReview) {
+      autoApprovals.abortAll()
+      broadcastAutoReviewState()
+    }
     if (revokeUnrestricted || revokeDevTools) {
       void persistSettings({
         ...revokeUnrestricted ? { unrestrictedBrowserAccess: false } : {},
@@ -626,7 +628,8 @@ const commitGate = new CommitGate({
     const caller = commitGateCallers.get(tabId)
     // A request held behind an unanswered card would hang the page: bound it.
     const signal = AbortSignal.timeout(120_000)
-    const decision = await authorizeToolCall(prompt, signal, caller?.windowId ?? 0, { sessionId: caller?.sessionId, unrestrictedAccess: false, tabId })
+    // Strict mode is the user's own "ask before every write" for this site: Auto approve never answers it.
+    const decision = await authorizeToolCall(prompt, signal, caller?.windowId ?? 0, { sessionId: caller?.sessionId, unrestrictedAccess: false, tabId, autoOptOut: true })
     // Audit: attach the write decision to the agent call(s) running on this tab.
     for (const call of unsettledToolCalls) {
       if (call.tabId === tabId) (call.commit ??= []).push(decision === 'approved' ? 'allowed' : decision)
@@ -771,13 +774,12 @@ const stepLabels = new StepLabels({
   write: async (value) => { await chrome.storage.session.set({ [STEP_LABELS_STORAGE_KEY]: value }) },
 })
 /**
- * Auto review (docs/auto-review-design.md): which conversations have it on,
- * its limits, and one review at a time per conversation. Memory only
- * (`chrome.storage.session`): a browser restart turns it off everywhere.
+ * Auto approve (docs/auto-approve-design.md): the conversations the user
+ * switched on or off (kept across restarts), and the reviews in flight.
  */
-const autoReviews = new AutoReviewRegistry({
-  read: async () => (await chrome.storage.session.get(AUTO_REVIEW_STORAGE_KEY))[AUTO_REVIEW_STORAGE_KEY],
-  write: async (value) => { await chrome.storage.session.set({ [AUTO_REVIEW_STORAGE_KEY]: value }) },
+const autoApprovals = new AutoApproveRegistry({
+  read: async () => (await chrome.storage.local.get(AUTO_APPROVE_STORAGE_KEY))[AUTO_APPROVE_STORAGE_KEY],
+  write: async (value) => { await chrome.storage.local.set({ [AUTO_APPROVE_STORAGE_KEY]: value }) },
 }, Date.now, () => { broadcastAutoReviewState() })
 const pageSessionContexts = new PageSessionContextTracker({
   read: async () => (await chrome.storage.session.get(PAGE_SESSION_CONTEXT_STORAGE_KEY))[PAGE_SESSION_CONTEXT_STORAGE_KEY],
@@ -945,8 +947,7 @@ async function persistSettings(next: Partial<Settings>): Promise<void> {
   // Turning page watchers off revokes every standing watcher.
   if (togglesWatchers) void (updated.allowPageWatchers ? Promise.resolve() : pageWatchers.clearAll()).then(() => { pageWatchers.broadcast() })
   syncSelectionWatch()
-  // Turning the Setting off ends Auto review in every conversation.
-  if (!updated.offerAutoReview) autoReviews.endAll('setting')
+  // "Start conversations in Auto approve" changes which conversations are on.
   broadcastAutoReviewState()
   let accessTransition: Promise<void> | undefined
   if (revokesUnrestrictedAccess) {
@@ -1054,7 +1055,7 @@ function normalizeUserSettings(candidate: Settings): Settings {
     taintTrustConfirmed: Array.isArray(candidate.taintTrustConfirmed)
       ? [...new Set(candidate.taintTrustConfirmed.filter((key): key is string => typeof key === 'string'))].sort()
       : [],
-    offerAutoReview: candidate.offerAutoReview !== false,
+    autoApproveDefault: candidate.autoApproveDefault === true,
   }
 }
 
@@ -1276,8 +1277,10 @@ async function engageKillSwitch(): Promise<void> {
   sessionTrustedActionOrigins.clear()
   devToolsGrants.clear()
   programGrants.clear()
-  // Auto review ends everywhere; reviews in flight fall back to (cancelled) cards.
-  autoReviews.endAll('kill-switch')
+  // Reviews in flight end now (nothing runs while the switch is engaged). Auto
+  // approve itself stays as the user set it: after they reconnect, it is on
+  // where it was on.
+  autoApprovals.abortAll()
   // No series card may be raised for a run started before the switch, and its wait ends now.
   learning.disarmSeries()
   // Fleet children lose their tab bindings; the tabs stay open for the user.
@@ -1450,8 +1453,6 @@ async function pauseAgent(request: PauseRequest): Promise<void> {
   if (request === 'take-over') commitGateTurnEnded(undefined)
   // ... and a "do the remaining N" series does not continue blind over whatever they change.
   if (request === 'take-over') programGrants.onTakeOver()
-  // Taking over ends Auto review: the user is in control, and turns it on again if they want it.
-  if (request === 'take-over') autoReviews.endAll('take-over')
   if (wasRunning) pauseBaseline = capturePauseBaseline(resumeFlowDeps())
 }
 
@@ -1468,30 +1469,29 @@ async function resumeAgent(): Promise<void> {
   await pauseGate.resume(async (held, context) => prepareResume(held, context, await baseline, resumeFlowDeps()))
 }
 
-/** Whether this browser offers Auto review at all right now (Setting, managed policy, bridge cap). */
-function autoReviewOffered(): boolean {
-  return settingsLoaded && settings.offerAutoReview && !policyRuntime.managed.disableAutoReview
-    && caps?.autoReview === AUTO_REVIEW_CAPS_VERSION && bridge?.state === 'connected' && !killSwitchEngaged
+/** Whether Auto approve can be used at all (settings loaded; not turned off by the administrator). */
+function autoApproveOffered(): boolean {
+  return settingsLoaded && !policyRuntime.managed.disableAutoReview
 }
 
-/** Auto review on, for one conversation, now. */
-function autoReviewOn(sessionId: string | undefined): boolean {
-  return sessionId !== undefined && autoReviewOffered() && autoReviews.isOn(sessionId)
+/** Auto approve on, for one conversation, now: its explicit choice, else "Start conversations in Auto approve". */
+function autoApproveOn(sessionId: string | undefined): boolean {
+  return autoApproveOffered() && !isExternalSessionId(sessionId) && autoApprovals.isOn(sessionId, settings.autoApproveDefault)
+}
+
+/** The bridge can review consequential actions now (its cap, connected). */
+function reviewerReady(): boolean {
+  return caps?.autoReview === AUTO_REVIEW_CAPS_VERSION && bridge?.state === 'connected' && rpc !== null && !killSwitchEngaged
 }
 
 function autoReviewStatePayload(): Record<string, unknown> {
   return {
     type: 'auto-review.state',
-    offered: autoReviewOffered(),
-    // Why not, when it is not: the panel says so in one line.
-    ...autoReviewOffered() ? {} : {
-      unavailable: !settingsLoaded || !settings.offerAutoReview ? 'setting'
-        : policyRuntime.managed.disableAutoReview ? 'managed'
-          : killSwitchEngaged ? 'kill-switch'
-            : bridge?.state !== 'connected' ? 'disconnected'
-              : 'bridge',
-    },
-    sessions: autoReviews.views(),
+    offered: autoApproveOffered(),
+    ...autoApproveOffered() ? {} : { unavailable: settingsLoaded ? 'managed' : 'loading' },
+    startOn: settingsLoaded && settings.autoApproveDefault,
+    reviewer: reviewerReady(),
+    sessions: autoApprovals.views(),
   }
 }
 
@@ -2425,144 +2425,97 @@ interface AuthorizeOptions {
   /** Told when a card is actually shown (the audit log tells user approvals from standing rules). */
   onPrompt?: () => void
   /**
-   * Set only by the ordinary tab-bound page dispatcher: this card may be
-   * decided by Auto review if the floor allows it. Every other caller leaves
-   * it undefined, so no other card is ever reviewed.
+   * The agent call behind the card, for Auto approve: its tool and arguments
+   * decide whether it is ordinary or consequential, and a consequential one is
+   * reviewed by the bridge against this call. Absent (internal reads): an
+   * ordinary card is still auto-approved, a consequential one shows.
    */
-  autoReview?: AutoReviewRequest
+  auto?: AutoCall
+  /** This card is never decided by Auto approve (strict mode's commit gate). */
+  autoOptOut?: true
 }
 
-/** What Auto review needs to know about the call behind a card. */
-interface AutoReviewRequest {
+/** The call behind a card, as Auto approve needs it. */
+interface AutoCall {
   call: ToolCall
-  /** The session whose panel shows the call's cards (a fleet child's parent). */
-  approvalSession: string | undefined
-  /** A program grant covers the call. */
-  program: boolean
   /** Title of the tab the call acts on (page-authored). */
   title?: string
-  /** Auto review approved the card (the audit log records `auto-reviewed`). */
-  onAutoReviewed: () => void
+  /** Auto approve passed the card (`reviewed`: after the reviewer allowed it). */
+  onAuto?: (reviewed: boolean) => void
 }
 
-/** Longest a review RPC may take; the bridge answers "ask" after 9 s itself. */
-const AUTO_REVIEW_RPC_TIMEOUT_MS = 15_000
-
-/** A side panel is open and showing this conversation. */
-function autoReviewVisible(sessionId: string | undefined): boolean {
-  if (sessionId === undefined) return false
-  for (const port of panelPorts) if (panelActiveSessions.get(port) === sessionId) return true
-  return false
-}
-
-function autoReviewFloor(prompt: ApprovalPrompt, request: AutoReviewRequest): ReturnType<typeof autoReviewEligibility> {
-  const { call } = request
-  const sessionId = call.sessionId
-  return autoReviewEligibility(prompt, {
-    enabled: autoReviewOn(sessionId),
-    // Nobody watching (no panel, or another conversation in front): the card waits as usual.
-    visible: autoReviewVisible(sessionId),
-    ...sessionId === undefined ? {} : { sessionId },
-    external: isExternalSessionId(sessionId),
-    pageAction: true,
-    program: request.program || call.program !== undefined,
-    fleetChild: request.approvalSession !== sessionId,
-    tainted: call.tainted === true || policyRuntime.get(sessionId) !== undefined,
-    tool: call.name,
-    args: call.args,
-  })
-}
+/** Longest a review RPC may take; the bridge answers "deny" after 8 s itself. */
+const AUTO_REVIEW_RPC_TIMEOUT_MS = 10_000
 
 /**
- * Let Auto review decide one card, if the deterministic floor allows it
- * (security/auto-review.ts). `approved` is applied by the caller exactly like
- * the user's "Allow once" for this card's binding; anything else shows the
- * card, with `note` as its one extra line.
+ * Auto approve's decision for one card the ordinary flow would show
+ * (security/auto-review.ts): `approved` is applied exactly like the user's
+ * "Allow once" for this card's binding (the dispatcher re-reads the page and
+ * re-checks the binding before anything runs); anything else shows the card,
+ * with `note` as its one extra line.
  */
-async function autoReviewCard(prompt: ApprovalPrompt, request: AutoReviewRequest, signal: AbortSignal): Promise<{ kind: 'approved' } | { kind: 'card'; note?: string; limit?: true }> {
-  const { call } = request
-  const sessionId = call.sessionId
+async function autoApproveCard(prompt: ApprovalPrompt, options: AuthorizeOptions, signal: AbortSignal): Promise<{ kind: 'approved' } | { kind: 'card'; note?: string }> {
+  const sessionId = options.sessionId
+  const call = options.auto?.call
+  const tool = call?.name ?? prompt.action
+  const args = call?.args ?? {}
+  const path = autoApprovePath(prompt, {
+    on: autoApproveOn(sessionId),
+    external: isExternalSessionId(sessionId) || isExternalSessionId(call?.sessionId),
+    ...options.autoOptOut === true ? { optOut: true } : {},
+    tool,
+    args,
+  })
+  if (path.kind === 'card' || sessionId === undefined) return { kind: 'card' }
   const zh = getUiLocale() === 'zh'
-  const eligibility = autoReviewFloor(prompt, request)
-  if (!eligibility.eligible || sessionId === undefined) {
-    // Several controls share the name and nothing tells them apart: say why, once Auto is on.
-    if (!eligibility.eligible && eligibility.reason === 'ambiguous') {
-      return { kind: 'card', note: autoReviewSentence('ambiguous', { tool: 'browser_click', assessment: { rule: 'named', commitClass: 'unknown' } }, zh) }
-    }
-    return { kind: 'card' }
+  if (autoApprovals.runaway(sessionId)) return { kind: 'card', note: autoApproveNote('runaway', undefined, zh) }
+  if (path.kind === 'run') {
+    // The ordinary path: nothing to wait for.
+    autoApprovals.noteApproved(sessionId)
+    options.auto?.onAuto?.(false)
+    return { kind: 'approved' }
   }
-  const subject: ReviewSubject = {
-    tool: eligibility.tool,
-    ...(() => {
-      const target = prompt.review?.targets?.target ?? prompt.review?.targets?.from
-      return target?.state === 'found' ? { kind: target.kind } : {}
-    })(),
-    assessment: eligibility.assessment,
-  }
-  const budget = autoReviews.budget(sessionId)
-  if (budget === 'turn-limit') return { kind: 'card', note: autoReviewSentence('turn-limit', subject, zh), limit: true }
-  if (budget !== 'ok') return { kind: 'card', note: autoReviewSentence(budget, subject, zh) }
+  // A consequential action: the conversation's model reviews it silently.
   const client = rpc
-  if (client === null || prompt.binding === undefined) return { kind: 'card', note: autoReviewSentence('failed', subject, zh) }
+  if (call === undefined || client === null || !reviewerReady() || prompt.binding === undefined) {
+    return { kind: 'card', note: autoApproveNote('no-reviewer', undefined, zh) }
+  }
   const binding = prompt.binding
   const controller = new AbortController()
   const onAbort = (): void => { controller.abort() }
   signal.addEventListener('abort', onAbort, { once: true })
+  const untrack = autoApprovals.track(sessionId, controller)
   const reviewId = crypto.randomUUID()
   const label = prompt.stepLabel ?? prompt.summary
   broadcastReviewing(sessionId, call.toolCallId, label, true)
+  const cancel = (): void => { void client.request(BRIDGE_REVIEW_CANCEL_METHOD, { toolCallId: call.id, reviewId }).catch(() => {}) }
+  controller.signal.addEventListener('abort', cancel, { once: true })
   try {
-    return await autoReviews.serialized(sessionId, controller, async () => {
-      if (controller.signal.aborted || !autoReviewOn(sessionId)) return { kind: 'card' as const }
-      // Every review costs a model call: they are capped per hour, not only the approvals.
-      autoReviews.noteAttempt(sessionId)
-      const counts = autoReviews.counts(sessionId)
-      const action = buildReviewAction(prompt, eligibility.tool, call.args, {
-        tainted: call.tainted === true || policyRuntime.get(sessionId) !== undefined,
-        approvedThisTurn: counts.turn,
-        ...request.title === undefined ? {} : { title: request.title },
-        recent: counts.recent,
-      }, eligibility.assessment)
-      const cancel = (): void => { void client.request(BRIDGE_REVIEW_CANCEL_METHOD, { toolCallId: call.id, reviewId }).catch(() => {}) }
-      controller.signal.addEventListener('abort', cancel, { once: true })
-      let answer: { reviewId?: unknown; binding?: unknown; decision?: unknown; code?: unknown; userTurn?: unknown } | null
-      try {
-        answer = await client.request(BRIDGE_REVIEW_ASK_METHOD, { toolCallId: call.id, reviewId, binding, action }, AUTO_REVIEW_RPC_TIMEOUT_MS) as typeof answer
-      } catch {
-        return { kind: 'card' as const, note: autoReviewSentence('failed', subject, zh) }
-      } finally {
-        controller.signal.removeEventListener('abort', cancel)
-      }
-      // Turned off, a new message, the call cancelled: whatever came back, the user decides.
-      if (controller.signal.aborted || !autoReviewOn(sessionId)) return { kind: 'card' as const }
-      // Only an answer about exactly this card counts.
-      if (answer?.reviewId !== reviewId || answer.binding !== binding) return { kind: 'card' as const, note: autoReviewSentence('failed', subject, zh) }
-      if (typeof answer.userTurn === 'string') autoReviews.noteUserTurn(sessionId, answer.userTurn)
-      const code: ReviewCode = (REVIEW_CODES as readonly unknown[]).includes(answer.code) ? answer.code as ReviewCode : 'failed'
-      if (answer.decision === 'allow' && code === 'allowed') {
-        // Nobody may have been watching while the model thought: decide the floor again now.
-        const again = autoReviewFloor(prompt, request)
-        if (!again.eligible) return { kind: 'card' as const, ...again.reason === 'not-visible' || again.reason === 'off' ? {} : { note: autoReviewSentence('changed', subject, zh) } }
-        // The same rule, requiring the same words, as the answer was about.
-        if (JSON.stringify(again.assessment) !== JSON.stringify(eligibility.assessment)) return { kind: 'card' as const, note: autoReviewSentence('changed', subject, zh) }
-        if (autoReviews.budget(sessionId) !== 'ok') return { kind: 'card' as const, note: autoReviewSentence('message-limit', subject, zh) }
-        // Each name or dictated text the user gave lets one action through per message.
-        const { assessment } = eligibility
-        const items = assessment.rule === 'named' ? [...(assessment.mustName ?? []).map((name) => `n:${foldName(name)}`), ...assessment.exactText === undefined ? [] : [`t:${assessment.exactText}`]] : []
-        if (items.length > 0) {
-          if (typeof answer.userTurn !== 'string') return { kind: 'card' as const, note: autoReviewSentence('failed', subject, zh) }
-          if (autoReviews.isConsumed(sessionId, answer.userTurn, items)) return { kind: 'card' as const, note: autoReviewSentence('already-used', subject, zh) }
-          autoReviews.consume(sessionId, answer.userTurn, items)
-        }
-        autoReviews.noteApproved(sessionId, label)
-        return { kind: 'approved' as const }
-      }
-      return { kind: 'card' as const, note: autoReviewSentence(code === 'allowed' ? 'failed' : code, subject, zh) }
-    })
-  } catch {
-    return { kind: 'card', note: autoReviewSentence('failed', subject, zh) }
+    const action = buildReviewAction(prompt, tool, args, {
+      tainted: call.tainted === true || policyRuntime.get(call.sessionId) !== undefined,
+      ...options.auto?.title === undefined ? {} : { title: options.auto.title },
+    }, path.reasons)
+    let answer: { reviewId?: unknown; binding?: unknown; decision?: unknown; code?: unknown; reason?: unknown } | null
+    try {
+      answer = await client.request(BRIDGE_REVIEW_ASK_METHOD, { toolCallId: call.id, reviewId, binding, action }, AUTO_REVIEW_RPC_TIMEOUT_MS) as typeof answer
+    } catch {
+      return { kind: 'card', note: autoApproveNote(controller.signal.aborted ? 'cancelled' : 'failed', undefined, zh) }
+    }
+    // Turned off, the kill switch, the call cancelled: whatever came back, the user decides.
+    if (controller.signal.aborted || !autoApproveOn(sessionId)) return { kind: 'card' }
+    // Only an answer about exactly this card counts.
+    if (answer?.reviewId !== reviewId || answer.binding !== binding) return { kind: 'card', note: autoApproveNote('failed', undefined, zh) }
+    const code: ReviewCode = (REVIEW_CODES as readonly unknown[]).includes(answer.code) ? answer.code as ReviewCode : 'failed'
+    if (answer.decision === 'allow' && code === 'allowed') {
+      autoApprovals.noteApproved(sessionId)
+      options.auto?.onAuto?.(true)
+      return { kind: 'approved' }
+    }
+    return { kind: 'card', note: autoApproveNote(code === 'allowed' ? 'failed' : code, typeof answer.reason === 'string' ? answer.reason : undefined, zh) }
   } finally {
+    controller.signal.removeEventListener('abort', cancel)
     signal.removeEventListener('abort', onAbort)
+    untrack()
     broadcastReviewing(sessionId, call.toolCallId, label, false)
   }
 }
@@ -2591,28 +2544,16 @@ async function authorizeToolCall(
     ),
   })
   if (gate !== 'prompt') return gate
-  let shown = prompt
-  if (options.autoReview !== undefined) {
-    const reviewed = await autoReviewCard(prompt, options.autoReview, signal)
-    if (signal.aborted) return 'cancelled'
-    // Exactly like the user's "Allow once" for this card: the dispatcher
-    // re-reads the page and re-checks the binding before anything runs.
-    if (reviewed.kind === 'approved') {
-      options.autoReview.onAutoReviewed()
-      return 'approved'
-    }
-    if (reviewed.note !== undefined) shown = { ...shown, autoReviewNote: reviewed.note }
-    if (reviewed.limit === true) shown = { ...shown, autoReviewLimit: true }
-  }
+  // Auto approve: an ordinary action runs now; a consequential one after its reviewer allows it.
+  const auto = await autoApproveCard(prompt, options, signal)
+  if (signal.aborted) return 'cancelled'
+  if (auto.kind === 'approved') return 'approved'
+  const shown = auto.note === undefined ? prompt : { ...prompt, autoReviewNote: auto.note }
   onPrompt?.()
   const result: ApprovalRequestResult = await approvals.request(shown, signal, windowId, sessionId, toolCallId)
   if (signal.aborted) return 'cancelled'
   if (result.status !== 'decision') return result.status
   const { decision } = result
-  // The user approved the "continue?" card: Auto may approve another batch this turn.
-  if (shown.autoReviewLimit === true && decision !== 'deny' && options.autoReview?.call.sessionId !== undefined) {
-    autoReviews.noteContinued(options.autoReview.call.sessionId)
-  }
   if (prompt.devTools === true) {
     // A grant covers (agent session, origin) for DEVTOOLS_GRANT_TTL_MS, ends
     // when its tab leaves the origin, and is cleared when the last side panel
@@ -2986,31 +2927,23 @@ function routeToolCall(call: ToolCall): void {
    * Every card this call raises: audited, cancelled with the call, under its
    * access mode, shown in `session`'s panel. `label` adds card context.
    */
-  const authorizeFor = (session: string | undefined, label?: (prompt: ApprovalPrompt) => ApprovalPrompt, review?: { title?: string }) => (
-    (prompt: ApprovalPrompt, windowId: number): Promise<ApprovalAuthorization> => auditedAuthorize(activeCall, (shown, onPrompt, onAutoReviewed) => authorizeToolCall(
+  const authorizeFor = (session: string | undefined, label?: (prompt: ApprovalPrompt) => ApprovalPrompt, page?: { title?: string }) => (
+    (prompt: ApprovalPrompt, windowId: number): Promise<ApprovalAuthorization> => auditedAuthorize(activeCall, (shown, onPrompt, onAuto) => authorizeToolCall(
       label === undefined ? shown : label(shown), controller.signal, windowId, {
         sessionId: session,
         unrestrictedAccess,
         toolCallId: call.id,
         // A card is really shown: outline the element it names on the page (agent-overlay.ts).
         onPrompt: () => { onPrompt(); agentOverlay.showPreview(call.id) },
-        // Only the ordinary page dispatcher below asks for this (docs/auto-review-design.md §5 row 2).
-        ...review === undefined ? {} : {
-          autoReview: {
-            call,
-            approvalSession: session,
-            program: programCover !== undefined,
-            ...review.title === undefined ? {} : { title: review.title },
-            onAutoReviewed,
-          },
-        },
+        // Auto approve decides under the conversation whose panel shows the card (a fleet child's parent).
+        auto: { call, ...page?.title === undefined ? {} : { title: page.title }, onAuto },
       },
     ))(prompt)
   )
   // Tab-bound cards show under the fleet parent's session (approvalSession); lane cards under the call's own.
-  const approve = (windowId: number, review?: { title?: string }): ((prompt: ApprovalPrompt) => Promise<ApprovalAuthorization>) => coverByProgram(
+  const approve = (windowId: number, page?: { title?: string }): ((prompt: ApprovalPrompt) => Promise<ApprovalAuthorization>) => coverByProgram(
     programCover,
-    (prompt) => authorizeFor(approvalSession, undefined, review)(prompt, windowId),
+    (prompt) => authorizeFor(approvalSession, undefined, page)(prompt, windowId),
     () => { activeCall.decision = 'program-approved' },
   )
   let policyTabOrigin: string | undefined
@@ -3136,7 +3069,7 @@ function routeToolCall(call: ToolCall): void {
           call,
           sharePageContent,
           budget,
-          // The one path whose ordinary cards Auto review may decide.
+          // The tab's title goes to Auto approve's reviewer (page-authored, capped).
           approve(target.windowId, { ...target.title === undefined ? {} : { title: target.title } }),
           controller.signal,
           (endSeriesOnTab(target), noteCallTarget(activeCall, target, policyRuntime.strictFor(call.sessionId, target.url))),
@@ -4023,10 +3956,8 @@ chrome.runtime.onConnect.addListener((port) => {
         // A session prompted from this browser keeps its panel-free runtime
         // alive while it works, even after the panel closes.
         if (rpcMsg.method === 'session.prompt' && typeof rpcSessionId === 'string') noteRuntimeSession(rpcSessionId)
-        // A new message from the user: pending reviews are dropped (their cards show) and the counters start again.
-        if (rpcMsg.method === 'session.prompt' && typeof rpcSessionId === 'string') autoReviews.noteUserMessage(rpcSessionId)
-        // The conversation is deleted: Auto ends with it.
-        if (rpcMsg.method === BRIDGE_SESSION_PURGE_METHOD && typeof rpcSessionId === 'string') autoReviews.end(rpcSessionId, 'conversation-ended')
+        // The conversation is deleted: its Auto approve choice goes with it.
+        if (rpcMsg.method === BRIDGE_SESSION_PURGE_METHOD && typeof rpcSessionId === 'string') autoApprovals.forget(rpcSessionId)
         const prepare = rpcMsg.method === 'session.prompt'
           ? Promise.resolve().then(async () => {
               await refresh
@@ -4209,43 +4140,12 @@ chrome.runtime.onConnect.addListener((port) => {
         // Only this extension's own panel reaches this port (checked above).
         const request = message as { sessionId?: unknown; enabled?: unknown }
         const sid = validSessionId(request.sessionId)
-        if (sid === undefined || isExternalSessionId(sid)) break
-        void Promise.all([settingsReady, autoReviews.ready]).then(() => {
-          if (request.enabled === true && autoReviewOffered()) autoReviews.enable(sid)
-          else if (request.enabled === false) autoReviews.end(sid, 'user')
+        if (sid === undefined || isExternalSessionId(sid) || typeof request.enabled !== 'boolean') break
+        const enabled = request.enabled
+        void Promise.all([settingsReady, autoApprovals.ready]).then(() => {
+          if (!enabled || autoApproveOffered()) autoApprovals.set(sid, enabled)
           broadcastAutoReviewState()
         })
-        break
-      }
-      case 'auto-review.set-all': {
-        // "Turn all off" from the panel's line about other conversations.
-        void autoReviews.ready.then(() => {
-          autoReviews.endAll('user')
-          broadcastAutoReviewState()
-        })
-        break
-      }
-      case 'auto-review.status': {
-        const request = message as { id?: unknown; sessionId?: unknown }
-        const sid = validSessionId(request.sessionId)
-        if (typeof request.id !== 'string' || sid === undefined) break
-        const requestId = request.id
-        const reply = (result: Record<string, unknown>): void => {
-          try { port.postMessage({ type: 'auto-review.status.result', id: requestId, sessionId: sid, ...result }) } catch { /* port closed */ }
-        }
-        if (!autoReviewOffered() || rpc === null) {
-          reply({ available: false, reason: autoReviewStatePayload().unavailable ?? 'bridge' })
-          break
-        }
-        void rpc.request(BRIDGE_REVIEW_STATUS_METHOD, { sessionId: sid }).then(
-          (result) => {
-            const status = result as { available?: unknown; reason?: unknown; model?: unknown } | null
-            reply(status?.available === true
-              ? { available: true, ...typeof status.model === 'string' ? { model: status.model.slice(0, 120) } : {} }
-              : { available: false, reason: typeof status?.reason === 'string' ? status.reason : 'bridge' })
-          },
-          () => { reply({ available: false, reason: 'bridge' }) },
-        )
         break
       }
       case 'selection.clear': {

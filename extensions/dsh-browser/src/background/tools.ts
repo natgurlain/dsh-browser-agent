@@ -2113,13 +2113,9 @@ export async function dispatchToolCall(
   // Recomputed after approval and after content-script recovery: the same
   // decision must yield the same card, or the page changed under it.
   const promptFor = (current: TabFrame[], context: ApprovalContext): ApprovalPrompt | undefined => decision.kind === 'force'
-    ? forcedApprovalPrompt(call, current, decision.reasons, undefined, context)
+    ? forcedApprovalPrompt(call, current, decision.reasons, undefined, context, decision.causes)
     : approvalPromptForCall(call, sharePageContent, current, undefined, context)
-  const unlabelled = skipsPrompt ? undefined : promptFor(frames, approvalContext)
-  // Auto review's floor reads the policy decision off the card (security/auto-review.ts).
-  const approval = unlabelled?.review === undefined
-    ? unlabelled
-    : { ...unlabelled, review: { ...unlabelled.review, policy: decision.kind } }
+  const approval = skipsPrompt ? undefined : promptFor(frames, approvalContext)
   const stepLabel = approval?.stepLabel
     ?? (approvalContext.targets === undefined ? undefined : approvalPromptForCall(call, 'auto', frames, undefined, approvalContext)?.stepLabel)
   if (stepLabel !== undefined) tabManagement.onStepLabel?.(stepLabel)
@@ -2457,7 +2453,7 @@ export async function dispatchOpenTab(
   const decision: CallPolicyDecision = policy?.(call, callPolicyTargets(call, [])) ?? { kind: 'default' }
   if (decision.kind === 'deny') return policyDenied(decision.message)
   const promptFor = (): ApprovalPrompt | undefined => decision.kind === 'force'
-    ? forcedApprovalPrompt(call, [], decision.reasons)
+    ? forcedApprovalPrompt(call, [], decision.reasons, undefined, {}, decision.causes)
     : decision.kind === 'trust' ? undefined : approvalPromptForCall(call, sharePageContent, [])
   const approval = promptFor()
   if (approval !== undefined) {

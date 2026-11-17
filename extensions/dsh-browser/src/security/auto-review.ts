@@ -1,638 +1,191 @@
 /**
- * Auto review's deterministic rules (docs/auto-review-design.md §5, §8, §9).
+ * Auto approve's decision for one approval card (docs/auto-approve-design.md
+ * §3, §4). Pure functions, so every branch is unit-tested.
  *
- * Decided by the extension BEFORE any model is asked, and never widened by
- * the reviewer's answer: which approval cards a reviewer may decide at all,
- * and by which rule. The promise to the user is short: Auto approves an
- * action only when **you named it, or it is plainly harmless**.
- *
- * - `harmless` (this file decides): a real same-site link, a control that
- *   only shows or hides part of the page and is called so ("Show more"),
- *   hover, and moving around inside a text field with navigation keys.
- * - `named` (the bridge checks against the user's newest panel message):
- *   everything else that is eligible. The action carries the exact phrases
- *   the message must contain — the control's full name, every chosen option,
- *   both ends of a drag — or the exact text to be typed.
- * - Anything else is never Auto: the card waits for the user.
- *
- * The rules decide what CAN be approved; the conversation's model then
- * decides whether it SHOULD be. Pure functions only, so every rule is
- * unit-tested.
+ * With Auto approve on for a conversation:
+ * - an ordinary action runs at once: no card, no model call, no wait;
+ * - a consequential action (committing or irreversible words, credentials,
+ *   a step the taint rules flag after the conversation read untrusted page
+ *   content, files, programs, standing watchers) goes to the silent reviewer
+ *   first: its "allow" runs it, anything else shows the ordinary card;
+ * - a few cards are never decided by Auto approve: the developer-tools
+ *   allowance, a browser permission only a click can grant, a site the user
+ *   or an administrator set to "ask", strict mode's commit gate, and MCP
+ *   conversations from other apps.
  *
  * @module
  */
 
 import {
-  AUTO_REVIEW_TOOLS,
-  MAX_REVIEW_EXACT_TEXT_CHARS,
-  MAX_REVIEW_RECENT,
   MAX_REVIEW_UNTRUSTED_CHARS,
-  type AutoReviewRule,
-  type AutoReviewTool,
-  type CommitClass,
+  type AutoReviewVerb,
+  type ConsequenceReason,
   type ReviewAction,
 } from '@natgurlain/dsh-bridge-browser/src/protocol.ts'
 import type { ApprovalPrompt } from './approval.ts'
-import { MAX_TARGET_NAME_CHARS, pageTextForCard, type TargetDestination, type TargetKind, type TargetState } from '../shared/target-description.ts'
+import { pageTextForCard, type TargetDestination, type TargetState } from '../shared/target-description.ts'
 
-/** Why a card is not reviewed (stable codes; tests and the audit read them). */
-export type IneligibleReason =
+/** Why Auto approve leaves a card to the user (stable codes; tests and the docs read them). */
+export type AutoCardReason =
   | 'off'
-  | 'not-visible'
-  | 'no-session'
   | 'external-session'
-  | 'not-page-action'
-  | 'program'
-  | 'fleet-child'
-  | 'not-action'
-  | 'forced'
-  | 'per-call-only'
-  | 'permission'
   | 'devtools'
-  | 'browser-only'
-  | 'url-risk'
-  | 'external-requester'
-  | 'dev-loop'
-  | 'no-binding'
-  | 'policy'
-  | 'tool'
-  | 'target-not-found'
-  | 'sensitive-target'
-  | 'cross-origin-navigation'
-  | 'navigation-query'
-  | 'navigation-words'
-  | 'tainted-navigation'
-  | 'typed-line-break'
-  | 'typed-length'
-  | 'field-not-empty'
-  | 'link-destination'
-  | 'form-destination'
-  | 'data-in-path'
-  | 'press-key'
-  | 'select-unresolved'
-  | 'download'
-  | 'unnamed'
-  | 'drag-offset'
-  | 'click-modifier'
-  | 'link-new-tab'
-  | 'frame-origin'
-  | 'name-mismatch'
-  | 'ambiguous'
-  | 'typing-target'
-  | 'typing-mode'
-  | 'field-autosave'
+  | 'permission'
+  | 'site-rule'
+  | 'opted-out'
 
-/** What the extension concluded about an eligible action. */
-export interface Assessment {
-  /** Which rule makes it auto-approvable (see {@link AutoReviewRule}). */
-  rule: AutoReviewRule
-  /** For `named`: the phrases the newest panel message must contain verbatim. */
-  mustName?: string[]
-  /** For `named` clicks on a name that repeats on the page: the row or section that says which one. */
-  mustContext?: string
-  /** For `named` typing: the full text, which the message must contain verbatim. */
-  exactText?: string
-  /** For `named` typing into a recipient/address/link/amount field: a whole-token match. */
-  exactToken?: boolean
-  /** What it would commit, for the reviewer's prompt and the card's sentence. */
-  commitClass: CommitClass
-  /** Native structure: a submit control, or a select whose page acts on change. */
-  formSubmitLikely: boolean
-  /** Payment, purchase, security, credential or access words in the name, context, options or address. */
-  highRiskWords: boolean
-  /** Only where computed: a navigation, link or form destination on the current page's origin. */
-  sameOrigin?: boolean
-  /** The navigation, link or form destination (origin + path). */
-  destination?: string
-}
+/** What Auto approve does with one card. */
+export type AutoPath =
+  | { kind: 'run' }
+  | { kind: 'review'; reasons: ConsequenceReason[] }
+  | { kind: 'card'; reason: AutoCardReason }
 
-export type Eligibility =
-  | { eligible: true; tool: AutoReviewTool; assessment: Assessment }
-  | { eligible: false; reason: IneligibleReason }
-
-/** Where the call came from, as the background's router knows it. */
-export interface ReviewCallContext {
-  /** Auto review is on for the conversation (toggle, Setting, managed policy, bridge cap, connection, expiry). */
-  enabled: boolean
-  /** A side panel is open and showing this conversation (nobody watching: no Auto approval). */
-  visible?: boolean
-  sessionId?: string
-  /** An external (MCP client) session: there is no user instruction source. */
+/** What the background knows about the card's call. */
+export interface AutoContext {
+  /** Auto approve is on for the conversation whose panel shows the card. */
+  on: boolean
+  /** An external (MCP client) conversation from another app. */
   external: boolean
-  /** The ordinary tab-bound page-action dispatcher raised the card. */
-  pageAction: boolean
-  /** A `browser_run` program or series step. */
-  program: boolean
-  /** The card shows under another session (a fleet child's parent). */
-  fleetChild: boolean
-  /** The conversation has read web pages that taint it. */
-  tainted?: boolean
+  /** The caller asked for the card itself (strict mode's commit gate). */
+  optOut?: boolean
   /** The call's tool name. */
   tool: string
-  /** The call's arguments (for navigation's destination, the typed text and the key of a press). */
+  /** The call's arguments. */
   args: Record<string, unknown>
 }
 
-const REVIEW_TOOLS: ReadonlySet<string> = new Set(AUTO_REVIEW_TOOLS)
-
-/** Kinds a reviewer never decides for, whatever the page says about sensitivity. */
-const NEVER_KINDS: ReadonlySet<TargetKind> = new Set(['password', 'file'])
-
-/** Kinds a person types into. */
-const TEXT_KINDS: ReadonlySet<TargetKind> = new Set([
-  'textbox', 'searchbox', 'spinbutton', 'textarea', 'email', 'tel', 'url', 'number', 'date', 'editable', 'combobox',
-])
 /**
- * Where navigation keys only move the caret, focus or scroll: free-text
- * fields, links and buttons. On a select, radio group, slider, spin button,
- * date or combobox an arrow key changes the value, so it is never Auto.
+ * Words that commit or cannot be undone, EN and ZH, matched on stems in a
+ * control's name, its link or form address, a navigation address, the
+ * options a selection chooses or a dialog's text. Deliberately narrow:
+ * "Save", "Continue", "OK", "Apply" and "Accept" are ordinary, or every task
+ * would wait on the reviewer.
  */
-const NAVIGATION_TARGETS: ReadonlySet<TargetKind> = new Set(['textbox', 'searchbox', 'textarea', 'editable', 'email', 'url', 'tel', 'link', 'button'])
-/** Text fields where a repeated navigation key is still only caret movement, and the only kinds Auto may type into. */
-const CARET_FIELDS: ReadonlySet<TargetKind> = new Set(['textbox', 'searchbox', 'textarea', 'editable', 'email', 'url', 'tel'])
-/** Of those, the multi-line ones: replacing their text could wipe what the user wrote. */
-const MULTI_LINE: ReadonlySet<TargetKind> = new Set(['textarea', 'editable'])
-/** Most repeats of a navigation key Auto may approve (in a text field only). */
-const MAX_NAVIGATION_REPEAT = 10
-
-/**
- * Commit classes by the words of a name or a path, EN and ZH, matched on
- * stems. Checked in order; the first match wins. They only label the action
- * for the reviewer and the card's sentence, and turn a same-site link into a
- * `named` action; they never make anything approvable.
- */
-const CLASS_WORDS: ReadonlyArray<readonly [CommitClass, RegExp]> = [
-  ['delete', /\b(?:delet\w*|remov\w*|trash\w*|bin|archiv\w*|discard\w*|eras\w*|purg\w*|destroy\w*|empty|clear(?:ed)?|wipe\w*)\b|删除|移除|回收站|废纸篓|垃圾箱|归档|清空|丢弃|销毁/iu],
-  ['send', /\b(?:send\w*|sent|forward\w*|repl(?:y|ies|ied)|respond\w*|e-?mail(?:ed)?)\b|发送|转发|回复|发给/iu],
-  ['share', /\b(?:share\w*|unshare\w*|publish\w*|make\s+(?:it\s+)?(?:public|private)|public|private|everyone|anyone|visib\w*|invit\w*)\b|分享|共享|公开|发布|邀请|所有人|任何人/iu],
-  ['submit', /\b(?:submit\w*|post(?:ed|ing)?|comment(?:ed)?|checkout|check\s+out|order)\b|提交|发表|评论|下单/iu],
-  ['save', /\b(?:sav(?:e|ed|ing)|updat\w*|apply|applied)\b|保存|更新|应用/iu],
-  ['account', /\b(?:log\s*out|log\s*in|sign\s*(?:out|in|up)|logout|login|signout|signin|signup|subscrib\w*|unsubscrib\w*|follow\w*|unfollow\w*|join\w*|leav\w*|block\w*|report\w*|mute\w*)\b|登录|退出|登出|注册|订阅|退订|关注|加入|屏蔽|举报/iu],
-  ['change', /\b(?:transfer\w*|mov(?:e|ed|ing)|merg\w*|revok\w*|reset\w*|deploy\w*|enabl\w*|disabl\w*|turn\s+(?:on|off)|install\w*|uninstall\w*|approv\w*|declin\w*|reject\w*|accept\w*|cancel\s+(?:order|subscription|plan|account|booking)|book\w*|reserv\w*|restor\w*|rename\w*|assign\w*)\b|转移|移动|合并|撤销|重置|部署|启用|停用|开启|关闭|批准|拒绝|接受|预订|预约|恢复|重命名|分配/iu],
-  ['confirm', /\b(?:done|ok|okay|yes|confirm\w*|continue|proceed|finish\w*|complete|agree\w*|got\s+it|i\s+understand)\b|确定|确认|继续|完成|同意|好的/iu],
-]
-
-/**
- * Payments, purchases, account security, credentials and access. Any of these
- * in the name, context, chosen options or the address: always the user's call.
- */
-const HIGH_RISK_WORDS = new RegExp([
-  String.raw`\b(?:pay(?:ment)?s?|purchase\w*|buy(?:\s+now)?|checkout|check\s+out|place\s+order|order\s+now|transfer|withdraw\w*|wire|billing|invoice|subscription|credit\s+card|card\s+number|bank|password|passcode|passkey|2fa|two[- ]factor|mfa|security|recovery|api\s+key|access\s+token|token|credential\w*|secret|delete\s+account|close\s+account|deactivat\w*|permission\w*|grant\s+access|add\s+member|invite\s+member|admin\w*|owner\w*|ownership|super\s?user|root)\b`,
-  '支付|付款|购买|下单|结算|转账|提现|充值|账单|发票|订阅|信用卡|银行|密码|验证码|口令|双重验证|两步验证|安全|恢复|密钥|令牌|凭证|注销|删除账户|删除账号|账户设置|账号设置|权限|授权|管理员|所有者',
+export const COMMIT_WORDS = new RegExp([
+  String.raw`\b(?:send\w*|sent|delet\w*|remov\w*|trash\w*|discard\w*|eras\w*|purg\w*|destroy\w*|wipe\w*|submit\w*|post|publish\w*|share|unsubscrib\w*|transfer\w*|withdraw\w*|deactivat\w*|invite\w*|cancel\s+(?:order|subscription|plan|account|booking|membership))\b`,
+  '发送|删除|移除|清空|销毁|提交|发布|发表|分享|退订|取消订阅|转账|提现|邀请|注销',
 ].join('|'), 'iu')
 
-/** Address paths that say payment, account security, credentials, administration, or destruction. */
-const HIGH_RISK_PATHS = /\/(?:checkout|payment|payments|pay|billing|purchase|security|password|passwords|2fa|mfa|tokens|keys|credentials|admin|permissions|members|ownership)(?:\/|$)/iu
-
-/** Fields where typed text decides who or what receives something: recipients, addresses, links, amounts. */
-const ADDRESS_FIELD = /\b(?:to|cc|bcc|recipients?|e-?mail|address|url|link|website|amount|quantity|qty|price|share\s+with|invite|phone)\b|收件人|抄送|密送|邮箱|地址|网址|链接|金额|数量|价格|分享给|邀请/iu
-const ADDRESS_KINDS: ReadonlySet<TargetKind> = new Set(['email', 'url', 'tel', 'number', 'spinbutton'])
-/** In an address-like field, these words make typing high risk: where mail or money goes, and account recovery. */
-const ADDRESS_HIGH_RISK = /\b(?:forward\w*|redirect\w*|recovery|backup|alternate|alternative|secondary|payout\w*|iban|bic|swift|routing|sort\s+code|account\s+number|wallet|beneficiar\w*|payee|deliver\w*\s+to)\b|转发|重定向|恢复|备用|收款|钱包|账号|银行/iu
-
 /**
- * The words a harmless disclosure's name may consist of: a few verbs that
- * only show or hide, and the UI nouns they act on. Only for elements that are
- * disclosures by their own markup (aria-expanded, `<summary>`, a popup
- * button), and only when EVERY word of the name is listed ("Show more",
- * "Show 12 replies", "Details"). Deliberately short: "toggle", "open",
- * "read", "hide", "go", "dismiss", "answer", "up" and "down" are not here,
- * because a page can attach anything to them. "Close", "cancel" and "next"
- * are kept and documented as residues: on a disclosure they rarely do more
- * than close or page, but the page decides.
+ * Payments, purchases, account security, credentials and access. Any of
+ * these in the name, the chosen options or the address makes the action
+ * consequential.
  */
-const HARMLESS_WORDS = new Set([
-  'show', 'more', 'less', 'expand', 'collapse', 'next', 'previous', 'prev', 'back', 'menu', 'details', 'close', 'cancel',
-  'all', 'comments', 'replies', 'results', 'items', 'options', 'info', 'page', 'pages', 'section', 'thread',
-  'the', 'a', 'an', 'of',
-])
-const HARMLESS_ZH = /^(?:显示|展开|收起|更多|下一页|上一页|返回|菜单|详情|关闭|取消)(?:更多|详情|菜单|全部|评论|回复|内容|结果)?$/u
+export const HIGH_RISK_WORDS = new RegExp([
+  String.raw`\b(?:pay(?:ment)?s?|purchase\w*|buy(?:\s+now)?|checkout|check\s+out|place\s+order|order\s+now|billing|invoice|subscription|credit\s+card|card\s+number|bank|password|passcode|passkey|2fa|two[- ]factor|mfa|recovery|api\s+key|access\s+token|credential\w*|secret|delete\s+account|close\s+account|permission\w*|grant\s+access|add\s+member|ownership|forward\w*\s+(?:all\s+)?(?:incoming\s+)?mail|payout\w*|iban|wallet|beneficiar\w*|payee)\b`,
+  '支付|付款|购买|下单|结算|充值|账单|发票|信用卡|银行|密码|验证码|口令|双重验证|两步验证|密钥|令牌|凭证|删除账户|删除账号|权限|授权|收款|钱包',
+].join('|'), 'iu')
 
-/** Keys that only move focus, the caret, or scroll (on the kinds in {@link NAVIGATION_TARGETS}). */
-const NAVIGATION_KEYS = new Set(['Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Escape', 'Esc', 'PageUp', 'PageDown', 'Home', 'End', 'Up', 'Down', 'Left', 'Right'])
-const ENTER_KEYS = new Set(['Enter', 'Return', 'NumpadEnter'])
-const SPACE_KEYS = new Set([' ', 'Space', 'Spacebar'])
-const MODIFIER_NAMES: Record<string, string> = {
-  shift: 'Shift', control: 'Control', ctrl: 'Control', alt: 'Alt', option: 'Alt', meta: 'Meta', cmd: 'Meta', command: 'Meta', super: 'Meta', win: 'Meta', os: 'Meta',
-}
-
-function originOf(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined
-  try {
-    const url = new URL(value)
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
-    return url.origin
-  } catch {
-    return undefined
-  }
-}
-
-function hasQueryOrFragment(value: unknown): boolean {
-  if (typeof value !== 'string') return true
-  try {
-    const url = new URL(value)
-    return url.search !== '' || url.hash !== '' || value.includes('?') || value.includes('#')
-  } catch {
-    return true
-  }
-}
-
-function pathOf(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined
-  try {
-    return new URL(value).pathname
-  } catch {
-    return undefined
-  }
-}
+/** Address paths that say payment, purchase, account security, credentials or access. */
+export const HIGH_RISK_PATHS = /\/(?:checkout|payment|payments|pay|billing|purchase|password|passwords|2fa|mfa|tokens|keys|credentials|permissions|ownership)(?:\/|$)/iu
 
 /** A path as words: segments split on separators, percent-decoding tried. */
-function pathWords(path: string | undefined): string {
+export function pathWords(path: string | undefined): string {
   if (path === undefined) return ''
   let decoded = path
   try { decoded = decodeURIComponent(path) } catch { /* keep it raw */ }
   return decoded.split(/[/_.\-+~]+/u).filter((part) => part !== '').join(' ')
 }
 
-/**
- * Whether a path segment looks like it carries a host, a URL or data rather
- * than a page name: dots with a top-level domain, percent-encoding, or a long
- * run that mixes letters and digits.
- */
-export function pathCarriesData(path: string | undefined): boolean {
-  if (path === undefined) return false
-  return path.split('/').some((segment) => /%[0-9a-f]{2}/iu.test(segment)
-    || /[a-z0-9-]\.[a-z]{2,}(?:$|[^a-z])/iu.test(segment)
-    || (segment.length >= 12 && /\d/u.test(segment) && /[a-z]/iu.test(segment)))
+function pathOf(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.pathname : undefined
+  } catch {
+    return undefined
+  }
 }
 
-/** The commit class the words of a name, path or option say, if any. */
-export function classOfWords(...texts: Array<string | undefined>): CommitClass | undefined {
-  const text = texts.filter((part): part is string => typeof part === 'string' && part !== '').join(' · ')
-  if (text === '') return undefined
-  for (const [cls, pattern] of CLASS_WORDS) if (pattern.test(text)) return cls
-  return undefined
+function destinationPath(destination: TargetDestination | undefined): string | undefined {
+  return destination === undefined || 'other' in destination ? undefined : destination.path
 }
 
-/** Whether a disclosure's own name says it only shows or hides (every word in the short list). */
-export function harmlessDisclosureName(name: string): boolean {
-  const trimmed = name.trim()
-  if (HARMLESS_ZH.test(trimmed)) return true
-  const words = trimmed.toLowerCase().match(/[\p{L}\p{N}']+/gu) ?? []
-  return words.length > 0 && words.every((word) => HARMLESS_WORDS.has(word) || /^\d+$/u.test(word))
-    && words.some((word) => !/^\d+$/u.test(word) && !['the', 'a', 'an', 'of'].includes(word))
+/** Whether any of the texts carries a committing word. */
+function commits(...texts: Array<string | undefined>): boolean {
+  return texts.some((text) => typeof text === 'string' && text !== '' && COMMIT_WORDS.test(text))
 }
 
-/** The name as Auto review compares names: folded, case-folded, whitespace collapsed. */
-export function foldName(text: string): string {
-  return text.normalize('NFKC').replace(/[\u2018\u2019\u02BC\uFF07`\u00B4]/gu, "'").replace(/[\u201C\u201D\uFF02]/gu, '"').toLowerCase().replace(/\s+/gu, ' ').trim()
-}
-
-/**
- * The visible label a click is judged by. The accessible name must equal
- * what a person sees: a button that reads "Delete everything" but is
- * labelled "Save settings" or "Show more" for assistive technology is never
- * Auto, and neither is an icon-only control (nothing visible to name).
- */
-function visibleName(target: Extract<TargetState, { state: 'found' }>): { name: string } | { reason: IneligibleReason } {
-  const rendered = target.rendered ?? ''
-  if (rendered.trim() === '') return no('unnamed')
-  if (foldName(rendered) !== foldName(target.name)) return no('name-mismatch')
-  return { name: target.name }
-}
-
-/**
- * Whether a name can be required verbatim: at least 3 letters or digits (2
- * for Chinese), as the bridge's check requires, and not cut short when it was
- * read (a cut name would let a message naming only its start through). A
- * control that cannot be named ("OK", an icon) is never Auto: its card simply
- * waits, without a model call.
- */
-function nameable(name: string): boolean {
-  const count = name.match(/[\p{L}\p{N}]/gu)?.length ?? 0
-  if (count < (/\p{Script=Han}/u.test(name) ? 2 : 3)) return false
-  return !([...name].length >= MAX_TARGET_NAME_CHARS && name.endsWith('…'))
-}
-
-function highRisk(...texts: Array<string | undefined>): boolean {
+/** Whether any of the texts (or paths) carries a high-risk word. */
+function highRisk(texts: Array<string | undefined>, paths: Array<string | undefined> = []): boolean {
   return texts.some((text) => typeof text === 'string' && text !== '' && HIGH_RISK_WORDS.test(text))
+    || paths.some((path) => typeof path === 'string' && (HIGH_RISK_PATHS.test(path) || HIGH_RISK_WORDS.test(pathWords(path))))
 }
 
-function destinationText(destination: TargetDestination | undefined): string | undefined {
-  return destination === undefined || 'other' in destination ? undefined : `${destination.origin}${destination.path}`
+const ENTER_KEYS = new Set(['enter', 'return', 'numpadenter'])
+
+/** Whether a key press is Enter (with or without modifiers). */
+function pressesEnter(args: Record<string, unknown>): boolean {
+  const key = typeof args.key === 'string' ? args.key : ''
+  const base = (key.split('+').at(-1) ?? '').trim().toLowerCase()
+  return ENTER_KEYS.has(base)
 }
 
-type Classified = { reason: IneligibleReason } | Assessment
-
-function no(reason: IneligibleReason): { reason: IneligibleReason } {
-  return { reason }
-}
-
-/** A `named` assessment that requires the given phrases. */
-function named(mustName: string[], rest: Omit<Assessment, 'rule' | 'mustName'>): Classified {
-  if (mustName.length === 0 || !mustName.every(nameable)) return no('unnamed')
-  return { rule: 'named', mustName, ...rest }
-}
-
-/** Whether the click is one plain left click with no modifier (anything else can download, open elsewhere or open menus). */
-function plainClick(args: Record<string, unknown>): boolean {
-  if (Array.isArray(args.modifiers) ? args.modifiers.length > 0 : args.modifiers !== undefined) return false
-  if (args.button !== undefined && args.button !== 'left') return false
-  if (args.clicks !== undefined && args.clicks !== 1) return false
-  if (args.action !== undefined && args.action !== 'click') return false
-  return true
-}
-
-/** A click (or Space/Enter on a focused control) on one found element. */
-function classifyClick(target: Extract<TargetState, { state: 'found' }>, topOrigin: string | undefined, tainted: boolean, args: Record<string, unknown>): Classified {
-  if (!plainClick(args)) return no('click-modifier')
-  // A download writes a file to the user's disk: never Auto.
-  if (target.download === true) return no('download')
-  // A link that opens another tab or window leaves this page's review.
-  if (target.newTab === true) return no('link-new-tab')
-  const seen = visibleName(target)
-  if ('reason' in seen) return seen
-  const name = seen.name
-  const context = target.context?.text
-  // A real link (describe drops empty, fragment-only, javascript: and same-document ones): where it goes decides.
-  if (target.href !== undefined) {
-    const href = target.href
-    if ('other' in href || topOrigin === undefined || href.origin !== topOrigin || href.query) return no('link-destination')
-    if (tainted && pathCarriesData(href.path)) return no('data-in-path')
-    if (!nameable(name)) return no('unnamed')
-    // The path, not the name, says what a GET does ("/logout", "/items/7/delete").
-    const cls = classOfWords(pathWords(href.path))
-    const facts = {
-      commitClass: cls ?? 'none' as CommitClass,
-      formSubmitLikely: false,
-      highRiskWords: highRisk(name, context, href.path) || HIGH_RISK_PATHS.test(href.path),
-      sameOrigin: true,
-      destination: destinationText(href),
-    }
-    // A link whose path says it commits something needs the user's words.
-    return cls === undefined ? { rule: 'harmless', ...facts } : withWhich(target, named([name], facts))
-  }
-  // A submit control: where its form goes decides too, and it is at least a submission.
-  if (target.submits === true) {
-    const form = target.form
-    if (form === undefined || 'other' in form || topOrigin === undefined || form.origin !== topOrigin) return no('form-destination')
-    return withWhich(target, named([name], {
-      commitClass: classOfWords(name, pathWords(form.path)) ?? 'submit',
-      formSubmitLikely: true,
-      highRiskWords: highRisk(name, context, form.path) || HIGH_RISK_PATHS.test(form.path),
-      sameOrigin: true,
-      destination: destinationText(form),
-    }))
-  }
-  const cls = classOfWords(name)
-  // A disclosure called "Show more" only shows more; anything else it might do is the page's residue.
-  // The words are checked on the visible text, which equals the name here.
-  if (target.disclosure === true && nameable(name) && harmlessDisclosureName(target.rendered ?? '')) {
-    return { rule: 'harmless', commitClass: 'none', formSubmitLikely: false, highRiskWords: highRisk(name, context) }
-  }
-  // Every other control — button, menu item, option, tree item, checkbox,
-  // radio, switch, tab, summary, a link without a real destination, an
-  // unknown element — needs its full name in the user's message.
-  return withWhich(target, named([name], { commitClass: cls ?? 'unknown', formSubmitLikely: false, highRiskWords: highRisk(name, context) }))
+function found(state: TargetState | undefined): Extract<TargetState, { state: 'found' }> | undefined {
+  return state?.state === 'found' ? state : undefined
 }
 
 /**
- * When other visible controls share the name, the user must also say which
- * one: the row or section it is in, in the same clause ("click Delete on
- * Bob's mail"). Without a row or section to say, it is never Auto.
+ * Why this action is consequential, from the card and the extension's own
+ * facts; empty for an ordinary action.
  */
-function withWhich(target: Extract<TargetState, { state: 'found' }>, classified: Classified): Classified {
-  if ('reason' in classified || classified.rule !== 'named') return classified
-  if ((target.sameName ?? 1) <= 1) return classified
-  const key = target.rowKey ?? ''
-  if (!nameable(key)) return no('ambiguous')
-  return { ...classified, mustContext: key }
-}
-
-/** The key of a press and its modifiers, from `key` (a chord) and `modifiers`. */
-export function parseKeyPress(args: Record<string, unknown>): { key: string; modifiers: string[] } | undefined {
-  const raw = args.key
-  if (typeof raw !== 'string' || raw === '') return undefined
-  let key = raw
-  let listed: unknown[] = []
-  if (raw.length > 1 && raw.includes('+')) {
-    const parts = raw.split('+')
-    if (raw.endsWith('++')) {
-      key = '+'
-      listed = parts.slice(0, -2)
-    } else {
-      key = parts.at(-1)!
-      listed = parts.slice(0, -1)
-    }
-    if (key === '') return undefined
-  }
-  listed = [...listed, ...Array.isArray(args.modifiers) ? args.modifiers : []]
-  const modifiers: string[] = []
-  for (const name of listed) {
-    if (typeof name !== 'string') return undefined
-    const canonical = MODIFIER_NAMES[name.trim().toLowerCase()]
-    if (canonical === undefined) return undefined
-    if (!modifiers.includes(canonical)) modifiers.push(canonical)
-  }
-  return { key, modifiers }
-}
-
-/** The repeat count of a press (1 when absent); undefined when malformed. */
-function repeatOf(args: Record<string, unknown>): number | undefined {
-  if (args.repeat === undefined) return 1
-  return typeof args.repeat === 'number' && Number.isSafeInteger(args.repeat) && args.repeat >= 1 ? args.repeat : undefined
-}
-
-/** A key press on the focused (or addressed) element. */
-function classifyPress(target: Extract<TargetState, { state: 'found' }>, args: Record<string, unknown>, topOrigin: string | undefined, tainted: boolean): Classified {
-  if (args.action !== undefined && args.action !== 'press') return no('press-key')
-  const press = parseKeyPress(args)
-  const repeat = repeatOf(args)
-  if (press === undefined || repeat === undefined) return no('press-key')
-  // Control, Alt and Meta make app shortcuts with unknown effects.
-  if (press.modifiers.some((modifier) => modifier !== 'Shift')) return no('press-key')
-  const { key } = press
-  if (NAVIGATION_KEYS.has(key)) {
-    // On a select, radio, slider or spin button an arrow changes the value.
-    if (!NAVIGATION_TARGETS.has(target.kind)) return no('press-key')
-    // Tab can accept a suggestion; Escape can dismiss (and discard) a dialog.
-    if (key === 'Tab' && target.suggests === true) return no('press-key')
-    if ((key === 'Escape' || key === 'Esc') && target.dialogOpen === true) return no('press-key')
-    if (repeat > 1 && (!CARET_FIELDS.has(target.kind) || repeat > MAX_NAVIGATION_REPEAT)) return no('press-key')
-    return { rule: 'harmless', commitClass: 'none', formSubmitLikely: false, highRiskWords: false }
-  }
-  const field = TEXT_KINDS.has(target.kind)
-  // Space or Enter on a button, link or control is a click on it, once.
-  if ((ENTER_KEYS.has(key) || SPACE_KEYS.has(key)) && !field && press.modifiers.length === 0 && repeat === 1) {
-    return classifyClick(target, topOrigin, tainted, {})
-  }
-  // Enter in a field submits or sends; a character key is typing one
-  // character, which can never be named (three characters at least): the
-  // user decides both.
-  return no('press-key')
-}
-
-/** Typing into a found text field. */
-function classifyTyping(target: Extract<TargetState, { state: 'found' }>, args: Record<string, unknown>, tainted: boolean): Classified {
-  const text = args.text
-  if (typeof text !== 'string') return no('typed-length')
-  // A line break typed key by key can press Enter and submit the form, a tab
-  // can move focus onto a button that a typed space then presses.
-  // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001F\u007F]/u.test(text)) return no('typed-line-break')
-  if (text.length > MAX_REVIEW_EXACT_TEXT_CHARS || (text.match(/[\p{L}\p{N}]/gu)?.length ?? 0) < 3) return no('typed-length')
-  // Only text into a text field, addressed by a locator, through the default
-  // insertion path: key-by-key or trusted typing sends real key events that a
-  // focused button, checkbox or shortcut-bearing page acts on.
-  if (!CARET_FIELDS.has(target.kind) || typeof target.empty !== 'boolean') return no('typing-target')
-  if (target.focused === true || (args.index === undefined && (typeof args.selector !== 'string' || args.selector === ''))) return no('typing-target')
-  if ((args.mode !== undefined && args.mode !== 'auto') || args.trusted === true) return no('typing-mode')
-  // A field that saves as it is typed in commits the text with no further step.
-  if (target.autoSubmit === true) return no('field-autosave')
-  // Appending to what is there could finish a sentence the page or an earlier
-  // step began; replacing a multi-line field could wipe what the user wrote.
-  if (target.empty !== true && (args.replace !== true || MULTI_LINE.has(target.kind))) return no('field-not-empty')
-  const address = ADDRESS_KINDS.has(target.kind) || ADDRESS_FIELD.test(target.name)
-  return {
-    rule: 'named',
-    exactText: text,
-    ...address ? { exactToken: true } : {},
-    commitClass: address ? 'address' : tainted ? 'type' : 'none',
-    formSubmitLikely: false,
-    highRiskWords: highRisk(target.name, target.context?.text) || (address && (ADDRESS_HIGH_RISK.test(target.name) || ADDRESS_HIGH_RISK.test(target.context?.text ?? ''))),
-  }
-}
-
-/**
- * The deterministic rules: whether Auto review may decide this card, and by
- * which rule.
- */
-export function autoReviewEligibility(prompt: ApprovalPrompt, call: ReviewCallContext): Eligibility {
-  const refuse = (reason: IneligibleReason): Eligibility => ({ eligible: false, reason })
-  if (!call.enabled) return refuse('off')
-  if (call.visible === false) return refuse('not-visible')
-  if (call.sessionId === undefined || call.sessionId === '') return refuse('no-session')
-  if (call.external) return refuse('external-session')
-  if (!call.pageAction) return refuse('not-page-action')
-  if (call.program) return refuse('program')
-  if (call.fleetChild) return refuse('fleet-child')
-  if (prompt.kind !== 'action') return refuse('not-action')
-  if (prompt.forced === true) return refuse('forced')
-  if (prompt.perCallOnly === true) return refuse('per-call-only')
-  if (prompt.permission !== undefined) return refuse('permission')
-  if (prompt.devTools === true) return refuse('devtools')
-  if (prompt.browserOnly === true) return refuse('browser-only')
-  if (prompt.urlRisk === true) return refuse('url-risk')
-  if (prompt.requester !== undefined) return refuse('external-requester')
-  if (prompt.devLoopFor !== undefined) return refuse('dev-loop')
-  if (prompt.binding === undefined || prompt.binding === '') return refuse('no-binding')
-  if (prompt.action !== call.tool || !REVIEW_TOOLS.has(call.tool)) return refuse('tool')
+export function consequenceReasons(prompt: ApprovalPrompt, tool: string, args: Record<string, unknown>): ConsequenceReason[] {
+  const reasons = new Set<ConsequenceReason>()
   const facts = prompt.review
-  if (facts?.policy !== 'default') return refuse('policy')
-  const tool = call.tool as AutoReviewTool
-  const tainted = call.tainted === true
-  // Every element action: the frame it acts in must be the top page's origin.
-  if (tool !== 'browser_navigate' && (facts.topOrigin === undefined || originOf(facts.pageUrl) !== facts.topOrigin)) return refuse('frame-origin')
-  const found = (slot: 'target' | 'from' | 'to'): Extract<TargetState, { state: 'found' }> | IneligibleReason => {
-    const state = facts.targets?.[slot]
-    if (state?.state !== 'found') return 'target-not-found'
-    if (state.sensitive === true || NEVER_KINDS.has(state.kind)) return 'sensitive-target'
-    return state
+  const targets = facts?.targets
+  const target = found(targets?.target) ?? found(targets?.from)
+  const to = found(targets?.to)
+
+  // The taint rules flagged this step, or it is a standing grant that can act later.
+  if (prompt.forced === true) {
+    if (prompt.forcedBy?.includes('taint') === true) reasons.add('tainted')
+    if (prompt.forcedBy === undefined) reasons.add(tool === 'browser_watch' || tool === 'browser_site_driver' ? 'standing' : 'tainted')
   }
-  let classified: Classified
-  switch (tool) {
-    case 'browser_navigate': {
-      const destination = originOf(call.args.url)
-      if (destination === undefined || facts.topOrigin === undefined || destination !== facts.topOrigin) return refuse('cross-origin-navigation')
-      // The reviewer is shown origin and path only: a query or fragment is the user's call.
-      if (hasQueryOrFragment(call.args.url)) return refuse('navigation-query')
-      // After reading web pages, a navigation can carry what was read: always the user's call.
-      if (tainted) return refuse('tainted-navigation')
-      const path = pathOf(call.args.url as string)
-      // A typed address names no control: one whose path says it commits something is the user's call.
-      if (classOfWords(pathWords(path)) !== undefined) return refuse('navigation-words')
-      classified = {
-        rule: 'harmless',
-        commitClass: 'none',
-        formSubmitLikely: false,
-        highRiskWords: highRisk(pathWords(path)) || (path !== undefined && HIGH_RISK_PATHS.test(path)),
-        sameOrigin: true,
-        destination: `${destination}${path ?? ''}`,
-      }
-      break
-    }
-    case 'browser_click':
-    case 'browser_hover': {
-      const target = found('target')
-      if (typeof target === 'string') return refuse(target)
-      classified = tool === 'browser_hover'
-        ? { rule: 'harmless', commitClass: 'none', formSubmitLikely: false, highRiskWords: false }
-        : classifyClick(target, facts.topOrigin, tainted, call.args)
-      break
-    }
-    case 'browser_type': {
-      const target = found('target')
-      if (typeof target === 'string') return refuse(target)
-      // Undefined means "not inspected", which counts as sensitive.
-      if (facts.typedTargetSensitive !== false) return refuse('sensitive-target')
-      classified = classifyTyping(target, call.args, tainted)
-      break
-    }
-    case 'browser_press': {
-      const target = found('target')
-      if (typeof target === 'string') return refuse(target)
-      classified = classifyPress(target, call.args, facts.topOrigin, tainted)
-      break
-    }
-    case 'browser_select': {
-      const target = found('target')
-      if (typeof target === 'string') return refuse(target)
-      // Only a native select whose chosen options the page itself named.
-      if (target.chosen === undefined || target.chosen.length === 0) return refuse('select-unresolved')
-      // A select whose page code submits on change: its form must stay on this origin.
-      if (target.autoSubmit === true && target.form !== undefined && ('other' in target.form || facts.topOrigin === undefined || target.form.origin !== facts.topOrigin)) return refuse('form-destination')
-      const chosen = target.chosen.join(' · ')
-      // Every chosen option, verbatim.
-      classified = withWhich(target, named([...target.chosen], {
-        commitClass: classOfWords(target.name, chosen) ?? (target.autoSubmit === true ? 'submit' : 'none'),
-        formSubmitLikely: target.autoSubmit === true,
-        highRiskWords: highRisk(target.name, target.context?.text, chosen),
-      }))
-      break
-    }
-    case 'browser_drag': {
-      const from = found('from')
-      if (typeof from === 'string') return refuse(from)
-      // A drag by offset (a slider, a canvas) moves a value nobody named.
-      if (typeof call.args.toOffset === 'object' && call.args.toOffset !== null) return refuse('drag-offset')
-      const to = found('to')
-      if (typeof to === 'string') return refuse(to)
-      if (from.kind === 'slider' || to.kind === 'slider') return refuse('drag-offset')
-      // Both ends, verbatim.
-      classified = named([from.name, to.name], {
-        commitClass: classOfWords(to.name, from.name) ?? 'unknown',
-        formSubmitLikely: false,
-        highRiskWords: highRisk(from.name, to.name, to.context?.text),
-      })
-      break
-    }
-  }
-  if ('reason' in classified) return refuse(classified.reason)
-  return { eligible: true, tool, assessment: classified }
+  if (tool === 'browser_watch' || tool === 'browser_site_driver') reasons.add('standing')
+  if (prompt.urlRisk === true) reasons.add('url-risk')
+  if (tool === 'browser_run' || tool === 'browser_workflow_run') reasons.add('program')
+  if (tool === 'browser_upload' || tool === 'browser_downloads' || tool === 'browser_save_pdf'
+    || (tool === 'browser_extract' && typeof args.saveTo === 'string' && args.saveTo !== '')) reasons.add('files')
+  if (target?.download === true) reasons.add('files')
+
+  // Credentials and payment fields.
+  if (target?.kind === 'password' || target?.sensitive === true || facts?.typedTargetSensitive === true) reasons.add('sensitive-field')
+
+  // Words: the control's name, the chosen options, where its link or form goes, the navigation address.
+  const linkPath = destinationPath(target?.href)
+  const formPath = destinationPath(target?.form)
+  const navigationPath = tool === 'browser_navigate' || tool === 'browser_open_tab' ? pathOf(args.url) : undefined
+  const enter = tool === 'browser_press' && pressesEnter(args)
+  const activates = tool === 'browser_click' || enter || tool === 'browser_select' || tool === 'browser_drag'
+  const names = activates ? [target?.name, to?.name, ...target?.chosen ?? []] : []
+  const submitting = (tool === 'browser_click' && target?.submits === true) || (enter && target?.inForm === true)
+  const paths = [linkPath, navigationPath, submitting ? formPath : undefined]
+  const dialogText = tool === 'browser_dialog' && args.accept !== false ? prompt.summary : undefined
+  if (commits(...names, dialogText, ...paths.map(pathWords))) reasons.add('commit-words')
+  const typedInto = tool === 'browser_type' ? target?.name : undefined
+  if (highRisk([...names, typedInto, dialogText], paths)) reasons.add('high-risk-words')
+  // A form that writes (POST) when this click or Enter submits it.
+  if (submitting && target?.form !== undefined && !('other' in target.form) && target.form.method === 'post') reasons.add('submits-form')
+
+  return [...reasons]
 }
 
-const TARGET_CLASS_OF: ReadonlyArray<readonly [ReviewAction['targetClass'], ReadonlySet<TargetKind>]> = [
-  ['button', new Set(['button', 'menuitem', 'tab', 'summary'])],
-  ['field', TEXT_KINDS],
-  ['control', new Set(['checkbox', 'radio', 'switch', 'slider', 'select', 'listbox', 'color', 'option', 'file'])],
-]
-
-/** How the element presents itself, from its kind (never from page prose). */
-export function targetClass(state: TargetState | undefined): ReviewAction['targetClass'] {
-  if (state?.state !== 'found') return 'none'
-  if (state.kind === 'link' || state.href !== undefined) return 'link'
-  for (const [cls, kinds] of TARGET_CLASS_OF) if (kinds.has(state.kind)) return cls
-  return 'other'
+/**
+ * What Auto approve does with one card that the ordinary flow would show
+ * (the policy gate already returned "prompt").
+ */
+export function autoApprovePath(prompt: ApprovalPrompt, context: AutoContext): AutoPath {
+  if (!context.on) return { kind: 'card', reason: 'off' }
+  if (context.external || prompt.requester !== undefined) return { kind: 'card', reason: 'external-session' }
+  if (context.optOut === true) return { kind: 'card', reason: 'opted-out' }
+  // The developer-tools allowance is its own consent, unchanged by Auto approve.
+  if (prompt.devTools === true) return { kind: 'card', reason: 'devtools' }
+  // A browser permission can only be granted from a click on the card.
+  if (prompt.permission !== undefined) return { kind: 'card', reason: 'permission' }
+  // A site the user (or an administrator) set to "ask": their narrower rule wins.
+  if (prompt.forced === true && prompt.forcedBy?.includes('site-ask') === true) return { kind: 'card', reason: 'site-rule' }
+  const reasons = consequenceReasons(prompt, context.tool, context.args)
+  return reasons.length === 0 ? { kind: 'run' } : { kind: 'review', reasons }
 }
 
 /** Origin and path of a URL, without query or fragment (secrets live there). */
@@ -661,79 +214,71 @@ export function untrustedText(value: unknown): string | undefined {
   return text === '' ? undefined : text
 }
 
-function verbOf(tool: AutoReviewTool, args: Record<string, unknown>): ReviewAction['verb'] {
-  switch (tool) {
-    case 'browser_click':
-      if (args.action === 'dblclick' || args.clicks === 2) return 'double-click'
-      if (args.button === 'right') return 'right-click'
-      return 'click'
-    case 'browser_type': return 'type'
-    case 'browser_select': return 'select'
-    case 'browser_hover': return 'hover'
-    case 'browser_press': return 'press'
-    case 'browser_drag': return 'drag'
-    case 'browser_navigate': return 'navigate'
-  }
+const VERBS: Record<string, AutoReviewVerb> = {
+  browser_click: 'click',
+  browser_type: 'type',
+  browser_select: 'select',
+  browser_press: 'press',
+  browser_drag: 'drag',
+  browser_hover: 'hover',
+  browser_navigate: 'navigate',
+  browser_back: 'navigate',
+  browser_open_tab: 'open-tab',
+  browser_upload: 'upload',
+  browser_downloads: 'download',
+  browser_clipboard: 'clipboard',
+  browser_dialog: 'dialog',
+  browser_run: 'run-program',
+  browser_workflow_run: 'run-program',
+  browser_watch: 'watch',
+  browser_fanout: 'fan-out',
+  browser_site_driver: 'site-request',
+  browser_save_pdf: 'save-file',
+  browser_extract: 'save-file',
 }
 
 /** Facts the background adds to the card's own. */
 export interface ReviewExtras {
+  /** The conversation has read untrusted web page content. */
   tainted: boolean
-  approvedThisTurn: number
   /** The tab's title (page-authored). */
   title?: string
-  /** Labels of the actions Auto approved this turn, newest last. */
-  recent: readonly string[]
 }
 
 /**
  * The structured action the reviewer is shown, built only from the
- * extension's own facts plus capped untrusted strings.
+ * extension's own facts plus capped untrusted strings: the verb, the
+ * control's visible name and section, the page title and address (origin and
+ * path), the destination, and the text to be typed (never into a sensitive
+ * field). No page content.
  */
-export function buildReviewAction(prompt: ApprovalPrompt, tool: AutoReviewTool, args: Record<string, unknown>, extras: ReviewExtras, assessment: Assessment): ReviewAction {
+export function buildReviewAction(prompt: ApprovalPrompt, tool: string, args: Record<string, unknown>, extras: ReviewExtras, reasons: ConsequenceReason[]): ReviewAction {
   const facts = prompt.review
-  const target = facts?.targets?.target ?? facts?.targets?.from
-  const found = target?.state === 'found' ? target : undefined
-  const to = facts?.targets?.to?.state === 'found' ? facts.targets.to : undefined
-  const typed = tool === 'browser_type' && facts?.typedTargetSensitive === false ? untrustedText(args.text) : undefined
-  const options = tool === 'browser_select' ? (found?.chosen ?? []).map(untrustedText).filter((value): value is string => value !== undefined).slice(0, 5) : []
-  const recent = extras.recent.slice(-MAX_REVIEW_RECENT).map(untrustedText).filter((value): value is string => value !== undefined)
-  const press = tool === 'browser_press' ? parseKeyPress(args) : undefined
-  const put = <K extends keyof ReviewAction['untrusted']>(key: K, value: string | undefined): Partial<ReviewAction['untrusted']> => {
+  const target = found(facts?.targets?.target) ?? found(facts?.targets?.from)
+  const put = <K extends keyof ReviewAction['untrusted']>(key: K, value: unknown): Partial<ReviewAction['untrusted']> => {
     const text = untrustedText(value)
     return text === undefined ? {} : { [key]: text }
   }
-  const untrusted: ReviewAction['untrusted'] = {
-    ...put('name', found?.name),
-    ...put('context', found?.context?.text),
-    ...put('title', extras.title),
-    ...put('url', originAndPath(facts?.pageUrl)),
-    ...put('destination', assessment.destination),
-    ...put('dropTarget', tool === 'browser_drag' ? to?.name : undefined),
-    ...typed === undefined ? {} : { typed },
-    ...options.length === 0 ? {} : { options },
-    ...recent.length === 0 ? {} : { recent },
-  }
-  const repeat = tool === 'browser_press' && typeof args.repeat === 'number' && Number.isSafeInteger(args.repeat) && args.repeat >= 1 && args.repeat <= 100 ? args.repeat : undefined
+  const destination = target?.href !== undefined && !('other' in target.href) ? `${target.href.origin}${target.href.path}`
+    : target?.submits === true && target.form !== undefined && !('other' in target.form) ? `${target.form.origin}${target.form.path}`
+      : tool === 'browser_navigate' || tool === 'browser_open_tab' ? originAndPath(typeof args.url === 'string' ? args.url : undefined)
+        : undefined
+  const sensitive = target?.sensitive === true || target?.kind === 'password' || facts?.typedTargetSensitive !== false
   return {
     tool,
-    verb: verbOf(tool, args),
-    targetKind: found?.kind ?? 'none',
-    targetClass: targetClass(found),
-    rule: assessment.rule,
-    // The phrases and text the bridge checks verbatim: exactly as the page reported them, uncut.
-    ...assessment.rule === 'named' && assessment.mustName !== undefined ? { mustName: [...assessment.mustName] } : {},
-    ...assessment.rule === 'named' && assessment.mustName !== undefined && assessment.mustContext !== undefined ? { mustContext: assessment.mustContext } : {},
-    ...assessment.rule === 'named' && assessment.exactText !== undefined ? { exactText: assessment.exactText } : {},
-    ...assessment.rule === 'named' && assessment.exactToken === true ? { exactToken: true } : {},
-    commitClass: assessment.commitClass,
-    formSubmitLikely: assessment.formSubmitLikely,
-    highRiskWords: assessment.highRiskWords,
-    ...assessment.sameOrigin === undefined ? {} : { sameOrigin: assessment.sameOrigin },
+    verb: VERBS[tool] ?? 'other',
+    targetKind: target?.kind ?? 'none',
+    reasons,
     tainted: extras.tainted,
-    approvedThisTurn: Math.max(0, Math.min(10_000, Math.floor(extras.approvedThisTurn))),
-    ...tool === 'browser_type' && typeof args.text === 'string' ? { typedChars: args.text.length } : {},
-    ...press === undefined ? {} : { key: press.key.slice(0, 40), ...press.modifiers.length === 0 ? {} : { modifiers: press.modifiers }, ...repeat === undefined ? {} : { repeat } },
-    untrusted,
+    untrusted: {
+      ...put('name', target?.name),
+      ...put('context', target?.context?.text),
+      ...target === undefined ? put('summary', prompt.stepLabel ?? prompt.summary) : {},
+      ...put('title', extras.title),
+      ...put('url', originAndPath(facts?.pageUrl)),
+      ...put('destination', destination),
+      ...tool === 'browser_type' && !sensitive ? put('typed', args.text) : {},
+      ...tool === 'browser_press' ? put('key', typeof args.key === 'string' ? args.key.slice(0, 40) : undefined) : {},
+    },
   }
 }

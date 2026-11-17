@@ -300,41 +300,37 @@ export interface PanelCopy {
     duration: (ms: number) => string
   }
   autoReview: {
-    /** Accessible name of the composer control. */
-    control: string
-    chipAsk: string
-    chipAuto: string
-    optionAsk: string
-    optionAskHelp: string
-    optionAuto: string
-    optionAutoHelp: string
-    /** The unobtrusive indicator while Auto is on. */
-    on: (minutesLeft: number) => string
+    /** The composer toggle's label. */
+    toggle: string
+    /** The toggle's tooltip while on / off. */
+    toggleOnHint: string
+    toggleOffHint: string
+    /** The unobtrusive indicator while Auto approve is on. */
+    on: string
     turnOff: string
-    /** Why Auto ended for this conversation. */
-    ended: Record<string, string>
-    /** Why the control is disabled (one line). */
-    unavailable: Record<string, string>
-    notStarted: string
+    /** The administrator turned it off (the toggle is hidden; Settings says so). */
+    managed: string
+    /** The reviewer cannot run: consequential steps still ask. */
+    reviewerMissing: string
+    /** The one confirmation, the first time it is switched on. */
     dialogTitle: string
-    dialogBody: string[]
+    dialogBody: string
     dialogConfirm: string
     dialogCancel: string
     /** The running step while the reviewer decides. */
     reviewing: string
-    /** Timeline badge of a step Auto review approved. */
+    /** Timeline badge of an auto-approved step. */
     badge: string
+    /** The line under an auto-approved row, without and with a review. */
+    approvedLine: string
+    reviewedLine: string
     /** Prefix of the reviewer's reason in a timeline row's details. */
     reasonPrefix: string
-    /** The fixed line under a row Auto review approved. */
-    approvedLine: string
-    /** Other conversations with Auto on (panel line), and its one-click off. */
-    otherOn: (count: number) => string
-    turnAllOff: string
+    /** Settings: the group, the option, and the one-sentence trade-off. */
     settingLabel: string
+    settingTitle: string
     settingHelp: string
     settingMore: string
-    settingManaged: string
   }
   audit: {
     section: string
@@ -816,7 +812,7 @@ const EN: PanelCopy = {
       appearance: { title: 'Appearance', help: 'Language, colours and text size. Changes apply immediately.' },
       permissions: { title: 'Permissions & safety', help: 'What the assistant may read and do, and on which sites.' },
       behaviour: { title: 'Behaviour', help: 'Approvals, conversations and what you see on the page.' },
-      automation: { title: 'Automation', help: 'Page watchers, Auto review, the dev loop and experimental learning features.' },
+      automation: { title: 'Automation', help: 'Page watchers, Auto approve, the dev loop and experimental learning features.' },
       models: { title: 'Models & API relay', help: 'Use your own API relay as a model provider.' },
       about: { title: 'About', help: 'Updates, audit log and uninstall.' },
     },
@@ -987,7 +983,8 @@ const EN: PanelCopy = {
     decisions: {
       'not-required': 'Auto',
       'auto-allowed': 'Trusted',
-      'auto-reviewed': 'Auto review',
+      'auto-approved': 'Auto approve',
+      'auto-reviewed': 'Auto approve (checked)',
       'program-approved': 'Program approved',
       allowed: 'Approved',
       denied: 'Denied',
@@ -1006,53 +1003,26 @@ const EN: PanelCopy = {
     duration: (ms) => ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`,
   },
   autoReview: {
-    control: 'Approvals',
-    chipAsk: 'Approvals: Ask',
-    chipAuto: 'Approvals: Auto',
-    optionAsk: 'Ask',
-    optionAskHelp: 'You answer every approval card.',
-    optionAuto: 'Auto review',
-    optionAutoHelp: 'Approves an action only when you named it, or it is plainly harmless; this conversation\'s model checks it fits.',
-    on: (minutes) => `Auto review on · ${minutes} min left`,
+    toggle: 'Auto approve',
+    toggleOnHint: 'Auto approve is on: the agent acts without asking. Click to turn it off.',
+    toggleOffHint: 'Auto approve is off: you approve each action. Click to let the agent act without asking.',
+    on: 'Auto approve is on: the agent acts without asking.',
     turnOff: 'Turn off',
-    ended: {
-      expired: 'Auto review ended after 60 minutes. Turn it on again to continue.',
-      'kill-switch': 'Auto review ended when you stopped the agent.',
-      'take-over': 'Auto review ended when you took over.',
-      managed: 'Auto review was turned off by your administrator.',
-      setting: 'Auto review is turned off in Settings.',
-    },
-    unavailable: {
-      setting: 'Turned off in Settings.',
-      managed: 'Turned off by your administrator.',
-      'kill-switch': 'Not available while the agent is stopped.',
-      disconnected: 'Not connected to DSH.',
-      bridge: 'Update the DSH browser bridge to use Auto review.',
-      'host-unsupported': 'This DSH version cannot run Auto review.',
-      'no-model': 'Choose a model for this conversation first.',
-      'external-session': 'Not available for conversations from other apps.',
-      disabled: 'Turned off in the DSH browser bridge configuration.',
-    },
-    notStarted: 'Takes effect once this conversation has started.',
-    dialogTitle: 'Turn on Auto review for this conversation?',
-    dialogBody: [
-      'Auto approves an action only when you named it, or it is plainly harmless. Named: your latest message asks for it by the name you see ("click Save settings"), or gives the text to type in quotes (type "hello world"). Each name lets one action through; if several buttons share a name, say which ("click Delete on Bob\'s mail"). Plainly harmless: a same-site link, "Show more"-style controls, hovering, moving around in a text field.',
-      'This conversation\'s model then checks the action fits your request and can always ask you instead. Anything else shows the usual card, with a line saying what to write next time. A question ("should I click Send?"), "don\'t", "before", "only read", "tell me if" or "draft" never authorises anything. Payments, purchases, security and account settings always ask, as do the cards that protect your data (sensitive fields, other sites, uploads, the clipboard, developer tools, site rules).',
-      'On the current site an approved action can do what your own click could do, and a page can give a harmful control the name you used. Each reviewed action makes one extra call to this conversation\'s model through DSH (your account and quota), sending your messages from this panel, the action, the element\'s label and the page address.',
-      'Auto review pauses while this conversation is not shown in a panel, ends after 60 minutes, when you stop the agent or take over, and asks before continuing after 25 approvals since your last message.',
-    ],
-    dialogConfirm: 'Turn on Auto review',
-    dialogCancel: 'Keep asking',
-    reviewing: 'Reviewing…',
+    managed: 'Your administrator turned Auto approve off.',
+    reviewerMissing: 'Steps that send, delete or pay still ask: the reviewer is not available.',
+    dialogTitle: 'Turn on Auto approve?',
+    dialogBody: 'The agent will act without asking you first. A web page that tricks the model can make it do things you did not ask for. Steps that send, delete, pay or use passwords are checked by this conversation\'s model first, and you can turn Auto approve off or stop the agent at any time.',
+    dialogConfirm: 'Turn on',
+    dialogCancel: 'Cancel',
+    reviewing: 'Checking…',
     badge: 'Auto',
-    reasonPrefix: 'Auto review\'s note (model text)',
-    approvedLine: 'Approved by Auto review',
-    otherOn: (count) => `Auto review is on in ${count} other conversation${count === 1 ? '' : 's'}.`,
-    turnAllOff: 'Turn all off',
-    settingLabel: 'Offer Auto review',
-    settingHelp: 'Shows "Approvals: Auto" next to the composer. Every conversation still starts with Ask.',
-    settingMore: 'With Auto review on in a conversation (and that conversation open in a panel), its own model approves small page actions that fit your request; sending, saving, deleting, sharing and unclear buttons run only when your latest message asks for them. Each reviewed action costs one extra model call and sends your messages from the panel, the action, the element\'s label and the page address to that model. Protective cards always ask.',
-    settingManaged: 'Your administrator turned Auto review off.',
+    approvedLine: 'Auto-approved',
+    reviewedLine: 'Auto-approved after a check',
+    reasonPrefix: 'Reviewer\'s note (model text)',
+    settingLabel: 'Auto approve',
+    settingTitle: 'Start conversations in Auto approve',
+    settingHelp: 'With Auto approve on, the agent acts without asking; a web page that tricks the model can make it do things you did not ask for.',
+    settingMore: 'New conversations start with Auto approve on; you can still switch it off per conversation with the Auto approve button under the message box. Ordinary steps run at once. Steps that send, delete, pay, buy, publish or use passwords, and steps after the agent read web pages that could move data elsewhere, are first checked by this conversation\'s model (one extra model call each); if it objects, you get the usual card. Developer tools, a site you set to "Always ask" and strict mode still ask.',
   },
   audit: {
     section: 'Audit log',
@@ -1521,7 +1491,7 @@ const ZH: PanelCopy = {
       appearance: { title: '外观', help: '语言、配色和字号。更改立即生效。' },
       permissions: { title: '权限与安全', help: '助手可以读取和操作什么，以及在哪些站点上。' },
       behaviour: { title: '行为', help: '审批、会话以及页面上的显示。' },
-      automation: { title: '自动化', help: '页面监视、自动审核、开发闭环和实验性的学习功能。' },
+      automation: { title: '自动化', help: '页面监视、自动批准、开发闭环和实验性的学习功能。' },
       models: { title: '模型与中转服务', help: '把你自己的 API 中转站用作模型提供方。' },
       about: { title: '关于', help: '更新、审计日志和卸载。' },
     },
@@ -1692,7 +1662,8 @@ const ZH: PanelCopy = {
     decisions: {
       'not-required': '自动',
       'auto-allowed': '已信任',
-      'auto-reviewed': '自动审核',
+      'auto-approved': '自动批准',
+      'auto-reviewed': '自动批准（已检查）',
       'program-approved': '程序已批准',
       allowed: '已批准',
       denied: '已拒绝',
@@ -1711,53 +1682,26 @@ const ZH: PanelCopy = {
     duration: (ms) => ms < 1000 ? `${ms} 毫秒` : `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} 秒`,
   },
   autoReview: {
-    control: '审批方式',
-    chipAsk: '审批：询问',
-    chipAuto: '审批：自动',
-    optionAsk: '询问',
-    optionAskHelp: '每个审批卡片都由您决定。',
-    optionAuto: '自动审核',
-    optionAutoHelp: '只批准您点名的操作或明显无害的操作；本对话的模型会检查它是否符合您的请求。',
-    on: (minutes) => `自动审核已开启 · 剩余 ${minutes} 分钟`,
+    toggle: '自动批准',
+    toggleOnHint: '自动批准已开启：代理会直接操作而不再询问。点击关闭。',
+    toggleOffHint: '自动批准已关闭：每个操作都由您批准。点击后代理将直接操作而不再询问。',
+    on: '自动批准已开启：代理会直接操作而不再询问。',
     turnOff: '关闭',
-    ended: {
-      expired: '自动审核已在 60 分钟后结束。如需继续，请重新开启。',
-      'kill-switch': '您停止了代理，自动审核已结束。',
-      'take-over': '您接管了页面，自动审核已结束。',
-      managed: '管理员已关闭自动审核。',
-      setting: '自动审核已在设置中关闭。',
-    },
-    unavailable: {
-      setting: '已在设置中关闭。',
-      managed: '已被管理员关闭。',
-      'kill-switch': '代理已停止，暂不可用。',
-      disconnected: '未连接到 DSH。',
-      bridge: '请更新 DSH 浏览器桥接插件以使用自动审核。',
-      'host-unsupported': '此 DSH 版本无法运行自动审核。',
-      'no-model': '请先为本对话选择模型。',
-      'external-session': '来自其他应用的对话不可用。',
-      disabled: '已在 DSH 浏览器桥接配置中关闭。',
-    },
-    notStarted: '对话开始后生效。',
-    dialogTitle: '为本对话开启自动审核？',
-    dialogBody: [
-      '自动审核只批准您点名的操作，或明显无害的操作。点名：您最新的消息用您看到的名称要求它（“点击保存设置”），或把要输入的文字放在引号里（输入“你好”）。每次点名只放行一次；多个按钮同名时请说明是哪一个（“点击 Bob 那封邮件的删除”）。明显无害：同站链接、“显示更多”一类的控件、悬停、在文本框内移动光标。',
-      '随后由本对话的模型检查该操作是否符合您的请求，它随时可以改为询问您。其他操作都会显示常规卡片，并附一句下次该怎么说。疑问句（“要不要点发送？”）以及“不要”“之前”“只看”“告诉我是否”“草拟”等字眼永远不会授权任何操作。支付、购买、安全与账户设置始终询问；保护数据的卡片（敏感字段、其他站点、上传、剪贴板、开发者工具、站点规则）也始终询问。',
-      '在当前站点上，被批准的操作能做到您亲手点击能做到的事，页面也可能给有害的控件起您用过的名字。每个被审核的操作会通过 DSH 额外调用一次本对话的模型（使用您的账户和额度），发送您在此面板中的消息、操作本身、元素标签和页面地址。',
-      '本对话不在面板中显示时自动审核暂停；60 分钟后、您停止代理或接管页面时结束；自您上一条消息起批准 25 个操作后，会先询问您是否继续。',
-    ],
-    dialogConfirm: '开启自动审核',
-    dialogCancel: '继续逐一询问',
-    reviewing: '正在审核…',
+    managed: '管理员已关闭自动批准。',
+    reviewerMissing: '审核模型不可用：发送、删除、付款等操作仍会询问您。',
+    dialogTitle: '开启自动批准？',
+    dialogBody: '代理将直接操作，不再先询问您。如果网页诱骗了模型，它可能会做您没有要求的事。发送、删除、付款或使用密码的操作会先由本对话的模型检查；您可以随时关闭自动批准或停止代理。',
+    dialogConfirm: '开启',
+    dialogCancel: '取消',
+    reviewing: '正在检查…',
     badge: '自动',
-    reasonPrefix: '自动审核的说明（模型文本）',
-    approvedLine: '由自动审核批准',
-    otherOn: (count) => `另有 ${count} 个对话开启了自动审核。`,
-    turnAllOff: '全部关闭',
-    settingLabel: '提供自动审核',
-    settingHelp: '在输入框旁显示“审批：自动”。每个对话仍默认为询问。',
-    settingMore: '在某个对话中开启自动审核（且该对话在面板中打开）后，由它自己的模型批准符合您请求的小型页面操作；发送、保存、删除、分享及作用不明的按钮只有在您最新的消息要求时才会执行。每个被审核的操作需要额外调用一次模型，并向该模型发送您在面板中的消息、操作、元素标签和页面地址。保护性卡片始终会询问。',
-    settingManaged: '管理员已关闭自动审核。',
+    approvedLine: '已自动批准',
+    reviewedLine: '检查后已自动批准',
+    reasonPrefix: '审核模型的说明（模型文本）',
+    settingLabel: '自动批准',
+    settingTitle: '新对话默认开启自动批准',
+    settingHelp: '开启自动批准后，代理会直接操作而不再询问；如果网页诱骗了模型，它可能会做您没有要求的事。',
+    settingMore: '新对话开始时即开启自动批准；您仍可用输入框下方的“自动批准”按钮为单个对话关闭它。普通操作立即执行。发送、删除、付款、购买、发布或使用密码的操作，以及代理读取网页后可能把数据带到别处的操作，会先由本对话的模型检查（每次额外调用一次模型）；如有异议，您会看到常规卡片。开发者工具、设为“总是询问”的站点和严格模式仍会询问。',
   },
   audit: {
     section: '审计日志',

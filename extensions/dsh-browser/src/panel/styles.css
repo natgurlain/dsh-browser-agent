@@ -4574,7 +4574,7 @@ textarea:focus-visible {
   display: none;
 }
 
-/* ---- Auto review (docs/auto-review-design.md): composer control, indicator, card line, timeline ---- */
+/* ---- Auto approve (docs/auto-approve-design.md): composer toggle, indicator, card line, timeline ---- */
 .composer-approvals {
   position: relative;
   display: flex;
@@ -4592,18 +4592,9 @@ textarea:focus-visible {
   color: var(--blue-ink);
 }
 
-.auto-review-menu button {
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
-}
-
-.auto-review-menu button > small {
-  color: var(--muted);
-  font-size: calc(10px * var(--ui-scale));
-  font-weight: 500;
-  line-height: 1.35;
-  white-space: normal;
+.auto-approve-toggle svg {
+  fill: currentColor;
+  stroke: none;
 }
 
 .auto-review-indicator {

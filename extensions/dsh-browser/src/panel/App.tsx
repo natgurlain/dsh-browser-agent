@@ -22,7 +22,7 @@ import { TaintExemptionSettings } from './TaintExemptionSettings.tsx'
 import { WatchersCard } from './WatchersCard.tsx'
 import { connectPanel, PanelRpcError, type AgentPauseState, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type StandingStatus, type PanelApi, type PanelSettings } from './api.ts'
 import { StepTimeline } from './StepTimeline.tsx'
-import { AutoReviewControl } from './AutoReviewControl.tsx'
+import { AutoApproveControl } from './AutoApproveControl.tsx'
 import { AgentControls } from './AgentControls.tsx'
 import { LearningPanel } from './LearningPanel.tsx'
 import { LearningSettings } from './LearningSettings.tsx'
@@ -767,7 +767,7 @@ export function ApprovalDialog({
           {/* How the call addresses its element and where the page shows it: plain text, the quoted parts are the page's. */}
           {request.targetNote !== undefined && <small className="approval-target-note">{revealInvisible(request.targetNote)}</small>}
         </div>
-        {/* Auto review looked at this card and left it to the user: its line, attributed (the reason is model text). */}
+        {/* Auto approve's reviewer looked at this card and left it to the user: its line, attributed (the reason is model text). */}
         {request.autoReviewNote !== undefined && (
           <p className="approval-auto-review" role="note">{revealInvisible(request.autoReviewNote)}</p>
         )}
@@ -1201,7 +1201,7 @@ export function App(): React.JSX.Element {
         taintLocalOrigins: raw?.taintLocalOrigins ?? [],
         taintTrustedSites: raw?.taintTrustedSites ?? [],
         taintTrustConfirmed: raw?.taintTrustConfirmed ?? [],
-        offerAutoReview: raw?.offerAutoReview ?? true,
+        autoApproveDefault: raw?.autoApproveDefault ?? false,
       }
       setSettings(seeded)
       setSettingsBaseline(seeded)
@@ -1240,7 +1240,7 @@ export function App(): React.JSX.Element {
   const resumeAgent = useCallback(() => { void api.resumeAgent().catch(() => {}) }, [api])
   const engageKillSwitch = useCallback(() => { setKillSwitchEngaged(true); void api.engageKillSwitch().catch(() => {}) }, [api])
 
-  // Steps Auto review is deciding right now ("Reviewing…" instead of a flashing card).
+  // Steps Auto approve's reviewer is checking right now ("Checking…" in the timeline, never a card).
   const [reviewingCalls, setReviewingCalls] = useState<ReadonlySet<string>>(() => new Set())
   useEffect(() => api.onAutoReviewing((reviewing) => {
     if (reviewing.toolCallId === undefined) return
@@ -3302,11 +3302,11 @@ export function App(): React.JSX.Element {
             </SettingsGroup>
             <SettingsGroup label={copy.autoReview.settingLabel}>
               <SettingToggle
-                title={copy.autoReview.settingLabel}
+                title={copy.autoReview.settingTitle}
                 help={copy.autoReview.settingHelp}
                 more={<p>{copy.autoReview.settingMore}</p>}
-                checked={settings?.offerAutoReview ?? true}
-                onChange={(checked) => patch({ offerAutoReview: checked })}
+                checked={settings?.autoApproveDefault ?? false}
+                onChange={(checked) => patch({ autoApproveDefault: checked })}
               />
             </SettingsGroup>
             <DevLoopSettings
@@ -3829,7 +3829,7 @@ export function App(): React.JSX.Element {
         </div>
         {state === 'connected' ? (
           <div className="composer-controls">
-            <AutoReviewControl api={api} copy={copy} sessionId={sessionRef.current} disabled={sessionChanging} />
+            <AutoApproveControl api={api} copy={copy} sessionId={sessionRef.current} disabled={sessionChanging} />
             <div className="composer-chip" ref={permissionPickerRef}>
               <button
                 type="button"

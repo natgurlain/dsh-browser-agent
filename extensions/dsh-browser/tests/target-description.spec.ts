@@ -46,12 +46,10 @@ describe('describing the element in the page (content script)', () => {
     Object.defineProperty(document.querySelector('label')!, 'innerText', { value: 'Email notifications\nNew orders, refunds and low stock alerts' })
     expect(describeElement(document.querySelector('#email')!)).toEqual({
       found: true, kind: 'checkbox', name: 'Email notifications', context: { kind: 'section', text: 'Notifications' },
-      // What a person sees of the label's headline (Auto review compares it with the name).
-      rendered: 'Email notifications',
     })
     expect(describeElement(document.querySelector('button')!)).toEqual({
-      // A submit button of the form (native structure; Auto review treats it as commit-like).
-      found: true, kind: 'button', name: 'Save settings', rendered: 'Save settings', context: { kind: 'section', text: 'Notifications' }, submits: true, form: expect.objectContaining({ method: 'get' }),
+      // A submit button of the form, by native structure: where its form goes is bound and read by Auto approve.
+      found: true, kind: 'button', name: 'Save settings', context: { kind: 'section', text: 'Notifications' }, submits: true, form: expect.objectContaining({ method: 'get' }),
     })
   })
 
@@ -91,7 +89,7 @@ describe('describing the element in the page (content script)', () => {
       <tr><td>Order #1041</td><td>Ada</td><td><button>Refund</button></td></tr>
       <tr><td>Order #1042</td><td>Grace</td><td><button id="second">Refund</button></td></tr></tbody></table>`
     expect(describeElement(document.querySelector('#second')!)).toEqual({
-      found: true, kind: 'button', name: 'Refund', rendered: 'Refund', context: { kind: 'row', text: 'Order #1042GraceRefund' },
+      found: true, kind: 'button', name: 'Refund', context: { kind: 'row', text: 'Order #1042GraceRefund' },
     })
   })
 

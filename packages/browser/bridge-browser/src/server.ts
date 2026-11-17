@@ -1517,10 +1517,11 @@ export class BridgeServer {
   }
 
   /**
-   * Auto review of one ordinary card of an owned pending call
-   * (docs/auto-review-design.md §4.3). The session and tool come from this
-   * bridge's own record of the call; the payload's tool must agree with it.
-   * Every failure answers "ask" or an RPC error: the extension shows the card.
+   * The silent review of one consequential action of an owned pending call
+   * while Auto approve is on (docs/auto-approve-design.md §5). The session and
+   * tool come from this bridge's own record of the call; the payload's tool
+   * must agree with it. Every failure answers "deny" or an RPC error: the
+   * extension shows the card.
    */
   private async handleReviewAsk(conn: ReadyConnection, frame: Extract<ClientFrame, { t: 'rpc' }>): Promise<void> {
     const service = this.deps.autoReview
@@ -1560,18 +1561,17 @@ export class BridgeServer {
     try {
       record = await service.review(tool.sessionId, action, controller.signal)
     } catch (error: unknown) {
-      record = { decision: 'ask', reason: 'Auto review could not decide.', code: 'failed', latencyMs: 0, failure: errorMessage(error) }
+      record = { decision: 'deny', reason: 'The reviewer could not decide.', code: 'failed', latencyMs: 0, failure: errorMessage(error) }
     } finally {
       if (tool.reviews.get(reviewId) === controller) tool.reviews.delete(reviewId)
     }
     // Only a review of the still-pending, unaborted call may allow.
     if (controller.signal.aborted || this.pendingTools.get(callId) !== tool) {
-      record = { ...record, decision: 'ask', reason: 'The review was cancelled.', code: 'cancelled', failure: record.failure ?? 'cancelled' }
+      record = { ...record, decision: 'deny', reason: 'The review was cancelled.', code: 'cancelled', failure: record.failure ?? 'cancelled' }
     }
     this.auditSafely(audit => {
       audit.reviewed?.(callId, {
         decision: record.decision,
-        ...(record.risk === undefined ? {} : { risk: record.risk }),
         reason: record.reason,
         ...(record.model === undefined ? {} : { model: record.model }),
         latencyMs: record.latencyMs,
@@ -1583,7 +1583,7 @@ export class BridgeServer {
     sendFrame(conn, { t: 'rpc.result', id: frame.id, ok: true, result: reviewAnswer(reviewId, binding, record) })
   }
 
-  /** Abort one in-flight review (Auto turned off, a new user message, the call cancelled). */
+  /** Abort one in-flight review (Auto turned off, the kill switch, the call cancelled). */
   private handleReviewCancel(conn: ReadyConnection, frame: Extract<ClientFrame, { t: 'rpc' }>): void {
     const tool = this.ownedTool(conn, frame.payload)
     const reviewId = tool === undefined ? undefined : (frame.payload as Record<string, unknown>).reviewId

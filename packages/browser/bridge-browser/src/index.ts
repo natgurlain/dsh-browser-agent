@@ -228,10 +228,11 @@ export interface Config {
    */
   honorTaintExemptions?: boolean
   /**
-   * Offer Auto review to the browser extension (docs/auto-review-design.md):
-   * per conversation, opt-in in the side panel, the conversation's own model
-   * decides eligible ordinary approval cards. Default true; false removes the
-   * `autoReview` cap so no extension offers the toggle.
+   * Offer the Auto approve reviewer to the browser extension
+   * (docs/auto-approve-design.md): with Auto approve on, the conversation's
+   * own model silently reviews consequential actions. Default true; false
+   * removes the `autoReview` cap, and consequential actions then show the
+   * ordinary card even with Auto approve on.
    */
   autoReview?: boolean
 }
@@ -349,7 +350,7 @@ function mountBridge(
     ctx.get('attachments')?.imageLimits,
   )
   const browserContext = new BrowserContextInjector(ctx.agents)
-  // Prompts the extension's panel submitted, by session (Auto review's trust anchor).
+  // Prompts the extension's panel submitted, by session (what the reviewer trusts as the user's words).
   const panelPrompts = new PanelPrompts()
   // Untrusted web content in a session makes its harness tools read-only
   // until the user clears it in the panel (session-taint.ts).
@@ -489,7 +490,7 @@ function mountBridge(
       () => ctx.agents as unknown as AgentLookup,
     ),
     maxApprovalHoldMs: DEFAULT_MAX_APPROVAL_HOLD_MS,
-    // Auto review runs here on the Host, with the conversation's own model (auto-review.ts).
+    // The Auto approve reviewer runs here on the Host, with the conversation's own model (auto-review.ts).
     // Only prompts this bridge forwarded from the panel count as the user's words.
     onPanelPrompt: (sessionId, requestId, text) => { panelPrompts.record(sessionId, requestId, text) },
     onPanelPromptRejected: (sessionId, requestId) => { panelPrompts.drop(sessionId, requestId) },

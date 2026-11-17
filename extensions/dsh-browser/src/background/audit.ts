@@ -30,19 +30,20 @@ export interface AuditedCall {
 
 /**
  * Record the approval outcome of one call: `allowed` only when the user
- * approved a card, `auto-reviewed` when Auto review approved it, and
+ * approved a card; `auto-approved` when Auto approve ran it without a card,
+ * `auto-reviewed` when it did so after its reviewer allowed it; and
  * `auto-allowed` when a standing rule (a trusted site, a session grant)
  * passed it without one.
  */
 export function auditedAuthorize(
   audited: AuditedCall,
-  authorize: (prompt: ApprovalPrompt, onPrompt: () => void, onAutoReviewed: () => void) => Promise<ApprovalAuthorization>,
+  authorize: (prompt: ApprovalPrompt, onPrompt: () => void, onAuto: (reviewed: boolean) => void) => Promise<ApprovalAuthorization>,
 ): (prompt: ApprovalPrompt) => Promise<ApprovalAuthorization> {
   return async (prompt) => {
     let prompted = false
-    let reviewed = false
-    const result = await authorize(prompt, () => { prompted = true }, () => { reviewed = true })
-    audited.decision = result === 'approved' ? (prompted ? 'allowed' : reviewed ? 'auto-reviewed' : 'auto-allowed') : result
+    let auto: 'auto-approved' | 'auto-reviewed' | undefined
+    const result = await authorize(prompt, () => { prompted = true }, (reviewed) => { auto = reviewed ? 'auto-reviewed' : 'auto-approved' })
+    audited.decision = result === 'approved' ? (prompted ? 'allowed' : auto ?? 'auto-allowed') : result
     return result
   }
 }

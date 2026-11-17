@@ -41,8 +41,8 @@ export type ApprovalDetail =
 
 /**
  * What the background knew about an action card's call when it raised it,
- * kept for Auto review's eligibility floor (security/auto-review.ts). Never
- * part of the binding (the binding covers the same facts through the target
+ * kept for Auto approve's decision (security/auto-review.ts). Never part of
+ * the binding (the binding covers the same facts through the target
  * description) and never shown on the card.
  */
 export interface ApprovalReviewFacts {
@@ -54,8 +54,6 @@ export interface ApprovalReviewFacts {
   pageUrl?: string
   /** Effective origin of the tab's top page. */
   topOrigin?: string
-  /** The policy layer's decision for the call; set by the dispatcher. */
-  policy?: 'default' | 'force' | 'trust'
 }
 
 /** A policy decision awaiting a user response. */
@@ -127,16 +125,21 @@ export interface ApprovalPrompt {
    * that session, which the browser cannot prompt.
    */
   devLoopFor?: string
-  /** Facts for Auto review's eligibility floor (action cards from the page dispatcher only). */
+  /**
+   * Which rules forced a `forced` card: a site `ask` rule, the taint rules, or
+   * both. Absent on cards forced for other reasons (watchers, site drivers,
+   * strict mode). Auto approve leaves `site-ask` cards to the user and sends
+   * `taint` cards to its reviewer. Not part of the binding.
+   */
+  forcedBy?: Array<'site-ask' | 'taint'>
+  /** Facts for Auto approve's decision (action cards from the page dispatcher only). */
   review?: ApprovalReviewFacts
   /**
-   * Auto review looked at this card and left it to the user: the line the
-   * card shows ("Auto review asked: …"). Reviewer text, sanitized and capped;
-   * not part of the binding.
+   * Auto approve's reviewer looked at this card and left it to the user: the
+   * line the card shows, with the reviewer's one-line reason (model text,
+   * sanitized and capped). Not part of the binding.
    */
   autoReviewNote?: string
-  /** The card is shown because Auto review reached its per-turn limit: approving it lets Auto go on. */
-  autoReviewLimit?: true
 }
 
 /** Correlated request delivered to every open side-panel view. */
