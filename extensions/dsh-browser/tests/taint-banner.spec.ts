@@ -269,6 +269,117 @@ describe('taint banner buttons', () => {
   })
 })
 
+describe('taint banner with Auto approve', () => {
+  const en = PANEL_COPY.en.taint
+  const auto = { autoApprove: true }
+  const summary = (host: HTMLElement): HTMLButtonElement => host.querySelector('.taint-quiet-summary') as HTMLButtonElement
+
+  it('Auto off: the full yellow banner, wording and buttons exactly as before', async () => {
+    const host = await banner(['https://seraph.quest'], sites(['https://seraph.quest']), { autoApprove: false })
+    const element = host.querySelector('[data-testid="taint-banner"]') as HTMLElement
+    expect(element.className).toBe('taint-banner')
+    expect(host.querySelector('.taint-quiet-summary')).toBeNull()
+    expect(sentence(host)).toBe('This conversation read web pages that could contain instructions (seraph.quest), so risky actions ask first and shell and file tools are off.')
+    expect(buttons(host)).toEqual(['Trust seraph.quest', 'Clear'])
+  })
+
+  it('Auto on: one slim neutral line with a details toggle and Clear; the full sentence is in the title and read to screen readers', async () => {
+    const sources = ['https://a.example', 'https://b.example', 'https://c.example', 'https://d.example']
+    const host = await banner(sources, sites(['https://a.example']), auto)
+    const element = host.querySelector('[data-testid="taint-banner"]') as HTMLElement
+    expect(element.classList.contains('taint-quiet')).toBe(true)
+    expect(element.getAttribute('role')).toBe('status')
+    // Only two controls on the line: no Trust button, no "+N more", no long sentence in view.
+    expect(buttons(host)).toEqual([en.quiet, en.clear])
+    expect(summary(host).textContent).toBe('Web pages read · shell and file tools paused')
+    const full = 'This conversation read web pages that could contain instructions (a.example, b.example, c.example, d.example). Auto approve checks risky actions before they run; shell and file tools are off.'
+    expect(summary(host).getAttribute('title')).toBe(full)
+    const described = document.getElementById(summary(host).getAttribute('aria-describedby') ?? '')
+    expect(described?.textContent).toBe(full)
+    expect(described?.className).toBe('sr-only')
+    expect(host.querySelector('[data-testid="taint-details"]')).toBeNull()
+    expect(summary(host).getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('Auto on: the toggle opens the full sentence with every site, and the Trust choice', async () => {
+    const host = await banner(['https://seraph.quest', 'https://x.com'], sites(['https://seraph.quest', 'https://x.com']), auto)
+    await click(summary(host))
+    expect(summary(host).getAttribute('aria-expanded')).toBe('true')
+    const details = host.querySelector('[data-testid="taint-details"]') as HTMLElement
+    expect(summary(host).getAttribute('aria-controls')).toBe(details.id)
+    expect(details.querySelector('p')?.textContent).toBe(en.bodyAuto('seraph.quest, x.com'))
+    expect(buttons(details)).toEqual(['Trust seraph.quest', 'Trust x.com'])
+    await click(summary(host))
+    expect(host.querySelector('[data-testid="taint-details"]')).toBeNull()
+  })
+
+  it('Auto on: Clear clears exactly the shown session, as before', async () => {
+    const host = await banner(['https://seraph.quest'], sites(['https://seraph.quest']), auto)
+    await click(button(host, 'Clear'))
+    expect(ports[0]!.posted.at(-1)).toMatchObject({ type: 'taint.clear', sessionId: 's1' })
+  })
+
+  it('Auto on: "Trust" still asks first and sends exactly that site\'s sources; the confirmation stays if the details close', async () => {
+    const offered = { 'https://x.com': site('x.com'), 'https://mail.x.com': site('x.com') }
+    const host = await banner(Object.keys(offered), offered, auto)
+    await click(summary(host))
+    await click(button(host, 'Trust x.com'))
+    expect(trustMessages()).toEqual([])
+    await click(summary(host))
+    const confirm = host.querySelector('[data-testid="taint-trust-confirm"]') as HTMLElement
+    expect(confirm.querySelector('span')?.textContent).toBe(`Trust x.com? ${en.trustEffects}`)
+    await click(button(confirm, 'Trust'))
+    expect(trustMessages()).toEqual([expect.objectContaining({ type: 'taint.trust', sessionId: 's1', origins: ['https://x.com', 'https://mail.x.com'] })])
+    expect(host.querySelector('[data-testid="taint-trust-confirm"]')).toBeNull()
+  })
+
+  it('Auto on: more than two sites still open the list of Trust choices', async () => {
+    const sources = ['https://a.example', 'https://b.example', 'https://c.example']
+    const host = await banner(sources, sites(sources), auto)
+    await click(summary(host))
+    await click(button(host, 'Trust these sites…'))
+    const list = host.querySelector('[data-testid="taint-trust-list"]') as HTMLElement
+    expect([...list.querySelectorAll('li span')].map((item) => item.textContent)).toEqual(['a.example', 'b.example', 'c.example'])
+  })
+
+  it('Auto on: a local address still asks its question on its own row, one click', async () => {
+    const host = await banner(['http://localhost:3000'], { 'http://localhost:3000': local('http://localhost:3000') }, auto)
+    expect(host.querySelector('[data-testid="taint-local-question"] span')?.textContent).toBe('Treat pages from localhost:3000 as yours?')
+    expect(buttons(host)).toEqual([en.quiet, 'Clear', 'Yes, they are mine'])
+    await click(button(host, 'Yes, they are mine'))
+    expect(trustMessages()).toEqual([expect.objectContaining({ type: 'taint.trust', sessionId: 's1', origins: ['http://localhost:3000'] })])
+  })
+
+  it('Auto on: an unknown source offers no choice, only Clear', async () => {
+    const host = await banner([UNKNOWN_SOURCE, 'https://seraph.quest'], sites(['https://seraph.quest']), auto)
+    await click(summary(host))
+    expect(buttons(host)).toEqual([en.quiet, 'Clear'])
+    expect(host.querySelector('[data-testid="taint-details"] p')?.textContent).toContain('(seraph.quest, an unknown origin)')
+  })
+
+  it('Auto on: only a real user click can trust; a scripted click does nothing, and Clear works', async () => {
+    const host = await banner(['https://x.com', 'http://localhost:3000'], { 'https://x.com': site('x.com'), 'http://localhost:3000': local('http://localhost:3000') }, { ...auto, acceptSyntheticClicks: false })
+    await click(summary(host))
+    await click(button(host, 'Trust x.com'))
+    expect(host.querySelector('[data-testid="taint-trust-confirm"]')).toBeNull()
+    await click(button(host, 'Yes, they are mine'))
+    expect(trustMessages()).toEqual([])
+    await click(button(host, 'Clear'))
+    expect(ports[0]!.posted.at(-1)).toMatchObject({ type: 'taint.clear', sessionId: 's1' })
+  })
+
+  it('Auto on: Chinese strings', async () => {
+    expect(PANEL_COPY.zh.taint.quiet).toBe('已读取网页 · 命令行与文件工具已暂停')
+    expect(PANEL_COPY.zh.taint.quiet).not.toBe(en.quiet)
+    const host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+    await act(async () => { root!.render(createElement(TaintBanner, { sessionId: 's1', locale: 'zh', autoApprove: true })) })
+    await act(async () => { ports[0]!.emit({ type: 'taint.state', records: { s1: record(['https://x.com']) }, trustable: {} }) })
+    expect(buttons(host)).toEqual(['已读取网页 · 命令行与文件工具已暂停', '清除'])
+  })
+})
+
 describe('taint exemption settings', () => {
   const value: TaintExemptionValue = {
     taintExemptLocalPages: true,

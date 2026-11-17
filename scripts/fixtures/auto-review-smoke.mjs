@@ -215,6 +215,40 @@ export async function runAutoReviewSmoke(ctx) {
   await waitFor(async () => await chat.locator('.auto-review-badge').count() >= 4, 'Auto badges on the timeline rows')
   assert.ok(await chat.getByText('Auto-approved after a check', { exact: true }).count() >= 1)
   await themedShots(chat, 'auto-approve-on')
+  // The page read taints the conversation. With Auto approve on that is one slim, neutral
+  // line (not the yellow banner); the full sentence is one click away.
+  const taintLine = chat.getByTestId('taint-banner')
+  await taintLine.waitFor({ timeout: 15_000 })
+  assert.equal(await taintLine.evaluate(element => element.classList.contains('taint-quiet')), true, 'Auto approve shows the slim taint line')
+  const taintSummary = taintLine.locator('.taint-quiet-summary')
+  assert.equal(await taintSummary.textContent(), 'Web pages read · shell and file tools paused')
+  assert.match(await taintSummary.getAttribute('title'), new RegExp(`could contain instructions \\(${origin.replace(/^https?:\/\//u, '').replaceAll('.', '\\.')}\\)\\. Auto approve checks risky actions before they run; shell and file tools are off\\.`))
+  assert.equal(await taintLine.getByRole('button', { name: 'Clear', exact: true }).count(), 1)
+  // One line, at the panel's default width too.
+  for (const width of [400, 360]) {
+    await chat.setViewportSize({ width, height: 860 })
+    const box = await taintLine.boundingBox()
+    assert.ok(box !== null && box.height <= 32, `the taint line is one line at ${width} px (${box?.height} px tall)`)
+  }
+  await chat.setViewportSize({ width: 400, height: 860 })
+  await themedShots(chat, 'auto-approve-taint-line')
+  await taintSummary.click()
+  const taintDetails = chat.getByTestId('taint-details')
+  await taintDetails.waitFor()
+  assert.match(await taintDetails.textContent(), /could contain instructions/u)
+  await themedShots(chat, 'auto-approve-taint-details')
+  await taintSummary.click()
+  await taintDetails.waitFor({ state: 'detached' })
+  // A special state still asks, in the same neutral style: with local pages exempt, the
+  // unlisted local address gets its one question. Nothing is answered; the setting goes back.
+  await settings({ taintExemptLocalPages: true, taintLocalOrigins: [] })
+  const localQuestion = chat.getByTestId('taint-local-question')
+  await localQuestion.waitFor({ timeout: 15_000 })
+  assert.match(await localQuestion.textContent(), /Treat pages from 127\.0\.0\.1:\d+ as yours\?Yes, they are mine/u)
+  await themedShots(chat, 'auto-approve-taint-local')
+  await settings({ taintExemptLocalPages: false })
+  await localQuestion.waitFor({ state: 'detached', timeout: 15_000 })
+  results.push('with Auto approve on, the page read shows as one slim neutral line ("Web pages read · shell and file tools paused", Clear) with the full sentence one click away; the local-address question still shows')
   results.push('Auto approve on: navigate, click, type and a form submit ran with zero approval cards; only the submit was reviewed (silently, "Checking…" in the timeline), and the timeline marks every step Auto')
 
   // ---- 2. Latency: ordinary steps under Auto against the trusted-site baseline; the reviewed step ----

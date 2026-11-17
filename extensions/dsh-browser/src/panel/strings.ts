@@ -414,6 +414,9 @@ export interface PanelCopy {
     body: (sites: string) => string
     /** The same, while Auto approve is on: risky steps are checked by the reviewer instead of asking. */
     bodyAuto: (sites: string) => string
+    /** The slim status line shown instead of the banner while Auto approve is on. */
+    quiet: string
+    /** Accessible name of the slim line's details toggle. */
     unknownSource: string
     more: (count: number) => string
     clear: string
@@ -1097,6 +1100,7 @@ const EN: PanelCopy = {
   taint: {
     body: (sites) => `This conversation read web pages that could contain instructions (${sites}), so risky actions ask first and shell and file tools are off.`,
     bodyAuto: (sites) => `This conversation read web pages that could contain instructions (${sites}). Auto approve checks risky actions before they run; shell and file tools are off.`,
+    quiet: 'Web pages read · shell and file tools paused',
     unknownSource: 'an unknown origin',
     more: (count) => `+${String(count)} more`,
     clear: 'Clear',
@@ -1776,6 +1780,7 @@ const ZH: PanelCopy = {
   taint: {
     body: (sites) => `本对话读取了可能包含指令的网页（${sites}），因此高风险操作会先询问，命令行与文件工具已停用。`,
     bodyAuto: (sites) => `本对话读取了可能包含指令的网页（${sites}）。自动批准会在高风险操作执行前先检查；命令行与文件工具已停用。`,
+    quiet: '已读取网页 · 命令行与文件工具已暂停',
     unknownSource: '未知来源',
     more: (count) => `另有 ${String(count)} 个`,
     clear: '清除',
