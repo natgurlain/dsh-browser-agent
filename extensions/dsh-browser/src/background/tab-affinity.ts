@@ -65,6 +65,32 @@ export class TabAffinityController {
   private revision = 0
   private sessionTabs = new Map<string, AffinityTab>()
   private focusedSessionId: string | null = null
+  /** Tabs the agent's own foreground `browser_open_tab` is creating and has not bound yet. */
+  private agentOpening = new Set<number>()
+
+  /**
+   * The agent itself is opening this tab in the foreground: Chrome activates
+   * it (still blank) before the open binds it, and that activation is not the
+   * user switching pages, so it raises no handoff question.
+   */
+  expectAgentOpenedTab(tabId: number): boolean {
+    if (this.agentOpening.has(tabId)) return false
+    const before = this.status()
+    this.agentOpening.add(tabId)
+    if (this.status() === before) return false
+    this.revision += 1
+    return true
+  }
+
+  /** The open ended (bound, failed or cancelled); true when the visible state changed. */
+  endAgentOpenedTab(tabId: number): boolean {
+    if (!this.agentOpening.has(tabId)) return false
+    const before = this.status()
+    this.agentOpening.delete(tabId)
+    if (this.status() === before) return false
+    this.revision += 1
+    return true
+  }
 
   snapshot(): TabAffinityState {
     return {
@@ -300,6 +326,7 @@ export class TabAffinityController {
 
   /** Remove stale state when Chrome closes a tracked tab. */
   removeTab(tabId: number): boolean {
+    this.agentOpening.delete(tabId)
     let sessionRemoved = false
     for (const [sid, sTab] of this.sessionTabs.entries()) {
       if (sTab.tabId === tabId) {
@@ -426,6 +453,8 @@ export class TabAffinityController {
   private status(): TabAffinityStatus {
     if (this.controlled === null) return this.lost ? 'lost' : 'unbound'
     if (this.active?.tabId === this.controlled.tabId) return 'following'
+    // The agent's own new tab, shown before it is bound: tools still target the bound tab.
+    if (this.active !== null && this.agentOpening.has(this.active.tabId)) return 'following'
     if (this.active !== null && !this.pinned && this.keptActiveTabId !== this.active.tabId) return 'handoff'
     return 'background'
   }

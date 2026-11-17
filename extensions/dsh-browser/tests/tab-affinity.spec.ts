@@ -38,6 +38,41 @@ describe('TabAffinityController', () => {
     expect(affinity.snapshot()).toMatchObject({ status: 'following', controlled: { tabId: 2 } })
   })
 
+  it('does not ask "follow your current page?" for a tab the agent itself is opening', () => {
+    const affinity = new TabAffinityController()
+    affinity.observeActive(tab(1))
+    affinity.bindInitial(tab(1))
+    // browser_open_tab (foreground): Chrome activates the new, still blank tab before it is bound.
+    affinity.expectAgentOpenedTab(2)
+    affinity.observeActive({ tabId: 2, windowId: 1, title: '', url: '' })
+    expect(affinity.snapshot()).toMatchObject({ status: 'following', controlled: { tabId: 1 } })
+    // Tools keep targeting the bound tab until the open binds the new one.
+    expect(affinity.resolveTarget()).toMatchObject({ kind: 'target', tab: { tabId: 1 } })
+    affinity.rebindActive(tab(2))
+    expect(affinity.snapshot()).toMatchObject({ status: 'following', controlled: { tabId: 2 } })
+  })
+
+  it('still asks when the user switches to another tab while the agent opens one', () => {
+    const affinity = new TabAffinityController()
+    affinity.observeActive(tab(1))
+    affinity.bindInitial(tab(1))
+    affinity.expectAgentOpenedTab(2)
+    affinity.observeActive(tab(3))
+    expect(affinity.snapshot()).toMatchObject({ status: 'handoff', active: { tabId: 3 } })
+  })
+
+  it('asks again for the opened tab once the open ended without binding it', () => {
+    const affinity = new TabAffinityController()
+    affinity.observeActive(tab(1))
+    affinity.bindInitial(tab(1))
+    affinity.expectAgentOpenedTab(2)
+    affinity.observeActive(tab(2))
+    const revision = affinity.snapshot().revision
+    expect(affinity.endAgentOpenedTab(2)).toBe(true)
+    expect(affinity.snapshot()).toMatchObject({ status: 'handoff', active: { tabId: 2 } })
+    expect(affinity.snapshot().revision).toBeGreaterThan(revision)
+  })
+
   it('keeps operating the bound tab in the background after an explicit keep choice', () => {
     const affinity = new TabAffinityController()
     affinity.observeActive(tab(1))

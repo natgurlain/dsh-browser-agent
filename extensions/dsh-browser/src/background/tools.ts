@@ -2485,6 +2485,12 @@ export async function dispatchOpenTab(
   targetStillAllowed: (tabId: number) => boolean,
   commitAction?: () => void,
   policy?: CallPolicyHook,
+  /**
+   * Told right before the tab is created and the moment it exists (a
+   * foreground tab is already active then), so its activation is known as the
+   * agent's own and raises no handoff question.
+   */
+  agentOpen?: { creating: () => void; created: (tabId: number) => void },
 ): Promise<ToolAnswer> {
   if (isCancelled(call, signal)) return cancelled()
   const parsed = parseHttpUrl(call.args.url)
@@ -2516,6 +2522,7 @@ export async function dispatchOpenTab(
   let created: chrome.tabs.Tab
   try {
     // No URL yet: register the readiness wait before the http(s) navigation.
+    agentOpen?.creating()
     created = await chrome.tabs.create({ active, windowId })
   } catch (error: unknown) {
     return {
@@ -2530,6 +2537,7 @@ export async function dispatchOpenTab(
     return { ok: false, error: { code: 'action-failed', message: 'Chrome created a tab without an id.' } }
   }
   const tabId = created.id
+  agentOpen?.created(tabId)
   if (isCancelled(call, signal)) {
     await removeCreatedTab(tabId)
     return cancelled()
