@@ -239,6 +239,7 @@ export async function runAutoReviewSmoke(ctx) {
   await themedShots(chat, 'auto-approve-taint-details')
   await taintSummary.click()
   await taintDetails.waitFor({ state: 'detached' })
+  assert.equal(await taintSummary.getAttribute('aria-expanded'), 'false')
   // A special state still asks, in the same neutral style: with local pages exempt, the
   // unlisted local address gets its one question. Nothing is answered; the setting goes back.
   await settings({ taintExemptLocalPages: true, taintLocalOrigins: [] })
