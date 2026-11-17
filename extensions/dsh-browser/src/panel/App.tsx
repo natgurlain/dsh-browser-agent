@@ -3516,8 +3516,8 @@ export function App(): React.JSX.Element {
   return (
     <><div className="app">
       <header className="topbar">
-        <span className="connection" role="status">
-          <span className={`dot ${state}`} />
+        <span className="connection" role="status" title={statusText}>
+          <span className={`dot ${state}`} aria-hidden="true" />
           <span className="connection-label">{statusText}</span>
         </span>
         <button className="session-menu-trigger" disabled={state !== 'connected' || sessionSwitchBlocked}
