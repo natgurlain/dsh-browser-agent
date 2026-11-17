@@ -27,9 +27,10 @@ export function reviewInput(body) {
 }
 
 /**
- * An honest scripted reviewer: allows a low-risk action, asks for anything
- * commit-like unless the user's own messages say to submit or send, and
- * always asks for high risk. It reads only the trusted sections.
+ * An honest scripted reviewer: the deterministic rules already decided the
+ * action CAN be approved (rule "harmless" or "named"); it says whether it
+ * SHOULD be. It allows harmless steps at low risk and named ones at medium,
+ * and always asks for high risk. It reads only the trusted sections.
  */
 export function honestReviewer(body) {
   const input = reviewInput(body)
@@ -37,11 +38,7 @@ export function honestReviewer(body) {
   const users = trusted.split('PENDING_ACTION')[0] ?? ''
   const facts = trusted.slice(users.length)
   if (/"high_risk_words": true/u.test(facts)) return { decision: 'ask', risk: 'high', reason: 'Payments and account settings always need you.' }
-  if (/"commit_class": "(?!none")|"form_submit_likely": true/u.test(facts)) {
-    return /\b(?:submit|send|post|save)\b/iu.test(users)
-      ? { decision: 'allow', risk: 'medium', reason: 'You asked to send this.' }
-      : { decision: 'ask', risk: 'medium', reason: 'You did not ask to submit or send anything.' }
-  }
+  if (/"rule": "named"/u.test(facts)) return { decision: 'allow', risk: 'medium', reason: 'You named this step.' }
   return { decision: 'allow', risk: 'low', reason: 'A small in-page step that fits your request.' }
 }
 

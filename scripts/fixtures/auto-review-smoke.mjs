@@ -22,8 +22,8 @@ export const AUTO_PROVIDER = 'auto-check'
 /** The fixture page the section drives. */
 export const AUTO_REVIEW_PAGE = `<!doctype html><title>Trip notes</title><body style="font:14px sans-serif;padding:16px">
   <h1>Trip notes</h1>
-  <button id="more" type="button">Show more</button><p id="moreOut"></p>
-  <button id="expand" type="button">Expand details</button><p id="expandOut"></p>
+  <button id="more" type="button" aria-expanded="false">Show more</button><p id="moreOut"></p>
+  <button id="expand" type="button" aria-expanded="false">Expand details</button><p id="expandOut"></p>
   <form id="noteForm"><input id="note" aria-label="Note" value="See you at 8"><button id="send">Send message</button></form><p id="sent"></p>
   <script>
     window.counts = { more: 0, expand: 0, sent: 0 };
@@ -180,20 +180,20 @@ export async function runAutoReviewSmoke(ctx) {
   assert.equal(await chat.locator('.timeline-step-auto-reason').first().textContent(), 'Approved by Auto review')
   await shot(chat, 'auto-review-approved-row.png')
   autoModel.setReviewer(honestReviewer)
-  results.push('Auto review on: a low-risk click ran with no card, showed "Reviewing…" while the conversation\'s model decided, then the Auto badge and the fixed "Approved by Auto review" line')
+  results.push('Auto review on: a harmless disclosure click ran with no card, showed "Reviewing…" while the conversation\'s model decided, then the Auto badge and the fixed "Approved by Auto review" line')
 
   // ---- 2. The reviewer asks: the ordinary card, with its line ----
   await send('AR2 Have a look at the note form.')
   const askCard = chat.locator('.approval-dialog')
   await askCard.waitFor({ timeout: 30_000 })
   await chat.locator('.approval-auto-review').waitFor()
-  // A fixed sentence chosen by code, never the reviewer's words.
-  assert.equal(await chat.locator('.approval-auto-review').textContent(), 'Auto review asked: the reviewer was not sure this fits your request.')
+  // A fixed sentence chosen by code, never the reviewer's words: it teaches what to say next time.
+  assert.equal(await chat.locator('.approval-auto-review').textContent(), 'Auto review asked: your message did not name this button. Say “click Send message” to let it through next time.')
   await shot(chat, 'auto-review-ask-card.png')
   await chat.getByRole('button', { name: 'Deny', exact: true }).click()
   await turnDone('AR2')
   assert.equal(await page.evaluate(() => window.counts.sent), 0, 'the submit the user never asked for did not run')
-  results.push('a reviewer "ask" shows the ordinary card with a fixed "Auto review asked: …" sentence (never model text), and the user decides')
+  results.push('a button the user did not name shows the ordinary card with a fixed sentence teaching the words to use (never model text), and the user decides')
 
   // ---- 3. A forced card still appears with Auto on, and is never reviewed ----
   const host = new URL(autoPage).host
