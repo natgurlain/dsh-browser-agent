@@ -161,7 +161,17 @@ describe('panel session transitions', () => {
     expect(scrollTop).toBe(scrollHeight - 600)
     expect(document.querySelector('.scroll-to-bottom')).toBeNull()
 
+    // A scroll the reader did not make (layout, scroll anchoring) does not stop following.
     await act(async () => {
+      scrollTop -= 200
+      messages.dispatchEvent(new Event('scroll'))
+    })
+    expect(scrollTop).toBe(scrollHeight - 600)
+    expect(document.querySelector('.scroll-to-bottom')).toBeNull()
+
+    // The reader wheels the thread up: that does.
+    await act(async () => {
+      messages.dispatchEvent(new WheelEvent('wheel', { deltaY: -200 }))
       scrollTop -= 200
       messages.dispatchEvent(new Event('scroll'))
     })

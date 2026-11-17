@@ -102,7 +102,7 @@ import {
   restoreSubmittedDraft,
   type ComposerDraft,
 } from './composer.ts'
-import { isNearScrollBottom } from './scroll.ts'
+import { ConversationFollow, isScrollUpKey } from './scroll.ts'
 import { SettingToggle } from './SettingToggle.tsx'
 import { EntryAdd, EntryList, SettingRow, SettingsGroup, SettingsKitCopyContext, SettingsSection } from './SettingsKit.tsx'
 import { downloadText, requestOptionalPermission, storedStepLabels } from './browser-helpers.ts'
@@ -1040,22 +1040,42 @@ export function App(): React.JSX.Element {
   const seqRef = useRef(0)
   const sessionRef = useRef<string | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  // Whether the thread follows its newest content (see ConversationFollow).
+  const followRef = useRef(new ConversationFollow())
   const atBottomRef = useRef(true)
   const [atBottom, setAtBottom] = useState(true)
 
   const nextSeq = (): number => { seqRef.current += 1; return seqRef.current }
 
-  function syncScrollBottom(): void {
-    const element = scrollRef.current
-    if (element === null) return
-    const next = isNearScrollBottom(element)
+  function setFollowing(next: boolean): void {
     atBottomRef.current = next
     setAtBottom((current) => current === next ? current : next)
   }
 
+  function pinToBottom(element: HTMLDivElement): void {
+    element.scrollTo({ top: element.scrollHeight, behavior: 'instant' })
+    followRef.current.pinned(element)
+  }
+
+  function syncScrollBottom(): void {
+    const element = scrollRef.current
+    if (element === null) return
+    const { following, pin } = followRef.current.onScroll(element)
+    if (pin) pinToBottom(element)
+    setFollowing(following)
+  }
+
+  /** The scrollport or its content changed size: a following thread stays at the newest content. */
+  function syncScrollResize(): void {
+    const element = scrollRef.current
+    if (element === null) return
+    if (followRef.current.onResize(element)) pinToBottom(element)
+    setFollowing(followRef.current.isFollowing)
+  }
+
   function stickConversationToBottom(): void {
-    atBottomRef.current = true
-    setAtBottom(true)
+    followRef.current.stick()
+    setFollowing(true)
   }
 
   function scrollMessagesToBottom(behavior: ScrollBehavior = 'smooth'): void {
@@ -1443,20 +1463,53 @@ export function App(): React.JSX.Element {
     if (!atBottomRef.current) return
     // Scroll before ResizeObserver measures new content, without intermediate
     // smooth-scroll events disabling follow while content keeps growing.
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'instant' })
+    const element = scrollRef.current
+    if (element !== null) pinToBottom(element)
   }, [rows, streamRow, working])
 
-  // Sibling chrome (session picker, question card, errors, attachments) can
-  // resize the scrollport without a scroll event; keep bottom state honest.
+  // Sibling chrome (the taint line, session picker, question card, errors,
+  // attachments) resizes the scrollport without any scroll by the user: a
+  // following thread stays at the newest content.
   useEffect(() => {
     if (showSettings) return
     const element = scrollRef.current
     if (element === null || typeof ResizeObserver === 'undefined') return
-    syncScrollBottom()
-    const observer = new ResizeObserver(() => { syncScrollBottom() })
+    syncScrollResize()
+    const observer = new ResizeObserver(() => { syncScrollResize() })
     observer.observe(element)
     return () => observer.disconnect()
-  }, [showSettings, question, error, showSessionPicker, draftImages.length, selection])
+  }, [showSettings])
+
+  // Only the user's own scrolling of the thread stops it following: a wheel,
+  // touch, scrolling key or a drag of the thread's scrollbar.
+  useEffect(() => {
+    if (showSettings) return
+    const element = scrollRef.current
+    if (element === null) return
+    const follow = followRef.current
+    const onWheel = (event: WheelEvent): void => { follow.noteUserScroll(event.deltaY < 0 ? 'up' : event.deltaY > 0 ? 'down' : 'unknown') }
+    const intent = (): void => { follow.noteUserScroll() }
+    const onKey = (event: KeyboardEvent): void => { if (isScrollUpKey(event)) follow.noteUserScroll('up') }
+    const onPointerDown = (event: PointerEvent): void => {
+      // Only the scrollport itself (its scrollbar), not the rows inside it.
+      if (event.target === element) follow.setDragging(true)
+    }
+    const onPointerUp = (): void => { follow.setDragging(false) }
+    element.addEventListener('wheel', onWheel, { passive: true })
+    element.addEventListener('touchmove', intent, { passive: true })
+    element.addEventListener('keydown', onKey)
+    element.addEventListener('pointerdown', onPointerDown)
+    window.addEventListener('pointerup', onPointerUp)
+    window.addEventListener('pointercancel', onPointerUp)
+    return () => {
+      element.removeEventListener('wheel', onWheel)
+      element.removeEventListener('touchmove', intent)
+      element.removeEventListener('keydown', onKey)
+      element.removeEventListener('pointerdown', onPointerDown)
+      window.removeEventListener('pointerup', onPointerUp)
+      window.removeEventListener('pointercancel', onPointerUp)
+    }
+  }, [showSettings])
 
   useEffect(() => {
     if (!showModelPicker) return

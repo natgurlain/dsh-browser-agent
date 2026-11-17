@@ -230,6 +230,8 @@ export async function runAutoReviewSmoke(ctx) {
   ])
   const cardsBefore = await cardsSoFar()
   const reviewsBefore = autoModel.state.reviews.length
+  // A short panel, so the thread scrolls: it must keep following the newest content when the taint line appears above it.
+  await chat.setViewportSize({ width: 400, height: 600 })
   await send('AR1 Open the contact page, show more, put my name Ada in the contact form and submit it.')
   // The submit is consequential: the timeline says "Checking…" while the reviewer decides; no card.
   await chat.locator('.timeline-step-reviewing').waitFor({ timeout: 30_000 })
@@ -254,7 +256,28 @@ export async function runAutoReviewSmoke(ctx) {
   // line (not the yellow banner); the full sentence is one click away.
   const taintLine = chat.getByTestId('taint-banner')
   await taintLine.waitFor({ timeout: 15_000 })
-  assert.equal(await taintLine.evaluate(element => element.classList.contains('taint-quiet')), true, 'Auto approve shows the slim taint line')
+  // The line appeared above the thread during the turn: the thread still shows the newest message.
+  const threadGap = () => chat.locator('.messages').evaluate(element => ({ gap: element.scrollHeight - element.scrollTop - element.clientHeight, overflow: element.scrollHeight - element.clientHeight }))
+  await chat.getByText('AR1 done.', { exact: true }).waitFor()
+  await chat.waitForTimeout(300)
+  const afterLine = await threadGap()
+  assert.ok(afterLine.overflow > 100, `the thread scrolls in the short panel (${afterLine.overflow} px)`)
+  assert.ok(afterLine.gap <= 2, `the thread follows the newest message after the taint line appeared (${afterLine.gap} px from the bottom)`)
+  assert.equal(await chat.locator('.scroll-to-bottom').count(), 0, 'no "Scroll to latest" after the taint line appeared')
+  // Scrolling inside a nested scroll area (a step's details) does not stop the thread following.
+  const lastStep = chat.locator('.step-timeline').last().locator('.timeline-step').first()
+  await lastStep.locator('.timeline-step-head').click()
+  const nested = lastStep.locator('.timeline-step-details pre').last()
+  await nested.waitFor()
+  const nestedRange = await nested.evaluate(element => element.scrollHeight - element.clientHeight)
+  assert.ok(nestedRange > 40, `the step details scroll on their own (${nestedRange} px)`)
+  await nested.hover()
+  await chat.mouse.wheel(0, Math.min(nestedRange, 120))
+  await chat.waitForTimeout(250)
+  await chat.mouse.wheel(0, -Math.floor(Math.min(nestedRange, 120) / 2))
+  await chat.waitForTimeout(400)
+  await lastStep.locator('.timeline-step-head').click()
+  results.push('the thread keeps following the newest message when the taint line appears above it mid-turn and after scrolling inside a step\'s details')
   const taintSummary = taintLine.locator('.taint-quiet-summary')
   assert.equal(await taintSummary.textContent(), 'Web pages read · shell and file tools paused')
   assert.match(await taintSummary.getAttribute('title'), new RegExp(`could contain instructions \\(${origin.replace(/^https?:\/\//u, '').replaceAll('.', '\\.')}\\)\\. Auto approve checks risky actions before they run; shell and file tools are off\\.`))
@@ -296,8 +319,13 @@ export async function runAutoReviewSmoke(ctx) {
   ])
   const cardsBeforeLead = await cardsSoFar()
   const savesBefore = leadSaves.length
+  await chat.setViewportSize({ width: 400, height: 600 })
   await send('AR6 Open the new lead form, type Marta Okafor as the name and save the lead.')
   await turnDone('AR6')
+  await chat.waitForTimeout(300)
+  const afterLead = await threadGap()
+  assert.ok(afterLead.gap <= 2, `the next turn is followed to its newest message (${afterLead.gap} px from the bottom)`)
+  assert.equal(await chat.locator('.scroll-to-bottom').count(), 0)
   assert.equal(await cardsSoFar(), cardsBeforeLead, 'the navigating save showed no card')
   assert.deepEqual(leadSaves.slice(savesBefore), ['name=Marta+Okafor'], 'the lead was saved once')
   assert.equal(new URL(page.url()).pathname, '/auto-review/lead/saved')
@@ -309,6 +337,9 @@ export async function runAutoReviewSmoke(ctx) {
   assert.match(autoModel.state.lastToolResult ?? '', /The page navigated to a new document/u, 'the agent is told the page navigated')
   await saveStep.scrollIntoViewIfNeeded()
   await themedShots(chat, 'auto-approve-post-submit-step')
+  // Back to the trip notes page the next sections act on.
+  await page.goto(`${autoPage}/contact`)
+  await chat.setViewportSize({ width: 400, height: 860 })
   results.push('a click that submits a navigating POST form (303) is a done step, not "Failed", and the agent is told the page navigated')
 
   // ---- 2. Latency: ordinary steps under Auto against the trusted-site baseline; the reviewed step ----
