@@ -113,7 +113,7 @@ describe('the offer', () => {
   it('tells the bridge about a real click on the offer or on Continue, with the run\'s own counts; never otherwise', async () => {
     const { learning, request, sent } = await watched()
     request.mockResolvedValueOnce(completed(38))
-    await learning.runSuggestion('s1', true)
+    await learning.runSuggestion('s1', { rows: 38, steps: 114 })
     expect(sent().at(-1)).toEqual({ sessionId: 's1', steps: program(38), rowSteps: 3, userRequest: { kind: 'do-remaining', rows: 38, steps: 114 } })
     // A run that stops part-way; Continue (a real click) carries its own counts.
     const again = await watched()
@@ -122,8 +122,35 @@ describe('the offer', () => {
     expect(again.sent().at(-1)).not.toHaveProperty('userRequest')
     expect(again.state().resume).toMatchObject({ rows: 18 })
     again.request.mockResolvedValueOnce(completed(18))
-    await again.learning.continueRemaining('s1', true)
+    await again.learning.continueRemaining('s1', { rows: 18 })
     expect(again.sent().at(-1)).toMatchObject({ userRequest: { kind: 'continue', rows: 18, steps: 54 } })
+  })
+
+  it('a click vouches only for the program its button stood for: other counts, or rows that changed before the click, run without the line', async () => {
+    // The button the user clicked showed other counts than the offer that runs (an offer replaced just before the click).
+    const other = await watched()
+    other.request.mockResolvedValueOnce(completed(38))
+    await other.learning.runSuggestion('s1', { rows: 10, steps: 30 })
+    expect(other.sent().at(-1)).toEqual({ sessionId: 's1', steps: program(38), rowSteps: 3 })
+    // Malformed counts from the panel count as no click at all.
+    const bad = await watched()
+    bad.request.mockResolvedValueOnce(completed(38))
+    await bad.learning.runSuggestion('s1', { rows: 38 })
+    expect(bad.sent().at(-1)).not.toHaveProperty('userRequest')
+    // The page shows fewer or other rows at the click than when the offer appeared: what runs is the page as it is, without the line.
+    const changed = await watched()
+    available = 30
+    changed.request.mockResolvedValueOnce(completed(28))
+    await changed.learning.runSuggestion('s1', { rows: 38, steps: 114 })
+    expect(changed.sent().at(-1)).not.toHaveProperty('userRequest')
+    expect(changed.sent().at(-1)!.steps.length).not.toBe(114)
+    // Continue: the button named 18 rows; a count that is not the one shown gets no line.
+    const again = await watched()
+    again.request.mockResolvedValueOnce(stopped(20, 38))
+    await again.learning.runSuggestion('s1')
+    again.request.mockResolvedValueOnce(completed(18))
+    await again.learning.continueRemaining('s1', { rows: 5 })
+    expect(again.sent().at(-1)).not.toHaveProperty('userRequest')
   })
 
   it('counts only rows that look like the ones the user did: the first hidden, missing or different row ends the offer', async () => {

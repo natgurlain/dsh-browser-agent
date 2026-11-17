@@ -177,7 +177,7 @@ export function LearningPanel({ locale, sessionId, connected }: { locale: UiLoca
               <small>{copy.repeated(state.suggestion.done)} {state.suggestion.labels.join(' → ')}</small>
               <button className="primary" disabled={busy || !connected}
                 // Only a real click is the user's own request (Auto approve's reviewer is told so); a scripted one still runs, without that.
-                onClick={(event) => report(client!.request('learning.watch.run', { userClick: event.nativeEvent.isTrusted }), (value) => String((value as { text?: string }).text ?? copy.done))}>
+                onClick={(event) => report(client!.request('learning.watch.run', { userClick: event.nativeEvent.isTrusted, shown: { rows: state.suggestion!.remaining, steps: state.suggestion!.program.length } }), (value) => String((value as { text?: string }).text ?? copy.done))}>
                 {copy.doRemaining(state.suggestion.remaining, state.suggestion.program.length, state.suggestion.more === true)}
               </button>
               {state.suggestion.limited === 'indistinct' && <small>{copy.rowsIndistinct}</small>}
@@ -188,7 +188,7 @@ export function LearningPanel({ locale, sessionId, connected }: { locale: UiLoca
               <small>{copy.stoppedEarly(state.resume.rows, state.resume.skipped)}</small>
               {state.resume.rows > 0 && (
                 <button className="primary" disabled={busy || !connected}
-                  onClick={(event) => report(client!.request('learning.watch.continue', { userClick: event.nativeEvent.isTrusted }), (value) => String((value as { text?: string }).text ?? copy.done))}>
+                  onClick={(event) => report(client!.request('learning.watch.continue', { userClick: event.nativeEvent.isTrusted, shown: { rows: state.resume!.rows } }), (value) => String((value as { text?: string }).text ?? copy.done))}>
                   {copy.continueRemaining(state.resume.rows)}
                 </button>
               )}

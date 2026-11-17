@@ -172,6 +172,8 @@ describe('learning panel UI', () => {
     expect(posted.some((message) => message.type === 'learning.watch.run')).toBe(true)
     // A scripted click is not the user's: it runs, but is never presented as the user's request.
     expect(posted.find((message) => message.type === 'learning.watch.run')?.userClick).toBe(false)
+    // The counts the button showed go with the click.
+    expect(posted.find((message) => message.type === 'learning.watch.run')?.shown).toEqual({ rows: 3, steps: 0 })
   })
 
   it('states the true total on a long offer, and offers to continue a run that stopped part-way', async () => {
@@ -190,6 +192,7 @@ describe('learning panel UI', () => {
     await act(async () => { button.click() })
     expect(posted.some((message) => message.type === 'learning.watch.continue')).toBe(true)
     expect(posted.find((message) => message.type === 'learning.watch.continue')?.userClick).toBe(false)
+    expect(posted.find((message) => message.type === 'learning.watch.continue')?.shown).toEqual({ rows: 18 })
     await act(async () => { push({ ...watching, suggestion: null, resume: null }) })
     expect(host.querySelector('.learning-suggestion')).toBeNull()
     // F7: a row the run left part-done is named and skipped; with nothing else left there is no button.

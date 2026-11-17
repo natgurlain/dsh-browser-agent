@@ -131,12 +131,34 @@ interface LocatorProbe extends RecordedLocator {
 type PanelClickKind = 'do-remaining' | 'continue'
 
 /**
+ * What the button the user really clicked said (the panel sends it with the
+ * click): the rows, and for "Do the remaining N" the steps. Absent when the
+ * click was not a real one.
+ */
+export interface ShownOffer {
+  rows: number
+  steps?: number
+}
+
+/** The counts a panel message carries for a real click, or undefined (not a real click, or malformed). */
+function shownOffer(message: Record<string, unknown>): ShownOffer | undefined {
+  if (message.userClick !== true || !isRecord(message.shown)) return undefined
+  const { rows, steps } = message.shown
+  if (typeof rows !== 'number' || !Number.isInteger(rows) || rows < 1) return undefined
+  if (steps !== undefined && (typeof steps !== 'number' || !Number.isInteger(steps) || steps < 1)) return undefined
+  return { rows, ...(steps === undefined ? {} : { steps }) }
+}
+
+/**
  * The user's real click on the panel's offer, for the bridge to give Auto
  * approve's reviewer (docs/auto-approve-design.md §5): the button and the
- * offer's own counts, nothing the page wrote. Empty unless the click was real.
+ * offer's own counts, nothing the page wrote. Empty unless the click was real
+ * and `vouched`: the program that runs is the one the clicked button stood
+ * for. A page that changed between the offer and the click (rows added,
+ * swapped) gets no line, so the reviewer sees no request and the card asks.
  */
-function panelClick(userClick: boolean, kind: PanelClickKind, offer: Pick<WatchSuggestion, 'remaining' | 'program'>): { userRequest?: { kind: PanelClickKind; rows: number; steps: number } } {
-  return userClick ? { userRequest: { kind, rows: offer.remaining, steps: offer.program.length } } : {}
+function panelClick(vouched: boolean, kind: PanelClickKind, offer: Pick<WatchSuggestion, 'remaining' | 'program'>): { userRequest?: { kind: PanelClickKind; rows: number; steps: number } } {
+  return vouched ? { userRequest: { kind, rows: offer.remaining, steps: offer.program.length } } : {}
 }
 
 /** A "do the remaining N" offer shown in the panel. */
@@ -850,7 +872,7 @@ export class LearningRuntime {
    * every step (run-program.ts). Only the exact program built here is
    * accepted as a series ({@link claimSeries}).
    */
-  async runSuggestion(sessionId: string | undefined, userClick = false): Promise<unknown> {
+  async runSuggestion(sessionId: string | undefined, shown?: ShownOffer): Promise<unknown> {
     const suggestion = this.suggestion
     if (suggestion === undefined || !this.settings.watchMe) throw new Error(zh() ? '没有可执行的建议。' : 'There is no suggestion to run.')
     const tab = await chrome.tabs.get(suggestion.tabId)
@@ -860,13 +882,17 @@ export class LearningRuntime {
     await this.stopWatching()
     const session = sessionId === undefined ? {} : { sessionId }
     this.resume = undefined
+    // The button the user clicked showed this very offer (not one replaced a moment before the click).
+    const clickedThis = shown !== undefined && shown.rows === suggestion.remaining && shown.steps === suggestion.program.length
     if (suggestion.program.length <= RUN_BATCH_STEPS) {
-      return this.bridgeCall(METHODS.programRun, { ...session, steps: suggestion.program, ...panelClick(userClick, 'do-remaining', suggestion) }, PROGRAM_RUN_TIMEOUT_MS)
+      return this.bridgeCall(METHODS.programRun, { ...session, steps: suggestion.program, ...panelClick(clickedThis, 'do-remaining', suggestion) }, PROGRAM_RUN_TIMEOUT_MS)
     }
     // Probe again now: the card must show the rows as they are when the user clicks, not when the offer appeared.
     const fresh = pattern === undefined ? undefined : await this.offerFor(suggestion.tabId, suggestion.origin, pattern).catch(() => undefined)
     if (fresh === undefined || pattern === undefined) throw new Error(zh() ? '这些行已经变化，未执行任何操作。请重新演示。' : 'The rows changed since the offer was made, so nothing was run. Show the action again.')
-    return this.runOffer(sessionId, fresh, pattern, tab.url, userClick ? 'do-remaining' : undefined)
+    // The click vouches only for the program the button stood for: the same rows and steps, unchanged since.
+    const same = clickedThis && fresh.remaining === suggestion.remaining && programDigest(fresh.program) === programDigest(suggestion.program)
+    return this.runOffer(sessionId, fresh, pattern, tab.url, same ? 'do-remaining' : undefined)
   }
 
   /**
@@ -936,7 +962,7 @@ export class LearningRuntime {
    * longer looks like the ones the user did is passed over (and said so);
    * nothing runs on the old approval.
    */
-  async continueRemaining(sessionId: string | undefined, userClick = false): Promise<unknown> {
+  async continueRemaining(sessionId: string | undefined, shown?: ShownOffer): Promise<unknown> {
     const resume = this.resume
     if (resume === undefined || resume.rows <= 0 || !this.settings.watchMe) throw new Error(zh() ? '没有可继续的操作。' : 'There is nothing to continue.')
     const tab = await chrome.tabs.get(resume.tabId)
@@ -962,7 +988,9 @@ export class LearningRuntime {
     this.runNote = noted
     let result: unknown
     try {
-      result = await this.runOffer(sessionId, offer, pattern, tab.url, userClick ? 'continue' : undefined)
+      // The click vouches for no more rows than the button named, and not for a run that passes a row over.
+      const vouched = shown !== undefined && shown.rows === resume.rows && offer.remaining <= resume.rows && !skipped
+      result = await this.runOffer(sessionId, offer, pattern, tab.url, vouched ? 'continue' : undefined)
     } finally {
       if (this.runNote === noted) this.runNote = undefined
     }
@@ -1087,11 +1115,12 @@ export class LearningRuntime {
         case 'learning.watch.stop':
           await this.stopWatching()
           return reply(true)
-        // `userClick`: the panel saw a real (trusted) click on the button. Only extension pages reach this port.
+        // `userClick`: the panel saw a real (trusted) click on the button; `shown`: the counts that button showed.
+        // Only extension pages reach this port.
         case 'learning.watch.run':
-          return reply(await this.runSuggestion(sessionId, message.userClick === true))
+          return reply(await this.runSuggestion(sessionId, shownOffer(message)))
         case 'learning.watch.continue':
-          return reply(await this.continueRemaining(sessionId, message.userClick === true))
+          return reply(await this.continueRemaining(sessionId, shownOffer(message)))
         case 'learning.driver.save':
           return reply(await this.saveDriver(Number(message.index), isRecord(message.edits) ? message.edits as { name?: string; description?: string } : {}))
         case 'learning.driver.discard':

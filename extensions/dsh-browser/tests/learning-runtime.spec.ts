@@ -160,7 +160,7 @@ describe('learning runtime', () => {
     expect(request).toHaveBeenCalledWith('bridge.learning.program.run', { sessionId: 's1', steps: program }, expect.any(Number))
     // A real click on the panel's offer: the bridge is told so, with the offer's own counts (nothing the page wrote).
     ;(learning as unknown as { suggestion: unknown }).suggestion = { tabId: 7, origin: 'https://crm.example', period: 1, done: 2, remaining: 1, program, labels: ['click "Approve all and send"'] }
-    await learning.runSuggestion('s1', true)
+    await learning.runSuggestion('s1', { rows: 1, steps: 1 })
     expect(request).toHaveBeenLastCalledWith('bridge.learning.program.run', { sessionId: 's1', steps: program, userRequest: { kind: 'do-remaining', rows: 1, steps: 1 } }, expect.any(Number))
     expect(JSON.stringify(request.mock.calls.at(-1))).not.toContain('Approve all')
     tabUrl = 'https://other.example/'

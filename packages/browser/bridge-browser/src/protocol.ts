@@ -213,7 +213,7 @@ export function parsePanelUserRequest(value: unknown, programSteps: number): Pan
   if (Object.keys(raw).some((key) => key !== 'kind' && key !== 'rows' && key !== 'steps')) return undefined
   if (raw.kind !== 'do-remaining' && raw.kind !== 'continue') return undefined
   const count = (field: unknown): field is number => typeof field === 'number' && Number.isSafeInteger(field) && field >= 1 && field <= MAX_PANEL_REQUEST_COUNT
-  if (!count(raw.rows) || !count(raw.steps) || raw.steps !== programSteps || raw.rows > raw.steps) return undefined
+  if (!count(raw.rows) || !count(raw.steps) || raw.steps !== programSteps || raw.rows > raw.steps || raw.steps % raw.rows !== 0) return undefined
   return { kind: raw.kind, rows: raw.rows, steps: raw.steps }
 }
 

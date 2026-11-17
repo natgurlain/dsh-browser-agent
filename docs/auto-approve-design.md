@@ -141,8 +141,15 @@ tools read-only in a session tainted by web pages until the user clears it
      then adds `userRequest: { kind, rows, steps }` (two kinds, integers from
      its own offer, never the step labels, which carry page text) to
      `bridge.learning.program.run`, an RPC of the extension's own
-     connection. The bridge validates it (`parsePanelUserRequest`: the two
-     kinds, positive integers, `steps` equal to the program's length,
+     connection. The click vouches only for the program its button stood
+     for: the panel sends the counts the button showed (`shown`), and the
+     extension adds `userRequest` only when they are the offer's own and
+     the program probed at the click is the same as the offer's (same
+     digest); "Continue" only for no more rows than its button named and
+     no row passed over. Rows a page added or swapped between the offer and
+     the click therefore run without the line: the reviewer sees no
+     request and the card asks. The bridge validates it (`parsePanelUserRequest`: the two
+     kinds, positive integers, `steps` equal to the program's length and a whole multiple of `rows`,
      unknown members refused), attaches it to the one `browser_run` approval
      call that run issues (not to its steps, not to the batches that
      continue a series, never to a workflow replay, a schedule or the
