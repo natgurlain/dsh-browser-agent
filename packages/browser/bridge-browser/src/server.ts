@@ -85,6 +85,7 @@ import {
   BRIDGE_REVIEW_CANCEL_METHOD,
   BRIDGE_REVIEW_STATUS_METHOD,
   parseReviewAction,
+  type PanelUserRequest,
   type ReviewAction,
   type ReviewUnavailableReason,
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
@@ -405,7 +406,7 @@ export interface BridgeServerDeps {
 export interface AutoReviewService {
   supported(): boolean
   status(sessionId: string, external: boolean): { available: true; model: string } | { available: false; reason: ReviewUnavailableReason }
-  review(sessionId: string, action: ReviewAction, signal: AbortSignal): Promise<ReviewRecord>
+  review(sessionId: string, action: ReviewAction, signal: AbortSignal, panelAction?: PanelUserRequest): Promise<ReviewRecord>
 }
 
 /** Longest review id accepted. */
@@ -434,6 +435,11 @@ interface PendingTool {
   approvals: Map<string, AbortController>
   /** Auto reviews in flight for this call, by extension review id. */
   reviews: Map<string, AbortController>
+  /**
+   * The user's click in the panel that started this very call (a Watch me
+   * run's own `browser_run` approval call only). Read once by its review.
+   */
+  panelAction?: PanelUserRequest
 }
 
 /** A socket that passed authentication and owns its client identity's slot. */
@@ -604,6 +610,7 @@ export class BridgeServer {
     callId?: string,
     program?: ProgramStepRef,
     requester?: string,
+    panelAction?: PanelUserRequest,
   ): Promise<unknown> {
     const conn = this.pickConnection(name, sessionId)
     if (conn === undefined) {
@@ -676,6 +683,7 @@ export class BridgeServer {
         timer: setTimeout(onExpire, timeoutMs),
         approvals: new Map(),
         reviews: new Map(),
+        ...panelAction === undefined ? {} : { panelAction },
       }
       signal.addEventListener('abort', onAbort, { once: true })
       this.pendingTools.set(id, entry)
@@ -1557,9 +1565,14 @@ export class BridgeServer {
     const callId = toolCallId as string
     const controller = new AbortController()
     tool.reviews.set(reviewId, controller)
+    // The user's click that started this very call: the bridge's own record, read once.
+    const panelAction = tool.panelAction
+    delete tool.panelAction
     let record: ReviewRecord
     try {
-      record = await service.review(tool.sessionId, action, controller.signal)
+      record = await (panelAction === undefined
+        ? service.review(tool.sessionId, action, controller.signal)
+        : service.review(tool.sessionId, action, controller.signal, panelAction))
     } catch (error: unknown) {
       record = { decision: 'deny', reason: 'The reviewer could not decide.', code: 'failed', latencyMs: 0, failure: errorMessage(error) }
     } finally {

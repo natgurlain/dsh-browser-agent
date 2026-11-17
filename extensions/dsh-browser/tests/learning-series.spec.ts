@@ -110,6 +110,22 @@ describe('the offer', () => {
     expect(state().resume).toBeNull()
   })
 
+  it('tells the bridge about a real click on the offer or on Continue, with the run\'s own counts; never otherwise', async () => {
+    const { learning, request, sent } = await watched()
+    request.mockResolvedValueOnce(completed(38))
+    await learning.runSuggestion('s1', true)
+    expect(sent().at(-1)).toEqual({ sessionId: 's1', steps: program(38), rowSteps: 3, userRequest: { kind: 'do-remaining', rows: 38, steps: 114 } })
+    // A run that stops part-way; Continue (a real click) carries its own counts.
+    const again = await watched()
+    again.request.mockResolvedValueOnce(stopped(20, 38))
+    await again.learning.runSuggestion('s1')
+    expect(again.sent().at(-1)).not.toHaveProperty('userRequest')
+    expect(again.state().resume).toMatchObject({ rows: 18 })
+    again.request.mockResolvedValueOnce(completed(18))
+    await again.learning.continueRemaining('s1', true)
+    expect(again.sent().at(-1)).toMatchObject({ userRequest: { kind: 'continue', rows: 18, steps: 54 } })
+  })
+
   it('counts only rows that look like the ones the user did: the first hidden, missing or different row ends the offer', async () => {
     // Row 13 has a "Delete" button where the user clicked "Invite".
     describe_ = (row, position) => row === 13 && position === 1 ? { ...defaultTarget(row, position), name: 'Delete' } : defaultTarget(row, position)

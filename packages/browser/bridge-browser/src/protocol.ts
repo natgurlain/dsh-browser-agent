@@ -184,6 +184,40 @@ export interface ReviewAction {
 const UNTRUSTED_KEYS = ['name', 'context', 'title', 'url', 'destination', 'typed', 'key', 'summary'] as const
 
 /**
+ * The user's own click in the extension's panel that started a Watch me run
+ * ("Do the remaining N like this", or "Continue with the N rows left"). The
+ * extension sends it on `bridge.learning.program.run` only when that request
+ * came from a real (trusted) click on that button; the bridge attaches it to
+ * the run's own `browser_run` approval call and nothing else, and renders the
+ * reviewer's line from these integers with a fixed template. No text travels.
+ */
+export interface PanelUserRequest {
+  kind: 'do-remaining' | 'continue'
+  /** Rows the button named. */
+  rows: number
+  /** Steps of the whole program the click started. */
+  steps: number
+}
+
+/** Most rows or steps a panel request may name (far above any real run). */
+const MAX_PANEL_REQUEST_COUNT = 100_000
+
+/**
+ * Validate the panel request a program run carries. Only the two kinds and
+ * positive integers; `steps` must be the program's own length.
+ * @returns the request, or undefined when anything is off.
+ */
+export function parsePanelUserRequest(value: unknown, programSteps: number): PanelUserRequest | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const raw = value as Record<string, unknown>
+  if (Object.keys(raw).some((key) => key !== 'kind' && key !== 'rows' && key !== 'steps')) return undefined
+  if (raw.kind !== 'do-remaining' && raw.kind !== 'continue') return undefined
+  const count = (field: unknown): field is number => typeof field === 'number' && Number.isSafeInteger(field) && field >= 1 && field <= MAX_PANEL_REQUEST_COUNT
+  if (!count(raw.rows) || !count(raw.steps) || raw.steps !== programSteps || raw.rows > raw.steps) return undefined
+  return { kind: raw.kind, rows: raw.rows, steps: raw.steps }
+}
+
+/**
  * Validate a review action received over the wire. Every field is checked
  * and unknown members are refused, so nothing unexpected reaches a prompt.
  * @returns the action, or undefined when anything is off.

@@ -27,7 +27,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeServer } from './server.ts'
 import { toolCallIdArg } from './server.ts'
 import { sessionIdOfExec } from './external-caller.ts'
-import { UNTRUSTED_CONTENT_TAG, UNTRUSTED_NOTICE_LEAD } from './protocol.ts'
+import { UNTRUSTED_CONTENT_TAG, UNTRUSTED_NOTICE_LEAD, type PanelUserRequest } from './protocol.ts'
 import { errorMessage, isRecord } from './host-api.ts'
 
 /** Most steps one program (one `browser_run` approval call) may hold. */
@@ -157,6 +157,23 @@ export type RunnerBridge = Pick<BridgeServer, 'requestTool'>
 export interface RunProgramOptions {
   /** Budget for each step's own call. */
   toolTimeoutMs: number
+  /**
+   * The user's click in the extension's panel that started this run (Watch
+   * me): it goes with the run's own approval call only, for its review.
+   */
+  panelAction?: PanelUserRequest
+}
+
+/** The approval call of a run, carrying the user's panel click when there is one. */
+function approvalRequest(
+  bridge: RunnerBridge,
+  args: Record<string, unknown>,
+  exec: { signal: AbortSignal; sessionId?: string; toolCallId?: string },
+  options: RunProgramOptions,
+): Promise<unknown> {
+  return options.panelAction === undefined
+    ? bridge.requestTool('browser_run', args, exec.signal, options.toolTimeoutMs, exec.sessionId, exec.toolCallId, undefined)
+    : bridge.requestTool('browser_run', args, exec.signal, options.toolTimeoutMs, exec.sessionId, exec.toolCallId, undefined, undefined, options.panelAction)
 }
 
 /** Thrown for malformed programs (a tool error the model can fix). */
@@ -288,7 +305,7 @@ export async function runProgram(
     bridge.requestTool(name, args, exec.signal, options.toolTimeoutMs, exec.sessionId, exec.toolCallId, program)
   let programId: string
   try {
-    const approval = await request('browser_run', { steps })
+    const approval = await approvalRequest(bridge, { steps }, exec, options)
     if (!isRecord(approval) || typeof approval.programId !== 'string' || approval.programId === '') {
       return { stop: 'not-approved', steps: [], message: 'The extension did not approve the program.' }
     }
@@ -410,7 +427,7 @@ export async function runProgramSeries(
     isRecord(approval) && typeof approval.programId === 'string' && approval.programId !== '' ? approval.programId : undefined
   let seriesId: string | undefined
   try {
-    seriesId = programIdOf(await request('browser_run', { steps: steps.slice(0, batchSteps), series: { rowSteps, later: steps.slice(batchSteps) } }))
+    seriesId = programIdOf(await approvalRequest(bridge, { steps: steps.slice(0, batchSteps), series: { rowSteps, later: steps.slice(batchSteps) } }, exec, options))
   } catch (error: unknown) {
     return { stop: 'not-approved', steps: [], message: errorMessage(error), rows: { done: 0, ...total } }
   }

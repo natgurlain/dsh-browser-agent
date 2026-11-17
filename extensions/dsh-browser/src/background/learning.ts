@@ -127,6 +127,18 @@ interface LocatorProbe extends RecordedLocator {
 }
 
 
+/** Which panel button started a run. */
+type PanelClickKind = 'do-remaining' | 'continue'
+
+/**
+ * The user's real click on the panel's offer, for the bridge to give Auto
+ * approve's reviewer (docs/auto-approve-design.md §5): the button and the
+ * offer's own counts, nothing the page wrote. Empty unless the click was real.
+ */
+function panelClick(userClick: boolean, kind: PanelClickKind, offer: Pick<WatchSuggestion, 'remaining' | 'program'>): { userRequest?: { kind: PanelClickKind; rows: number; steps: number } } {
+  return userClick ? { userRequest: { kind, rows: offer.remaining, steps: offer.program.length } } : {}
+}
+
 /** A "do the remaining N" offer shown in the panel. */
 export interface WatchSuggestion {
   tabId: number
@@ -838,7 +850,7 @@ export class LearningRuntime {
    * every step (run-program.ts). Only the exact program built here is
    * accepted as a series ({@link claimSeries}).
    */
-  async runSuggestion(sessionId: string | undefined): Promise<unknown> {
+  async runSuggestion(sessionId: string | undefined, userClick = false): Promise<unknown> {
     const suggestion = this.suggestion
     if (suggestion === undefined || !this.settings.watchMe) throw new Error(zh() ? '没有可执行的建议。' : 'There is no suggestion to run.')
     const tab = await chrome.tabs.get(suggestion.tabId)
@@ -849,12 +861,12 @@ export class LearningRuntime {
     const session = sessionId === undefined ? {} : { sessionId }
     this.resume = undefined
     if (suggestion.program.length <= RUN_BATCH_STEPS) {
-      return this.bridgeCall(METHODS.programRun, { ...session, steps: suggestion.program }, PROGRAM_RUN_TIMEOUT_MS)
+      return this.bridgeCall(METHODS.programRun, { ...session, steps: suggestion.program, ...panelClick(userClick, 'do-remaining', suggestion) }, PROGRAM_RUN_TIMEOUT_MS)
     }
     // Probe again now: the card must show the rows as they are when the user clicks, not when the offer appeared.
     const fresh = pattern === undefined ? undefined : await this.offerFor(suggestion.tabId, suggestion.origin, pattern).catch(() => undefined)
     if (fresh === undefined || pattern === undefined) throw new Error(zh() ? '这些行已经变化，未执行任何操作。请重新演示。' : 'The rows changed since the offer was made, so nothing was run. Show the action again.')
-    return this.runOffer(sessionId, fresh, pattern, tab.url)
+    return this.runOffer(sessionId, fresh, pattern, tab.url, userClick ? 'do-remaining' : undefined)
   }
 
   /**
@@ -863,11 +875,12 @@ export class LearningRuntime {
    * probed on; when that run stops early, what is left can be continued
    * ({@link continueRemaining}).
    */
-  private async runOffer(sessionId: string | undefined, offer: WatchSuggestion, pattern: RepetitionPattern, url: string | undefined): Promise<unknown> {
+  private async runOffer(sessionId: string | undefined, offer: WatchSuggestion, pattern: RepetitionPattern, url: string | undefined, clicked?: PanelClickKind): Promise<unknown> {
     const session = sessionId === undefined ? {} : { sessionId }
+    const click = clicked === undefined ? {} : panelClick(true, clicked, offer)
     this.resume = undefined
     if (offer.program.length <= RUN_BATCH_STEPS) {
-      return this.bridgeCall(METHODS.programRun, { ...session, steps: offer.program }, PROGRAM_RUN_TIMEOUT_MS)
+      return this.bridgeCall(METHODS.programRun, { ...session, steps: offer.program, ...click }, PROGRAM_RUN_TIMEOUT_MS)
     }
     const top = (await listTabFrames(offer.tabId, url)).find((frame) => frame.frameId === 0)
     if (top === undefined || httpOrigin(top.url) !== offer.origin) throw new Error(leftPage())
@@ -876,7 +889,7 @@ export class LearningRuntime {
     let stop: ((error: Error) => void) | undefined
     try {
       const result = await Promise.race([
-        this.bridgeCall(METHODS.programRun, { ...session, steps: offer.program, rowSteps: offer.period }, PROGRAM_RUN_TIMEOUT_MS),
+        this.bridgeCall(METHODS.programRun, { ...session, steps: offer.program, rowSteps: offer.period, ...click }, PROGRAM_RUN_TIMEOUT_MS),
         // The kill switch ends the wait: the bridge is gone and would never answer.
         new Promise<never>((_resolve, reject) => {
           stop = reject
@@ -923,7 +936,7 @@ export class LearningRuntime {
    * longer looks like the ones the user did is passed over (and said so);
    * nothing runs on the old approval.
    */
-  async continueRemaining(sessionId: string | undefined): Promise<unknown> {
+  async continueRemaining(sessionId: string | undefined, userClick = false): Promise<unknown> {
     const resume = this.resume
     if (resume === undefined || resume.rows <= 0 || !this.settings.watchMe) throw new Error(zh() ? '没有可继续的操作。' : 'There is nothing to continue.')
     const tab = await chrome.tabs.get(resume.tabId)
@@ -949,7 +962,7 @@ export class LearningRuntime {
     this.runNote = noted
     let result: unknown
     try {
-      result = await this.runOffer(sessionId, offer, pattern, tab.url)
+      result = await this.runOffer(sessionId, offer, pattern, tab.url, userClick ? 'continue' : undefined)
     } finally {
       if (this.runNote === noted) this.runNote = undefined
     }
@@ -1074,10 +1087,11 @@ export class LearningRuntime {
         case 'learning.watch.stop':
           await this.stopWatching()
           return reply(true)
+        // `userClick`: the panel saw a real (trusted) click on the button. Only extension pages reach this port.
         case 'learning.watch.run':
-          return reply(await this.runSuggestion(sessionId))
+          return reply(await this.runSuggestion(sessionId, message.userClick === true))
         case 'learning.watch.continue':
-          return reply(await this.continueRemaining(sessionId))
+          return reply(await this.continueRemaining(sessionId, message.userClick === true))
         case 'learning.driver.save':
           return reply(await this.saveDriver(Number(message.index), isRecord(message.edits) ? message.edits as { name?: string; description?: string } : {}))
         case 'learning.driver.discard':

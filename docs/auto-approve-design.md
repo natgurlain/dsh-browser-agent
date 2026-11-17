@@ -117,12 +117,41 @@ tools read-only in a session tainted by web pages until the user clears it
   header), through DSH's LLM service on the host, purpose
   `browser-auto-review`, temperature 0, no session id.
 * **Asked:** a fixed system policy (`REVIEW_POLICY`, marker
-  `DSH_BROWSER_AUTO_APPROVE_REVIEW v2`) and one message with three sections:
+  `DSH_BROWSER_AUTO_APPROVE_REVIEW v2`; the optional section below was added
+  without a new marker, as an older reviewer prompt simply never has it) and
+  one message with three sections, sometimes four:
   1. `USER_MESSAGES`: the user's own messages in this conversation (prompts
      the bridge forwarded from the panel, bound to a request id the bridge
      minted; page text the user attached is cut out), newest 12, at most
      2 000 characters each and 8 000 in total. A prompt still queued behind
      the running turn counts as the newest.
+  * `USER_PANEL_ACTION` (only for a Watch me run the user started with a
+     click): one line, *TRUSTED: The user clicked the offer to do the
+     remaining rows like this in the browser panel for this program: N rows,
+     S steps, which the extension built from the steps the user did by hand
+     on this page.* (or "…the offer to continue with the rows left…"). A click
+     on "Do the remaining N like this" or "Continue with the N rows left" is
+     the user's request for that series just as a message is, but it is not
+     a chat message, so without this line an honest reviewer saw no request
+     and denied, and the user got a card for what they had just asked for.
+     Where the line comes from, and why nothing else can produce it: the
+     panel sends `learning.watch.run` / `learning.watch.continue` with
+     `userClick: event.isTrusted` (a scripted click still runs, without the
+     line); only extension pages can open the learning port; the extension
+     then adds `userRequest: { kind, rows, steps }` (two kinds, integers from
+     its own offer, never the step labels, which carry page text) to
+     `bridge.learning.program.run`, an RPC of the extension's own
+     connection. The bridge validates it (`parsePanelUserRequest`: the two
+     kinds, positive integers, `steps` equal to the program's length,
+     unknown members refused), attaches it to the one `browser_run` approval
+     call that run issues (not to its steps, not to the batches that
+     continue a series, never to a workflow replay, a schedule or the
+     model's own `browser_run`), and reads it once when that call is
+     reviewed. The line is rendered from a fixed template with the integers;
+     `ReviewAction` cannot carry it (unknown members are refused), so a page,
+     the model or the extension's review payload cannot forge it, and text
+     that copies it stays a JSON string inside `UNTRUSTED_PAGE_DATA` or
+     `USER_MESSAGES`.
   2. `PENDING_ACTION`: the extension's facts: tool, verb, element kind, the
      reasons it is consequential, and whether the conversation has read
      untrusted web pages.
@@ -208,6 +237,9 @@ decision, reason, model, duration, binding, outcome code, failure.
   refused.
 * `bridge.review.cancel { toolCallId, reviewId }`; `bridge.review.status`
   (informational).
+* `bridge.learning.program.run` takes an optional `userRequest: { kind:
+  'do-remaining' | 'continue', rows, steps }` (§5 `USER_PANEL_ACTION`); a
+  malformed one is refused with `bad-request` before anything runs.
 * `tool.call` carries the model's `toolCallId` so the panel can mark the row.
 
 ## 9. Threat model, plainly
@@ -216,6 +248,7 @@ decision, reason, model, duration, binding, outcome code, failure.
 |---|---|---|
 | A hostile page / a compromised agent | Consequential steps run only after the reviewer allows them; page text reaches the reviewer only fenced and capped; a swapped element voids the decision; developer tools, site "ask" rules and strict mode still ask; the kill switch stops everything. | Ordinary steps on any site (a "Save" or "Continue" the user did not want; navigating somewhere; typing into a field). A reviewer that the page also fools. |
 | A wrong or compromised reviewer | Nothing beyond what the user turned on: it sees no page content and cannot call tools. | Any consequential step it allows. |
+| A page or the model claiming the user asked from the panel | The panel line (§5 `USER_PANEL_ACTION`) exists only on the bridge's record of the approval call of a run the panel started after a real click, built from integers with a fixed template; page and model text that copies it stays quoted. | Nothing: the line says only that this program, which the extension built from the user's own repetitions, was asked for. Taint still counts against it. |
 
 Turning Auto approve off restores the ordinary cards; setting a site to
 *Always ask* keeps that site out of it.
@@ -231,11 +264,31 @@ Turning Auto approve off restores the ordinary cards; setting a site to
   default and an explicit off; turning off and the kill switch during a
   review; managed policy; a site "ask" rule), `tests/panel-auto-approve.spec.ts`.
 * Bridge unit tests: `tests/auto-review.spec.ts` (history, fencing, schema,
-  allow / deny / timeout / error / cancel, RPCs).
+  allow / deny / timeout / error / cancel, RPCs; the panel line: its
+  template and place, page or user text copying it stays quoted, the
+  request's validation, and that only the call it was recorded on gets it,
+  once, never a model call with the same steps), `tests/learning.spec.ts`
+  (a Watch me run sends it with its own approval call only, short or
+  series; none without a click; a malformed one is refused).
+* Extension unit tests: `tests/learning-runtime.spec.ts`,
+  `tests/learning-series.spec.ts` (the click's counts go to the bridge only
+  for a real click, never the step labels), `tests/panel-learning.spec.ts`
+  (a scripted click is not presented as the user's).
+* `scripts/tests/scripted-reviewer.test.mjs`: the honest scripted reviewer
+  allows a program only with the bridge's line, and denies when the line is
+  copied into page or user text, or when the step is taint-flagged.
 * Browser smoke (`scripts/fixtures/auto-review-smoke.mjs`): navigate, click,
   type and a POST form submit complete with zero cards (only the submit is
   reviewed); measured latency; a denied step's card; a reviewer timeout;
-  Auto off mid-turn; the Setting; light and dark screenshots.
+  Auto off mid-turn; the Setting; light and dark screenshots; Watch me under
+  Auto approve: two rows invited by hand, a real click on "Do the remaining
+  28 like this", and the 28-click series (more than one `browser_run`) runs
+  with zero cards, reviewed once with the panel line in its trusted part.
+  Known limit: a series with typing steps still meets the taint rules on
+  those steps (the program's own approval answer counts as a page read
+  from an unknown origin, so typing is taint-forced and, with Auto approve
+  on, goes to the reviewer as `tainted`); changing that is a change to the
+  taint rules, not to Auto approve, and is left for a separate decision.
 * Model-free check (`benchmark/model-free-check.mjs` §4): the injection
   matrix with Auto approve on (taint-flagged steps reach the reviewer, its
   denial is the card, the canary is stopped); an ordinary task with zero

@@ -32,6 +32,7 @@ import { parseSiteDrivers, siteDriverToolName, type SiteDriverSummary } from './
 import { listWorkflows, loadWorkflow, registerWorkflowSkills, saveWorkflow, workspaceRootOf, type SkillsServiceLike } from './store.ts'
 import { WorkflowError } from './workflow.ts'
 import { errorMessage, isRecord } from '../host-api.ts'
+import { parsePanelUserRequest, type PanelUserRequest } from '../protocol.ts'
 
 /** Extension → bridge learning RPC methods. */
 export const LEARNING_METHODS = {
@@ -136,12 +137,16 @@ export function bridgeStepCall(bridge: Pick<BridgeServer, 'requestTool'>, toolTi
  * A `browser_run`-backed program runner: one program card in the extension,
  * then each step claims it (run-program.ts), every step through the full path.
  */
-export function browserRunRunner(bridge: Pick<BridgeServer, 'requestTool'>, toolTimeoutMs: number, sessionId: string | undefined, toolCallId?: string, rowSteps?: number): BrowserProgramRunner {
+export function browserRunRunner(bridge: Pick<BridgeServer, 'requestTool'>, toolTimeoutMs: number, sessionId: string | undefined, toolCallId?: string, rowSteps?: number, panelAction?: PanelUserRequest): BrowserProgramRunner {
+  // The user's panel click goes with the first approval call of this run only.
+  let click = panelAction
   return async (steps, signal) => {
     const exec = { signal, ...(sessionId === undefined ? {} : { sessionId }), ...(toolCallId === undefined ? {} : { toolCallId }) }
+    const runOptions = { toolTimeoutMs, ...(click === undefined ? {} : { panelAction: click }) }
+    click = undefined
     if (steps.length > MAX_PROGRAM_STEPS) {
       // More than one browser_run holds: batches under one card for the whole run.
-      const outcome = await runProgramSeries(bridge, parseProgramSeries(steps, rowSteps), rowSteps!, exec, { toolTimeoutMs })
+      const outcome = await runProgramSeries(bridge, parseProgramSeries(steps, rowSteps), rowSteps!, exec, runOptions)
       const status: ReplayReport['status'] = outcome.stop === 'completed' ? 'completed' : outcome.stop === 'cancelled' ? 'cancelled' : 'failed'
       return {
         status,
@@ -153,7 +158,7 @@ export function browserRunRunner(bridge: Pick<BridgeServer, 'requestTool'>, tool
     }
     // A demonstrated program says what each step's element looks like; the extension checks it inside the action.
     const parsed = parseBrowserRunProgram(steps.map((step) => ({ tool: step.tool, args: step.args, ...((step as { target?: unknown }).target === undefined ? {} : { target: (step as { target?: unknown }).target }) })), true)
-    const outcome = await runBrowserRun(bridge, parsed, exec, { toolTimeoutMs })
+    const outcome = await runBrowserRun(bridge, parsed, exec, runOptions)
     const status: ReplayReport['status'] = outcome.stop === 'completed' ? 'completed' : outcome.stop === 'cancelled' ? 'cancelled' : 'failed'
     return {
       status,
@@ -426,12 +431,16 @@ export function mountLearning(
           case LEARNING_METHODS.programRun: {
             const program = parseProgram(body.steps, body.rowSteps)
             const rowSteps = program.length > MAX_PROGRAM_STEPS ? body.rowSteps as number : undefined
+            // The user's real click on the panel's offer that started this run (the extension says so
+            // only for a trusted click): integers only, checked here, for this run's own approval call.
+            const panelAction = body.userRequest === undefined ? undefined : parsePanelUserRequest(body.userRequest, program.length)
+            if (body.userRequest !== undefined && panelAction === undefined) return { ok: false, error: { code: 'bad-request', message: 'userRequest must name the panel button and the program\'s rows and steps' } }
             const controller = new AbortController()
             const timer = setTimeout(() => { controller.abort() }, REPLAY_TIMEOUT_MS)
             try {
               const report = await executorFor(
                 bridgeStepCall(bridge, options.toolTimeoutMs, sessionId),
-                browserRunRunner(bridge, options.toolTimeoutMs, sessionId, undefined, rowSteps),
+                browserRunRunner(bridge, options.toolTimeoutMs, sessionId, undefined, rowSteps, panelAction),
               ).runProgram(program, { signal: controller.signal })
               return { ok: true, result: { report, text: report.text ?? renderReplayReport('watch-me program', report, program.length) } }
             } finally {
