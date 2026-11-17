@@ -7,20 +7,18 @@ Each `## vX.Y.Z` section becomes the notes of that GitHub release
 
 Unreleased (version numbers are not bumped yet).
 
-- **Auto review (opt-in, per conversation).** *Approvals: Ask · Auto* under the composer lets
-  the conversation's own model approve page actions while the conversation is open in a
-  panel — only when **you named it, or it is plainly harmless**. Named: your latest panel
-  message asks for it by the name you see, with a verb ("click Save settings"; the row too
-  when the name repeats), or gives the text to type in quotes; each name lets one action
-  through, and a question or a "don't"/"before"/"until" clause never counts. Plainly harmless: hover, a same-site link, a *Show more*-style disclosure,
-  navigation keys in a text field. Holding-back words ("only read", "don't", "tell me if",
-  "draft") stop it; payments and account settings, forced cards, sensitive fields,
-  developer tools, uploads, clipboard, dialogs, programs, fleets, MCP conversations, other
-  sites and shortcuts always ask. Cards show a fixed line that teaches what to write next
-  time, never model text. Ends after 60 minutes, on stop or take-over; 25 approvals per
-  message before it asks to continue; at most 120 reviews per conversation per hour. One
-  extra model call per reviewed action. Managed policy `disableAutoReview`, Setting *Offer
-  Auto review*, bridge config `autoReview`. Design: `docs/auto-review-design.md`.
+- **Auto approve.** Like DeepSeek Harness's auto-approve: click *Auto approve* under the
+  message box and the agent works without asking. Ordinary steps (navigate, click, type,
+  choose, search, read, open tabs) run at once with no card and no extra model call.
+  Consequential steps (send, delete, POST submit, publish, unsubscribe, transfer, pay, buy,
+  password and payment fields, files, programs, watchers, and steps the taint rules flag
+  after reading web pages) are first checked silently by the conversation's own model;
+  if it objects, times out or fails, the usual card shows with its one-line reason. Stays
+  on for the conversation until turned off; Settings → *Start conversations in Auto
+  approve* (off by default). Still asks: developer tools, the first download, sites set to
+  *Always ask*, strict mode, MCP conversations. Every auto-approved step is marked *Auto*
+  in the timeline and the audit log. Managed policy `disableAutoReview`, bridge config
+  `autoReview`. Design and honest limit: `docs/auto-approve-design.md`.
 
 ## v0.2.1
 

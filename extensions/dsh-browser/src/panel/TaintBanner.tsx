@@ -155,9 +155,11 @@ export function taintBannerView(record: TaintRecord, offered: Record<string, Tru
   }
 }
 
-export function TaintBanner({ sessionId, locale, onTrusted, acceptSyntheticClicks = false }: {
+export function TaintBanner({ sessionId, locale, onTrusted, autoApprove = false, acceptSyntheticClicks = false }: {
   sessionId: string | null
   locale: UiLocale
+  /** Auto approve is on for this conversation: risky steps go to its reviewer instead of asking. */
+  autoApprove?: boolean
   /** A choice went through: the panel's copy of the settings is stale. */
   onTrusted?: () => void
   /** Test seam only: jsdom cannot produce a trusted click. Never set in the panel. */
@@ -185,7 +187,7 @@ export function TaintBanner({ sessionId, locale, onTrusted, acceptSyntheticClick
     <div className="taint-banner" role="status" data-testid="taint-banner">
       <div className="taint-banner-row">
         <span title={everySite}>
-          {copy.body(named)}
+          {autoApprove ? copy.bodyAuto(named) : copy.body(named)}
           {view.more > 0 && (
             <>
               {' '}

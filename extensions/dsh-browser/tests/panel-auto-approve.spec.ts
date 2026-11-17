@@ -121,6 +121,9 @@ describe('the Auto approve toggle', () => {
     expect(PANEL_COPY.zh.autoReview.toggle).toBe('自动批准')
     expect(PANEL_COPY.en.autoReview.settingTitle).toBe('Start conversations in Auto approve')
     expect(PANEL_COPY.en.autoReview.settingHelp).toBe('With Auto approve on, the agent acts without asking; a web page that tricks the model can make it do things you did not ask for.')
+    // With Auto approve on, the taint banner does not promise cards that will not come.
+    expect(PANEL_COPY.en.taint.bodyAuto('a.example')).toContain('Auto approve checks risky actions before they run')
+    expect(PANEL_COPY.zh.taint.bodyAuto('a.example')).toContain('自动批准')
     for (const decision of ['auto-approved', 'auto-reviewed']) {
       expect(PANEL_COPY.en.timeline.decisions[decision]).toBeTruthy()
       expect(PANEL_COPY.zh.timeline.decisions[decision]).toBeTruthy()

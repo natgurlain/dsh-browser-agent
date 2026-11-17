@@ -20,7 +20,7 @@ import { DevLoopSettings } from './DevLoopSettings.tsx'
 import { TaintBanner } from './TaintBanner.tsx'
 import { TaintExemptionSettings } from './TaintExemptionSettings.tsx'
 import { WatchersCard } from './WatchersCard.tsx'
-import { connectPanel, PanelRpcError, type AgentPauseState, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type StandingStatus, type PanelApi, type PanelSettings } from './api.ts'
+import { autoApproveOnFor, connectPanel, PanelRpcError, type AutoReviewState, type AgentPauseState, type BridgeInstance, type DevToolsStatus, type DiscoveryStatus, type StandingStatus, type PanelApi, type PanelSettings } from './api.ts'
 import { StepTimeline } from './StepTimeline.tsx'
 import { AutoApproveControl } from './AutoApproveControl.tsx'
 import { AgentControls } from './AgentControls.tsx'
@@ -1239,6 +1239,10 @@ export function App(): React.JSX.Element {
   const takeOver = useCallback(() => { void api.pauseAgent('take-over').catch(() => {}) }, [api])
   const resumeAgent = useCallback(() => { void api.resumeAgent().catch(() => {}) }, [api])
   const engageKillSwitch = useCallback(() => { setKillSwitchEngaged(true); void api.engageKillSwitch().catch(() => {}) }, [api])
+
+  // Auto approve's state, for the taint banner's wording (the toggle reads it itself).
+  const [autoApproveState, setAutoApproveState] = useState<AutoReviewState>({ offered: false, startOn: false, reviewer: false, sessions: {} })
+  useEffect(() => api.onAutoReviewState(setAutoApproveState), [api])
 
   // Steps Auto approve's reviewer is checking right now ("Checking…" in the timeline, never a card).
   const [reviewingCalls, setReviewingCalls] = useState<ReadonlySet<string>>(() => new Set())
@@ -3169,6 +3173,14 @@ export function App(): React.JSX.Element {
                 checked={settings?.unrestrictedBrowserAccess ?? false}
                 onChange={(checked) => patch({ unrestrictedBrowserAccess: checked })}
               />
+              {/* Auto approve (docs/auto-approve-design.md): new conversations start with it on. */}
+              <SettingToggle
+                title={copy.autoReview.settingTitle}
+                help={copy.autoReview.settingHelp}
+                more={<p>{copy.autoReview.settingMore}</p>}
+                checked={settings?.autoApproveDefault ?? false}
+                onChange={(checked) => patch({ autoApproveDefault: checked })}
+              />
               {settings !== null && (
                 <TaintExemptionSettings
                   locale={locale}
@@ -3298,15 +3310,6 @@ export function App(): React.JSX.Element {
                 more={<p>{copy.settings.allowPageWatchersMore}</p>}
                 checked={settings?.allowPageWatchers ?? false}
                 onChange={(checked) => patch({ allowPageWatchers: checked })}
-              />
-            </SettingsGroup>
-            <SettingsGroup label={copy.autoReview.settingLabel}>
-              <SettingToggle
-                title={copy.autoReview.settingTitle}
-                help={copy.autoReview.settingHelp}
-                more={<p>{copy.autoReview.settingMore}</p>}
-                checked={settings?.autoApproveDefault ?? false}
-                onChange={(checked) => patch({ autoApproveDefault: checked })}
               />
             </SettingsGroup>
             <DevLoopSettings
@@ -3491,7 +3494,7 @@ export function App(): React.JSX.Element {
             aria-label={copy.app.openSettings} title={copy.app.settings}><SettingsIcon /></button>
         </div>
       </header>
-      <TaintBanner sessionId={sessionRef.current} locale={locale} onTrusted={loadStoredSettings} />
+      <TaintBanner sessionId={sessionRef.current} locale={locale} onTrusted={loadStoredSettings} autoApprove={autoApproveOnFor(autoApproveState, sessionRef.current)} />
       <WatchersCard locale={locale} />
       {firstPairing && !killSwitchEngaged
         // Keyed by the bridge address: a request is for one bridge, so a new address asks anew.

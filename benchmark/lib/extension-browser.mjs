@@ -162,26 +162,25 @@ export async function startExtensionBrowser({ repoRoot, benchmarkRoot, bridgeUrl
         }, policy)
       },
       /**
-       * Turn Auto review on or off for one conversation, as the panel's
-       * control does, and wait until the extension reports it.
+       * Turn Auto approve on or off for one conversation, as the panel's
+       * toggle does, and wait until the extension reports it.
        */
       async setAutoReview(sessionId, enabled) {
         await panel.evaluate(async ({ id, on, timeoutMs }) => {
-          // This panel shows the conversation: Auto approves only in a conversation a panel shows.
           window.__dshBenchmarkPort.postMessage({ type: 'session.active', sessionId: id })
           window.__dshBenchmarkPort.postMessage({ type: 'auto-review.set', sessionId: id, enabled: on })
           const deadline = Date.now() + timeoutMs
           while (Date.now() < deadline) {
             const state = window.__dshAutoReviewState
-            if (state?.offered === true && (state.sessions?.[id]?.on === true) === on) return
+            if (state?.offered === true && state.sessions?.[id] === on) return
             await new Promise((resolveWait) => setTimeout(resolveWait, 25))
           }
-          throw new Error(`Auto review did not turn ${on ? 'on' : 'off'} for ${id}: ${JSON.stringify(window.__dshAutoReviewState)}`)
+          throw new Error(`Auto approve did not turn ${on ? 'on' : 'off'} for ${id}: ${JSON.stringify(window.__dshAutoReviewState)}`)
         }, { id: sessionId, on: enabled, timeoutMs: actionTimeoutMs })
       },
       /**
        * A session RPC sent from the panel, as the user's own panel sends it:
-       * prompts sent this way are the only ones Auto review trusts.
+       * prompts sent this way are the only ones Auto approve's reviewer trusts.
        */
       async panelRpc(method, payload) {
         const answer = await request({ type: 'rpc', method, payload }, 'rpc.result')

@@ -80,7 +80,7 @@ const scripted = await startScriptedModel([
   { name: 'browser_click', args: { selector: '#hoverTarget' }, gate: 'paused' },
   { name: 'browser_screenshot', args: {} },
 ], 'Timeline smoke done.')
-// The Auto review section's agent and reviewer: one scripted model (auto-review-smoke.mjs).
+// The Auto approve section's agent and reviewer: one scripted model (auto-review-smoke.mjs).
 const autoModel = await startAutoReviewModel()
 
 /** Poll until truthy; fails early (with the DSH log) once DSH has exited. */
@@ -1548,7 +1548,7 @@ try {
     tool, succeed, settings, waitFor, hostRpc, bridgeRpc, scripted, results, delay,
     knownSessions: [conversation.sessionId, secondConversation.sessionId],
   })
-  // ---- Auto review: a reviewed click, an ask card, a forced card, a timeout, off mid-turn ----
+  // ---- Auto approve: a multi-step task with zero cards, latency, a denied step, a timeout, off mid-turn, the Setting ----
   screenshots.push(...await runAutoReviewSmoke({
     browser, page, panel, extensionId, directory, settings, waitFor, hostRpc, bridgeRpc, results, delay, autoModel,
     autoPage: `${origin}/auto-review`,

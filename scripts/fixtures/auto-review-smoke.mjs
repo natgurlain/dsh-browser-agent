@@ -1,13 +1,15 @@
-// Real-browser coverage for Auto review (docs/auto-review-design.md): the
-// composer control and its one-time explanation, a low-risk click that runs
-// with no card and shows the Auto badge and the reviewer's reason, a reviewer
-// "ask" that shows the ordinary card with its line, a forced card that still
-// appears with Auto on, a reviewer timeout that falls back to the card, and
-// Auto turned off in the middle of a turn. Screenshots land in
-// <evidence>/screenshots.
+// Real-browser coverage for Auto approve (docs/auto-approve-design.md): the
+// composer toggle and its one confirmation; a multi-step task (navigate,
+// click, type, submit a form) that completes with ZERO approval cards, where
+// only the submit is reviewed (silently, "Checking…" in the timeline); the
+// measured added latency of an ordinary step (against a trusted-site baseline
+// that also shows no card) and of a reviewed one; a reviewer "deny" that shows
+// the ordinary card with the reviewer's line; a reviewer timeout that falls
+// back to the card; Auto turned off mid-turn; and the Settings option.
+// Screenshots (light and dark) land in <evidence>/screenshots.
 //
-// The agent and the reviewer are one scripted model ("auto-check"): Auto
-// review uses the conversation's own model, so review requests reach the same
+// The agent and the reviewer are one scripted model ("auto-check"): the
+// reviewer is the conversation's own model, so review requests reach the same
 // server and are told apart by the bridge's policy marker.
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
@@ -19,35 +21,29 @@ import { honestReviewer, isReviewRequest, reviewInput } from './scripted-model.m
 
 export const AUTO_PROVIDER = 'auto-check'
 
-/** The fixture page the section drives. */
+/** The fixture page the section drives (served for every /auto-review… path). */
 export const AUTO_REVIEW_PAGE = `<!doctype html><title>Trip notes</title><body style="font:14px sans-serif;padding:16px">
   <h1>Trip notes</h1>
   <button id="more" type="button" aria-expanded="false">Show more</button><p id="moreOut"></p>
-  <button id="expand" type="button" aria-expanded="false">Expand details</button><p id="expandOut"></p>
-  <form id="noteForm"><input id="note" aria-label="Note" value="See you at 8"><button id="send">Send message</button></form><p id="sent"></p>
+  <h2>Contact the organiser</h2>
+  <form id="contact" method="post" action="/auto-review/contact"><label>Your name <input id="name" name="name"></label> <button id="submit">Submit</button></form><p id="submitted"></p>
+  <h2>Note to the group</h2>
+  <form id="noteForm" method="post" action="/auto-review/notes"><input id="note" aria-label="Note" value="See you at 8"> <button id="send">Send message</button></form><p id="sent"></p>
   <script>
-    window.counts = { more: 0, expand: 0, sent: 0 };
+    window.counts = { more: 0, submitted: 0, sent: 0, name: '' };
     document.querySelector('#more').addEventListener('click', () => { window.counts.more++; document.querySelector('#moreOut').textContent = 'More shown ' + window.counts.more });
-    document.querySelector('#expand').addEventListener('click', () => { window.counts.expand++; document.querySelector('#expandOut').textContent = 'Details ' + window.counts.expand });
+    document.querySelector('#contact').addEventListener('submit', (event) => { event.preventDefault(); window.counts.submitted++; window.counts.name = document.querySelector('#name').value; document.querySelector('#submitted').textContent = 'Thanks, ' + window.counts.name });
     document.querySelector('#noteForm').addEventListener('submit', (event) => { event.preventDefault(); window.counts.sent++; document.querySelector('#sent').textContent = 'Sent' });
   </script></body>`
-
-/** Per turn (marked AR1…AR5 in the user's message): the browser steps, then a closing text. */
-const TURNS = {
-  AR1: [{ name: 'browser_click', args: { selector: '#more' } }],
-  AR2: [{ name: 'browser_click', args: { selector: '#send' } }],
-  AR3: [{ name: 'browser_click', args: { selector: '#more' } }],
-  AR4: [{ name: 'browser_click', args: { selector: '#expand' } }],
-  AR5: [{ name: 'browser_click', args: { selector: '#expand' }, gate: 'ar5' }],
-}
 
 const text = message => typeof message?.content === 'string'
   ? message.content
   : Array.isArray(message?.content) ? message.content.map(part => part?.text ?? '').join('\n') : ''
 
-/** The scripted agent-and-reviewer model. `reviewer` and gates are set by the section. */
+/** The scripted agent-and-reviewer model. Turns (by an AR<n> marker in the user's message) and the reviewer are set by the section. */
 export async function startAutoReviewModel() {
   const state = { reviews: [], agentRequests: 0 }
+  const turns = new Map()
   const gates = new Map()
   const released = new Set()
   let reviewer = honestReviewer
@@ -66,23 +62,25 @@ export async function startAutoReviewModel() {
     state.agentRequests += 1
     const messages = Array.isArray(body.messages) ? body.messages : []
     if (messages.some(message => message.role === 'user' && text(message).includes('Generate the session title'))) {
-      streamReply(response, { text: 'Auto review smoke' }, { model: AUTO_PROVIDER })
+      streamReply(response, { text: 'Auto approve smoke' }, { model: AUTO_PROVIDER })
       return
     }
     const markerIndex = messages.findLastIndex(message => message.role === 'user' && /\bAR\d\b/u.test(text(message)))
     const marker = markerIndex === -1 ? undefined : /\b(AR\d)\b/u.exec(text(messages[markerIndex]))[1]
     const done = messages.slice(markerIndex + 1).filter(message => message.role === 'tool').length
-    const step = marker === undefined ? undefined : TURNS[marker]?.[done]
+    const step = marker === undefined ? undefined : turns.get(marker)?.[done]
     if (step?.gate !== undefined && !released.has(step.gate)) {
       await new Promise(resolve => { gates.set(step.gate, [...gates.get(step.gate) ?? [], resolve]) })
     }
-    streamReply(response, step === undefined ? { text: `${marker ?? 'Auto review smoke'} done.` } : { tool: { name: step.name, args: step.args } }, { model: AUTO_PROVIDER })
+    streamReply(response, step === undefined ? { text: `${marker ?? 'Auto approve smoke'} done.` } : { tool: { name: step.name, args: step.args } }, { model: AUTO_PROVIDER })
   })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   return {
     port: server.address().port,
     state,
+    /** The browser steps of one turn (by marker). */
+    setTurn: (marker, steps) => { turns.set(marker, steps) },
     setReviewer: (next) => { reviewer = next },
     /** Whether the agent's next step is held on gate `name`. */
     waiting: (name) => (gates.get(name)?.length ?? 0) > 0,
@@ -95,12 +93,17 @@ export async function startAutoReviewModel() {
   }
 }
 
+const median = (values) => {
+  const sorted = [...values].sort((a, b) => a - b)
+  return sorted.length === 0 ? Number.NaN : sorted[Math.floor(sorted.length / 2)]
+}
+
 /**
  * @param {object} ctx - handles from smoke-browser.mjs plus `autoModel` and `autoPage` (the fixture URL).
  * @returns {Promise<string[]>} screenshot paths.
  */
 export async function runAutoReviewSmoke(ctx) {
-  const { browser, page, panel, extensionId, directory, settings, waitFor, hostRpc, bridgeRpc, knownSessions, results, delay, autoModel, autoPage } = ctx
+  const { browser, page, panel, extensionId, directory, settings, waitFor, hostRpc, bridgeRpc, knownSessions, results, autoModel, autoPage } = ctx
   const shots = join(directory, 'screenshots')
   await mkdir(shots, { recursive: true })
   const taken = []
@@ -110,9 +113,19 @@ export async function runAutoReviewSmoke(ctx) {
     taken.push(path)
     return path
   }
+  /** The same view in the light and the dark palette. */
+  const themedShots = async (target, name) => {
+    for (const theme of ['light', 'dark']) {
+      await target.evaluate((value) => { document.documentElement.setAttribute('data-theme', value) }, theme)
+      await target.waitForTimeout(150)
+      await shot(target, `${name}-${theme}.png`)
+    }
+    await target.evaluate(() => { document.documentElement.setAttribute('data-theme', 'light') })
+  }
 
-  // Every ordinary card asks: nothing is trusted, page reads are automatic.
-  await settings({ unrestrictedBrowserAccess: false, trustedActionOrigins: [], sharePageContent: 'auto', siteRules: [], offerAutoReview: true })
+  const origin = new URL(autoPage).origin
+  // Nothing trusted and every page read automatic: without Auto approve, every action asks.
+  await settings({ unrestrictedBrowserAccess: false, trustedActionOrigins: [], sharePageContent: 'auto', siteRules: [], autoApproveDefault: false })
   await page.goto(autoPage)
   await page.bringToFront()
   const chat = await browser.newPage()
@@ -120,126 +133,175 @@ export async function runAutoReviewSmoke(ctx) {
   await chat.goto(`chrome-extension://${extensionId}/panel/index.html`)
   await page.bringToFront()
   const composer = chat.locator('textarea')
-  await waitFor(() => composer.isEnabled(), 'Auto review panel readiness')
+  await waitFor(() => composer.isEnabled(), 'Auto approve panel readiness')
   await composer.fill('Warm up this conversation.')
   await chat.getByRole('button', { name: 'Send message', exact: true }).click()
   await chat.getByRole('button', { name: 'Continue generating', exact: true }).waitFor({ timeout: 30_000 })
   const session = (await bridgeRpc('session.list', {})).items.find(item => !item.blank && !knownSessions.includes(item.sessionId))
-  assert.ok(session, 'Auto review session')
+  assert.ok(session, 'Auto approve session')
   await hostRpc('session', 'selectModel', { sessionId: session.sessionId, provider: AUTO_PROVIDER, model: AUTO_PROVIDER })
   await waitFor(async () => (await chat.locator('.composer-model > button').textContent()).includes(AUTO_PROVIDER), 'scripted model selected')
 
-  // The user's own prompt is what the reviewer trusts: check DSH records it as user-sourced with an RPC id.
+  // The user's own prompt is what the reviewer trusts: DSH records it as user-sourced with an RPC id.
   const history = await bridgeRpc('session.history', { sessionId: session.sessionId })
   const warmUp = history.events.map(({ event }) => event).find(event => event.type === 'user/message' && JSON.stringify(event.data.content).includes('Warm up this conversation.'))
   assert.equal(warmUp?.data.source.kind, 'user', 'a panel prompt is user-sourced')
   assert.equal(typeof warmUp?.data.source.rpcId, 'string', 'a panel prompt carries its RPC id')
-
-  // ---- The control: Ask by default, a one-time explanation, then Auto ----
-  const chip = chat.locator('.composer-approvals .composer-chip-trigger')
-  try {
-    await waitFor(async () => !(await chip.isDisabled()) && (await chip.textContent()) === 'Approvals: Ask', 'the Approvals control is offered and starts on Ask', 20_000)
-  } catch (error) {
-    await shot(chat, 'debug-auto-review-control.png').catch(() => {})
-    const seen = await panel.evaluate(() => messages.filter(message => String(message.type).startsWith('auto-review')).slice(-3)).catch(cause => String(cause))
-    throw new Error(`Approvals control not usable: ${JSON.stringify({ title: await chip.getAttribute('title').catch(() => null), text: await chip.textContent().catch(() => null), seen })}`, { cause: error })
-  }
-  await chip.click()
-  await chat.locator('.auto-review-menu').waitFor()
-  await shot(chat, 'auto-review-menu.png')
-  await chat.locator('.auto-review-menu button', { hasText: 'Auto review' }).click()
-  await chat.locator('.auto-review-dialog').waitFor()
-  await shot(chat, 'auto-review-explanation.png')
-  await chat.getByRole('button', { name: 'Turn on Auto review', exact: true }).click()
-  await chat.locator('.auto-review-indicator').waitFor()
-  assert.equal(await chip.textContent(), 'Approvals: Auto')
-  await shot(chat, 'auto-review-on.png')
 
   const cardsSoFar = () => panel.evaluate(() => messages.filter(message => message.type === 'approval.request').length)
   const send = async (prompt) => {
     await composer.fill(prompt)
     await chat.getByRole('button', { name: 'Send message', exact: true }).click()
   }
-  const turnDone = (marker) => chat.getByText(`${marker} done.`, { exact: true }).waitFor({ timeout: 60_000 })
-
-  // ---- 1. A low-risk click runs with no card: "Reviewing…", then the Auto badge and reason ----
-  let releaseReview
-  const reviewHeld = new Promise(resolve => { releaseReview = resolve })
-  autoModel.setReviewer(async (body) => { await reviewHeld; return honestReviewer(body) })
-  const cardsBefore = await cardsSoFar()
-  await send('AR1 Show me more of these notes.')
-  await chat.locator('.timeline-step-reviewing').waitFor({ timeout: 30_000 })
-  await shot(chat, 'auto-review-reviewing.png')
-  releaseReview()
-  await turnDone('AR1')
-  assert.equal(await page.evaluate(() => window.counts.more), 1, 'the reviewed click ran')
-  assert.equal(await cardsSoFar(), cardsBefore, 'no card for a low-risk click Auto review approved')
-  await waitFor(async () => await chat.locator('.auto-review-badge').count() === 1, 'the Auto badge on the timeline row')
-  await chat.locator('.timeline-step-auto-reason').first().waitFor()
-  // A fixed line on the row; the reviewer's own words only in the step's details.
-  assert.equal(await chat.locator('.timeline-step-auto-reason').first().textContent(), 'Approved by Auto review')
-  await shot(chat, 'auto-review-approved-row.png')
-  autoModel.setReviewer(honestReviewer)
-  results.push('Auto review on: a harmless disclosure click ran with no card, showed "Reviewing…" while the conversation\'s model decided, then the Auto badge and the fixed "Approved by Auto review" line')
-
-  // ---- 2. The reviewer asks: the ordinary card, with its line ----
-  await send('AR2 Have a look at the note form.')
+  const turnDone = async (marker) => {
+    try {
+      await chat.getByText(`${marker} done.`, { exact: true }).waitFor({ timeout: 60_000 })
+    } catch (error) {
+      const card = await panel.evaluate(() => messages.filter(message => message.type === 'approval.request').at(-1)?.request).catch(() => undefined)
+      throw new Error(`${marker} did not finish; last card: ${JSON.stringify({ summary: card?.summary, note: card?.autoReviewNote })}; reviews: ${JSON.stringify(autoModel.state.reviews.slice(-2).map(review => review.answer))}`, { cause: error })
+    }
+  }
+  const audit = async () => (await bridgeRpc('bridge.audit.export', { sessionId: session.sessionId })).entries ?? []
   const askCard = chat.locator('.approval-dialog')
+  const more = { name: 'browser_click', args: { selector: '#more' } }
+
+  // ---- 0. Baseline: the site trusted, Auto off. Three clicks pass with no card (standing rule) ----
+  await settings({ trustedActionOrigins: [origin] })
+  autoModel.setTurn('AR0', [more, more, more])
+  const baselineCards = await cardsSoFar()
+  await send('AR0 Show more three times.')
+  await turnDone('AR0')
+  assert.equal(await cardsSoFar(), baselineCards, 'the trusted-site baseline shows no card')
+  await settings({ trustedActionOrigins: [] })
+
+  // ---- The toggle: off by default, one confirmation the first time, then on ----
+  const toggle = chat.locator('.auto-approve-toggle')
+  await waitFor(async () => !(await toggle.isDisabled()) && (await toggle.getAttribute('aria-pressed')) === 'false', 'the Auto approve toggle is offered and off')
+  await toggle.click()
+  await chat.locator('.auto-review-dialog').waitFor()
+  await themedShots(chat, 'auto-approve-confirm')
+  await chat.locator('.auto-review-dialog').getByRole('button', { name: 'Turn on', exact: true }).click()
+  await chat.locator('.auto-review-indicator').waitFor()
+  assert.equal(await toggle.getAttribute('aria-pressed'), 'true')
+
+  // ---- 1. A multi-step task: navigate, click, type, submit a form. Zero cards; only the submit is reviewed ----
+  // The reviewer takes 4 s here (under the bridge's 8 s limit), long enough to photograph "Checking…".
+  autoModel.setReviewer(async (body) => { await new Promise(resolve => { setTimeout(resolve, 4_000) }); return honestReviewer(body) })
+  autoModel.setTurn('AR1', [
+    { name: 'browser_navigate', args: { url: `${autoPage}/contact` } },
+    more,
+    { name: 'browser_type', args: { selector: '#name', text: 'Ada' } },
+    { name: 'browser_click', args: { selector: '#submit' } },
+  ])
+  const cardsBefore = await cardsSoFar()
+  const reviewsBefore = autoModel.state.reviews.length
+  await send('AR1 Open the contact page, show more, put my name Ada in the contact form and submit it.')
+  // The submit is consequential: the timeline says "Checking…" while the reviewer decides; no card.
+  await chat.locator('.timeline-step-reviewing').waitFor({ timeout: 30_000 })
+  assert.equal(await cardsSoFar(), cardsBefore, 'no card while the reviewer checks')
+  await themedShots(chat, 'auto-approve-checking')
+  await turnDone('AR1')
+  autoModel.setReviewer(honestReviewer)
+  assert.equal(await cardsSoFar(), cardsBefore, 'the whole task ran with zero approval cards')
+  assert.equal(new URL(page.url()).pathname, '/auto-review/contact', 'the navigation ran')
+  assert.deepEqual(await page.evaluate(() => window.counts), { more: 1, submitted: 1, sent: 0, name: 'Ada' }, 'click, typing and submit ran')
+  const task = autoModel.state.reviews.slice(reviewsBefore)
+  assert.equal(task.length, 1, `only the submit was reviewed (${task.length} reviews)`)
+  assert.match(task[0].input, /"control_name": "Submit"/u)
+  assert.match(task[0].input, /"consequential_because": \[[^\]]*"submits-form"/u)
+  // Page text only inside the fence; the user's words in the trusted part.
+  assert.match(task[0].input.split('<untrusted_page_data')[0], /put my name Ada in the contact form and submit it/u)
+  // The timeline: four Auto rows, the submit marked as checked.
+  await waitFor(async () => await chat.locator('.auto-review-badge').count() >= 4, 'Auto badges on the timeline rows')
+  assert.ok(await chat.getByText('Auto-approved after a check', { exact: true }).count() >= 1)
+  await themedShots(chat, 'auto-approve-on')
+  results.push('Auto approve on: navigate, click, type and a form submit ran with zero approval cards; only the submit was reviewed (silently, "Checking…" in the timeline), and the timeline marks every step Auto')
+
+  // ---- 2. Latency: ordinary steps under Auto against the trusted-site baseline; the reviewed step ----
+  autoModel.setTurn('AR2', [more, more, more, { name: 'browser_click', args: { selector: '#submit' } }])
+  const cardsBeforeTimed = await cardsSoFar()
+  await send('AR2 Show more three times, then submit the contact form.')
+  await turnDone('AR2')
+  assert.equal(await cardsSoFar(), cardsBeforeTimed, 'the timed turn showed no card')
+  const entries = await audit()
+  const byCall = new Map()
+  for (const entry of entries) {
+    if (typeof entry.callId !== 'string') continue
+    const record = byCall.get(entry.callId) ?? {}
+    if (entry.kind === 'tool-call') record.tool = entry.tool
+    if (entry.kind === 'approval') record.decision = entry.decision
+    if (entry.kind === 'result' && typeof entry.durationMs === 'number') record.durationMs = entry.durationMs
+    if (entry.kind === 'auto-review') record.review = entry
+    byCall.set(entry.callId, record)
+  }
+  const calls = [...byCall.values()]
+  const clicks = (decision) => calls.filter(call => call.tool === 'browser_click' && call.decision === decision && call.review === undefined && typeof call.durationMs === 'number').map(call => call.durationMs)
+  const trusted = clicks('auto-allowed')
+  const auto = clicks('auto-approved')
+  assert.ok(trusted.length >= 3 && auto.length >= 3, `enough timed clicks (trusted ${trusted.length}, auto ${auto.length})`)
+  // The last reviewed submit (AR2): its review was not held open.
+  const reviewed = calls.filter(call => call.review !== undefined && call.decision === 'auto-reviewed').at(-1)
+  assert.ok(reviewed, 'the reviewed submit is audited as auto-reviewed, with its review')
+  assert.equal(reviewed.review.decision, 'allow')
+  const latency = {
+    trustedClickMs: median(trusted),
+    autoClickMs: median(auto),
+    reviewMs: reviewed.review.durationMs,
+    reviewedSubmitMs: reviewed.durationMs,
+  }
+  results.push(`latency (scripted reviewer model): ordinary click median ${latency.autoClickMs} ms under Auto approve vs ${latency.trustedClickMs} ms on a trusted site (no card either way); a reviewed submit took ${latency.reviewedSubmitMs} ms end to end, of which the review ${latency.reviewMs} ms`)
+
+  // ---- 3. The reviewer denies: the ordinary card, with the reviewer's one line ----
+  autoModel.setTurn('AR3', [{ name: 'browser_click', args: { selector: '#send' } }])
+  await send('AR3 Read the notes for me.')
   await askCard.waitFor({ timeout: 30_000 })
   await chat.locator('.approval-auto-review').waitFor()
-  // A fixed sentence chosen by code, never the reviewer's words: it teaches what to say next time.
-  assert.equal(await chat.locator('.approval-auto-review').textContent(), 'Auto review asked: your message did not name this button. Say “click Send message” to let it through next time.')
-  await shot(chat, 'auto-review-ask-card.png')
+  assert.equal(await chat.locator('.approval-auto-review').textContent(), 'Auto approve\'s reviewer asked you: You did not ask for this step.')
+  await themedShots(chat, 'auto-approve-denied-card')
   await chat.getByRole('button', { name: 'Deny', exact: true }).click()
-  await turnDone('AR2')
-  assert.equal(await page.evaluate(() => window.counts.sent), 0, 'the submit the user never asked for did not run')
-  results.push('a button the user did not name shows the ordinary card with a fixed sentence teaching the words to use (never model text), and the user decides')
-
-  // ---- 3. A forced card still appears with Auto on, and is never reviewed ----
-  const host = new URL(autoPage).host
-  await settings({ siteRules: [{ pattern: host, rule: 'ask' }] })
-  const reviewsBeforeForced = autoModel.state.reviews.length
-  await send('AR3 Show more once again.')
-  await askCard.waitFor({ timeout: 30_000 })
-  assert.equal(await chat.locator('.approval-auto-review').count(), 0, 'a forced card carries no Auto review line')
-  assert.equal(autoModel.state.reviews.length, reviewsBeforeForced, 'a forced card is never sent to the reviewer')
-  const forced = await panel.evaluate(() => messages.filter(message => message.type === 'approval.request').at(-1).request)
-  assert.equal(forced.forced, true)
-  await chat.getByRole('button', { name: 'Allow once', exact: true }).click()
   await turnDone('AR3')
-  await settings({ siteRules: [] })
-  results.push('with Auto review on, a site "ask" rule still forces its card and the reviewer is never asked')
+  assert.equal(await page.evaluate(() => window.counts.sent), 0, 'the send the user never asked for did not run')
+  results.push('a consequential step the user did not ask for: the reviewer denied it, the ordinary card showed the reviewer\'s one-line reason, and the user decided')
 
   // ---- 4. The reviewer does not answer: after its time limit the card shows ----
   autoModel.setReviewer(() => ({ hang: true }))
+  autoModel.setTurn('AR4', [{ name: 'browser_click', args: { selector: '#submit' } }])
   const timedFrom = Date.now()
-  await send('AR4 Expand the details.')
+  await send('AR4 Submit the contact form again.')
   await askCard.waitFor({ timeout: 30_000 })
   const waited = Date.now() - timedFrom
   assert.match(await chat.locator('.approval-auto-review').textContent(), /did not answer in time/u)
-  assert.ok(waited >= 8_000, `the card waited for the reviewer's time limit (${waited} ms)`)
+  assert.ok(waited >= 7_000, `the card waited for the reviewer's time limit (${waited} ms)`)
   await chat.getByRole('button', { name: 'Allow once', exact: true }).click()
   await turnDone('AR4')
   autoModel.setReviewer(honestReviewer)
   results.push(`a reviewer that never answers falls back to the card after its time limit (${Math.round(waited / 1000)} s)`)
 
   // ---- 5. Auto turned off in the middle of a turn: the next step asks ----
-  await send('AR5 Expand the details again.')
-  // The model holds its step: the turn is running when the user turns Auto off.
+  autoModel.setTurn('AR5', [{ ...more, gate: 'ar5' }])
+  await send('AR5 Show more again.')
   await waitFor(() => autoModel.waiting('ar5'), 'the AR5 step is waiting')
   await chat.locator('.auto-review-indicator button').click()
-  await waitFor(async () => (await chip.textContent()) === 'Approvals: Ask', 'Auto review off')
+  await waitFor(async () => (await toggle.getAttribute('aria-pressed')) === 'false', 'Auto approve off')
   const reviewsBeforeOff = autoModel.state.reviews.length
   autoModel.release('ar5')
   await askCard.waitFor({ timeout: 30_000 })
   assert.equal(autoModel.state.reviews.length, reviewsBeforeOff, 'no review after Auto was turned off')
   await chat.getByRole('button', { name: 'Allow once', exact: true }).click()
   await turnDone('AR5')
-  results.push('turning Auto review off in the middle of a turn makes the next step ask')
+  results.push('turning Auto approve off in the middle of a turn makes the next step ask')
 
-  // The audit log records each review: decision, risk, reason, model and binding.
-  const exported = await bridgeRpc('bridge.audit.export', { sessionId: session.sessionId }).catch(() => undefined)
-  const reviews = (exported?.entries ?? []).filter(entry => entry.kind === 'auto-review')
+  // ---- The Settings option ----
+  await chat.getByRole('button', { name: 'Open settings', exact: true }).click()
+  const option = chat.getByText('Start conversations in Auto approve', { exact: true })
+  await option.scrollIntoViewIfNeeded()
+  await chat.getByText('With Auto approve on, the agent acts without asking; a web page that tricks the model can make it do things you did not ask for.', { exact: true }).waitFor()
+  await themedShots(chat, 'auto-approve-setting')
+  await chat.getByRole('button', { name: 'Back to chat', exact: true }).click()
+  results.push('Settings offers "Start conversations in Auto approve" (off by default) with its one-sentence trade-off')
+
+  // The audit log records each review: decision, reason, model and binding.
+  const reviews = (await audit()).filter(entry => entry.kind === 'auto-review')
   assert.ok(reviews.length >= 3, `auto-review audit entries (${reviews.length})`)
   assert.ok(reviews.every(entry => /^[0-9a-f]{64}$/u.test(entry.binding) && entry.model === `${AUTO_PROVIDER}/${AUTO_PROVIDER}`), 'each review records its binding and model')
   await chat.close()

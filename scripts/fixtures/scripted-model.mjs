@@ -6,14 +6,14 @@ import { once } from 'node:events'
 import { createServer } from 'node:http'
 import { readJson, streamReply } from '../lib/dsh-harness.mjs'
 
-/** Opens the bridge's fixed Auto review policy (packages/browser/bridge-browser/src/auto-review.ts). */
-export const REVIEW_POLICY_MARKER = 'DSH_BROWSER_AUTO_REVIEW_POLICY v1'
+/** Opens the bridge's fixed Auto approve review policy (packages/browser/bridge-browser/src/auto-review.ts). */
+export const REVIEW_POLICY_MARKER = 'DSH_BROWSER_AUTO_APPROVE_REVIEW v2'
 
 const textOfMessage = message => typeof message?.content === 'string'
   ? message.content
   : Array.isArray(message?.content) ? message.content.map(part => part?.text ?? '').join('\n') : ''
 
-/** Whether a chat-completions request is an Auto review (the bridge's reviewer), not the agent. */
+/** Whether a chat-completions request is an Auto approve review (the bridge's reviewer), not the agent. */
 export function isReviewRequest(body) {
   const messages = Array.isArray(body?.messages) ? body.messages : []
   return messages.some(message => (message.role === 'system' || message.role === 'developer') && textOfMessage(message).startsWith(REVIEW_POLICY_MARKER))
@@ -26,20 +26,30 @@ export function reviewInput(body) {
   return messages.filter(message => message.role === 'user').map(textOfMessage).join('\n')
 }
 
+const STOP_WORDS = new Set(['this', 'that', 'with', 'from', 'your', 'http', 'https', 'page', 'button', 'link', 'click', 'into', 'type'])
+
 /**
- * An honest scripted reviewer: the deterministic rules already decided the
- * action CAN be approved (rule "harmless" or "named"); it says whether it
- * SHOULD be. It allows harmless steps at low risk and named ones at medium,
- * and always asks for high risk. It reads only the trusted sections.
+ * An honest scripted reviewer for consequential steps: it allows a step only
+ * when the user's own messages mention the control (a word of its name, or
+ * of the card's summary), and never a step the taint rules flagged after the
+ * agent read untrusted pages. It reads the page data only to learn the
+ * control's name, never as instructions.
  */
 export function honestReviewer(body) {
   const input = reviewInput(body)
-  const trusted = input.split('UNTRUSTED_PAGE_DATA')[0] ?? ''
-  const users = trusted.split('PENDING_ACTION')[0] ?? ''
-  const facts = trusted.slice(users.length)
-  if (/"high_risk_words": true/u.test(facts)) return { decision: 'ask', risk: 'high', reason: 'Payments and account settings always need you.' }
-  if (/"rule": "named"/u.test(facts)) return { decision: 'allow', risk: 'medium', reason: 'You named this step.' }
-  return { decision: 'allow', risk: 'low', reason: 'A small in-page step that fits your request.' }
+  const fence = input.indexOf('<untrusted_page_data')
+  const trusted = fence === -1 ? input : input.slice(0, fence)
+  const section = trusted.split('PENDING_ACTION')[0] ?? ''
+  const facts = trusted.slice(section.length)
+  // The user's messages only, without the section's own header line ("USER_MESSAGES (the user's own words…)").
+  const users = section.slice(section.indexOf('\n') + 1).toLowerCase()
+  const page = fence === -1 ? '' : input.slice(fence)
+  if (/"consequential_because": \[[^\]]*"tainted"/u.test(facts)) return { decision: 'deny', reason: 'The page, not you, asked for this step.' }
+  const what = (/"control_name": "([^"]*)"/u.exec(page)?.[1] ?? /"action_summary": "([^"]*)"/u.exec(page)?.[1] ?? '').toLowerCase()
+  const words = (what.match(/[\p{L}\p{N}]{4,}/gu) ?? []).filter(word => !STOP_WORDS.has(word))
+  return words.some(word => users.includes(word))
+    ? { decision: 'allow', reason: 'You asked for this step.' }
+    : { decision: 'deny', reason: 'You did not ask for this step.' }
 }
 
 /**
@@ -57,11 +67,11 @@ export function honestReviewer(body) {
 export async function startScriptedModel(steps, finalText, options = {}) {
   const state = { requests: 0, sawResumeContext: false, toolResults: [], log: [], reviews: [] }
   /**
-   * Answers Auto review requests, which never count as agent requests:
-   * returns `{ decision, risk, reason }`, `{ text }` (raw output), `{ hang: true }`
-   * (never answers, for timeouts) or a promise of one. Default: always ask.
+   * Answers Auto approve review requests, which never count as agent requests:
+   * returns `{ decision, reason }`, `{ text }` (raw output), `{ hang: true }`
+   * (never answers, for timeouts) or a promise of one. Default: always deny.
    */
-  let reviewer = options.reviewer ?? (() => ({ decision: 'ask', risk: 'low', reason: 'Scripted reviewer: ask.' }))
+  let reviewer = options.reviewer ?? (() => ({ decision: 'deny', reason: 'Scripted reviewer: deny.' }))
   const startedAt = Date.now()
   const released = new Set()
   const waiting = new Map()
@@ -80,7 +90,7 @@ export async function startScriptedModel(steps, finalText, options = {}) {
         await new Promise(resolve => { response.on('close', resolve) })
         return
       }
-      const text = typeof answer?.text === 'string' ? answer.text : JSON.stringify({ decision: answer.decision, risk: answer.risk, reason: answer.reason })
+      const text = typeof answer?.text === 'string' ? answer.text : JSON.stringify({ decision: answer.decision, reason: answer.reason })
       if (body.stream === true) {
         streamReply(response, { text }, { id: `chatcmpl-review-${state.reviews.length}`, model: body.model ?? 'scripted' })
         return

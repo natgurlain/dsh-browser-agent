@@ -326,8 +326,7 @@ export interface PanelCopy {
     reviewedLine: string
     /** Prefix of the reviewer's reason in a timeline row's details. */
     reasonPrefix: string
-    /** Settings: the group, the option, and the one-sentence trade-off. */
-    settingLabel: string
+    /** Settings: the option, and the one-sentence trade-off. */
     settingTitle: string
     settingHelp: string
     settingMore: string
@@ -413,6 +412,8 @@ export interface PanelCopy {
   taint: {
     /** `sites`: host names, comma-separated (at most three). */
     body: (sites: string) => string
+    /** The same, while Auto approve is on: risky steps are checked by the reviewer instead of asking. */
+    bodyAuto: (sites: string) => string
     unknownSource: string
     more: (count: number) => string
     clear: string
@@ -812,7 +813,7 @@ const EN: PanelCopy = {
       appearance: { title: 'Appearance', help: 'Language, colours and text size. Changes apply immediately.' },
       permissions: { title: 'Permissions & safety', help: 'What the assistant may read and do, and on which sites.' },
       behaviour: { title: 'Behaviour', help: 'Approvals, conversations and what you see on the page.' },
-      automation: { title: 'Automation', help: 'Page watchers, Auto approve, the dev loop and experimental learning features.' },
+      automation: { title: 'Automation', help: 'Page watchers, the dev loop and experimental learning features.' },
       models: { title: 'Models & API relay', help: 'Use your own API relay as a model provider.' },
       about: { title: 'About', help: 'Updates, audit log and uninstall.' },
     },
@@ -1019,7 +1020,6 @@ const EN: PanelCopy = {
     approvedLine: 'Auto-approved',
     reviewedLine: 'Auto-approved after a check',
     reasonPrefix: 'Reviewer\'s note (model text)',
-    settingLabel: 'Auto approve',
     settingTitle: 'Start conversations in Auto approve',
     settingHelp: 'With Auto approve on, the agent acts without asking; a web page that tricks the model can make it do things you did not ask for.',
     settingMore: 'New conversations start with Auto approve on; you can still switch it off per conversation with the Auto approve button under the message box. Ordinary steps run at once. Steps that send, delete, pay, buy, publish or use passwords, and steps after the agent read web pages that could move data elsewhere, are first checked by this conversation\'s model (one extra model call each); if it objects, you get the usual card. Developer tools, a site you set to "Always ask" and strict mode still ask.',
@@ -1096,6 +1096,7 @@ const EN: PanelCopy = {
   },
   taint: {
     body: (sites) => `This conversation read web pages that could contain instructions (${sites}), so risky actions ask first and shell and file tools are off.`,
+    bodyAuto: (sites) => `This conversation read web pages that could contain instructions (${sites}). Auto approve checks risky actions before they run; shell and file tools are off.`,
     unknownSource: 'an unknown origin',
     more: (count) => `+${String(count)} more`,
     clear: 'Clear',
@@ -1491,7 +1492,7 @@ const ZH: PanelCopy = {
       appearance: { title: '外观', help: '语言、配色和字号。更改立即生效。' },
       permissions: { title: '权限与安全', help: '助手可以读取和操作什么，以及在哪些站点上。' },
       behaviour: { title: '行为', help: '审批、会话以及页面上的显示。' },
-      automation: { title: '自动化', help: '页面监视、自动批准、开发闭环和实验性的学习功能。' },
+      automation: { title: '自动化', help: '页面监视、开发闭环和实验性的学习功能。' },
       models: { title: '模型与中转服务', help: '把你自己的 API 中转站用作模型提供方。' },
       about: { title: '关于', help: '更新、审计日志和卸载。' },
     },
@@ -1698,7 +1699,6 @@ const ZH: PanelCopy = {
     approvedLine: '已自动批准',
     reviewedLine: '检查后已自动批准',
     reasonPrefix: '审核模型的说明（模型文本）',
-    settingLabel: '自动批准',
     settingTitle: '新对话默认开启自动批准',
     settingHelp: '开启自动批准后，代理会直接操作而不再询问；如果网页诱骗了模型，它可能会做您没有要求的事。',
     settingMore: '新对话开始时即开启自动批准；您仍可用输入框下方的“自动批准”按钮为单个对话关闭它。普通操作立即执行。发送、删除、付款、购买、发布或使用密码的操作，以及代理读取网页后可能把数据带到别处的操作，会先由本对话的模型检查（每次额外调用一次模型）；如有异议，您会看到常规卡片。开发者工具、设为“总是询问”的站点和严格模式仍会询问。',
@@ -1775,6 +1775,7 @@ const ZH: PanelCopy = {
   },
   taint: {
     body: (sites) => `本对话读取了可能包含指令的网页（${sites}），因此高风险操作会先询问，命令行与文件工具已停用。`,
+    bodyAuto: (sites) => `本对话读取了可能包含指令的网页（${sites}）。自动批准会在高风险操作执行前先检查；命令行与文件工具已停用。`,
     unknownSource: '未知来源',
     more: (count) => `另有 ${String(count)} 个`,
     clear: '清除',

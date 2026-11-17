@@ -97,13 +97,13 @@ export async function runOne({
   await prepareBackend(backend, instance, extensionBrowser)
 
   // `viaPanel`: create and prompt the session from the extension's panel, as a user does
-  // (Auto review trusts only prompts the bridge forwarded from the panel).
+  // (Auto approve's reviewer trusts only prompts the bridge forwarded from the panel).
   const created = viaPanel === undefined
     ? await backend.client.rpc('session.create', { cwd: workspace })
     : await viaPanel('session.create', { cwd: workspace })
   const sessionId = created.sessionId
   if (backend.backend === 'extension') await extensionBrowser.bindSession?.(sessionId)
-  // Set up the session before its prompt (the model-free check turns Auto review on here).
+  // Set up the session before its prompt (the model-free check turns Auto approve on here).
   await onSession?.(sessionId)
   const models = await backend.client.rpc('session.modelCatalog')
   let selectedModel = models.default
