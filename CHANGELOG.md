@@ -3,6 +3,15 @@
 Each `## vX.Y.Z` section becomes the notes of that GitHub release
 (`scripts/package-release.mjs --notes`), followed by the SHA-256 digests of its assets.
 
+## v0.3.4
+
+- **No more failed `web_fetch` step after reading a page.** Once a conversation has read a
+  web page, fetching and searching the web directly are paused together with shell and file
+  tools. The agent used to find that out by trying, which showed as a *Failed* step, and was
+  then told to ask you. It is now told up front to open further pages in the browser, and a
+  refused fetch or search points it there. What is paused has not changed.
+- **A video instead of the screenshot in the README.**
+
 ## v0.3.3
 
 One name everywhere.
