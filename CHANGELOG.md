@@ -3,6 +3,30 @@
 Each `## vX.Y.Z` section becomes the notes of that GitHub release
 (`scripts/package-release.mjs --notes`), followed by the SHA-256 digests of its assets.
 
+## v0.3.2
+
+Rough edges in everyday use, most of them seen while recording the demo.
+
+- **"Do the remaining N" under Auto approve runs without a card.** Your click on the offer in
+  the panel is your request: the reviewer is told so by the bridge, from the click itself and
+  never from page or model text. A series that types into fields runs without a card too: a
+  program's approval answer is fixed text and no longer counts as a web page the conversation
+  read. Each step still counts as a read of the page it touches, so typing is checked as
+  before once the conversation holds content from another site.
+- **A click that submits a form is "Done".** A submit that navigates away was shown as
+  *Failed* in the step timeline although it had saved.
+- **No "Follow your current page?" for the agent's own tab.** The question no longer flashes
+  when the agent opens a tab itself.
+- **The thread keeps following the newest message** when a banner appears in the middle of a
+  turn or you scroll inside a card.
+- **The status line lists only the sites that were read.** Your own local pages and sites you
+  trust are no longer named as sources.
+- **The "AI controlling · Stop" pill and frame** show only while a turn acts on the tab, not
+  before you have asked for anything.
+- **Narrow panel.** The connection status fits a panel about 360 px wide (a dot only).
+- **Step timeline.** Rows no longer blink or lose their open details when a new step or a
+  screenshot arrives.
+
 ## v0.3.1
 
 The plugin package has the repository's name, and Auto approve is quieter.
