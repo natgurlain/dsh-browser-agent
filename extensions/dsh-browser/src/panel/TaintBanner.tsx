@@ -45,18 +45,22 @@ interface TrustOutcome {
 export function useSessionTaint(onTrusted?: (outcome: TrustOutcome) => void): {
   records: Record<string, TaintRecord>
   trustable: TrustableSources
+  /** Per record key: its sources that are exempt now (they tainted nothing; not named). */
+  exemptSources: Record<string, string[]>
   clear: (sessionId: string | null) => void
   trust: (sessionId: string | null, origins: readonly string[]) => void
 } {
   const [records, setRecords] = useState<Record<string, TaintRecord>>({})
   const [trustable, setTrustable] = useState<TrustableSources>({})
+  const [exemptSources, setExemptSources] = useState<Record<string, string[]>>({})
   const onTrustedRef = useRef(onTrusted)
   onTrustedRef.current = onTrusted
   const post = useSidePort(PORT_NAME, { type: 'taint.subscribe' }, (message) => {
-    const msg = message as { type?: unknown; records?: unknown; trustable?: unknown; ok?: unknown; cleared?: unknown }
+    const msg = message as { type?: unknown; records?: unknown; trustable?: unknown; exemptSources?: unknown; ok?: unknown; cleared?: unknown }
     if (msg?.type === 'taint.state' && typeof msg.records === 'object' && msg.records !== null) {
       setRecords(msg.records as Record<string, TaintRecord>)
       setTrustable(typeof msg.trustable === 'object' && msg.trustable !== null ? msg.trustable as TrustableSources : {})
+      setExemptSources(typeof msg.exemptSources === 'object' && msg.exemptSources !== null ? msg.exemptSources as Record<string, string[]> : {})
     } else if (msg?.type === 'taint.trust.result') {
       onTrustedRef.current?.({ ok: msg.ok === true, cleared: msg.cleared === true })
     }
@@ -64,6 +68,7 @@ export function useSessionTaint(onTrusted?: (outcome: TrustOutcome) => void): {
   return {
     records,
     trustable,
+    exemptSources,
     clear: (sessionId) => {
       post({ type: 'taint.clear', id: crypto.randomUUID(), ...sessionId === null ? {} : { sessionId } })
     },
@@ -123,11 +128,21 @@ export function siteNameParts(host: string): { prefix: string; domain: string } 
  * Lay out one taint record for the banner. Pure, so the wording and the
  * button rules are tested without a browser.
  * @param offered - source origin → the choice the background offers for it.
+ * @param exempt - sources that are exempt from taint now (the user's own local
+ *   pages, trusted sites): they tainted nothing, so they are not named, unless
+ *   nothing else is left to name.
  */
-export function taintBannerView(record: TaintRecord, offered: Record<string, TrustOffer> | undefined, unknownLabel: string): TaintBannerView {
+export function taintBannerView(
+  record: TaintRecord,
+  offered: Record<string, TrustOffer> | undefined,
+  unknownLabel: string,
+  exempt: readonly string[] = [],
+): TaintBannerView {
   const hosts: string[] = []
+  const named = record.sources.filter((source) => !exempt.includes(source))
+  const listed = named.length > 0 ? named : record.sources
   let unknown = record.sources.length === 0
-  for (const source of record.sources) {
+  for (const source of listed) {
     const host = source === UNKNOWN_SOURCE ? undefined : displayHost(source)
     if (host === undefined) unknown = true
     else if (!hosts.includes(host)) hosts.push(host)
@@ -170,7 +185,7 @@ export function TaintBanner({ sessionId, locale, onTrusted, autoApprove = false,
   /** Test seam only: jsdom cannot produce a trusted click. Never set in the panel. */
   acceptSyntheticClicks?: boolean
 }): React.JSX.Element | null {
-  const { records, trustable, clear, trust } = useSessionTaint((outcome) => { if (outcome.ok) onTrusted?.() })
+  const { records, trustable, exemptSources, clear, trust } = useSessionTaint((outcome) => { if (outcome.ok) onTrusted?.() })
   const [expanded, setExpanded] = useState(false)
   const [listOpen, setListOpen] = useState(false)
   const [confirming, setConfirming] = useState<TaintTrustChoice | null>(null)
@@ -183,7 +198,7 @@ export function TaintBanner({ sessionId, locale, onTrusted, autoApprove = false,
   const record = records[key]
   if (record === undefined) return null
   const copy = PANEL_COPY[locale].taint
-  const view = taintBannerView(record, trustable[key], copy.unknownSource)
+  const view = taintBannerView(record, trustable[key], copy.unknownSource, exemptSources[key])
   const target = key === NO_SESSION_KEY ? null : key
   // Trusting a site is the user's decision alone: only a real click in the panel counts.
   const userClick = (event: React.MouseEvent): boolean => acceptSyntheticClicks || event.nativeEvent.isTrusted

@@ -96,6 +96,23 @@ describe('taint banner layout', () => {
     expect(buttons(host)).toEqual([en.clear])
   })
 
+  it('does not name the user\'s own exempt pages, which tainted nothing', async () => {
+    const sources = ['http://crm.localhost:4180', 'http://hours.localhost:4180', 'https://shop-a.example', 'https://shop-b.example']
+    const exempt = ['http://crm.localhost:4180', 'http://hours.localhost:4180']
+    const view = taintBannerView(record(sources), sites(['https://shop-a.example', 'https://shop-b.example']), en.unknownSource, exempt)
+    expect(view.hosts).toEqual(['shop-a.example', 'shop-b.example'])
+    expect(view.trust.map((choice) => choice.site)).toEqual(['shop-a.example', 'shop-b.example'])
+    // Only exempt sources (it should have been lifted): name them rather than nothing.
+    expect(taintBannerView(record(exempt), undefined, en.unknownSource, exempt).hosts).toEqual(['crm.localhost:4180', 'hours.localhost:4180'])
+    const host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+    await act(async () => { root!.render(createElement(TaintBanner, { sessionId: 's1', locale: 'en', acceptSyntheticClicks: true })) })
+    await act(async () => { ports[0]!.emit({ type: 'taint.state', records: { s1: record(sources) }, trustable: {}, exemptSources: { s1: exempt } }) })
+    expect(host.textContent).toContain('(shop-a.example, shop-b.example)')
+    expect(host.textContent).not.toContain('localhost')
+  })
+
   it('names host names, not origins, in one short sentence that says why', () => {
     const view = taintBannerView(record(['https://seraph.quest', 'https://x.com']), undefined, en.unknownSource)
     expect(view).toMatchObject({ hosts: ['seraph.quest', 'x.com'], shown: ['seraph.quest', 'x.com'], more: 0, unknown: false, trust: [], local: [] })

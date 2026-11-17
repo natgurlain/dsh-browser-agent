@@ -594,6 +594,22 @@ export class PolicyRuntime {
   }
 
   /**
+   * Per record, the sources that are exempt from taint now (the user's own
+   * local pages, trusted sites). They stay sources, so a later page is never
+   * the "only source"; the banner just does not name them, as they tainted
+   * nothing.
+   */
+  exemptSources(): Record<string, string[]> {
+    const config = this.exemption()
+    const result: Record<string, string[]> = {}
+    for (const [key, record] of Object.entries(this.taint.snapshot())) {
+      const exempt = record.sources.filter((source) => source !== UNKNOWN_SOURCE && originTaintExempt(source, config))
+      if (exempt.length > 0) result[key] = exempt
+    }
+    return result
+  }
+
+  /**
    * The banner's one-click choices for one session: "Trust <site>" adds the
    * source's host to the sites whose pages are not treated as untrusted
    * content (a taint-only entry: it relaxes no approval card), and "these
@@ -688,6 +704,7 @@ export class PolicyRuntime {
         type: 'taint.state',
         records: this.taint.snapshot(),
         trustable: this.trustable(),
+        exemptSources: this.exemptSources(),
         unconfirmedTrust: this.unconfirmedTrust(),
         strictSessions: [...this.strictSessions],
         managed: { active: this.managed.active, siteRules: this.managed.siteRules },
