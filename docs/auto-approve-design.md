@@ -1,6 +1,6 @@
 # Auto approve: design
 
-Status: implemented for v0.3.0 (unreleased). It replaces the earlier "Auto
+Status: released in v0.3.0. It replaces the earlier "Auto
 review" design (the agent could act without a card only when the user's
 message named the control verbatim, or the action was on a short "plainly
 harmless" list), which still showed a card for most actions. README.md and
