@@ -46,8 +46,8 @@ describe('describing the element in the page (content script)', () => {
     Object.defineProperty(document.querySelector('label')!, 'innerText', { value: 'Email notifications\nNew orders, refunds and low stock alerts' })
     expect(describeElement(document.querySelector('#email')!)).toEqual({
       found: true, kind: 'checkbox', name: 'Email notifications', context: { kind: 'section', text: 'Notifications' },
-      // What a person sees: the whole label, description included (Auto review compares it with the name).
-      rendered: 'Email notifications New orders, refunds and low stock alerts',
+      // What a person sees of the label's headline (Auto review compares it with the name).
+      rendered: 'Email notifications',
     })
     expect(describeElement(document.querySelector('button')!)).toEqual({
       // A submit button of the form (native structure; Auto review treats it as commit-like).

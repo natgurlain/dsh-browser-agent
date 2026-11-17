@@ -488,7 +488,8 @@ describe('security review 3 (both reviewers, end to end)', () => {
     const y = describeElement(document.getElementById('y')!)
     expect(y).toMatchObject({ name: 'Show more', rendered: 'Delete everything', disclosure: true })
     const z = describeElement(document.getElementById('z')!)
-    expect(z).toMatchObject({ name: 'Save settings', rendered: 'Delete everything' })
+    // labelledby a hidden node: nothing visible names it.
+    expect(z).toMatchObject({ name: 'Save settings', rendered: '' })
     expect(describeElement(document.getElementById('v')!)).toMatchObject({ rendered: 'Save' })
     const fromPage = (d: ReturnType<typeof describeElement>): TargetState => ({ state: 'found', kind: d.kind, name: d.name, rendered: d.rendered, ...d.disclosure === true ? { disclosure: true } : {} } as TargetState)
     expect(judge('browser_click', { index: 1 }, at(fromPage(y)))).toEqual({ eligible: false, reason: 'name-mismatch' })
@@ -496,6 +497,29 @@ describe('security review 3 (both reviewers, end to end)', () => {
     expect(judge('browser_click', { index: 1 }, at(fromPage(describeElement(document.getElementById('i')!))))).toEqual({ eligible: false, reason: 'unnamed' })
     // "Save" does not name "Save and delete everything".
     expect(judge('browser_click', { index: 1 }, at(found('button', 'Save', { rendered: 'Save and delete everything' })))).toEqual({ eligible: false, reason: 'name-mismatch' })
+  })
+
+  it('F5 positive: a real settings label with a description line still names its checkbox', () => {
+    document.body.innerHTML = '<form><section><h2>Notifications</h2><label class="row"><span><strong>Email notifications</strong> <span>New orders, refunds and low stock alerts</span></span><input id="email" type="checkbox"></label><button id="save" type="submit">Save settings</button></section></form>'
+    Object.defineProperty(document.querySelector('label')!, 'innerText', { value: 'Email notifications\nNew orders, refunds and low stock alerts' })
+    const fromPage = (d: ReturnType<typeof describeElement>): TargetState => ({ state: 'found', kind: d.kind, name: d.name, rendered: d.rendered } as TargetState)
+    const box = describeElement(document.getElementById('email')!)
+    expect(box).toMatchObject({ name: 'Email notifications', rendered: 'Email notifications' })
+    expect(both('browser_click', { index: 1 }, at(fromPage(box)), 'Turn on Email notifications and click Save settings')).toEqual(['allow', 'allow'])
+    // A label whose visible start differs from its name (hidden prefix) is not the name.
+    document.body.innerHTML = '<label><span style="opacity:0">Save settings</span>Delete account<input id="x" type="checkbox"></label>'
+    Object.defineProperty(document.querySelector('label')!, 'innerText', { value: 'Save settingsDelete account' })
+    const hidden = describeElement(document.getElementById('x')!)
+    expect(judge('browser_click', { index: 1 }, at(fromPage(hidden)))).toEqual({ eligible: false, reason: 'name-mismatch' })
+  })
+
+  it('F4 for selects: a select that repeats per row needs the row', () => {
+    document.body.innerHTML = '<table><tr><td>Bob</td><td><select id="r1" aria-label="Role"><option>Viewer</option><option>Editor</option></select></td></tr><tr><td>Dana</td><td><select id="r2" aria-label="Role"><option>Viewer</option><option>Editor</option></select></td></tr></table>'
+    const slots = describeActionTargets('browser_select', { selector: '#r2', label: 'Editor' }, new ElementIds())
+    expect(slots.target).toMatchObject({ sameName: 2, rowKey: 'Dana', chosen: ['Editor'] })
+    const select = (row: string) => at(found('select', 'Role', { chosen: ['Editor'], sameName: 2, rowKey: row }))
+    expect(both('browser_select', { index: 4, label: 'Editor' }, select('Dana'), 'select Editor for Bob')).not.toContain('allow')
+    expect(both('browser_select', { index: 4, label: 'Editor' }, select('Bob'), 'select Editor for Bob')).toEqual(['allow', 'allow'])
   })
 
   it('F6: modifiers, other buttons, more clicks, new tabs and other-origin frames are never Auto', () => {

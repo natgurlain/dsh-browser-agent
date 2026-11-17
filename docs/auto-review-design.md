@@ -73,6 +73,14 @@ Residues, stated plainly (each is the cost of not asking more often):
 * **Hidden text the visibility check misses**: text the same colour as its
   background, moved off-screen, or covered by another element still counts as
   visible.
+* **Which row**: the row a repeated name needs comes from the page (the
+  row's first cell, emphasised text or heading). Markup inside a row (a mail
+  body) can supply a row word; the once-per-message rule limits it to one
+  action.
+* **Once is per name**: "Delete Bob's and Dana's" lets one Delete through;
+  the second asks.
+* **New tabs by other means**: `<base target=_blank>` and a form's `target`
+  are not detected as opening a new tab.
 * **Autosave by script**: a field that saves through `addEventListener` (not
   an `onchange`/`oninput` attribute) is not detected; typing there is still
   named and verbatim.

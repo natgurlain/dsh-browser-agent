@@ -609,10 +609,9 @@ export class PanelPrompts {
   }
 
   /** Whether this event is the one that carries a minted id (binding the id on first sight). */
-  has(sessionId: string, rpcId: string, seq?: number): boolean {
+  has(sessionId: string, rpcId: string, seq: number): boolean {
     const entry = this.bySession.get(sessionId)?.get(rpcId)
     if (entry === undefined) return false
-    if (seq === undefined) return true
     if (entry.seq === undefined) {
       entry.seq = seq
       return true
@@ -636,6 +635,12 @@ export class PanelPrompts {
       else if (newestPending === undefined || entry.order > newestPending[1].order) newestPending = [id, entry]
     }
     return newestPending === undefined || newestPending[1].order < newestSeen ? undefined : { rpcId: newestPending[0], text: newestPending[1].text }
+  }
+
+  /** The Host refused the prompt: it never becomes a message. */
+  drop(sessionId: string, rpcId: string): void {
+    const entry = this.bySession.get(sessionId)?.get(rpcId)
+    if (entry !== undefined && entry.seq === undefined) this.bySession.get(sessionId)!.delete(rpcId)
   }
 
   forget(sessionId: string): void {

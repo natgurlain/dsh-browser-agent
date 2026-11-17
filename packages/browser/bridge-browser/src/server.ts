@@ -370,6 +370,8 @@ export interface BridgeServerDeps {
    * trusts only these prompts as the user's own words.
    */
   onPanelPrompt?: (sessionId: string, requestId: string, text: string) => void
+  /** The Host refused or failed a panel prompt recorded by {@link onPanelPrompt}: it is not the user's newest message. */
+  onPanelPromptRejected?: (sessionId: string, requestId: string) => void
   /** Clock seam for tests. */
   now?: () => number
   /**
@@ -1402,6 +1404,9 @@ export class BridgeServer {
       // prompt (an unauthorized prompt must not steer another session's tools).
       const prompted = frame.method === 'session.prompt' ? orderedSessionId(frame) : undefined
       if (prompted !== undefined && result.ok) this.sessionAffinity.set(prompted, conn.key)
+      if (!result.ok && panelSession !== undefined && minted !== undefined) {
+        try { this.deps.onPanelPromptRejected?.(panelSession, minted) } catch { /* observer only */ }
+      }
       sendFrame(conn, {
         t: 'rpc.result',
         id: frame.id,
@@ -1409,6 +1414,9 @@ export class BridgeServer {
         result: { type: 'server-response', rpcId: frame.id, result },
       })
     } catch (error: unknown) {
+      if (panelSession !== undefined && minted !== undefined) {
+        try { this.deps.onPanelPromptRejected?.(panelSession, minted) } catch { /* observer only */ }
+      }
       this.rpcError(conn, frame.id, 'internal', String(error))
     }
   }

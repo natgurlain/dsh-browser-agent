@@ -382,16 +382,32 @@ export function visibleText(root: Element): string {
  * anything else its own visible text. Empty for an icon-only control.
  */
 export function renderedLabel(el: Element, kind: TargetKind): string {
-  if (FIELD_KINDS.has(kind) && !(el instanceof HTMLLabelElement)) {
+  // The visible counterpart of the name's own source (targetName / fieldLabel):
+  // an aria-label is compared with the element's own visible text, a
+  // labelledby with the visible text of the nodes it points to (a hidden node
+  // shows nothing), a native <label> with its first visible line. A field's
+  // own content is its value, never its label: it is never read here.
+  const field = FIELD_KINDS.has(kind) && !(el instanceof HTMLLabelElement)
+  if (clean(el.getAttribute('aria-label') ?? '') !== '') return field ? '' : clip(visibleText(el), MAX_TARGET_NAME_CHARS)
+  const root = el.getRootNode() as Document | ShadowRoot
+  const ids = (el.getAttribute('aria-labelledby') ?? '').split(/\s+/u).filter((id) => id !== '')
+  const referenced = ids.map((id) => ('getElementById' in root ? root.getElementById(id) : null)).filter((node): node is HTMLElement => node !== null && node !== el && !node.contains(el))
+  if (referenced.length > 0) return clip(clean(referenced.map(visibleText).join(' ')), MAX_TARGET_NAME_CHARS)
+  if (field) {
     const labels = 'labels' in el ? (el as HTMLInputElement).labels : null
-    const texts = labels === null ? [] : [...labels].map(visibleText).filter((text) => text !== '')
-    return clip(texts.join(' '), MAX_TARGET_NAME_CHARS)
+    for (const label of labels === null ? [] : [...labels]) {
+      const shown = visibleText(label)
+      const first = headline(label, el)
+      // The label's headline when a person sees it as the start of the label, else all it shows.
+      if (shown !== '') return clip(first !== '' && foldName(shown).startsWith(foldName(first)) ? first : shown, MAX_TARGET_NAME_CHARS)
+    }
+    return ''
   }
   return clip(visibleText(el), MAX_TARGET_NAME_CHARS)
 }
 
 /** Clickable things another control with the same name could be. */
-const CONTROL_SELECTOR = 'button, a[href], area[href], summary, input[type="button"], input[type="submit"], input[type="reset"], input[type="image"], input[type="checkbox"], input[type="radio"], [role="button"], [role="link"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="tab"], [role="treeitem"], [role="checkbox"], [role="radio"], [role="switch"], [onclick]'
+const CONTROL_SELECTOR = 'button, a[href], area[href], summary, select, input[type="button"], input[type="submit"], input[type="reset"], input[type="image"], input[type="checkbox"], input[type="radio"], [role="button"], [role="link"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="tab"], [role="treeitem"], [role="checkbox"], [role="radio"], [role="switch"], [onclick]'
 
 /** The name as Auto review compares names: folded, case-folded, whitespace collapsed. */
 function foldName(text: string): string {
@@ -560,7 +576,7 @@ function describeSlot(action: string, slot: string, args: Record<string, unknown
     ...base,
     ...(located ? {} : { focused: true as const }),
     // Clicks and key presses: how many controls share the name, and which row this one is in.
-    ...(action === 'browser_click' || action === 'browser_press' ? { sameName: sameNameCount(el, base.name), rowKey: rowKey(el, base.name) } : {}),
+    ...(action === 'browser_click' || action === 'browser_press' || action === 'browser_select' ? { sameName: sameNameCount(el, base.name), rowKey: rowKey(el, base.name) } : {}),
     ...(action === 'browser_select' ? selectFacts(el, args) : {}),
   }
   if (!recheck) {

@@ -492,6 +492,7 @@ function mountBridge(
     // Auto review runs here on the Host, with the conversation's own model (auto-review.ts).
     // Only prompts this bridge forwarded from the panel count as the user's words.
     onPanelPrompt: (sessionId, requestId, text) => { panelPrompts.record(sessionId, requestId, text) },
+    onPanelPromptRejected: (sessionId, requestId) => { panelPrompts.drop(sessionId, requestId) },
     autoReview: new AutoReviewer({
       fromPanel: (sessionId, rpcId, seq) => panelPrompts.has(sessionId, rpcId, seq),
       pendingPrompt: (sessionId) => panelPrompts.pending(sessionId),
