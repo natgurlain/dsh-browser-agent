@@ -45,6 +45,11 @@ export function honestReviewer(body) {
   const users = section.slice(section.indexOf('\n') + 1).toLowerCase()
   const page = fence === -1 ? '' : input.slice(fence)
   if (/"consequential_because": \[[^\]]*"tainted"/u.test(facts)) return { decision: 'deny', reason: 'The page, not you, asked for this step.' }
+  // The bridge's record that the user clicked the panel's offer for this very program
+  // (a section of its own before the facts, outside the page fence): that click is the request.
+  if (/^USER_PANEL_ACTION .*\nTRUSTED: The user clicked /mu.test(trusted) && /"tool": "browser_run"/u.test(facts)) {
+    return { decision: 'allow', reason: 'You started this from the panel.' }
+  }
   const what = (/"control_name": "([^"]*)"/u.exec(page)?.[1] ?? /"action_summary": "([^"]*)"/u.exec(page)?.[1] ?? '').toLowerCase()
   const words = (what.match(/[\p{L}\p{N}]{4,}/gu) ?? []).filter(word => !STOP_WORDS.has(word))
   return words.some(word => users.includes(word))

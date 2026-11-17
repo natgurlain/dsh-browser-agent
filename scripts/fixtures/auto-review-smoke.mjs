@@ -451,6 +451,74 @@ export async function runAutoReviewSmoke(ctx) {
   await chat.getByRole('button', { name: 'Back to chat', exact: true }).click()
   results.push('Settings offers "Start conversations in Auto approve" (off by default) with its one-sentence trade-off')
 
+  // ---- 6. Watch me under Auto approve: the user's click on "Do the remaining N" is their request ----
+  // The series is one browser_run program (consequential: the reviewer sees it). The bridge tells
+  // the reviewer, from its own record, that the user's real click in the panel started it.
+  await toggle.click()
+  await waitFor(async () => (await toggle.getAttribute('aria-pressed')) === 'true', 'Auto approve on again')
+  const learningSetting = (watchMe) => chat.evaluate((value) => new Promise((resolve) => {
+    const port = chrome.runtime.connect({ name: 'dsh-learning' })
+    port.onMessage.addListener((message) => { if (message.type === 'learning.result') { port.disconnect(); resolve(message.ok) } })
+    port.postMessage({ type: 'learning.settings', id: 'watch-me-setting', settings: { watchMe: value } })
+  }), watchMe)
+  assert.equal(await learningSetting(true), true)
+  // A clean start: what the earlier steps read is cleared by the user (the line's Clear).
+  if (await taintLine.count() > 0) await taintLine.getByRole('button', { name: 'Clear', exact: true }).click()
+  // The learning smoke's table, 30 rows: the user invites two, and the remaining 28 clicks are
+  // longer than one browser_run (25 steps), so they run as a series under one review.
+  // Clicks only, as in approving timesheet rows: a typing step of a program meets the taint
+  // rules on its own (the program's approval answer counts as a page read with no known
+  // origin), which is not what this checks.
+  const GUESTS = 30
+  await page.goto(`${origin}/learn?v=1&rows=${String(GUESTS)}`)
+  await page.bringToFront()
+  await chat.waitForTimeout(1_700)
+  await chat.getByRole('button', { name: 'Watch me', exact: true }).click()
+  await chat.getByRole('button', { name: 'Stop watching', exact: true }).waitFor()
+  // The user does two rows by hand.
+  for (const index of [0, 1]) await page.locator('.invite').nth(index).click()
+  const offer = chat.getByRole('button', { name: `Do the remaining ${String(GUESTS - 2)} like this`, exact: true })
+  await offer.waitFor({ timeout: 30_000 })
+  const cardsBeforeWatch = await cardsSoFar()
+  const reviewsBeforeWatch = autoModel.state.reviews.length
+  const dialogs = await chat.evaluate(() => {
+    globalThis.smokeCardsSeen = 0
+    new MutationObserver((records) => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node instanceof Element && (node.matches('.approval-dialog') || node.querySelector('.approval-dialog') !== null)) globalThis.smokeCardsSeen += 1
+      }
+    }).observe(document.body, { childList: true, subtree: true })
+    return document.querySelectorAll('.approval-dialog').length
+  })
+  assert.equal(dialogs, 0)
+  // A real click on the panel's own button (not a message posted to the port).
+  await offer.click()
+  const invitedRows = () => page.locator('.invite').evaluateAll((buttons) => buttons.filter((button) => button.textContent === 'Invited').length)
+  try {
+    await waitFor(async () => await invitedRows() === GUESTS, 'every remaining row invited', 180_000)
+  } catch (error) {
+    const card = await panel.evaluate(() => messages.filter(message => message.type === 'approval.request').at(-1)?.request).catch(() => undefined)
+    const evidence = {
+      invited: await invitedRows().catch(() => 'unknown'),
+      cardsSeen: await chat.evaluate(() => globalThis.smokeCardsSeen).catch(() => 'unknown'),
+      card: card === undefined ? null : { action: card.action, summary: card.summary, note: card.autoReviewNote },
+      reviews: autoModel.state.reviews.slice(reviewsBeforeWatch).map(review => ({ answer: review.answer, trusted: review.input.split('<untrusted_page_data')[0].slice(-900) })),
+      learning: await chat.locator('.learning-panel').innerText().catch(() => 'none'),
+      error: await chat.locator('.error, [role=alert]').allInnerTexts().catch(() => []),
+    }
+    throw new Error(`the Watch me run did not finish: ${JSON.stringify(evidence, null, 1)}`, { cause: error })
+  }
+  assert.equal(await chat.evaluate(() => globalThis.smokeCardsSeen), 0, 'no approval card appeared during the Watch me run')
+  assert.equal(await cardsSoFar(), cardsBeforeWatch, 'the extension raised no card for the series')
+  const watchReviews = autoModel.state.reviews.slice(reviewsBeforeWatch)
+  assert.equal(watchReviews.length, 1, `the series was reviewed once (${watchReviews.length})`)
+  const watchTrusted = watchReviews[0].input.split('<untrusted_page_data')[0]
+  assert.match(watchTrusted, new RegExp(`USER_PANEL_ACTION \\(recorded by the browser bridge for this very action\\):\\nTRUSTED: The user clicked the offer to do the remaining rows like this in the browser panel for this program: ${String(GUESTS - 2)} rows, ${String(GUESTS - 2)} steps`, 'u'))
+  assert.match(watchTrusted, /"tool": "browser_run"/u)
+  assert.equal(watchReviews[0].answer.decision, 'allow')
+  await learningSetting(false)
+  results.push(`Watch me under Auto approve: a real click on "Do the remaining ${String(GUESTS - 2)} like this" ran the ${String(GUESTS - 2)}-step series (more than one browser_run) with zero cards; the honest reviewer saw the bridge's TRUSTED line for that click and allowed it`)
+
   // The audit log records each review: decision, reason, model and binding.
   const reviews = (await audit()).filter(entry => entry.kind === 'auto-review')
   assert.ok(reviews.length >= 3, `auto-review audit entries (${reviews.length})`)

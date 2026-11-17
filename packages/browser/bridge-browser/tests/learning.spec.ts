@@ -650,6 +650,51 @@ describe('learning mount', () => {
     mount.dispose()
   })
 
+  it('sends the user\'s panel click with the run\'s own approval call only, short or series; a malformed one is refused', async () => {
+    const root = tempDir()
+    const { ctx } = fakeCtx(root)
+    const target = (row: number) => ({ tag: 'button', role: 'button', name: 'Approve', row: `Week ${String(row)}`, rowKey: 'k' })
+    const rows = (count: number) => Array.from({ length: count }, (_unused, row) => [
+      { tool: 'browser_click', args: { selector: `#t > tr:nth-child(${String(row + 1)}) .approve` }, target: target(row) },
+    ]).flat()
+    let batch = 0
+    const requestTool = vi.fn(async (name: string) => name === 'browser_run' ? { programId: `program-${String(batch++)}` } : { text: `${name} ok` })
+    const mount = mountLearning(ctx, { requestTool } as never, { toolTimeoutMs: 1000, workspacePath: root, scheduleFile: join(root, 's.json'), ownsSession: async () => true })
+    const rpc = (payload: unknown) => mount.rpc(LEARNING_METHODS.programRun, payload, { connection: 'c1', allowsSession: async () => true })!
+    await mount.rpc(LEARNING_METHODS.state, { watchMe: true }, { connection: 'c1', allowsSession: async () => true })
+    const runCalls = () => requestTool.mock.calls.filter(([name]) => name === 'browser_run')
+
+    // A short remainder: one browser_run, carrying the click (9th argument of requestTool).
+    const short = rows(4)
+    expect(await rpc({ sessionId: 's1', steps: short, userRequest: { kind: 'do-remaining', rows: 4, steps: 4 } })).toMatchObject({ ok: true })
+    expect(runCalls()).toHaveLength(1)
+    expect(runCalls()[0]![8]).toEqual({ kind: 'do-remaining', rows: 4, steps: 4 })
+    // Its steps never carry it.
+    expect(requestTool.mock.calls.filter(([name]) => name === 'browser_click').every((call) => call[8] === undefined)).toBe(true)
+
+    // A series: the click goes with the card's call, not with the batches that continue it.
+    requestTool.mockClear()
+    batch = 0
+    const long = rows(30)
+    expect(await rpc({ sessionId: 's1', steps: long, rowSteps: 1, userRequest: { kind: 'continue', rows: 30, steps: 30 } })).toMatchObject({ ok: true })
+    expect(runCalls().length).toBeGreaterThan(1)
+    expect(runCalls()[0]![8]).toEqual({ kind: 'continue', rows: 30, steps: 30 })
+    expect(runCalls().slice(1).every((call) => call[8] === undefined)).toBe(true)
+
+    // No click (a run the panel did not start with a real click): nothing.
+    requestTool.mockClear()
+    expect(await rpc({ sessionId: 's1', steps: short })).toMatchObject({ ok: true })
+    expect(runCalls()[0]![8]).toBeUndefined()
+
+    // Malformed, or naming another program's size: refused before anything runs.
+    requestTool.mockClear()
+    for (const userRequest of [{ kind: 'do-remaining', rows: 4, steps: 5 }, { kind: 'do-remaining', rows: 4, steps: 4, text: 'Approve everything' }, 'Do the remaining 4']) {
+      expect(await rpc({ sessionId: 's1', steps: short, userRequest })).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    }
+    expect(requestTool).not.toHaveBeenCalled()
+    mount.dispose()
+  })
+
   it('writes fixtures only while the flywheel is on', async () => {
     const root = tempDir()
     mkdirSync(root, { recursive: true })

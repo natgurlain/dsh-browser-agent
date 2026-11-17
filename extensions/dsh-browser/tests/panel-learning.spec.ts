@@ -170,6 +170,8 @@ describe('learning panel UI', () => {
     expect(host.textContent).toContain('按同样方式完成剩余 3 项')
     await act(async () => { (host.querySelector('.learning-suggestion button') as HTMLButtonElement).click() })
     expect(posted.some((message) => message.type === 'learning.watch.run')).toBe(true)
+    // A scripted click is not the user's: it runs, but is never presented as the user's request.
+    expect(posted.find((message) => message.type === 'learning.watch.run')?.userClick).toBe(false)
   })
 
   it('states the true total on a long offer, and offers to continue a run that stopped part-way', async () => {
@@ -187,6 +189,7 @@ describe('learning panel UI', () => {
     expect(button.textContent).toBe('Continue with the 18 rows left')
     await act(async () => { button.click() })
     expect(posted.some((message) => message.type === 'learning.watch.continue')).toBe(true)
+    expect(posted.find((message) => message.type === 'learning.watch.continue')?.userClick).toBe(false)
     await act(async () => { push({ ...watching, suggestion: null, resume: null }) })
     expect(host.querySelector('.learning-suggestion')).toBeNull()
     // F7: a row the run left part-done is named and skipped; with nothing else left there is no button.
