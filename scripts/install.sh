@@ -633,6 +633,7 @@ register_desktop() {
         rm -f "$log"
         return 0
       fi
+      remove_stale_plugin_link "$DSH_HOME_DIR/profiles/desktop" "$legacy_plugin"
     fi
   done
   if ! migrate_bridge_settings desktop; then
@@ -1281,6 +1282,22 @@ profile_has_dependency() {
   ' "$manifest" "$package_name"
 }
 
+# `dsh plugin remove` drops a linked package from the profile's manifest, but pnpm can leave
+# the link itself behind in node_modules (it does when the link came from another store).
+# DSH loads only what the manifest lists, so the leftover is inert; it is removed anyway so
+# exactly one bridge is on disk. Only a symbolic link is ever removed here.
+remove_stale_plugin_link() {
+  local profile_dir="$1" package_name="$2" link scope
+  link="$profile_dir/node_modules/$package_name"
+  [ -L "$link" ] || return 0
+  rm -f "$link" || return 0
+  scope="$(dirname "$link")"
+  case "$package_name" in
+    @*/*) rmdir "$scope" 2>/dev/null || true ;;
+  esac
+  return 0
+}
+
 # Settings saved for the bridge under its previous package name (profile cordis.patch.yml
 # rows that name @natgurlain/dsh-bridge-browser) are rewritten to the current name once the
 # old registration is gone from that profile; DSH skips a row whose name does not match.
@@ -1302,6 +1319,7 @@ for legacy_plugin in $LEGACY_PLUGINS; do
   if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$legacy_plugin"; then
     run_quiet "从 web profile 移除旧的桥插件失败" "Removing the old bridge plugin from the web profile failed" \
       pnpm exec dsh plugin --profile web remove "$legacy_plugin"
+    remove_stale_plugin_link "$(dirname "$WEB_PROFILE_MANIFEST")" "$legacy_plugin"
   fi
 done
 migrate_bridge_settings web ||
