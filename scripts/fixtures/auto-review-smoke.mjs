@@ -494,7 +494,7 @@ export async function runAutoReviewSmoke(ctx) {
     await page.locator('#people input').nth(index).fill(guestName(index))
     await page.locator('.invite').nth(index).click()
   }
-  const offer = chat.getByRole('button', { name: `Do the remaining ${String(GUESTS - 2)} like this`, exact: true })
+  const offer = chat.getByRole('button', { name: `Do the remaining ${String(GUESTS - 2)} like this (${String((GUESTS - 2) * 2)} steps)`, exact: true })
   await offer.waitFor({ timeout: 30_000 })
   const cardsBeforeWatch = await cardsSoFar()
   const reviewsBeforeWatch = autoModel.state.reviews.length
