@@ -1,4 +1,4 @@
-# dsh Browser Agent
+# dsh-browser-agent
 
 [![Release](https://img.shields.io/github/v/release/natgurlain/dsh-browser-agent?label=release)](https://github.com/natgurlain/dsh-browser-agent/releases)
 [![npm](https://img.shields.io/npm/v/dsh-browser-agent?label=npm%20plugin)](https://www.npmjs.com/package/dsh-browser-agent)
@@ -12,7 +12,7 @@
 
 Let [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) work in the browser you already use. The agent reads the page you are on, clicks, types, navigates and manages tabs, in your own Chrome, Brave or Firefox (other Chromium browsers should work too), with your logins and cookies, and you watch and approve what it does from a side panel.
 
-<img width="900" alt="The dsh Browser Agent side panel in Brave, answering a question about the GitHub page next to it" src="docs/images/dsh-browser-agent-dark.png" />
+<img width="900" alt="The dsh-browser-agent side panel in Brave, answering a question about the GitHub page next to it" src="docs/images/dsh-browser-agent-dark.png" />
 
 > Based on [dsh-browser](https://github.com/omdsh-dev/dsh-browser) by Yuxiang Lin and contributors (MIT). See [NOTICE](NOTICE).
 
@@ -91,7 +91,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-
 
 `--release latest` installs the newest release instead of a named one. `SHA256SUMS` comes from the same release as the files, so it catches a corrupted, truncated or substituted download, not a release that was itself published by someone who took over the repository or its release workflow; see [RELEASING.md](RELEASING.md#what-verification-covers).
 
-When the installer opens `chrome://extensions`, follow its instructions to load or reload **dsh Browser Agent**. If dsh is already running, restart it after installation. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
+When the installer opens `chrome://extensions`, follow its instructions to load or reload the extension, which the browser lists as **dsh Browser Agent**. If dsh is already running, restart it after installation. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
 
 > [!IMPORTANT]
 > The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project's npm package is [`dsh-browser-agent`](https://www.npmjs.com/package/dsh-browser-agent); it holds the plugin only, so use the installer above to get the extension too.
