@@ -3,6 +3,17 @@
 Each `## vX.Y.Z` section becomes the notes of that GitHub release
 (`scripts/package-release.mjs --notes`), followed by the SHA-256 digests of its assets.
 
+## v0.3.3
+
+One name everywhere.
+
+- **The extension is called `dsh-browser-agent`.** The browser's extensions page, the side
+  panel's title, the pairing card in DSH and the installer and uninstaller messages now use
+  the same name as the repository and the package, in English and Chinese. It was shown as
+  "dsh Browser Agent" before. Nothing else changes: update with the installer as usual and
+  reload the extension. The uninstaller still recognises an extension installed under the
+  earlier name.
+
 ## v0.3.2
 
 Rough edges in everyday use, most of them seen while recording the demo.
