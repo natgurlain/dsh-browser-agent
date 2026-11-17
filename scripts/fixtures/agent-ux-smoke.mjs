@@ -30,11 +30,32 @@ export async function runAgentUxSmoke(ctx) {
   await page.bringToFront()
 
   // ---- 2.5: the agent is visible on the page, from a closed shadow root ----
-  succeed(await tool('browser_snapshot', {}))
-  succeed(await tool('browser_hover', { selector: '#hoverTarget' }))
   // Clip to the viewport: an attached debugger's info bar can make full-page captures repeat.
   const viewport = await page.evaluate(() => ({ x: 0, y: 0, width: innerWidth, height: innerHeight }))
+  /** The page as a light and as a dark site (the overlay reads on both). */
+  const themedPageShots = async (name) => {
+    for (const theme of ['light', 'dark']) {
+      await page.evaluate((dark) => {
+        document.documentElement.style.colorScheme = dark ? 'dark' : ''
+        document.body.style.background = dark ? '#16181d' : ''
+        document.body.style.color = dark ? '#e8e8e8' : ''
+      }, theme === 'dark')
+      await delay(150)
+      await shot(page, `${name}-${theme}.png`, { clip: viewport })
+    }
+    await page.evaluate(() => { document.documentElement.style.colorScheme = ''; document.body.style.background = ''; document.body.style.color = '' })
+  }
+  // Connected, and no turn is acting on the page: no frame, no pill (the earlier
+  // agentless calls have gone idle).
+  await waitFor(async () => await shadowButtonCenter(page, 'stop') === undefined, 'no pill on an idle page', 30_000)
+  await themedPageShots('overlay-idle-no-pill')
+  succeed(await tool('browser_snapshot', {}))
+  succeed(await tool('browser_hover', { selector: '#hoverTarget' }))
+  // Acting: the frame and the "AI controlling · Stop" pill.
+  await waitFor(() => shadowButtonCenter(page, 'stop'), 'the pill while the agent acts')
   await shot(page, 'overlay-ghost-cursor-and-pill.png', { clip: viewport })
+  await themedPageShots('overlay-acting-pill')
+  results.push('the page shows no frame or pill while nothing acts on it, and the "AI controlling · Stop" pill while the agent acts')
   const hosts = await page.evaluate(() => [...document.documentElement.children]
     .filter(element => element.tagName === 'DIV')
     .map(element => ({ closed: element.shadowRoot === null, pointerEvents: getComputedStyle(element).pointerEvents, text: element.textContent })))
@@ -131,6 +152,8 @@ export async function runAgentUxSmoke(ctx) {
     throw new Error(`timeline run did not finish: ${JSON.stringify({ model: scripted.state.requests, pauseLog, toolEvents, types: history.events.map(({ event }) => event.type), rows: await chat.locator('.messages').innerText() })}`, { cause: error })
   }
   assert.equal(scripted.state.sawResumeContext, true, 'the resume delta reached the model')
+  // The turn ended: the pill goes with it (DSH's turn end, not an idle timer).
+  await waitFor(async () => await shadowButtonCenter(page, 'stop') === undefined, 'no pill once the turn ended', 5_000)
   results.push('pause after this step and take over hold the agent\'s next step as pending; the page banner\'s Resume opens the panel, whose Resume injects what changed, then runs it')
 
   // ---- 2.6: the step timeline, with audit decisions and a screenshot thumbnail ----
@@ -222,11 +245,15 @@ async function shadowButtonCenter(page, className) {
  * Stop engages the kill switch, every engagement is in the audit log, and no
  * typed dialog answer ever reached it.
  */
-export async function assertKillSwitchAudited({ env, bridge, page, panel, waitFor, delay }) {
+export async function assertKillSwitchAudited({ env, bridge, page, panel, waitFor, delay, tool }) {
   const { verifyAuditChain, parseAuditLines } = await import(pathToFileURL(join(bridge, 'src/audit-log.ts')).href)
   const key = Buffer.from((await readFile(join(env.DSH_HOME, 'browser-audit', '.chain-key'), 'utf8')).trim(), 'hex')
   // Let the pill's buttons leave the window in which agent actions make them inert.
   await delay(4_500)
+  // The pill shows while the agent acts: an agentless read (it points at nothing, so the
+  // buttons stay live) keeps it up for its short idle time, however long the wait above took.
+  const read = await tool('browser_snapshot', {})
+  assert.equal(read.isError, false, JSON.stringify(read))
   const stop = await waitFor(() => shadowButtonCenter(page, 'stop'), 'controlled-tab pill')
   await panel.evaluate(() => { messages = messages.filter(message => message.type !== 'status') })
   await page.mouse.click(stop.x, stop.y)

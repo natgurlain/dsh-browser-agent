@@ -117,6 +117,7 @@ import { createDebuggerBroker } from './debugger-broker.ts'
 import { HOLD_EXPIRED_MESSAGE, PauseGate, type PauseRequest } from './pause-gate.ts'
 import { capturePauseBaseline, prepareResume, type PauseBaseline, type ResumeFlowDeps } from './resume-flow.ts'
 import { AgentOverlayController } from './agent-overlay.ts'
+import { ActingTurns } from './agent-acting.ts'
 import { DialogController } from './dialogs.ts'
 import { approveProgram, coverByProgram, endsSeries, ProgramGrants } from './run-program.ts'
 import { PageWatcherRuntime } from './watcher-runtime.ts'
@@ -1297,12 +1298,30 @@ function controlledTabIds(): Set<number> {
 }
 
 /**
+ * Tabs a turn is acting on right now (agent-acting.ts): the on-page frame
+ * and pill show there only, and only while the agent may operate them.
+ */
+function actingTabIds(): Set<number> {
+  const allowed = controlledTabIds()
+  const ids = new Set<number>()
+  const affinity = tabAffinity.snapshot()
+  for (const sessionId of actingTurns.sessions()) {
+    const tabId = sessionId === undefined
+      ? affinity.controlled?.tabId
+      : tabAffinity.getSessionTab(sessionId)?.tabId
+        ?? (tabAffinity.focusedSession() === sessionId ? affinity.controlled?.tabId : undefined)
+    if (tabId !== undefined && allowed.has(tabId)) ids.add(tabId)
+  }
+  return ids
+}
+
+/**
  * Keep the toolbar badge truthful: "AI" on each tab the agent controls while
  * connected, and a global "OFF" (on every tab) while the kill switch is engaged.
  */
 function refreshActionBadges(): void {
-  // The on-page frame and pill follow the same truth as the badge.
-  agentOverlay.syncControl(controlledTabIds())
+  // The on-page frame and pill: on the tabs a turn is acting on, while the badge says the agent may.
+  agentOverlay.syncControl(actingTabIds())
   const api = actionApi()
   if (api === undefined) return
   if (killSwitchEngaged) {
@@ -1333,6 +1352,7 @@ function refreshActionBadges(): void {
 async function engageKillSwitch(): Promise<void> {
   killSwitchEngaged = true
   persistKillSwitch()
+  actingTurns.clear()
   // Sent before the bridge drops so the audit log records why calls ended.
   if (rpc !== null && bridge?.connected === true) void rpc.request(BRIDGE_AUDIT_RECORD_METHOD, { event: 'kill-switch' }).catch(() => {})
   pauseGate.cancelAll()
@@ -1416,6 +1436,9 @@ const agentOverlay = new AgentOverlayController({
   locale: () => getUiLocale(),
 })
 
+/** Which conversations are acting now: the frame and pill show on their tabs only. */
+const actingTurns = new ActingTurns(() => { refreshActionBadges() })
+
 const PAUSE_KEY = 'dshAgentPause'
 let persistedPause = 'null'
 /** Tab facts recorded when the user paused; compared on resume. */
@@ -1440,6 +1463,8 @@ const pauseGate = new PauseGate({
       if (area !== undefined) void Promise.resolve(area.set({ [PAUSE_KEY]: pauseGate.persisted() ?? null })).catch(() => {})
     }
     agentOverlay.setTakeover(state.mode === 'taken-over' ? boundTabIds() : new Set())
+    // The user took over: the turn no longer acts on the page (its next step shows the pill again).
+    if (state.mode === 'taken-over') actingTurns.clear()
     for (const port of panelPorts) {
       try { port.postMessage({ type: 'agent.pause-state', state }) } catch { /* port closed */ }
     }
@@ -3271,12 +3296,21 @@ function fleetDeps(signal: AbortSignal, authorize: FleetDeps['authorize']): Flee
 async function heldDispatch(call: ToolCall, activeCall: ActiveToolCall, dispatch: () => Promise<ToolAnswer>): Promise<ToolAnswer> {
   await pauseReady
   const outcome = await pauseGate.hold(call, activeCall.controller.signal)
+  // From here the turn acts on the page: the pill shows on its tab until the turn ends.
+  const acting = async (): Promise<ToolAnswer> => {
+    actingTurns.begin(call.sessionId)
+    try {
+      return await dispatch()
+    } finally {
+      actingTurns.settled(call.sessionId)
+    }
+  }
   switch (outcome.kind) {
     case 'not-held':
-      return dispatch()
+      return acting()
     case 'released':
       activeCall.heldMs = outcome.heldMs
-      return dispatch()
+      return acting()
     case 'cancelled':
       return { ok: false, error: { code: 'action-failed', message: 'Tool call was cancelled' } }
     case 'expired':
@@ -3713,7 +3747,10 @@ async function startBridge(): Promise<void> {
           const sessionEvent = frame.frame.method === 'session/event'
             ? (frame.frame.payload as { event?: { type?: unknown } } | null)?.event
             : undefined
-          if (sessionEvent?.type === 'turn/end' && typeof eventSessionId === 'string') commitGateTurnEnded(eventSessionId)
+          if (sessionEvent?.type === 'turn/end' && typeof eventSessionId === 'string') {
+            commitGateTurnEnded(eventSessionId)
+            actingTurns.turnEnded(eventSessionId)
+          }
           broadcastEvent(frame)
         }
         else if (frame.t === 'tool.call') routeToolCall(frame)
