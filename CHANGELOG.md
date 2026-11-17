@@ -8,17 +8,18 @@ Each `## vX.Y.Z` section becomes the notes of that GitHub release
 Unreleased (version numbers are not bumped yet).
 
 - **Auto review (opt-in, per conversation).** *Approvals: Ask · Auto* under the composer lets
-  the conversation's own model approve small page actions that fit what you asked for, while
-  the conversation is open in a panel. Fixed rules in the extension decide first: forced
-  cards, sensitive fields, developer tools, uploads, clipboard, dialogs, programs, fleets,
-  MCP conversations, other sites, keyboard shortcuts and, after reading web pages,
-  typed-in navigation always ask; sending, saving, deleting, sharing, confirming and unclear buttons
-  run only when your latest panel message asks for that action on that element; payments
-  and account settings always ask. Cards show a fixed line, never model text. Ends after 60
-  minutes, on stop or take-over; 25 approvals per message before it asks to continue; at
-  most 120 reviews per conversation per hour. One extra model call per reviewed action.
-  Managed policy `disableAutoReview`, Setting *Offer Auto review*, bridge config
-  `autoReview`. Design: `docs/auto-review-design.md`.
+  the conversation's own model approve page actions while the conversation is open in a
+  panel — only when **you named it, or it is plainly harmless**. Named: your latest panel
+  message contains the control's full name, the options, both drag ends, or the exact text
+  to type. Plainly harmless: hover, a same-site link, a *Show more*-style disclosure,
+  navigation keys in a text field. Holding-back words ("only read", "don't", "tell me if",
+  "draft") stop it; payments and account settings, forced cards, sensitive fields,
+  developer tools, uploads, clipboard, dialogs, programs, fleets, MCP conversations, other
+  sites and shortcuts always ask. Cards show a fixed line that teaches what to write next
+  time, never model text. Ends after 60 minutes, on stop or take-over; 25 approvals per
+  message before it asks to continue; at most 120 reviews per conversation per hour. One
+  extra model call per reviewed action. Managed policy `disableAutoReview`, Setting *Offer
+  Auto review*, bridge config `autoReview`. Design: `docs/auto-review-design.md`.
 
 ## v0.2.1
 
