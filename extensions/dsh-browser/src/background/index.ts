@@ -204,7 +204,7 @@ import { approvalFailureMessage } from './answers.ts'
 import { auditedAuthorize, auditedPolicy, auditNote, noteCallTarget, type AuditedCall } from './audit.ts'
 import { StepLabels, STEP_LABELS_STORAGE_KEY } from '../shared/step-labels.ts'
 import { AUTO_REVIEW_STORAGE_KEY, AutoReviewRegistry, autoReviewSentence, type ReviewSubject } from './auto-review.ts'
-import { autoReviewEligibility, buildReviewAction } from '../security/auto-review.ts'
+import { autoReviewEligibility, buildReviewAction, foldName } from '../security/auto-review.ts'
 import { createDevLoopPanelRpc } from './dev-loop.ts'
 
 /** User settings persisted in chrome.storage.local. */
@@ -2484,7 +2484,13 @@ async function autoReviewCard(prompt: ApprovalPrompt, request: AutoReviewRequest
   const sessionId = call.sessionId
   const zh = getUiLocale() === 'zh'
   const eligibility = autoReviewFloor(prompt, request)
-  if (!eligibility.eligible || sessionId === undefined) return { kind: 'card' }
+  if (!eligibility.eligible || sessionId === undefined) {
+    // Several controls share the name and nothing tells them apart: say why, once Auto is on.
+    if (!eligibility.eligible && eligibility.reason === 'ambiguous') {
+      return { kind: 'card', note: autoReviewSentence('ambiguous', { tool: 'browser_click', assessment: { rule: 'named', commitClass: 'unknown' } }, zh) }
+    }
+    return { kind: 'card' }
+  }
   const subject: ReviewSubject = {
     tool: eligibility.tool,
     ...(() => {
@@ -2540,6 +2546,14 @@ async function autoReviewCard(prompt: ApprovalPrompt, request: AutoReviewRequest
         // The same rule, requiring the same words, as the answer was about.
         if (JSON.stringify(again.assessment) !== JSON.stringify(eligibility.assessment)) return { kind: 'card' as const, note: autoReviewSentence('changed', subject, zh) }
         if (autoReviews.budget(sessionId) !== 'ok') return { kind: 'card' as const, note: autoReviewSentence('message-limit', subject, zh) }
+        // Each name or dictated text the user gave lets one action through per message.
+        const { assessment } = eligibility
+        const items = assessment.rule === 'named' ? [...(assessment.mustName ?? []).map((name) => `n:${foldName(name)}`), ...assessment.exactText === undefined ? [] : [`t:${assessment.exactText}`]] : []
+        if (items.length > 0) {
+          if (typeof answer.userTurn !== 'string') return { kind: 'card' as const, note: autoReviewSentence('failed', subject, zh) }
+          if (autoReviews.isConsumed(sessionId, answer.userTurn, items)) return { kind: 'card' as const, note: autoReviewSentence('already-used', subject, zh) }
+          autoReviews.consume(sessionId, answer.userTurn, items)
+        }
         autoReviews.noteApproved(sessionId, label)
         return { kind: 'approved' as const }
       }

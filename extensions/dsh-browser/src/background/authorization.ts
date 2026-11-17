@@ -426,6 +426,14 @@ function boundTargets(context: ApprovalContext): unknown {
           ...state.autoSubmit === true ? { autoSubmit: true } : {},
           ...state.disclosure === true ? { disclosure: true } : {},
           ...state.empty === undefined ? {} : { empty: state.empty },
+          // What a person sees, how many controls share the name and which row it is
+          // in, and whether it opens elsewhere: Auto review relied on these too.
+          ...state.rendered === undefined ? {} : { rendered: state.rendered },
+          ...state.sameName === undefined ? {} : { sameName: state.sameName },
+          ...state.rowKey === undefined ? {} : { rowKey: state.rowKey },
+          ...state.newTab === true ? { newTab: true } : {},
+          ...state.suggests === true ? { suggests: true } : {},
+          ...state.dialogOpen === true ? { dialogOpen: true } : {},
         }
       : { state: state.state }
   const targets = context.targets ?? {}

@@ -266,21 +266,186 @@ export function realLink(link: HTMLAnchorElement | HTMLAreaElement): boolean {
  * about this; Auto review only trusts it for names in a short harmless list.
  */
 export function isDisclosure(el: Element): boolean {
-  const control = el.closest('button, [role="button"], summary, [aria-expanded]') ?? el
-  if (control.tagName === 'SUMMARY') return true
-  if (control.hasAttribute('aria-expanded')) return true
-  const button = control instanceof HTMLButtonElement || (control.getAttribute('role') ?? '').trim().toLowerCase() === 'button'
-  const popup = (control.getAttribute('aria-haspopup') ?? '').trim().toLowerCase()
-  return button && ((popup !== '' && popup !== 'false') || (control.getAttribute('aria-controls') ?? '').trim() !== '')
+  // On the element itself, never inherited from an ancestor: a clickable span
+  // inside an expandable row is not the row's disclosure control.
+  if (el.tagName === 'SUMMARY') return true
+  if (el.hasAttribute('aria-expanded')) return true
+  const button = el instanceof HTMLButtonElement || (el.getAttribute('role') ?? '').trim().toLowerCase() === 'button'
+  const popup = (el.getAttribute('aria-haspopup') ?? '').trim().toLowerCase()
+  return button && ((popup !== '' && popup !== 'false') || (el.getAttribute('aria-controls') ?? '').trim() !== '')
 }
 
-/** For a text field: whether it holds nothing yet (one bit; the value never leaves the page). */
+function contentEditable(el: Element): boolean {
+  const value = el.getAttribute('contenteditable')
+  return (el instanceof HTMLElement && el.isContentEditable) || (value !== null && value.toLowerCase() !== 'false')
+}
+
+/**
+ * The editing host typed text goes to: the outermost contenteditable
+ * element the element is in (an empty paragraph inside a full editor is not
+ * an empty editor).
+ */
+export function editingHost(el: Element): Element | undefined {
+  if (!contentEditable(el)) return undefined
+  let host: Element = el
+  for (let node = el.parentElement; node !== null; node = node.parentElement) {
+    if (!contentEditable(node)) break
+    host = node
+  }
+  return host
+}
+
+/** For a text field: whether it holds nothing yet (one bit; the value never leaves the page), measured where the text goes. */
 function fieldEmpty(el: Element): boolean | undefined {
   if (el instanceof HTMLTextAreaElement) return el.value === ''
   if (el instanceof HTMLInputElement) return IMPLICIT_SUBMIT_TYPES.has(el.type) ? el.value === '' : undefined
-  const editable = (el instanceof HTMLElement && el.isContentEditable) || (el.getAttribute('contenteditable') !== null && el.getAttribute('contenteditable') !== 'false')
-  if (editable) return (el.textContent ?? '').trim() === ''
+  const host = editingHost(el)
+  if (host !== undefined) return (host.textContent ?? '').trim() === ''
   return undefined
+}
+
+/** Whether a field saves or acts on change by native markup (an onchange/oninput handler on it or its form). */
+function fieldAutoSaves(el: Element): boolean {
+  const own = (node: Element | null | undefined): boolean => node !== null && node !== undefined && (node.hasAttribute('onchange') || node.hasAttribute('oninput') || node.hasAttribute('onkeyup') || node.hasAttribute('onkeydown'))
+  const form = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.form : el.closest('form')
+  return own(el) || own(editingHost(el)) || own(form)
+}
+
+/** A field that offers suggestions (Tab may accept one). */
+function offersSuggestions(el: Element): boolean {
+  const autocomplete = (el.getAttribute('aria-autocomplete') ?? '').trim().toLowerCase()
+  const popup = (el.getAttribute('aria-haspopup') ?? '').trim().toLowerCase()
+  return el.hasAttribute('list') || (autocomplete !== '' && autocomplete !== 'none') || (popup !== '' && popup !== 'false')
+    || (el.getAttribute('aria-controls') ?? '').trim() !== '' || el.getAttribute('aria-expanded') === 'true'
+    || (el.getAttribute('role') ?? '').trim().toLowerCase() === 'combobox'
+}
+
+/** Whether a dialog or modal is open in this document (Escape may dismiss it). */
+function dialogOpen(doc: Document): boolean {
+  for (const dialog of doc.querySelectorAll('dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"]')) {
+    if (!hiddenElement(dialog, false)) return true
+  }
+  return false
+}
+
+/** Whether the document has layout (a real browser, not a DOM without rendering). */
+function hasLayout(el: Element): boolean {
+  // Only when the element itself has a box can a descendant without one be called hidden.
+  return el.getClientRects().length > 0
+}
+
+/**
+ * Whether an element hides its content from a person: `hidden`,
+ * aria-hidden, display none, visibility hidden, opacity 0, font size 0, a
+ * zero clip, or (with layout) no box at all. Not covered: text the same
+ * colour as its background, text moved off-screen or under another element.
+ */
+function hiddenElement(el: Element, layout: boolean): boolean {
+  if (el instanceof HTMLElement && el.hidden) return true
+  if ((el.getAttribute('aria-hidden') ?? '').trim().toLowerCase() === 'true') return true
+  const view = el.ownerDocument.defaultView
+  const style = view?.getComputedStyle(el)
+  if (style !== undefined) {
+    if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return true
+    if (style.opacity !== '' && Number(style.opacity) === 0) return true
+    if (style.fontSize !== '' && Number.parseFloat(style.fontSize) === 0) return true
+    if (/rect\(\s*0(?:px)?[\s,]+0(?:px)?[\s,]+0(?:px)?[\s,]+0(?:px)?\s*\)/u.test(style.clip ?? '')) return true
+    if (/inset\(\s*50%/u.test(style.clipPath ?? '')) return true
+  }
+  if (layout && el.getClientRects().length === 0 && !(style?.display === 'contents')) return true
+  return false
+}
+
+/** The text of an element a person can see (all lines, joined), skipping hidden parts, scripts and form values. */
+export function visibleText(root: Element): string {
+  const layout = hasLayout(root)
+  const parts: string[] = []
+  const walk = (node: Node, depth: number): void => {
+    if (depth > 40) return
+    for (const child of node.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) parts.push(child.textContent ?? '')
+      else if (child instanceof Element) {
+        if (/^(?:SCRIPT|STYLE|TEMPLATE|NOSCRIPT|INPUT|SELECT|TEXTAREA|OPTION)$/u.test(child.tagName)) continue
+        if (hiddenElement(child, layout)) continue
+        walk(child, depth + 1)
+      }
+    }
+  }
+  if (hiddenElement(root, layout)) return ''
+  walk(root, 0)
+  return clean(parts.join(' '))
+}
+
+/**
+ * What a person sees as the control's label: for a labelled field (a
+ * checkbox, a radio, a text field) the visible text of its <label>s; for
+ * anything else its own visible text. Empty for an icon-only control.
+ */
+export function renderedLabel(el: Element, kind: TargetKind): string {
+  if (FIELD_KINDS.has(kind) && !(el instanceof HTMLLabelElement)) {
+    const labels = 'labels' in el ? (el as HTMLInputElement).labels : null
+    const texts = labels === null ? [] : [...labels].map(visibleText).filter((text) => text !== '')
+    return clip(texts.join(' '), MAX_TARGET_NAME_CHARS)
+  }
+  return clip(visibleText(el), MAX_TARGET_NAME_CHARS)
+}
+
+/** Clickable things another control with the same name could be. */
+const CONTROL_SELECTOR = 'button, a[href], area[href], summary, input[type="button"], input[type="submit"], input[type="reset"], input[type="image"], input[type="checkbox"], input[type="radio"], [role="button"], [role="link"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="tab"], [role="treeitem"], [role="checkbox"], [role="radio"], [role="switch"], [onclick]'
+
+/** The name as Auto review compares names: folded, case-folded, whitespace collapsed. */
+function foldName(text: string): string {
+  return text.normalize('NFKC').replace(/[\u2018\u2019\u02BC\uFF07`\u00B4]/gu, "'").replace(/[\u201C\u201D\uFF02]/gu, '"').toLowerCase().replace(/\s+/gu, ' ').trim()
+}
+
+/** How many visible, enabled controls in the document carry this name (the element included; capped at 99). */
+export function sameNameCount(el: Element, name: string): number {
+  const wanted = foldName(name)
+  if (wanted === '') return 1
+  const layout = hasLayout(el)
+  let count = 0
+  let seen = 0
+  for (const candidate of el.ownerDocument.querySelectorAll(CONTROL_SELECTOR)) {
+    seen += 1
+    if (seen > 3_000) break
+    if (candidate === el) { count += 1; continue }
+    if ((candidate as HTMLButtonElement).disabled === true || candidate.getAttribute('aria-disabled') === 'true') continue
+    if (hiddenElement(candidate, layout)) continue
+    if (foldName(targetName(candidate, targetKind(candidate))) === wanted) count += 1
+    if (count >= 99) break
+  }
+  return Math.max(1, count)
+}
+
+/**
+ * Which row or section the element is in, as a person would say it: the
+ * first cell of its table row, or the first emphasised text or heading of
+ * its list item or article, else the row's or section's label.
+ */
+export function rowKey(el: Element, name: string): string {
+  const row = el.closest('tr, li, [role="row"], [role="listitem"], article')
+  const wanted = foldName(name)
+  const usable = (text: string): string | undefined => {
+    const value = clip(clean(text), MAX_TARGET_CONTEXT_CHARS)
+    return value !== '' && foldName(value) !== wanted ? value : undefined
+  }
+  if (row !== null) {
+    const cells = row.querySelectorAll(':scope > td, :scope > th, :scope > [role="cell"], :scope > [role="gridcell"], :scope > [role="rowheader"]')
+    for (const cell of cells) {
+      if (cell.contains(el)) continue
+      const text = usable(visibleText(cell))
+      if (text !== undefined) return text
+    }
+    for (const strong of row.querySelectorAll('strong, b, h1, h2, h3, h4, h5, h6, [role="heading"]')) {
+      if (strong.contains(el)) continue
+      const text = usable(visibleText(strong))
+      if (text !== undefined) return text
+    }
+    const label = usable(row.getAttribute('aria-label') ?? '')
+    if (label !== undefined) return label
+  }
+  const context = targetContext(el, name)
+  return context?.kind === 'section' ? usable(context.text) ?? '' : ''
 }
 
 /**
@@ -322,8 +487,15 @@ export function describeElement(el: Element): FoundTarget {
     ...(isDisclosure(el) ? { disclosure: true as const } : {}),
     ...(() => {
       const empty = fieldEmpty(el)
-      return empty === undefined ? {} : { empty }
+      return empty === undefined ? {} : { empty, ...fieldAutoSaves(el) ? { autoSubmit: true as const } : {}, ...offersSuggestions(el) ? { suggests: true as const } : {} }
     })(),
+    rendered: renderedLabel(el, kind),
+    ...(() => {
+      const link = linkOf(el)
+      const target = link?.getAttribute('target')?.trim().toLowerCase() ?? ''
+      return link !== undefined && target !== '' && target !== '_self' ? { newTab: true as const } : {}
+    })(),
+    ...(dialogOpen(el.ownerDocument) ? { dialogOpen: true as const } : {}),
     ...(() => {
       // Submit controls, fields where Enter submits, and selects in a form: where their form goes.
       const inForm = submitsForm(el) || fieldInForm(el) || ((el instanceof HTMLSelectElement || (el instanceof HTMLLabelElement && el.control instanceof HTMLSelectElement)) && (el instanceof HTMLSelectElement ? el : el.control as HTMLSelectElement).form !== null)
@@ -383,9 +555,12 @@ function describeSlot(action: string, slot: string, args: Record<string, unknown
   }
   if (!(el instanceof Element) || !el.isConnected) return { found: false }
   const key = locatorKey(action, slot, args)
+  const base = describeElement(el)
   const description: FoundTarget = {
-    ...describeElement(el),
+    ...base,
     ...(located ? {} : { focused: true as const }),
+    // Clicks and key presses: how many controls share the name, and which row this one is in.
+    ...(action === 'browser_click' || action === 'browser_press' ? { sameName: sameNameCount(el, base.name), rowKey: rowKey(el, base.name) } : {}),
     ...(action === 'browser_select' ? selectFacts(el, args) : {}),
   }
   if (!recheck) {

@@ -73,6 +73,14 @@ export type IneligibleReason =
   | 'download'
   | 'unnamed'
   | 'drag-offset'
+  | 'click-modifier'
+  | 'link-new-tab'
+  | 'frame-origin'
+  | 'name-mismatch'
+  | 'ambiguous'
+  | 'typing-target'
+  | 'typing-mode'
+  | 'field-autosave'
 
 /** What the extension concluded about an eligible action. */
 export interface Assessment {
@@ -80,6 +88,8 @@ export interface Assessment {
   rule: AutoReviewRule
   /** For `named`: the phrases the newest panel message must contain verbatim. */
   mustName?: string[]
+  /** For `named` clicks on a name that repeats on the page: the row or section that says which one. */
+  mustContext?: string
   /** For `named` typing: the full text, which the message must contain verbatim. */
   exactText?: string
   /** For `named` typing into a recipient/address/link/amount field: a whole-token match. */
@@ -138,8 +148,10 @@ const TEXT_KINDS: ReadonlySet<TargetKind> = new Set([
  * date or combobox an arrow key changes the value, so it is never Auto.
  */
 const NAVIGATION_TARGETS: ReadonlySet<TargetKind> = new Set(['textbox', 'searchbox', 'textarea', 'editable', 'email', 'url', 'tel', 'link', 'button'])
-/** Text fields where a repeated navigation key is still only caret movement. */
+/** Text fields where a repeated navigation key is still only caret movement, and the only kinds Auto may type into. */
 const CARET_FIELDS: ReadonlySet<TargetKind> = new Set(['textbox', 'searchbox', 'textarea', 'editable', 'email', 'url', 'tel'])
+/** Of those, the multi-line ones: replacing their text could wipe what the user wrote. */
+const MULTI_LINE: ReadonlySet<TargetKind> = new Set(['textarea', 'editable'])
 /** Most repeats of a navigation key Auto may approve (in a text field only). */
 const MAX_NAVIGATION_REPEAT = 10
 
@@ -175,6 +187,8 @@ const HIGH_RISK_PATHS = /\/(?:checkout|payment|payments|pay|billing|purchase|sec
 /** Fields where typed text decides who or what receives something: recipients, addresses, links, amounts. */
 const ADDRESS_FIELD = /\b(?:to|cc|bcc|recipients?|e-?mail|address|url|link|website|amount|quantity|qty|price|share\s+with|invite|phone)\b|收件人|抄送|密送|邮箱|地址|网址|链接|金额|数量|价格|分享给|邀请/iu
 const ADDRESS_KINDS: ReadonlySet<TargetKind> = new Set(['email', 'url', 'tel', 'number', 'spinbutton'])
+/** In an address-like field, these words make typing high risk: where mail or money goes, and account recovery. */
+const ADDRESS_HIGH_RISK = /\b(?:forward\w*|redirect\w*|recovery|backup|alternate|alternative|secondary|payout\w*|iban|bic|swift|routing|sort\s+code|account\s+number|wallet|beneficiar\w*|payee|deliver\w*\s+to)\b|转发|重定向|恢复|备用|收款|钱包|账号|银行/iu
 
 /**
  * The words a harmless disclosure's name may consist of: a few verbs that
@@ -269,6 +283,24 @@ export function harmlessDisclosureName(name: string): boolean {
     && words.some((word) => !/^\d+$/u.test(word) && !['the', 'a', 'an', 'of'].includes(word))
 }
 
+/** The name as Auto review compares names: folded, case-folded, whitespace collapsed. */
+export function foldName(text: string): string {
+  return text.normalize('NFKC').replace(/[\u2018\u2019\u02BC\uFF07`\u00B4]/gu, "'").replace(/[\u201C\u201D\uFF02]/gu, '"').toLowerCase().replace(/\s+/gu, ' ').trim()
+}
+
+/**
+ * The visible label a click is judged by. The accessible name must equal
+ * what a person sees: a button that reads "Delete everything" but is
+ * labelled "Save settings" or "Show more" for assistive technology is never
+ * Auto, and neither is an icon-only control (nothing visible to name).
+ */
+function visibleName(target: Extract<TargetState, { state: 'found' }>): { name: string } | { reason: IneligibleReason } {
+  const rendered = target.rendered ?? ''
+  if (rendered.trim() === '') return no('unnamed')
+  if (foldName(rendered) !== foldName(target.name)) return no('name-mismatch')
+  return { name: target.name }
+}
+
 /**
  * Whether a name can be required verbatim: at least 3 letters or digits (2
  * for Chinese), as the bridge's check requires, and not cut short when it was
@@ -302,12 +334,26 @@ function named(mustName: string[], rest: Omit<Assessment, 'rule' | 'mustName'>):
   return { rule: 'named', mustName, ...rest }
 }
 
+/** Whether the click is one plain left click with no modifier (anything else can download, open elsewhere or open menus). */
+function plainClick(args: Record<string, unknown>): boolean {
+  if (Array.isArray(args.modifiers) ? args.modifiers.length > 0 : args.modifiers !== undefined) return false
+  if (args.button !== undefined && args.button !== 'left') return false
+  if (args.clicks !== undefined && args.clicks !== 1) return false
+  if (args.action !== undefined && args.action !== 'click') return false
+  return true
+}
+
 /** A click (or Space/Enter on a focused control) on one found element. */
-function classifyClick(target: Extract<TargetState, { state: 'found' }>, topOrigin: string | undefined, tainted: boolean): Classified {
-  const name = target.name
-  const context = target.context?.text
+function classifyClick(target: Extract<TargetState, { state: 'found' }>, topOrigin: string | undefined, tainted: boolean, args: Record<string, unknown>): Classified {
+  if (!plainClick(args)) return no('click-modifier')
   // A download writes a file to the user's disk: never Auto.
   if (target.download === true) return no('download')
+  // A link that opens another tab or window leaves this page's review.
+  if (target.newTab === true) return no('link-new-tab')
+  const seen = visibleName(target)
+  if ('reason' in seen) return seen
+  const name = seen.name
+  const context = target.context?.text
   // A real link (describe drops empty, fragment-only, javascript: and same-document ones): where it goes decides.
   if (target.href !== undefined) {
     const href = target.href
@@ -324,29 +370,43 @@ function classifyClick(target: Extract<TargetState, { state: 'found' }>, topOrig
       destination: destinationText(href),
     }
     // A link whose path says it commits something needs the user's words.
-    return cls === undefined ? { rule: 'harmless', ...facts } : named([name], facts)
+    return cls === undefined ? { rule: 'harmless', ...facts } : withWhich(target, named([name], facts))
   }
   // A submit control: where its form goes decides too, and it is at least a submission.
   if (target.submits === true) {
     const form = target.form
     if (form === undefined || 'other' in form || topOrigin === undefined || form.origin !== topOrigin) return no('form-destination')
-    return named([name], {
+    return withWhich(target, named([name], {
       commitClass: classOfWords(name, pathWords(form.path)) ?? 'submit',
       formSubmitLikely: true,
       highRiskWords: highRisk(name, context, form.path) || HIGH_RISK_PATHS.test(form.path),
       sameOrigin: true,
       destination: destinationText(form),
-    })
+    }))
   }
   const cls = classOfWords(name)
   // A disclosure called "Show more" only shows more; anything else it might do is the page's residue.
-  if (target.disclosure === true && nameable(name) && harmlessDisclosureName(name)) {
+  // The words are checked on the visible text, which equals the name here.
+  if (target.disclosure === true && nameable(name) && harmlessDisclosureName(target.rendered ?? '')) {
     return { rule: 'harmless', commitClass: 'none', formSubmitLikely: false, highRiskWords: highRisk(name, context) }
   }
   // Every other control — button, menu item, option, tree item, checkbox,
   // radio, switch, tab, summary, a link without a real destination, an
   // unknown element — needs its full name in the user's message.
-  return named([name], { commitClass: cls ?? 'unknown', formSubmitLikely: false, highRiskWords: highRisk(name, context) })
+  return withWhich(target, named([name], { commitClass: cls ?? 'unknown', formSubmitLikely: false, highRiskWords: highRisk(name, context) }))
+}
+
+/**
+ * When other visible controls share the name, the user must also say which
+ * one: the row or section it is in, in the same clause ("click Delete on
+ * Bob's mail"). Without a row or section to say, it is never Auto.
+ */
+function withWhich(target: Extract<TargetState, { state: 'found' }>, classified: Classified): Classified {
+  if ('reason' in classified || classified.rule !== 'named') return classified
+  if ((target.sameName ?? 1) <= 1) return classified
+  const key = target.rowKey ?? ''
+  if (!nameable(key)) return no('ambiguous')
+  return { ...classified, mustContext: key }
 }
 
 /** The key of a press and its modifiers, from `key` (a chord) and `modifiers`. */
@@ -395,13 +455,16 @@ function classifyPress(target: Extract<TargetState, { state: 'found' }>, args: R
   if (NAVIGATION_KEYS.has(key)) {
     // On a select, radio, slider or spin button an arrow changes the value.
     if (!NAVIGATION_TARGETS.has(target.kind)) return no('press-key')
+    // Tab can accept a suggestion; Escape can dismiss (and discard) a dialog.
+    if (key === 'Tab' && target.suggests === true) return no('press-key')
+    if ((key === 'Escape' || key === 'Esc') && target.dialogOpen === true) return no('press-key')
     if (repeat > 1 && (!CARET_FIELDS.has(target.kind) || repeat > MAX_NAVIGATION_REPEAT)) return no('press-key')
     return { rule: 'harmless', commitClass: 'none', formSubmitLikely: false, highRiskWords: false }
   }
   const field = TEXT_KINDS.has(target.kind)
   // Space or Enter on a button, link or control is a click on it, once.
   if ((ENTER_KEYS.has(key) || SPACE_KEYS.has(key)) && !field && press.modifiers.length === 0 && repeat === 1) {
-    return classifyClick(target, topOrigin, tainted)
+    return classifyClick(target, topOrigin, tainted, {})
   }
   // Enter in a field submits or sends; a character key is typing one
   // character, which can never be named (three characters at least): the
@@ -418,8 +481,17 @@ function classifyTyping(target: Extract<TargetState, { state: 'found' }>, args: 
   // eslint-disable-next-line no-control-regex
   if (/[\u0000-\u001F\u007F]/u.test(text)) return no('typed-line-break')
   if (text.length > MAX_REVIEW_EXACT_TEXT_CHARS || (text.match(/[\p{L}\p{N}]/gu)?.length ?? 0) < 3) return no('typed-length')
-  // Appending to what is there could finish a sentence the page or an earlier step began.
-  if (args.replace !== true && target.empty !== true) return no('field-not-empty')
+  // Only text into a text field, addressed by a locator, through the default
+  // insertion path: key-by-key or trusted typing sends real key events that a
+  // focused button, checkbox or shortcut-bearing page acts on.
+  if (!CARET_FIELDS.has(target.kind) || typeof target.empty !== 'boolean') return no('typing-target')
+  if (target.focused === true || (args.index === undefined && (typeof args.selector !== 'string' || args.selector === ''))) return no('typing-target')
+  if ((args.mode !== undefined && args.mode !== 'auto') || args.trusted === true) return no('typing-mode')
+  // A field that saves as it is typed in commits the text with no further step.
+  if (target.autoSubmit === true) return no('field-autosave')
+  // Appending to what is there could finish a sentence the page or an earlier
+  // step began; replacing a multi-line field could wipe what the user wrote.
+  if (target.empty !== true && (args.replace !== true || MULTI_LINE.has(target.kind))) return no('field-not-empty')
   const address = ADDRESS_KINDS.has(target.kind) || ADDRESS_FIELD.test(target.name)
   return {
     rule: 'named',
@@ -427,7 +499,7 @@ function classifyTyping(target: Extract<TargetState, { state: 'found' }>, args: 
     ...address ? { exactToken: true } : {},
     commitClass: address ? 'address' : tainted ? 'type' : 'none',
     formSubmitLikely: false,
-    highRiskWords: highRisk(target.name, target.context?.text),
+    highRiskWords: highRisk(target.name, target.context?.text) || (address && (ADDRESS_HIGH_RISK.test(target.name) || ADDRESS_HIGH_RISK.test(target.context?.text ?? ''))),
   }
 }
 
@@ -459,6 +531,8 @@ export function autoReviewEligibility(prompt: ApprovalPrompt, call: ReviewCallCo
   if (facts?.policy !== 'default') return refuse('policy')
   const tool = call.tool as AutoReviewTool
   const tainted = call.tainted === true
+  // Every element action: the frame it acts in must be the top page's origin.
+  if (tool !== 'browser_navigate' && (facts.topOrigin === undefined || originOf(facts.pageUrl) !== facts.topOrigin)) return refuse('frame-origin')
   const found = (slot: 'target' | 'from' | 'to'): Extract<TargetState, { state: 'found' }> | IneligibleReason => {
     const state = facts.targets?.[slot]
     if (state?.state !== 'found') return 'target-not-found'
@@ -493,7 +567,7 @@ export function autoReviewEligibility(prompt: ApprovalPrompt, call: ReviewCallCo
       if (typeof target === 'string') return refuse(target)
       classified = tool === 'browser_hover'
         ? { rule: 'harmless', commitClass: 'none', formSubmitLikely: false, highRiskWords: false }
-        : classifyClick(target, facts.topOrigin, tainted)
+        : classifyClick(target, facts.topOrigin, tainted, call.args)
       break
     }
     case 'browser_type': {
@@ -519,11 +593,11 @@ export function autoReviewEligibility(prompt: ApprovalPrompt, call: ReviewCallCo
       if (target.autoSubmit === true && target.form !== undefined && ('other' in target.form || facts.topOrigin === undefined || target.form.origin !== facts.topOrigin)) return refuse('form-destination')
       const chosen = target.chosen.join(' · ')
       // Every chosen option, verbatim.
-      classified = named([...target.chosen], {
+      classified = withWhich(target, named([...target.chosen], {
         commitClass: classOfWords(target.name, chosen) ?? (target.autoSubmit === true ? 'submit' : 'none'),
         formSubmitLikely: target.autoSubmit === true,
         highRiskWords: highRisk(target.name, target.context?.text, chosen),
-      })
+      }))
       break
     }
     case 'browser_drag': {
@@ -649,6 +723,7 @@ export function buildReviewAction(prompt: ApprovalPrompt, tool: AutoReviewTool, 
     rule: assessment.rule,
     // The phrases and text the bridge checks verbatim: exactly as the page reported them, uncut.
     ...assessment.rule === 'named' && assessment.mustName !== undefined ? { mustName: [...assessment.mustName] } : {},
+    ...assessment.rule === 'named' && assessment.mustName !== undefined && assessment.mustContext !== undefined ? { mustContext: assessment.mustContext } : {},
     ...assessment.rule === 'named' && assessment.exactText !== undefined ? { exactText: assessment.exactText } : {},
     ...assessment.rule === 'named' && assessment.exactToken === true ? { exactToken: true } : {},
     commitClass: assessment.commitClass,

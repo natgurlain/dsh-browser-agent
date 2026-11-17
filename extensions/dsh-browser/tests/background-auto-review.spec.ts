@@ -38,7 +38,7 @@ async function boot(options: { caps?: BridgeCaps; settings?: Record<string, unkn
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const sessionData: Record<string, unknown> = {}
   const tabMessages: Array<Record<string, unknown>> = []
-  const target = options.target ?? { found: true, kind: 'button', name: 'Show more', disclosure: true }
+  const target = options.target ?? { found: true, kind: 'button', name: 'Show more', rendered: 'Show more', disclosure: true }
   vi.stubGlobal('chrome', {
     alarms: { create: vi.fn(), clear: vi.fn(async () => true), onAlarm: chromeEvent<[chrome.alarms.Alarm]>() },
     notifications: { create: vi.fn(async () => ''), clear: vi.fn(async () => true), onClicked: chromeEvent<[string]>() },
@@ -181,7 +181,7 @@ describe('Auto review in the background', () => {
   })
 
   it('a button the user did not name: the card teaches what to say, and the action carries the exact name', async () => {
-    const env = await boot({ target: { found: true, kind: 'button', name: 'Save settings' } })
+    const env = await boot({ target: { found: true, kind: 'button', name: 'Save settings', rendered: 'Save settings' } })
     await enableAuto(env)
     click(env, 'c9')
     const review = await reviewRequest(env, 'c9')
@@ -193,6 +193,24 @@ describe('Auto review in the background', () => {
     const request = env.posted('approval.request')[0]!.request as Record<string, unknown>
     env.panel.emit({ type: 'approval.response', id: request.id, decision: 'deny' })
     expect(await result(env, 'c9')).toMatchObject({ ok: false })
+  })
+
+  it('a name authorises one Auto approval per user message (security review 3 F4)', async () => {
+    const env = await boot({ target: { found: true, kind: 'button', name: 'Delete', rendered: 'Delete', sameName: 3, rowKey: 'Bob' } })
+    await enableAuto(env)
+    click(env, 'd1')
+    const first = await reviewRequest(env, 'd1')
+    expect(first.payload).toMatchObject({ action: { rule: 'named', mustName: ['Delete'], mustContext: 'Bob' } })
+    env.socket.receive({ t: 'rpc.result', id: first.id, ok: true, result: { reviewId: first.payload!.reviewId, binding: first.payload!.binding, decision: 'allow', code: 'allowed', risk: 'medium', reason: 'x', userTurn: 'm1' } })
+    expect(await result(env, 'd1')).toMatchObject({ ok: true })
+    click(env, 'd2')
+    const second = await reviewRequest(env, 'd2')
+    env.socket.receive({ t: 'rpc.result', id: second.id, ok: true, result: { reviewId: second.payload!.reviewId, binding: second.payload!.binding, decision: 'allow', code: 'allowed', risk: 'medium', reason: 'x', userTurn: 'm1' } })
+    await vi.waitFor(() => { expect(env.posted('approval.request')).toHaveLength(1) })
+    const request = env.posted('approval.request')[0]!.request as Record<string, unknown>
+    expect(request.autoReviewNote).toMatch(/already used once/u)
+    env.panel.emit({ type: 'approval.response', id: request.id, decision: 'deny' })
+    expect(await result(env, 'd2')).toMatchObject({ ok: false })
   })
 
   it('ignores an answer about another binding or review, and shows the card', async () => {

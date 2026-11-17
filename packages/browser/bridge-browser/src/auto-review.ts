@@ -74,7 +74,12 @@ export interface ReviewerVerdict {
 /** One user message the reviewer may treat as an instruction. */
 export interface TrustedMessage {
   seq: number
+  /** For the reviewer's prompt: page content cut out, the newest tail kept within the bounds. */
   text: string
+  /** The whole message (page content cut out), for the deterministic rules; never truncated. */
+  full?: string
+  /** The panel prompt's minted id: the turn marker Auto review's per-message limits key on. */
+  rpcId?: string
 }
 
 // ---- Trusted history ----
@@ -151,13 +156,15 @@ export function trustedUserMessages(session: SessionLike, fromPanel: (rpcId: str
     try { own = session.isOwnSeq(event.seq as never) } catch { own = false }
     if (!own) continue
     const text = withoutPageContent(textOf(event.data?.content).replace(SELECTION_HEADER, '')).trim()
-    if (text === '') continue
-    picked.push({ seq: event.seq, text: text.length > MAX_USER_MESSAGE_CHARS ? `…${text.slice(-MAX_USER_MESSAGE_CHARS)}` : text })
+    // A message without text (an image, "Continue") still counts as the newest:
+    // it clears whatever the previous message authorised.
+    picked.push({ seq: event.seq, text: text.length > MAX_USER_MESSAGE_CHARS ? `…${text.slice(-MAX_USER_MESSAGE_CHARS)}` : text, full: text, rpcId: source.rpcId })
   }
   const kept: TrustedMessage[] = []
   let total = 0
   for (const message of picked.slice(-MAX_USER_MESSAGES).reverse()) {
-    if (total + message.text.length > MAX_USER_TEXT_CHARS) break
+    // The newest is always kept (its rules read the full text); older ones within the bounds.
+    if (kept.length > 0 && total + message.text.length > MAX_USER_TEXT_CHARS) break
     total += message.text.length
     kept.unshift(message)
   }
@@ -264,8 +271,9 @@ export function parseVerdict(text: string): ReviewerVerdict {
 }
 
 /**
- * Words in the user's newest message that hold the agent back: a match vetoes
- * every `named` approval (EN/ZH). "Draft" and "prepare" only veto clicks and
+ * Words in the user's newest message that hold the agent back: a match
+ * anywhere in the WHOLE message (never a truncated copy) vetoes every
+ * `named` approval (EN/ZH). "Draft" and "prepare" only veto clicks and
  * selections: typing the draft is what the user asked for.
  */
 export const RESTRICTION = new RegExp([
@@ -273,7 +281,7 @@ export const RESTRICTION = new RegExp([
   String.raw`\bread[- ]only\b`,
   String.raw`\b(?:don'?t|do\s+not|never|without|avoid|no\s+need\s+to)\b`,
   String.raw`\btell\s+me\s+(?:if|whether)\b`,
-  String.raw`\bwait\s+for\s+me\b`,
+  String.raw`\bwait\s+for\s+(?:me|my)\b`,
   String.raw`\bleave\b[^.!?\n]{0,40}\bas\b`,
   String.raw`\b(?:i\s+will|i'll|i\s+am\s+going\s+to|i'm\s+going\s+to)\b[^.!?\n]{0,60}\b(?:myself|later)\b`,
   String.raw`\blook\s+but\b`,
@@ -284,9 +292,23 @@ export const RESTRICTION = new RegExp([
 /** Holding-back words that do not stop the user's own dictated text from being typed. */
 export const DRAFT_ONLY = /\b(?:draft|prepare|compose|write\s+up)\b|草拟|起草|准备/iu
 
-/** Normalise for verbatim matching: NFKC, case-folded, whitespace collapsed. */
+/** Apostrophe-like and quotation-mark-like characters folded before any matching. */
+const SINGLE_QUOTES = /[‘’‚‛ʼʹ`´′＇]/gu
+const DOUBLE_QUOTES = /[“”„‟«»″＂〝〞]/gu
+const INVISIBLE = /[­​-‏‪-‮⁠-⁤﻿]/gu
+
+/**
+ * Fold for matching, keeping case and line breaks: NFKC; every apostrophe-
+ * like character to ', every curly or angled double quote to "; invisible
+ * format characters removed.
+ */
+export function foldText(text: string): string {
+  return text.normalize('NFKC').replace(INVISIBLE, '').replace(SINGLE_QUOTES, "'").replace(DOUBLE_QUOTES, '"')
+}
+
+/** Normalise for verbatim matching: folded, case-folded, whitespace collapsed. */
 export function normaliseText(text: string): string {
-  return text.normalize('NFKC').toLowerCase().replace(/\s+/gu, ' ').trim()
+  return foldText(text).toLowerCase().replace(/\s+/gu, ' ').trim()
 }
 
 const HAN = /\p{Script=Han}/u
@@ -298,56 +320,184 @@ function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 }
 
+/** How much of the newest message can name controls or dictate text; the rest is treated as pasted material. */
+export const AUTHORISING_CHARS = 600
+
 /**
- * Whether the user's message names a control (or option) verbatim:
- * the full name, normalised on both sides with surrounding punctuation
- * stripped, occurs as a whole phrase (no letter or digit right before or
- * after it); it has at least 3 letters/digits (2 for Chinese); and a name of
- * one word is quoted or directly follows click/press/tap/choose/select/pick
- * (点击/按/选择) — a common word inside a sentence ("send me the summary")
- * names nothing. No page context, no verb classes, no token overlap.
+ * The part of the user's message that can authorise anything: its first
+ * {@link AUTHORISING_CHARS} characters, cut before the first blank-line-
+ * separated block that looks pasted (three or more lines, or a line starting
+ * with ">", "From:", "Subject:", "To:", "Date:" or "---").
  */
-export function namesVerbatim(name: string, message: string): boolean {
-  const target = normaliseText(name).replace(/^[\p{P}\p{S}\s]+|[\p{P}\p{S}\s]+$/gu, '')
+export function authorisingPart(message: string): string {
+  const head = foldText(message).replace(/\r\n?/gu, '\n').slice(0, AUTHORISING_CHARS)
+  const kept: string[] = []
+  for (const block of head.split(/\n[ \t]*\n/u)) {
+    const lines = block.split('\n').filter((line) => line.trim() !== '')
+    if (lines.length >= 3 || lines.some((line) => /^\s*(?:>|from:|subject:|to:|date:|---)/iu.test(line))) break
+    kept.push(block)
+  }
+  return kept.join('\n')
+}
+
+/** Verbs whose quoted object is text to enter, not a control to press. */
+const DICTATION_VERB = /(?:\b(?:type|typing|write|writing|enter|entering|search(?:\s+for)?|searching(?:\s+for)?|say|saying|reply|replying|respond|comment|commenting|fill(?:\s+in)?|put|paste)\b|输入|搜索|回复|写)[^"'「『\n]{0,30}$/iu
+
+/** One quoted string of the message. */
+export interface QuotedText {
+  /** Folded, whitespace collapsed, case kept (typed text is compared case-sensitively). */
+  text: string
+  /** The object of type/write/enter/search/say/reply/comment: text to enter, never a control's name. */
+  dictation: boolean
+}
+
+/** One clause of the authorising part. */
+export interface Clause {
+  /** Lower-cased; quoted strings that are dictation blanked, others replaced by their content. */
+  plain: string
+  quotes: QuotedText[]
+  /** Not a question, and no negation, condition or deferral. */
+  imperative: boolean
+}
+
+const QUOTE = /"([^"\n]{1,500})"|「([^」\n]{1,500})」|『([^』\n]{1,500})』|(?<![\p{L}\p{N}])'([^'\n]{1,500})'(?![\p{L}\p{N}])/gu
+const QUESTION_START = /^(?:what|whats|what's|should|shall|can|could|would|will|do|does|did|is|are|was|were|am|how|why|when|where|which|who|whom|whose|if|whether|may|might|have|has|had|isn't|aren't)\b/u
+/** Negation, condition or deferral: a clause holding one of these authorises nothing. */
+const HOLD_BACK = /\b(?:not|never|no|nothing|without|unless|until|till|before|after|once|if|when|whenever|wait|waiting|stop|hold|later|yet|myself|maybe|perhaps|i\s+will|i'll|i\s+would|i'd|i\s+might)\b|n't\b|不|别|勿|等|之后|以后|如果|是否|吗|再/u
+/** A verb that operates a control, needed in the same clause as any name. */
+const ACTION_VERB = /\b(?:click|press|tap|hit|choose|select|pick|open|turn\s+on|turn\s+off|switch\s+on|switch\s+off|switch|enable|disable|check|uncheck|tick|untick|toggle|drag|drop|move)\b|点击|点|按|选择|选中|打开|开启|关闭|启用|停用|勾选|取消勾选|切换|拖/u
+
+/**
+ * Split the authorising part into clauses: at a sentence end (. ! ? ;
+ * followed by a space or the end), at 。！？；, and at line breaks. Quoted
+ * strings are lifted out first, so a period inside a quote does not split.
+ */
+export function clausesOf(message: string): Clause[] {
+  const part = authorisingPart(message)
+  const quotes: Array<{ raw: string; dictation: boolean }> = []
+  const lifted = part.replace(QUOTE, (whole, a?: string, b?: string, c?: string, d?: string, offset?: number) => {
+    const raw = a ?? b ?? c ?? d ?? ''
+    const before = part.slice(Math.max(0, (offset ?? 0) - 40), offset ?? 0)
+    quotes.push({ raw, dictation: DICTATION_VERB.test(before) })
+    return `\u0001${String(quotes.length - 1)}\u0001${whole.length > 0 ? '' : ''}`
+  })
+  const pieces: string[] = []
+  let current = ''
+  for (let index = 0; index < lifted.length; index += 1) {
+    const char = lifted[index]!
+    current += char
+    const next = lifted[index + 1]
+    const ends = /[.!?;]/u.test(char) && (next === undefined || /\s/u.test(next))
+    if (ends || /[。！？；\n]/u.test(char)) {
+      pieces.push(current)
+      current = ''
+    }
+  }
+  if (current.trim() !== '') pieces.push(current)
+  return pieces.map((piece) => {
+    const own: QuotedText[] = []
+    const lower = piece.toLowerCase()
+    const plain = lower.replace(/\u0001(\d+)\u0001/gu, (_, n: string) => {
+      const quote = quotes[Number(n)]!
+      own.push({ text: quote.raw.replace(/\s+/gu, ' ').trim(), dictation: quote.dictation })
+      return quote.dictation ? ' ' : ` ${quote.raw.toLowerCase()} `
+    }).replace(/\s+/gu, ' ').trim()
+    const bare = lower.replace(/\u0001\d+\u0001/gu, ' ').replace(/\s+/gu, ' ').trim()
+    const question = /[?？]\s*$/u.test(piece.trim()) || QUESTION_START.test(bare)
+    return { plain, quotes: own, imperative: bare !== '' && !question && !HOLD_BACK.test(bare) }
+  }).filter((clause) => clause.plain !== '' || clause.quotes.length > 0)
+}
+
+function phrase(target: string): RegExp {
+  const body = target.split(' ').map(escapeRegExp).join('\\s+')
+  const before = HAN.test(target[0]!) ? '' : '(?<![\\p{L}\\p{N}])'
+  const after = HAN.test(target.at(-1)!) ? '' : '(?![\\p{L}\\p{N}])'
+  return new RegExp(`${before}${body}${after}`, 'u')
+}
+
+function cleanName(name: string): string {
+  return normaliseText(name).replace(/^[\p{P}\p{S}\s]+|[\p{P}\p{S}\s]+$/gu, '')
+}
+
+/** Whether a name can be named at all: 3+ letters/digits (2 Han), ≤ 200 chars, not a common word. */
+function nameable(target: string): boolean {
   if (target === '' || target.length > 200) return false
   const count = target.match(LETTER_OR_DIGIT)?.length ?? 0
   if (count < (HAN.test(target) ? 2 : 3)) return false
   const words = target.match(/[\p{L}\p{N}]+/gu) ?? []
-  const single = words.length === 1
-  if (single && COMMON_SINGLE.has(target)) return false
-  const text = normaliseText(message)
-  const body = target.split(' ').map(escapeRegExp).join('\\s+')
-  const before = HAN.test(target[0]!) ? '' : '(?<![\\p{L}\\p{N}])'
+  return !(words.length === 1 && COMMON_SINGLE.has(target))
+}
+
+const PRESS_BEFORE = String.raw`(?:(?<![\p{L}\p{N}])(?:click|press|tap|hit|choose|select|pick|check|uncheck|tick|untick|toggle|open|enable|disable|turn\s+on|turn\s+off|switch\s+on|switch\s+off)\s+(?:on\s+)?(?:the\s+)?|点击|点|按|选择|选中|勾选|打开|开启|关闭)`
+const LIST_BEFORE = String.raw`(?:,|\band\b|\bor\b|&|和|、|及)\s*(?:the\s+)?`
+
+/**
+ * Whether one IMPERATIVE clause names a control: it holds an action verb,
+ * and the name (normalised, surrounding punctuation stripped) is a quoted
+ * string that is not text to type, or follows the verb directly (or, for a
+ * later name of a list, "and"/","), or — for a name of several words —
+ * occurs as a whole phrase.
+ */
+function clauseNames(clause: Clause, target: string, inList: boolean): boolean {
+  if (!clause.imperative || !ACTION_VERB.test(clause.plain)) return false
+  if (clause.quotes.some((quote) => !quote.dictation && cleanName(quote.text) === target)) return true
+  const words = target.match(/[\p{L}\p{N}]+/gu) ?? []
   const after = HAN.test(target.at(-1)!) ? '' : '(?![\\p{L}\\p{N}])'
-  if (!single) return new RegExp(`${before}${body}${after}`, 'u').test(text)
-  const quoted = new RegExp(`["“”'‘’«»„「『]\\s*${body}\\s*["“”'‘’«»“」』]`, 'u')
-  const pressed = new RegExp(`(?:(?<![\\p{L}\\p{N}])(?:click|press|tap|choose|select|pick)\\s+(?:on\\s+)?(?:the\\s+)?|点击|按|选择)["“'‘「]?${body}${after}`, 'u')
-  return quoted.test(text) || pressed.test(text)
+  const body = target.split(' ').map(escapeRegExp).join('\\s+')
+  if (new RegExp(`${PRESS_BEFORE}${body}${after}`, 'u').test(clause.plain)) return true
+  if (inList && new RegExp(`${LIST_BEFORE}${body}${after}`, 'u').test(clause.plain)) return true
+  return words.length > 1 && phrase(target).test(clause.plain)
 }
 
 /**
- * Whether the message contains the text verbatim (normalised); for a
- * recipient/address/link/amount field, the text must instead equal one whole
- * whitespace-delimited token of the message, with surrounding punctuation
- * stripped from the token.
+ * Whether the user's message names a control (or option) verbatim, in one
+ * imperative clause of its authorising part (see {@link clausesOf}).
+ */
+export function namesVerbatim(name: string, message: string): boolean {
+  const target = cleanName(name)
+  if (!nameable(target)) return false
+  return clausesOf(message).some((clause) => clauseNames(clause, target, false))
+}
+
+/**
+ * Whether the message dictates exactly this text: it equals a whole quoted
+ * string (whitespace collapsed, case kept) in an imperative clause. For a
+ * recipient/address/link/amount field the text must instead equal one whole
+ * whitespace-delimited word of an imperative clause (punctuation around it
+ * stripped, case-insensitive).
  */
 export function containsVerbatim(typed: string, message: string, token: boolean): boolean {
-  const wanted = normaliseText(typed)
+  const wanted = foldText(typed).replace(/\s+/gu, ' ').trim()
   if ((wanted.match(LETTER_OR_DIGIT)?.length ?? 0) < 3) return false
-  const text = normaliseText(message)
-  if (!token) return text.includes(wanted)
-  return text.split(' ').some((part) => part.replace(/^[\p{P}\p{S}]+|[\p{P}\p{S}]+$/gu, '') === wanted)
+  const clauses = clausesOf(message).filter((clause) => clause.imperative)
+  if (!token) return clauses.some((clause) => clause.quotes.some((quote) => quote.text === wanted))
+  const lower = wanted.toLowerCase()
+  return clauses.some((clause) => [...clause.plain.split(' '), ...clause.quotes.map((quote) => quote.text.toLowerCase())]
+    .some((part) => part.replace(/^[\p{P}\p{S}]+|[\p{P}\p{S}]+$/gu, '') === lower))
 }
 
 /**
- * Whether the user's newest message lets a `named` action through (design §8).
+ * Whether the user's newest message lets a `named` action through (design §8):
+ * no restriction anywhere in the whole message; every required name, and the
+ * row or section that says which one (`mustContext`), in ONE imperative
+ * clause of its leading part; dictated text quoted there exactly.
  * @returns undefined when it does, else why not.
  */
 export function namedCovers(action: ReviewAction, newest: string): 'restricted' | 'not-named' | undefined {
+  const whole = foldText(newest)
   const typing = action.exactText !== undefined
-  if (RESTRICTION.test(newest) || (!typing && DRAFT_ONLY.test(newest))) return 'restricted'
-  if (action.mustName === undefined && action.exactText === undefined) return 'not-named'
-  for (const name of action.mustName ?? []) if (!namesVerbatim(name, newest)) return 'not-named'
+  if (RESTRICTION.test(whole) || (!typing && DRAFT_ONLY.test(whole))) return 'restricted'
+  const names = action.mustName ?? []
+  if (names.length === 0 && action.exactText === undefined) return 'not-named'
+  if (names.length > 0) {
+    const targets = names.map(cleanName)
+    if (!targets.every(nameable)) return 'not-named'
+    const context = action.mustContext === undefined ? undefined : cleanName(action.mustContext)
+    if (context !== undefined && context.match(LETTER_OR_DIGIT) === null) return 'not-named'
+    const covered = clausesOf(newest).some((clause) => targets.every((target, index) => clauseNames(clause, target, index > 0))
+      && (context === undefined || phrase(context).test(clause.plain)))
+    if (!covered) return 'not-named'
+  }
   if (action.exactText !== undefined && !containsVerbatim(action.exactText, newest, action.exactToken === true)) return 'not-named'
   return undefined
 }
@@ -371,7 +521,8 @@ export function applyFloors(verdict: ReviewerVerdict, action: ReviewAction, mess
   if (verdict.decision === 'ask') return { decision: 'ask', risk, reason: verdict.reason, code: 'model-ask' }
   if (risk === 'high') return { decision: 'ask', risk, reason: verdict.reason, code: 'high-risk' }
   if (action.rule === 'harmless') return { decision: 'allow', risk, reason: verdict.reason, code: 'allowed' }
-  const why = namedCovers(action, messages.at(-1)?.text ?? '')
+  const newest = messages.at(-1)
+  const why = namedCovers(action, newest?.full ?? newest?.text ?? '')
   if (why !== undefined) return { decision: 'ask', risk, reason: verdict.reason, code: why }
   return { decision: 'allow', risk, reason: verdict.reason, code: 'allowed' }
 }
@@ -431,6 +582,11 @@ export interface ReviewerHost {
    * counts (unit tests only).
    */
   fromPanel?(sessionId: string, rpcId: string, seq: number): boolean
+  /**
+   * A prompt the panel sent that is not in the history yet (queued behind a
+   * running turn): it is already the user's newest message.
+   */
+  pendingPrompt?(sessionId: string): { rpcId: string; text: string } | undefined
 }
 
 /**
@@ -439,32 +595,58 @@ export interface ReviewerHost {
  * to that event's seq; only that one event is trusted afterwards.
  */
 export class PanelPrompts {
-  private readonly bySession = new Map<string, Map<string, number | undefined>>()
+  /** Per session: minted id → the seq of the first event carrying it (once seen), the text, and the order recorded. */
+  private readonly bySession = new Map<string, Map<string, { seq?: number; text: string; order: number }>>()
+  private order = 0
   private static readonly KEPT = 200
 
-  record(sessionId: string, rpcId: string): void {
-    const ids = this.bySession.get(sessionId) ?? new Map<string, number | undefined>()
-    if (!ids.has(rpcId)) ids.set(rpcId, undefined)
+  /** The panel sent a prompt: record the id the bridge minted for it, before the Host runs it. */
+  record(sessionId: string, rpcId: string, text = ''): void {
+    const ids = this.bySession.get(sessionId) ?? new Map<string, { seq?: number; text: string; order: number }>()
+    if (!ids.has(rpcId)) ids.set(rpcId, { text: text.slice(0, 200_000), order: (this.order += 1) })
     while (ids.size > PanelPrompts.KEPT) ids.delete(ids.keys().next().value!)
     this.bySession.set(sessionId, ids)
   }
 
   /** Whether this event is the one that carries a minted id (binding the id on first sight). */
   has(sessionId: string, rpcId: string, seq?: number): boolean {
-    const ids = this.bySession.get(sessionId)
-    if (ids === undefined || !ids.has(rpcId)) return false
+    const entry = this.bySession.get(sessionId)?.get(rpcId)
+    if (entry === undefined) return false
     if (seq === undefined) return true
-    const bound = ids.get(rpcId)
-    if (bound === undefined) {
-      ids.set(rpcId, seq)
+    if (entry.seq === undefined) {
+      entry.seq = seq
       return true
     }
-    return bound === seq
+    return entry.seq === seq
+  }
+
+  /**
+   * The newest prompt the panel sent that the history has not shown yet
+   * (queued behind a running turn), when it was sent after every prompt
+   * that has been seen: it is the user's newest message from the moment
+   * they pressed Send.
+   */
+  pending(sessionId: string): { rpcId: string; text: string } | undefined {
+    const ids = this.bySession.get(sessionId)
+    if (ids === undefined) return undefined
+    let newestSeen = 0
+    let newestPending: [string, { text: string; order: number }] | undefined
+    for (const [id, entry] of ids) {
+      if (entry.seq !== undefined) newestSeen = Math.max(newestSeen, entry.order)
+      else if (newestPending === undefined || entry.order > newestPending[1].order) newestPending = [id, entry]
+    }
+    return newestPending === undefined || newestPending[1].order < newestSeen ? undefined : { rpcId: newestPending[0], text: newestPending[1].text }
   }
 
   forget(sessionId: string): void {
     this.bySession.delete(sessionId)
   }
+}
+
+/** The turn marker of a message: its minted panel id (stable from send to history), else its seq. */
+function turnOf(message: TrustedMessage | undefined): string | undefined {
+  if (message === undefined) return undefined
+  return message.rpcId ?? String(message.seq)
 }
 
 /** One review's full record (the audit log stores it; the extension gets the answer part). */
@@ -493,6 +675,14 @@ export class AutoReviewer {
   private fromPanel(sessionId: string): (rpcId: string, seq: number) => boolean {
     const check = this.host.fromPanel
     return check === undefined ? () => true : (rpcId, seq) => check(sessionId, rpcId, seq)
+  }
+
+  /** The history's messages, plus a panel prompt sent but not yet in the history (it is the newest). */
+  private withPending(sessionId: string, messages: TrustedMessage[]): TrustedMessage[] {
+    const pending = this.host.pendingPrompt?.(sessionId)
+    if (pending === undefined) return messages
+    const text = withoutPageContent(pending.text.replace(SELECTION_HEADER, '')).trim()
+    return [...messages, { seq: Number.MAX_SAFE_INTEGER, text: text.length > MAX_USER_MESSAGE_CHARS ? `…${text.slice(-MAX_USER_MESSAGE_CHARS)}` : text, full: text, rpcId: pending.rpcId }]
   }
 
   /** Whether the Host can review at all (the `autoReview` cap). */
@@ -544,7 +734,8 @@ export class AutoReviewer {
     } catch (error: unknown) {
       return ask('Your messages could not be read for the review.', { model, failure: errorText(error) })
     }
-    const userTurn = messages.length === 0 ? undefined : String(messages.at(-1)!.seq)
+    messages = this.withPending(sessionId, messages)
+    const userTurn = turnOf(messages.at(-1))
     if (messages.length === 0) return ask('No message you sent from the browser panel in this conversation authorizes page actions.', { model, failure: 'no-user-message', code: 'no-user-message' })
     const timeout = new AbortController()
     const timer = setTimeout(() => { timeout.abort(new Error('timeout')) }, this.options.timeoutMs ?? AUTO_REVIEW_TIMEOUT_MS)
@@ -561,9 +752,9 @@ export class AutoReviewer {
       })), combined)
       const verdict = parseVerdict(text)
       // A newer user message arrived while the model thought: its answer is stale.
-      const latest = trustedUserMessages(session, this.fromPanel(sessionId)).at(-1)
-      if (latest !== undefined && String(latest.seq) !== userTurn) {
-        return ask('You sent a new message while this was being reviewed.', { model, failure: 'superseded', code: 'superseded', userTurn: String(latest.seq) })
+      const latest = turnOf(this.withPending(sessionId, trustedUserMessages(session, this.fromPanel(sessionId))).at(-1))
+      if (latest !== undefined && latest !== userTurn) {
+        return ask('You sent a new message while this was being reviewed.', { model, failure: 'superseded', code: 'superseded', userTurn: latest })
       }
       const floored = applyFloors(verdict, action, messages)
       return {

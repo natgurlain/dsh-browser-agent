@@ -369,7 +369,7 @@ export interface BridgeServerDeps {
    * accepted, with the request id DSH stamps on its user source. Auto review
    * trusts only these prompts as the user's own words.
    */
-  onPanelPrompt?: (sessionId: string, requestId: string) => void
+  onPanelPrompt?: (sessionId: string, requestId: string, text: string) => void
   /** Clock seam for tests. */
   now?: () => number
   /**
@@ -1385,7 +1385,11 @@ export class BridgeServer {
     // the call returns); an id that never reaches the history trusts nothing.
     const panelSession = minted === undefined ? undefined : orderedSessionId(frame)
     if (panelSession !== undefined && minted !== undefined) {
-      try { this.deps.onPanelPrompt?.(panelSession, minted) } catch { /* observer only */ }
+      const content = (frame.payload as { content?: unknown }).content
+      const text = Array.isArray(content)
+        ? content.filter((block): block is { type: 'text'; text: string } => typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'text' && typeof (block as { text?: unknown }).text === 'string').map((block) => block.text).join('\n')
+        : ''
+      try { this.deps.onPanelPrompt?.(panelSession, minted, text) } catch { /* observer only */ }
     }
     try {
       const result = await this.deps.api.call({

@@ -190,6 +190,11 @@ export interface ReviewAction {
    * page reported them.
    */
   mustName?: string[]
+  /**
+   * For `named` clicks on a control whose name repeats on the page: the row
+   * or section that says which one, which must appear in the same clause.
+   */
+  mustContext?: string
   /** For `named` typing: the full text to be typed, which the message must contain verbatim. */
   exactText?: string
   /** For `named` typing into a recipient/address/link/amount field: the text must equal a whole token of the message. */
@@ -241,7 +246,7 @@ const UNTRUSTED_KEYS = ['name', 'context', 'title', 'url', 'destination', 'typed
 export function parseReviewAction(value: unknown): ReviewAction | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const raw = value as Record<string, unknown>
-  const allowed = new Set(['tool', 'verb', 'targetKind', 'targetClass', 'rule', 'mustName', 'exactText', 'exactToken', 'commitClass', 'formSubmitLikely', 'highRiskWords', 'sameOrigin', 'tainted', 'approvedThisTurn', 'typedChars', 'key', 'modifiers', 'repeat', 'untrusted'])
+  const allowed = new Set(['tool', 'verb', 'targetKind', 'targetClass', 'rule', 'mustName', 'mustContext', 'exactText', 'exactToken', 'commitClass', 'formSubmitLikely', 'highRiskWords', 'sameOrigin', 'tainted', 'approvedThisTurn', 'typedChars', 'key', 'modifiers', 'repeat', 'untrusted'])
   if (Object.keys(raw).some((key) => !allowed.has(key))) return undefined
   if (!(AUTO_REVIEW_TOOLS as readonly unknown[]).includes(raw.tool)) return undefined
   if (!(AUTO_REVIEW_VERBS as readonly unknown[]).includes(raw.verb)) return undefined
@@ -253,6 +258,7 @@ export function parseReviewAction(value: unknown): ReviewAction | undefined {
     || !raw.mustName.every((entry) => typeof entry === 'string' && entry !== '' && entry.length <= MAX_REVIEW_UNTRUSTED_CHARS))) return undefined
   if (raw.exactText !== undefined && (typeof raw.exactText !== 'string' || raw.exactText === '' || raw.exactText.length > MAX_REVIEW_EXACT_TEXT_CHARS)) return undefined
   if (raw.exactToken !== undefined && typeof raw.exactToken !== 'boolean') return undefined
+  if (raw.mustContext !== undefined && (typeof raw.mustContext !== 'string' || raw.mustContext === '' || raw.mustContext.length > MAX_REVIEW_UNTRUSTED_CHARS || raw.mustName === undefined)) return undefined
   // A `named` action must say what has to be named; a `harmless` one must not.
   if (raw.rule === 'named' && raw.mustName === undefined && raw.exactText === undefined) return undefined
   if (raw.rule === 'harmless' && (raw.mustName !== undefined || raw.exactText !== undefined)) return undefined
@@ -292,6 +298,7 @@ export function parseReviewAction(value: unknown): ReviewAction | undefined {
     targetClass: raw.targetClass as ReviewAction['targetClass'],
     rule: raw.rule as AutoReviewRule,
     ...raw.mustName === undefined ? {} : { mustName: [...raw.mustName] as string[] },
+    ...raw.mustContext === undefined ? {} : { mustContext: raw.mustContext as string },
     ...raw.exactText === undefined ? {} : { exactText: raw.exactText as string },
     ...raw.exactToken === undefined ? {} : { exactToken: raw.exactToken as boolean },
     commitClass: raw.commitClass as CommitClass,

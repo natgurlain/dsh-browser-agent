@@ -76,8 +76,20 @@ export type TargetDescription =
       autoSubmit?: true
       /** By its own markup, it only shows or hides part of the page (aria-expanded, summary, a popup or controls button). */
       disclosure?: true
-      /** For a text field: whether it was empty when described. */
+      /** For a text field: whether it was empty when described (for an editor, its editing host). */
       empty?: boolean
+      /** What a person sees as its label (visible text only; for a labelled field its <label>s). Page-authored. */
+      rendered?: string
+      /** For clicks and key presses: how many visible, enabled controls in the document share its name. */
+      sameName?: number
+      /** For clicks and key presses: the row or section it is in, as a person would say it. Page-authored. */
+      rowKey?: string
+      /** A link that opens in another tab or window (`target`). */
+      newTab?: true
+      /** A text field that offers suggestions (Tab may accept one). */
+      suggests?: true
+      /** A dialog or modal is open in the document (Escape may dismiss it). */
+      dialogOpen?: true
       /** On a re-check: whether the locator still names the element first described. */
       same?: boolean
     }
@@ -98,7 +110,7 @@ export type TargetState =
   | {
     state: 'found'; kind: TargetKind; name: string; context?: { kind: 'row' | 'section'; text: string }; sensitive?: true; focused?: true; submits?: true; inForm?: true
     href?: TargetDestination; download?: true; form?: TargetDestination & { method?: 'get' | 'post' | 'dialog' }; chosen?: string[]; autoSubmit?: true
-    disclosure?: true; empty?: boolean
+    disclosure?: true; empty?: boolean; rendered?: string; sameName?: number; rowKey?: string; newTab?: true; suggests?: true; dialogOpen?: true
   }
   | { state: 'missing' }
   | { state: 'unknown' }
@@ -174,6 +186,12 @@ function readDescription(raw: unknown): TargetState {
     ...(value.autoSubmit === true ? { autoSubmit: true as const } : {}),
     ...(value.disclosure === true ? { disclosure: true as const } : {}),
     ...(typeof value.empty === 'boolean' ? { empty: value.empty } : {}),
+    ...(typeof value.rendered === 'string' ? { rendered: pageTextForCard(value.rendered, MAX_TARGET_NAME_CHARS) } : {}),
+    ...(typeof value.sameName === 'number' && Number.isSafeInteger(value.sameName) && value.sameName >= 1 ? { sameName: Math.min(99, value.sameName) } : {}),
+    ...(typeof value.rowKey === 'string' && value.rowKey !== '' ? { rowKey: pageTextForCard(value.rowKey, MAX_TARGET_CONTEXT_CHARS) } : {}),
+    ...(value.newTab === true ? { newTab: true as const } : {}),
+    ...(value.suggests === true ? { suggests: true as const } : {}),
+    ...(value.dialogOpen === true ? { dialogOpen: true as const } : {}),
   }
 }
 

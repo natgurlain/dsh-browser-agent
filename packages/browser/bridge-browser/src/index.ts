@@ -491,9 +491,10 @@ function mountBridge(
     maxApprovalHoldMs: DEFAULT_MAX_APPROVAL_HOLD_MS,
     // Auto review runs here on the Host, with the conversation's own model (auto-review.ts).
     // Only prompts this bridge forwarded from the panel count as the user's words.
-    onPanelPrompt: (sessionId, requestId) => { panelPrompts.record(sessionId, requestId) },
+    onPanelPrompt: (sessionId, requestId, text) => { panelPrompts.record(sessionId, requestId, text) },
     autoReview: new AutoReviewer({
       fromPanel: (sessionId, rpcId, seq) => panelPrompts.has(sessionId, rpcId, seq),
+      pendingPrompt: (sessionId) => panelPrompts.pending(sessionId),
       llm: () => {
         const llm = ctx.get('llm' as never) as unknown
         return isLlmLike(llm) ? llm : undefined

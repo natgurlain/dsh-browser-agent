@@ -42,6 +42,11 @@ export interface AutoReviewSession {
   /** Opaque marker of the newest user message the bridge reported. */
   userTurn?: string
   recent: string[]
+  /**
+   * Names and dictated texts already used by an Auto approval under one user
+   * message (`turn` = that message's marker): each authorises one approval.
+   */
+  consumed?: { turn: string; items: string[] }
 }
 
 /** What the panel is told per conversation. */
@@ -97,6 +102,12 @@ function readSessions(stored: unknown): Record<string, AutoReviewSession> {
       sinceMessage: Math.max(0, num('sinceMessage') ?? 0),
       ...typeof entry.userTurn === 'string' ? { userTurn: entry.userTurn } : {},
       recent: Array.isArray(entry.recent) ? entry.recent.filter((label): label is string => typeof label === 'string').slice(-RECENT_KEPT) : [],
+      ...(() => {
+        const consumed = entry.consumed as { turn?: unknown; items?: unknown } | undefined
+        return typeof consumed?.turn === 'string' && Array.isArray(consumed.items)
+          ? { consumed: { turn: consumed.turn, items: consumed.items.filter((item): item is string => typeof item === 'string').slice(-200) } }
+          : {}
+      })(),
     }
   }
   return out
@@ -254,6 +265,21 @@ export class AutoReviewRegistry {
     this.persist()
   }
 
+  /** Whether any of these names or texts was already used by an Auto approval under this user message. */
+  isConsumed(sessionId: string, turn: string, items: readonly string[]): boolean {
+    const consumed = this.sessions[sessionId]?.consumed
+    return consumed !== undefined && consumed.turn === turn && items.some((item) => consumed.items.includes(item))
+  }
+
+  /** An Auto approval used these names or texts under this user message. */
+  consume(sessionId: string, turn: string, items: readonly string[]): void {
+    const entry = this.sessions[sessionId]
+    if (entry === undefined || items.length === 0) return
+    const before = entry.consumed?.turn === turn ? entry.consumed.items : []
+    entry.consumed = { turn, items: [...before, ...items].slice(-200) }
+    this.persist()
+  }
+
   /** Auto approved one action. */
   noteApproved(sessionId: string, label: string): void {
     const entry = this.sessions[sessionId]
@@ -319,7 +345,7 @@ export interface ReviewSubject {
   tool: AutoReviewTool
   /** The element's kind, when there is one. */
   kind?: TargetKind
-  assessment: Pick<Assessment, 'rule' | 'mustName' | 'exactText' | 'exactToken' | 'commitClass'>
+  assessment: Pick<Assessment, 'rule' | 'mustName' | 'mustContext' | 'exactText' | 'exactToken' | 'commitClass'>
 }
 
 /** What a control is called on the card's sentence (EN, ZH). */
@@ -350,8 +376,13 @@ function notNamedSentence(subject: ReviewSubject, zh: boolean): string {
         : 'Auto review asked: your message did not contain this exact recipient, address, link or amount. Write it out exactly in your message to let it through next time.'
     }
     return zh
-      ? '自动审核请您决定：您的消息里没有原样包含要输入的全部文字。下次把要输入的文字原样写进消息（例如放在引号里）即可放行。'
-      : 'Auto review asked: your message did not contain the exact text to type. Put the whole text in your message (in quotes, say) to let it through next time.'
+      ? '自动审核请您决定：您的消息里没有用引号给出要输入的完整文字。下次把要输入的全部文字放进引号（例如 输入“你好”）即可放行。'
+      : 'Auto review asked: your message did not give the text to type in quotes. Put the whole text in quotes (type "hello world") to let it through next time.'
+  }
+  if (assessment.mustContext !== undefined && names.length === 1) {
+    return zh
+      ? `自动审核请您决定：页面上有多个“${names[0]}”，您的消息没有说明是哪一个。下次说“点击${assessment.mustContext}的${names[0]}”即可放行。`
+      : `Auto review asked: there is more than one “${names[0]}” here and your message did not say which. Say “click ${names[0]} on ${assessment.mustContext}” to let it through next time.`
   }
   if (tool === 'browser_select') {
     const list = names.join(zh ? '、' : ', ')
@@ -377,8 +408,14 @@ function notNamedSentence(subject: ReviewSubject, zh: boolean): string {
  * the ones the card already shows). The reviewer's own words never reach the
  * card the user decides on.
  */
-export function autoReviewSentence(code: ReviewCode | 'turn-limit' | 'message-limit' | 'attempt-limit' | 'changed', subject: ReviewSubject, zh: boolean): string {
+export function autoReviewSentence(code: ReviewCode | 'turn-limit' | 'message-limit' | 'attempt-limit' | 'changed' | 'already-used' | 'ambiguous', subject: ReviewSubject, zh: boolean): string {
   switch (code) {
+    case 'already-used': return zh
+      ? '自动审核请您决定：您的消息点名的这一项已经自动批准过一次。每次点名只放行一次；想再做一次请再说一遍。'
+      : 'Auto review asked: what your message named was already used once. Each name lets one action through; say it again to repeat it.'
+    case 'ambiguous': return zh
+      ? '自动审核请您决定：页面上有多个同名控件，无法判断您指的是哪一个。'
+      : 'Auto review asked: several controls on this page have this name, and there is no row or section to tell them apart.'
     case 'high-risk': return zh ? '自动审核请您决定：支付、购买、安全与账户设置始终需要您本人确认。' : 'Auto review asked: payments, purchases, security and account settings always need you.'
     case 'not-named': return notNamedSentence(subject, zh)
     case 'restricted': return zh ? '自动审核请您决定：您最新的消息要求先不要动手（例如“不要”“只看”“草拟”）。' : 'Auto review asked: your latest message asked to hold back (“don’t”, “only read”, “draft”…), so you decide.'
