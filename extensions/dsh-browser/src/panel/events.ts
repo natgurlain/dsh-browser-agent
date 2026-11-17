@@ -323,13 +323,15 @@ export function appendToolStep(rows: Row[], step: ToolStep, seq: number): Row[] 
   const last = rows[rows.length - 1]
   if (last?.kind === 'tool') {
     const steps = [...(last.steps ?? []).filter((existing) => existing.callId !== step.callId), step]
-    return [...rows.slice(0, -1), toolRow(seq, steps)]
+    // The same timeline, one step longer: it keeps its key, so React updates it in place
+    // (a new key remounted it: open details closed and thumbnails loaded again on every step).
+    return [...rows.slice(0, -1), toolRow(last.seq, steps)]
   }
   return [...rows, toolRow(seq, [step])]
 }
 
 /** Finish the step a `tool/result` answers (by call id; else the oldest running step). */
-export function completeToolStep(rows: Row[], result: StepResult, seq: number): Row[] {
+export function completeToolStep(rows: Row[], result: StepResult, _seq?: number): Row[] {
   for (let index = rows.length - 1; index >= 0; index -= 1) {
     const row = rows[index]!
     if (row.kind !== 'tool' || row.steps === undefined) continue
@@ -347,7 +349,7 @@ export function completeToolStep(rows: Row[], result: StepResult, seq: number): 
         : {}),
     })
     const next = [...rows]
-    next[index] = { ...toolRow(index === rows.length - 1 ? seq : row.seq, steps) }
+    next[index] = { ...toolRow(row.seq, steps) }
     return next
   }
   return rows
@@ -447,6 +449,61 @@ export function applyStepLabels(rows: Row[], audit: Map<string, StepAudit>, labe
     return { ...row, steps }
   })
   return changed ? next : rows
+}
+
+/**
+ * The rows a history reload built (at a turn's end, on a stream rebaseline),
+ * laid over the rows already shown, so the panel updates them in place:
+ *
+ * - a row the view already has keeps its key (`seq`): React updates it
+ *   instead of unmounting and remounting it, so nothing blinks, a step's
+ *   open details stay open, its thumbnail is not loaded again, and the
+ *   scroll position holds. Tool rows match by their first step's call id;
+ *   message rows by kind and text, in order.
+ * - a step keeps what the audit log and the extension added to it (decision,
+ *   duration, policy, strict mode, the reviewer's reason, the label naming
+ *   its element) until the audit is read again; history's own facts (status,
+ *   result) win wherever it has them.
+ */
+export function reconcileRows(previous: Row[], next: Row[]): Row[] {
+  if (previous.length === 0) return next
+  const oldSteps = new Map<string, ToolStep>()
+  const toolRows = new Map<string, Row>()
+  for (const row of previous) {
+    if (row.kind === 'tool' && row.steps?.[0] !== undefined) toolRows.set(row.steps[0].callId, row)
+    for (const step of row.steps ?? []) oldSteps.set(step.callId, step)
+  }
+  const used = new Set<number>()
+  let cursor = 0
+  return next.map((row) => {
+    let match: Row | undefined
+    if (row.kind === 'tool') {
+      const candidate = row.steps?.[0] === undefined ? undefined : toolRows.get(row.steps[0].callId)
+      if (candidate !== undefined && !used.has(candidate.seq)) match = candidate
+    } else {
+      for (let index = cursor; index < previous.length; index += 1) {
+        const candidate = previous[index]!
+        if (candidate.kind === row.kind && candidate.text === row.text && !used.has(candidate.seq)) {
+          match = candidate
+          cursor = index + 1
+          break
+        }
+      }
+    }
+    if (match !== undefined) used.add(match.seq)
+    const steps = row.steps?.map((step) => {
+      const old = oldSteps.get(step.callId)
+      if (old === undefined || old.name !== step.name) return step
+      const kept = <K extends 'decision' | 'durationMs' | 'policy' | 'strict' | 'autoReason' | 'startedAt' | 'images'>(key: K): Partial<ToolStep> =>
+        step[key] === undefined && old[key] !== undefined ? { [key]: old[key] } : {}
+      return {
+        ...step,
+        label: old.label,
+        ...kept('decision'), ...kept('durationMs'), ...kept('policy'), ...kept('strict'), ...kept('autoReason'), ...kept('startedAt'), ...kept('images'),
+      }
+    })
+    return { ...row, ...(steps === undefined ? {} : { steps }), seq: match?.seq ?? row.seq }
+  })
 }
 
 /** Live append: user and assistant message rows (tool calls go through appendToolStep and merge into the timeline). */

@@ -7,6 +7,7 @@ import {
   auditByCall,
   completeToolStep,
   mergeHistoryRows,
+  reconcileRows,
   resultFromEvent,
   stepFromCall,
   pendingQuestionFromFrame,
@@ -121,6 +122,17 @@ describe('step timeline', () => {
     expect(rows[0]!.status).toBe('complete')
   })
 
+  it('keeps one timeline row (one key) while its steps arrive and finish: the row updates, it is never remounted', () => {
+    let rows = appendToolStep([], stepFromCall(call('c1', 'browser_click', { index: 1 }, 0), 'x', 'en'), 1)
+    const key = rows[0]!.seq
+    rows = completeToolStep(rows, resultFromEvent(result('c1', 'ok', 10)), 2)
+    rows = appendToolStep(rows, stepFromCall(call('c2', 'browser_click', { index: 2 }, 20), 'y', 'en'), 3)
+    rows = completeToolStep(rows, resultFromEvent(result('c2', 'ok', 30)), 4)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.seq).toBe(key)
+    expect(rows[0]!.steps!.map((step) => step.callId)).toEqual(['c1', 'c2'])
+  })
+
   it('attaches screenshot thumbnails from result image blocks', () => {
     let rows = appendToolStep([], stepFromCall(call('s', 'browser_screenshot', {}, 0), 'x', 'en'), 1)
     const attachment = { attachmentId: 'att-1', mediaType: 'image/png', bytes: 10, width: 4, height: 3 }
@@ -147,6 +159,40 @@ describe('step timeline', () => {
     expect(applyStepAudit(decorated, audit)).toBe(decorated)
     expect(applyStepAudit(rows, new Map())).toBe(rows)
     expect(auditByCall(undefined).size).toBe(0)
+  })
+})
+
+describe('reconcileRows (the history reload at turn end)', () => {
+  it('updates the rows in place: same keys, and what the audit added stays until it is read again', () => {
+    let seq = 0
+    const nextSeq = (): number => { seq += 1; return seq }
+    const events = [
+      ev('user/message', { content: [{ type: 'text', text: 'Save the lead' }], source: { kind: 'user' } }),
+      ev('tool/call', { callId: 'c1', name: 'browser_click', arguments: '{"selector":"#save"}' }),
+      ev('tool/result', { message: { callId: 'c1' } }),
+      ev('assistant/message', { message: { content: [{ type: 'text', text: 'Saved.' }] } }),
+      ev('turn/end', {}),
+    ]
+    // What the panel showed live, after the audit filled in the step.
+    const shown = mergeHistoryRows(events, nextSeq, 'en').map((row) => row.kind !== 'tool' ? row : {
+      ...row,
+      steps: row.steps!.map((step) => ({ ...step, label: 'Click button “Save lead”', decision: 'auto-reviewed', durationMs: 442, autoReason: 'You asked for this step.' })),
+    })
+    // The reload builds the same rows anew: new keys, no audit facts yet.
+    const reloaded = mergeHistoryRows(events, nextSeq, 'en')
+    expect(reloaded.map((row) => row.seq)).not.toEqual(shown.map((row) => row.seq))
+    expect(reloaded[1]!.steps![0]!.decision).toBeUndefined()
+    const next = reconcileRows(shown, reloaded)
+    expect(next.map((row) => row.seq)).toEqual(shown.map((row) => row.seq))
+    expect(next[1]!.steps![0]).toMatchObject({ callId: 'c1', status: 'ok', label: 'Click button “Save lead”', decision: 'auto-reviewed', durationMs: 442, autoReason: 'You asked for this step.' })
+    // A row the live view did not have yet gets its own key.
+    const more = mergeHistoryRows([...events, ev('assistant/message', { message: { content: [{ type: 'text', text: 'Anything else?' }] } })], nextSeq, 'en')
+    const grown = reconcileRows(shown, more)
+    expect(grown.slice(0, 3).map((row) => row.seq)).toEqual(shown.map((row) => row.seq))
+    expect(new Set(grown.map((row) => row.seq)).size).toBe(4)
+    // The history's own facts win where it has them (a step that failed after all).
+    const failed = reloaded.map((row) => row.kind !== 'tool' ? row : { ...row, steps: row.steps!.map((step) => ({ ...step, status: 'error' as const, decision: 'denied' })) })
+    expect(reconcileRows(shown, failed)[1]!.steps![0]).toMatchObject({ status: 'error', decision: 'denied' })
   })
 })
 
