@@ -13,10 +13,10 @@
 Let [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) work in the browser you already use. The agent reads the page you are on, clicks, types, navigates and manages tabs, in your own Chrome, Brave or Firefox (other Chromium browsers should work too), with your logins and cookies, and you watch and approve what it does from a side panel.
 
 <div align="center">
-  <video src="https://github.com/user-attachments/assets/1efcf871-2d76-40c2-a7da-fd7ccc9cf16a" width="900" controls></video>
+  <video src="https://github.com/user-attachments/assets/6a71fb20-f4c0-46be-b9fa-c8b64f15f2ba" width="900" controls></video>
 </div>
 
-<p align="center"><sub>Auto approve in 33 seconds: a form filled in from an email, timesheets approved, three shops compared. A real recording of the extension; the model's replies are scripted and the pages are local demo pages. <a href="https://github.com/user-attachments/assets/1efcf871-2d76-40c2-a7da-fd7ccc9cf16a">Direct link to the video</a>.</sub></p>
+<p align="center"><sub>Auto approve in 33 seconds: a form filled in from an email, timesheets approved, three shops compared. A real recording of the extension; the model's replies are scripted and the pages are local demo pages. <a href="https://github.com/user-attachments/assets/6a71fb20-f4c0-46be-b9fa-c8b64f15f2ba">Direct link to the video</a>.</sub></p>
 
 > Based on [dsh-browser](https://github.com/omdsh-dev/dsh-browser) by Yuxiang Lin and contributors (MIT). See [NOTICE](NOTICE).
 

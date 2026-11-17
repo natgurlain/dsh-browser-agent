@@ -13,10 +13,10 @@
 让 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）在你日常使用的浏览器里工作。智能体读取你正在看的页面，点击、输入、导航、管理标签页，用的是你自己的 Chrome、Brave 或 Firefox（其他 Chromium 浏览器应当也可用），保留你的登录态和 Cookie；你在侧边栏里查看并批准它的每一步。
 
 <div align="center">
-  <video src="https://github.com/user-attachments/assets/1efcf871-2d76-40c2-a7da-fd7ccc9cf16a" width="900" controls></video>
+  <video src="https://github.com/user-attachments/assets/6a71fb20-f4c0-46be-b9fa-c8b64f15f2ba" width="900" controls></video>
 </div>
 
-<p align="center"><sub>33 秒看“自动批准”：根据邮件填好表单、批准工时表、比较三家店铺。这是扩展的真实录屏；模型的回复是预先编写的，页面是本地演示页面。<a href="https://github.com/user-attachments/assets/1efcf871-2d76-40c2-a7da-fd7ccc9cf16a">视频直链</a>。</sub></p>
+<p align="center"><sub>33 秒看“自动批准”：根据邮件填好表单、批准工时表、比较三家店铺。这是扩展的真实录屏；模型的回复是预先编写的，页面是本地演示页面。<a href="https://github.com/user-attachments/assets/6a71fb20-f4c0-46be-b9fa-c8b64f15f2ba">视频直链</a>。</sub></p>
 
 > 基于 Yuxiang Lin 及贡献者的 [dsh-browser](https://github.com/omdsh-dev/dsh-browser)（MIT 许可）。见 [NOTICE](NOTICE)。
 
