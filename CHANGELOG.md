@@ -5,7 +5,7 @@ Each `## vX.Y.Z` section becomes the notes of that GitHub release
 
 ## v0.3.1
 
-The plugin package has the repository's name. No change in behaviour from v0.3.0.
+The plugin package has the repository's name, and Auto approve is quieter.
 
 - **Plugin package `dsh-browser-agent`.** The bridge plugin is now `dsh-browser-agent` on
   npm, the same name as the repository. The old package `@natgurlain/dsh-bridge-browser`
@@ -19,6 +19,10 @@ The plugin package has the repository's name. No change in behaviour from v0.3.0
   depends on the package name, and a v0.3.0 extension works with the renamed plugin.
 - **Plugin-only installs.** If you added the plugin with `dsh plugin add`, remove the old one
   first (`dsh plugin --profile web remove @natgurlain/dsh-bridge-browser`); see the README.
+- **Quieter status under Auto approve.** While Auto approve is on, the yellow "this
+  conversation read web pages" banner is replaced by one slim neutral line (*Web pages read ·
+  shell and file tools paused*) with the same *Clear*; click it for the full explanation. With
+  Auto approve off the banner is unchanged. Nothing about what is restricted has changed.
 
 ## v0.3.0
 

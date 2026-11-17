@@ -94,7 +94,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-
 When the installer opens `chrome://extensions`, follow its instructions to load or reload **dsh Browser Agent**. If dsh is already running, restart it after installation. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
 
 > [!IMPORTANT]
-> The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project is not currently published as an npm package; use the installer above.
+> The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project's npm package is [`dsh-browser-agent`](https://www.npmjs.com/package/dsh-browser-agent); it holds the plugin only, so use the installer above to get the extension too.
 
 ### Plugin only, without the installer
 
