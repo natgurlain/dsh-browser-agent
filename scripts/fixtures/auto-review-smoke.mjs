@@ -483,7 +483,7 @@ export async function runAutoReviewSmoke(ctx) {
   // approval answer is fixed text and does not taint (taint.ts CONTENT_FREE_TOOLS), so typing
   // on the page the user demonstrated on raises no taint card.
   const GUESTS = 16
-  const guestName = (index) => `Guest ${String(index + 1)}`
+  const guestName = (index) => `Guest ${String(index + 1).padStart(2, '0')}`
   await page.goto(`${origin}/learn?v=1&rows=${String(GUESTS)}&who=Guest`)
   await page.bringToFront()
   await chat.waitForTimeout(1_700)
@@ -495,7 +495,9 @@ export async function runAutoReviewSmoke(ctx) {
     await page.locator('.invite').nth(index).click()
   }
   const offer = chat.getByRole('button', { name: `Do the remaining ${String(GUESTS - 2)} like this (${String((GUESTS - 2) * 2)} steps)`, exact: true })
-  await offer.waitFor({ timeout: 30_000 })
+  await offer.waitFor({ timeout: 30_000 }).catch(async (error) => {
+    throw new Error(`the Watch me offer did not appear; the panel shows: ${JSON.stringify(await chat.locator('.learning-panel').innerText().catch(() => 'no learning panel'))}`, { cause: error })
+  })
   const cardsBeforeWatch = await cardsSoFar()
   const reviewsBeforeWatch = autoModel.state.reviews.length
   const dialogs = await chat.evaluate(() => {
