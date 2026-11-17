@@ -84,7 +84,7 @@ describe('panel UI language setting', () => {
 
     expect(set).toHaveBeenCalledWith({ dshPanelUiLocale: 'zh' })
     expect(document.documentElement.lang).toBe('zh-CN')
-    expect(document.title).toBe('dsh 浏览器助手')
+    expect(document.title).toBe('dsh-browser-agent')
     expect(document.body.textContent).toContain('界面语言')
 
     const chinese = document.querySelector<HTMLSelectElement>('.settings-panel select')!
@@ -93,7 +93,7 @@ describe('panel UI language setting', () => {
     await choose(chinese, 'en')
     expect(set).toHaveBeenLastCalledWith({ dshPanelUiLocale: 'en' })
     expect(document.documentElement.lang).toBe('en')
-    expect(document.title).toBe('dsh Browser Agent')
+    expect(document.title).toBe('dsh-browser-agent')
     expect(document.body.textContent).toContain('Language')
   })
 })

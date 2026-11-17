@@ -141,7 +141,7 @@ describe('DSH app: pairing a browser', () => {
     expect(prompt.textContent).toContain('A browser wants to connect')
     // Who is asking: the published extension, by the ID the browser reported.
     const requester = prompt.querySelector('[data-testid="dsh-pairing-requester"]')!
-    expect(requester.textContent).toBe('dsh Browser Agent (official) (says it is Brave)')
+    expect(requester.textContent).toBe('dsh-browser-agent (official) (says it is Brave)')
     expect(requester.className).toBe('dshBridgePairWho')
     expect(prompt.textContent).not.toContain(en['pairing.unknownWarning'])
     expect(prompt.textContent).toContain(en['pairing.only'])

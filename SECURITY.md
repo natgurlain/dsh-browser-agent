@@ -1,6 +1,6 @@
 # Security
 
-dsh Browser Agent lets an AI agent act in your browser, so we take reports about it seriously.
+dsh-browser-agent lets an AI agent act in your browser, so we take reports about it seriously.
 
 ## Reporting a problem
 

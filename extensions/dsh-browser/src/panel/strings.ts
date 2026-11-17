@@ -626,7 +626,7 @@ export interface PanelCopy {
 }
 
 const EN: PanelCopy = {
-  documentTitle: 'dsh Browser Agent',
+  documentTitle: 'dsh-browser-agent',
   status: {
     connected: 'Connected',
     connecting: 'Connecting…',
@@ -941,7 +941,7 @@ const EN: PanelCopy = {
     availableManagedBody: 'Copy the update command and run it in Terminal. It installs exactly this release and verifies its checksums first.',
     availableCheckoutBody: 'Pull or switch to the revision you want in the original checkout, then rerun its installer.',
     availableUnknownBody: 'This copy predates install-source metadata. Use the same update flow you originally installed with; no command will be copied.',
-    reloadReminder: 'After updating, open chrome://extensions, find “dsh Browser Agent,” click the rotating-arrow Reload button on its card, then restart dsh.',
+    reloadReminder: 'After updating, open chrome://extensions, find “dsh-browser-agent,” click the rotating-arrow Reload button on its card, then restart dsh.',
     loadingInstall: 'Identifying install…',
     managedInstall: 'Managed install',
     checkoutInstall: 'Local checkout',
@@ -1306,7 +1306,7 @@ const EN: PanelCopy = {
 }
 
 const ZH: PanelCopy = {
-  documentTitle: 'dsh 浏览器助手',
+  documentTitle: 'dsh-browser-agent',
   status: {
     connected: '已连接',
     connecting: '连接中…',
@@ -1621,7 +1621,7 @@ const ZH: PanelCopy = {
     availableManagedBody: '复制更新命令并在终端运行。它只安装这一发布版本，并会先校验校验和。',
     availableCheckoutBody: '请先在原 checkout 中 pull 或切换到目标 revision，再重新运行其中的安装脚本。',
     availableUnknownBody: '这个副本没有安装来源记录。请沿用最初的更新方式；这里不会复制可能覆盖来源的命令。',
-    reloadReminder: '更新完成后，打开 chrome://extensions，找到“dsh 浏览器助手”，点击卡片上的“重新加载”旋转箭头，然后重启 dsh。',
+    reloadReminder: '更新完成后，打开 chrome://extensions，找到“dsh-browser-agent”，点击卡片上的“重新加载”旋转箭头，然后重启 dsh。',
     loadingInstall: '正在识别安装来源…',
     managedInstall: '托管安装',
     checkoutInstall: '本地 checkout',

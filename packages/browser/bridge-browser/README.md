@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-The plugin of [dsh Browser Agent](https://github.com/natgurlain/dsh-browser-agent). Up to v0.3.0 this package was named `@natgurlain/dsh-bridge-browser`; that name is deprecated.
+The plugin of [dsh-browser-agent](https://github.com/natgurlain/dsh-browser-agent). Up to v0.3.0 this package was named `@natgurlain/dsh-bridge-browser`; that name is deprecated.
 
 The **browser-operation bridge** for dsh mounts a token-authenticated WebSocket carrier (`/ext/bridge`) for the browser extension, projects its calls onto DSH Typert Remotes, follows Session and Remote Event streams, and registers tools for reading and operating the controlled tab, capturing screenshots, and using developer tools. The browser retains its login state, and the side panel provides the conversation UI.
 

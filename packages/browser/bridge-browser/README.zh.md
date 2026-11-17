@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-[dsh Browser Agent](https://github.com/natgurlain/dsh-browser-agent) 的插件。v0.3.0 及之前此包名为 `@natgurlain/dsh-bridge-browser`，该名称已弃用。
+[dsh-browser-agent](https://github.com/natgurlain/dsh-browser-agent) 的插件。v0.3.0 及之前此包名为 `@natgurlain/dsh-bridge-browser`，该名称已弃用。
 
 dsh 的**浏览器操作桥**挂载经过 token 认证的 WebSocket 通道（`/ext/bridge`）供浏览器扩展连接，把扩展调用投影到 DSH Typert Remotes，跟随 Session 与 Remote Event 流，并注册用于读取和操作受控标签页、截图、开发者工具的工具集。浏览器保留登录状态，侧栏提供对话界面。
 

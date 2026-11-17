@@ -91,7 +91,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-
 
 `--release latest` 安装最新的发布版本，而不是指定的版本。`SHA256SUMS` 与文件来自同一个发布版本，因此它能发现损坏、截断或被替换的下载，但不能防范接管了仓库或发布流程的人所发布的版本；见 [RELEASING.md](RELEASING.md#what-verification-covers)。
 
-安装器打开 `chrome://extensions` 后，请按提示加载或重新加载 **dsh 浏览器助手**。如果 dsh 已经在运行，安装完成后请重启。前置要求、启动命令、更新方式和开发者安装详见[详细安装与使用](#详细安装与使用)。
+安装器打开 `chrome://extensions` 后，请按提示加载或重新加载 **dsh-browser-agent**。如果 dsh 已经在运行，安装完成后请重启。前置要求、启动命令、更新方式和开发者安装详见[详细安装与使用](#详细安装与使用)。
 
 > [!IMPORTANT]
 > npm 上未加 scope 的 [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) 包属于另一个项目，与本仓库无关。本项目的 npm 包是 [`dsh-browser-agent`](https://www.npmjs.com/package/dsh-browser-agent)，其中只有插件；要同时安装扩展，请使用上方安装器。

@@ -91,7 +91,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-
 
 `--release latest` installs the newest release instead of a named one. `SHA256SUMS` comes from the same release as the files, so it catches a corrupted, truncated or substituted download, not a release that was itself published by someone who took over the repository or its release workflow; see [RELEASING.md](RELEASING.md#what-verification-covers).
 
-When the installer opens `chrome://extensions`, follow its instructions to load or reload the extension, which the browser lists as **dsh Browser Agent**. If dsh is already running, restart it after installation. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
+When the installer opens `chrome://extensions`, follow its instructions to load or reload the extension, which the browser lists as **dsh-browser-agent**. If dsh is already running, restart it after installation. See [Detailed installation and usage](#detailed-installation-and-usage) for prerequisites, startup commands, updates, and developer installation.
 
 > [!IMPORTANT]
 > The unscoped [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) package on npm belongs to a different project and is not affiliated with this repository. This project's npm package is [`dsh-browser-agent`](https://www.npmjs.com/package/dsh-browser-agent); it holds the plugin only, so use the installer above to get the extension too.
