@@ -12,7 +12,8 @@
  */
 
 import { useEffect, useState } from 'react'
-import { autoApproveOnFor, type AutoReviewState, type PanelApi } from './api.ts'
+import type { AutoReviewState, PanelApi } from './api.ts'
+import { autoApproveOnFor } from './auto-approve-state.ts'
 import type { PanelCopy } from './strings.ts'
 
 /** `chrome.storage.local` key: the user has confirmed Auto approve once (it is never asked again). */

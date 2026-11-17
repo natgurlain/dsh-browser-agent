@@ -203,12 +203,6 @@ export interface AutoReviewState {
   sessions: Record<string, boolean>
 }
 
-/** Whether Auto approve is on for one conversation. */
-export function autoApproveOnFor(state: AutoReviewState, sessionId: string | null): boolean {
-  if (!state.offered || sessionId === null) return false
-  return state.sessions[sessionId] ?? state.startOn
-}
-
 /** A review is running (or finished) for one step. */
 export interface AutoReviewing {
   sessionId: string
