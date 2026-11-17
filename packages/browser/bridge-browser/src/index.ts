@@ -724,7 +724,11 @@ function mountBridge(
         + 'Use browser_snapshot { query } to locate controls by text or selector; browser_click targets elements by index or selector, '
         + 'browser_press sends chords and held keys, and browser_clipboard pastes rich content into editors. '
         + 'When a call reports "dialog open", answer it with browser_dialog before anything else; when a click reports "covered by", '
-        + 'dismiss the covering element first. Use browser_pdf_text for a PDF tab and browser_downloads to find downloaded files.'
+        + 'dismiss the covering element first. Use browser_pdf_text for a PDF tab and browser_downloads to find downloaded files. '
+        // Said up front so the model does not spend a step on a refused web_fetch (session-taint.ts).
+        + 'Once a browser_* tool has read a web page, web_fetch and web_search are usually refused for the rest of the conversation '
+        + '(as are shell and file-writing tools): to read another page or site, open it with browser_open_tab or browser_navigate '
+        + 'and read it with browser_snapshot instead of calling web_fetch.'
         + (devToolsDisposers === undefined
           ? ''
           : ' The browser_devtools_* and browser_console_* tools are available for element/CSS inspection, page-context JavaScript, and network '

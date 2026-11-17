@@ -70,6 +70,14 @@ describe('session taint (Host side)', () => {
     expect(await check({ name: 'bash', agent: agent('s1') })).toBeUndefined()
     result({ name: 'browser_snapshot', agent: agent('s1') }, { isError: false })
     expect(await check({ name: 'bash', agent: agent('s1') })).toMatch(/untrusted web page content.*clears the session/)
+    // A refused fetch or search is told the way that still works: the browser tools.
+    for (const name of ['web_fetch', 'web_search']) {
+      const reason = await check({ name, agent: agent('s1') })
+      expect(reason, name).toMatch(/untrusted web page content/)
+      expect(reason, name).toMatch(/browser_open_tab or browser_navigate/)
+      expect(reason, name).not.toMatch(/tell the user what you need/)
+    }
+    expect(await check({ name: 'bash', agent: agent('s1') })).not.toMatch(/browser_open_tab/)
     expect(await check({ name: 'write', agent: agent('s1') })).toBeDefined()
     expect(await check({ name: 'web_fetch', agent: agent('s1') })).toBeDefined()
     // Reads are path-scoped to the workspace; with none known they fail closed.

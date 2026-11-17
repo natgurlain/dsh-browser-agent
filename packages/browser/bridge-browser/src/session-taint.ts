@@ -355,11 +355,20 @@ export class SessionTaintRegistry {
   }
 }
 
+/** Denied network readers whose job the browser tools can do instead (the denial says how). */
+const NETWORK_READ_TOOLS: ReadonlySet<string> = new Set(['web_fetch', 'web_search'])
+
 /** Model-facing reason for a denied tool in a tainted session. */
 export function taintDenialReason(name: string): string {
-  return `Tool "${name}" is disabled in this session: it has read untrusted web page content, so shell, file-writing, `
+  const disabled = `Tool "${name}" is disabled in this session: it has read untrusted web page content, so shell, file-writing, `
     + 'network, and delegation tools are off (read-only) until the user clears the session in the browser panel '
-    + '("Clear" on the untrusted-content banner). Do not retry; tell the user what you need and why.'
+    + '("Clear" on the untrusted-content banner). '
+  // Reading a page is still possible, through the browser: say so instead of sending the model to the user.
+  if (NETWORK_READ_TOOLS.has(name)) {
+    return `${disabled}Do not retry ${name}. To read a page, open its URL with browser_open_tab or browser_navigate and read it `
+      + 'with browser_snapshot; for a search, open a search engine\'s results page the same way.'
+  }
+  return `${disabled}Do not retry; tell the user what you need and why.`
 }
 
 /** The slice of a dsh Agent the taint guard reads. */
