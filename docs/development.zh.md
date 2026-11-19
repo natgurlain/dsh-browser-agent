@@ -13,9 +13,9 @@ pnpm run test
 pnpm run check:runtime
 pnpm run test:smoke
 
-pnpm --filter dsh-browser-agent run build
-pnpm --filter dsh-browser-agent run typecheck
-pnpm --filter dsh-browser-agent run test
+pnpm --filter @natgurlain/dsh-browser-agent run build
+pnpm --filter @natgurlain/dsh-browser-agent run typecheck
+pnpm --filter @natgurlain/dsh-browser-agent run test
 
 pnpm --filter dsh-browser-extension run build
 pnpm --filter dsh-browser-extension run build:firefox

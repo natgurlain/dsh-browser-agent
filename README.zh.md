@@ -1,7 +1,7 @@
 # dsh-browser-agent
 
 [![Release](https://img.shields.io/github/v/release/natgurlain/dsh-browser-agent?label=release)](https://github.com/natgurlain/dsh-browser-agent/releases)
-[![npm](https://img.shields.io/npm/v/dsh-browser-agent?label=npm%20plugin)](https://www.npmjs.com/package/dsh-browser-agent)
+[![npm](https://img.shields.io/npm/v/%40natgurlain%2Fdsh-browser-agent?label=npm%20plugin)](https://www.npmjs.com/package/@natgurlain/dsh-browser-agent)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![Manifest V3](https://img.shields.io/badge/extension-Manifest%20V3-4d6bfe)
 ![Browsers](https://img.shields.io/badge/browsers-Chrome%20%7C%20Brave%20%7C%20Firefox-informational)
@@ -69,7 +69,7 @@ cd dsh-browser-agent
 macOS 与 Linux。先下载安装器，用已发布的校验值核对，再运行：
 
 ```sh
-tag=v0.3.4
+tag=v0.3.5
 base=https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag
 curl --proto '=https' --tlsv1.2 -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS"
 grep ' install.sh$' SHA256SUMS | sha256sum -c -    # macOS: shasum -a 256 -c -
@@ -79,7 +79,7 @@ bash install.sh --release "$tag"
 Windows（PowerShell；`install.ps1` 的发布版本路径尚未在 Windows 机器上运行过）：
 
 ```powershell
-$tag = 'v0.3.4'
+$tag = 'v0.3.5'
 $base = "https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag"
 irm "$base/install.ps1" -OutFile install.ps1; irm "$base/SHA256SUMS" -OutFile SHA256SUMS
 $want = (Select-String -Path SHA256SUMS -Pattern ' install\.ps1$').Line.Split(' ')[0]
@@ -90,7 +90,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --release $tag
 同样的校验值也印在每个[发布版本](https://github.com/natgurlain/dsh-browser-agent/releases)的说明里。下面的简短形式不会先核对安装脚本本身；安装器下载的内容仍会被校验：
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.4/install.sh | bash -s -- --release v0.3.4
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.5/install.sh | bash -s -- --release v0.3.5
 ```
 
 `--release latest` 安装最新的发布版本，而不是指定的版本。`SHA256SUMS` 与文件来自同一个发布版本，因此它能发现损坏、截断或被替换的下载，但不能防范接管了仓库或发布流程的人所发布的版本；见 [RELEASING.md](RELEASING.md#what-verification-covers)。
@@ -98,19 +98,19 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-
 安装器打开 `chrome://extensions` 后，请按提示加载或重新加载 **dsh-browser-agent**。如果 dsh 已经在运行，安装完成后请重启。前置要求、启动命令、更新方式和开发者安装详见[详细安装与使用](#详细安装与使用)。
 
 > [!IMPORTANT]
-> npm 上未加 scope 的 [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) 包属于另一个项目，与本仓库无关。本项目的 npm 包是 [`dsh-browser-agent`](https://www.npmjs.com/package/dsh-browser-agent)，其中只有插件；要同时安装扩展，请使用上方安装器。
+> npm 上未加 scope 的 [`dsh-browser`](https://www.npmjs.com/package/dsh-browser) 包属于另一个项目，与本仓库无关。本项目的 npm 包是 [`@natgurlain/dsh-browser-agent`](https://www.npmjs.com/package/@natgurlain/dsh-browser-agent)，其中只有插件；要同时安装扩展，请使用上方安装器。
 
 ### 只装插件，不用安装器
 
 如果你想用 DSH 自己的插件命令安装，每个发布版本也单独附带了插件包和扩展构建：
 
 ```sh
-dsh plugin --profile web add https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.4/dsh-browser-agent-plugin-v0.3.4.tgz
+dsh plugin --profile web add https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.5/dsh-browser-agent-plugin-v0.3.5.tgz
 ```
 
-从 v0.3.1 起插件包名为 `dsh-browser-agent`，之前是 `@natgurlain/dsh-bridge-browser`。如果你曾用这种方式安装过更早的版本，请先移除旧包，否则两者会注册同一个桥：`dsh plugin --profile web remove @natgurlain/dsh-bridge-browser`。为旧包保存的设置可以在 checkout 中运行 `node scripts/migrate-bridge-name.mjs ~/.dsh web` 迁移过来（安装器会自动完成）；否则请在 DSH 的插件设置中重新保存。
+从 v0.3.5 起插件包名为 `@natgurlain/dsh-browser-agent`；v0.3.1 至 v0.3.4 为 `dsh-browser-agent`，更早是 `@natgurlain/dsh-bridge-browser`。如果你曾用这种方式安装过更早的版本，请先移除旧包，否则两者会注册同一个桥：`dsh plugin --profile web remove dsh-browser-agent`（或 `@natgurlain/dsh-bridge-browser`）。为旧包保存的设置可以在 checkout 中运行 `node scripts/migrate-bridge-name.mjs ~/.dsh web` 迁移过来（安装器会自动完成）；否则请在 DSH 的插件设置中重新保存。
 
-然后从同一个[发布页](https://github.com/natgurlain/dsh-browser-agent/releases)下载 `dsh-browser-chrome-v0.3.4.zip`（或 Firefox 的 zip），解压后在浏览器的扩展管理页用**加载已解压的扩展程序**加载，再打开侧边栏。这样安装的扩展还没有 token：它会显示一个短码，把它输入 DSH 中出现的卡片即可连接。如果使用 DeepSeek Harness 桌面应用，请使用上面的安装器：它会替你把插件注册到应用中。
+然后从同一个[发布页](https://github.com/natgurlain/dsh-browser-agent/releases)下载 `dsh-browser-chrome-v0.3.5.zip`（或 Firefox 的 zip），解压后在浏览器的扩展管理页用**加载已解压的扩展程序**加载，再打开侧边栏。这样安装的扩展还没有 token：它会显示一个短码，把它输入 DSH 中出现的卡片即可连接。如果使用 DeepSeek Harness 桌面应用，请使用上面的安装器：它会替你把插件注册到应用中。
 
 ## 核心能力
 
@@ -202,7 +202,7 @@ dsh plugin --profile web add https://github.com/natgurlain/dsh-browser-agent/rel
 更新时，在侧栏打开**设置 → 软件更新**。检查会把当前版本与 GitHub 上的最新发布版本比较，并给出一条用本机已有的安装器安装该版本的命令，例如：
 
 ```sh
-DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.3.4
+DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.3.5
 ```
 
 安装器选项：
@@ -233,13 +233,13 @@ Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版�
 记录了安装位置的安装由本机已有的卸载器移除。否则，命令会获取与扩展自身版本一同发布的卸载器；它从该发布版本下载 `uninstall.mjs`，只有在其 SHA-256 与 `SHA256SUMS` 一致后才运行。macOS 或 Linux：
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.4/uninstall.sh | bash -s -- --release v0.3.4
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.5/uninstall.sh | bash -s -- --release v0.3.5
 ```
 
 Windows 请运行：
 
 ```powershell
-& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.4/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s --release v0.3.4 } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
+& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.5/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s --release v0.3.5 } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
 ```
 
 在源码目录中运行 `bash scripts/uninstall.sh` 或 `.\scripts\uninstall.ps1`。

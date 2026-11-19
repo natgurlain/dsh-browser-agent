@@ -4,7 +4,7 @@
  * loading, listing, and the DSH skill provider that exposes each saved
  * workflow as a skill for sessions working in that workspace.
  *
- * @module dsh-browser-agent/src/learning/store
+ * @module @natgurlain/dsh-browser-agent/src/learning/store
  */
 
 import { readdir, readFile } from 'node:fs/promises'

@@ -1,31 +1,35 @@
 #!/usr/bin/env node
 /**
- * Carries saved bridge settings over the package rename
- * `@natgurlain/dsh-bridge-browser` -> `dsh-browser-agent` (v0.3.1).
+ * Carries saved bridge settings over the package renames
+ * `@natgurlain/dsh-bridge-browser` -> `dsh-browser-agent` (v0.3.1) ->
+ * `@natgurlain/dsh-browser-agent` (v0.3.5): rows naming either earlier name end up naming
+ * the current one.
  *
  *   node scripts/migrate-bridge-name.mjs [--lang en|zh] <dsh-home> <profile>...
  *
  * DSH saves a plugin's settings (the settings page, `ctx.configEditor`) as a row of the
  * profile's `cordis.patch.yml` that names the package: `- id: bridge-browser`,
- * `name: '@natgurlain/dsh-bridge-browser'`, `config: {...}`. A row whose `name` differs
+ * `name: 'dsh-browser-agent'`, `config: {...}`. A row whose `name` differs
  * from the running entry's package is skipped (cordis-plugin-include: "patch: name
- * mismatch ... skipping"), so after the rename every saved setting, `autoReview: false`
+ * mismatch ... skipping"), so after a rename every saved setting, `autoReview: false`
  * included, would silently stop applying. This rewrites that `name:` value, and nothing
  * else, in:
  *
  * - `<dsh-home>/profiles/<profile>/cordis.patch.yml` for each profile named, which the
  *   installer passes once it has removed the old registration from that profile;
  * - `<dsh-home>/cordis.patch.yml`, the home patch every profile reads, only when no
- *   profile under `<dsh-home>/profiles` still lists the old package (as a dependency or
- *   a selected bundle): a profile the installer did not re-register keeps running the
+ *   profile under `<dsh-home>/profiles` still lists an old package (as a dependency or
+ *   a selected bundle): a profile the installer did not re-register keeps running an
  *   old package, and its home rows must keep matching it.
  *
- * Only the direct predecessor's name is rewritten. Rows naming the earlier upstream
+ * Only this project's own earlier names are rewritten, and in one file only the latest of
+ * them that it holds. Rows naming the earlier upstream
  * packages (`@deepseek-ai/...`, `@yuxianglin/...`) have not applied since 0.2.0 and are
  * left as they are, so no stale config of another package comes back to life.
  *
  * Comments, ordering, quoting and `!!js` expressions are kept: the rewrite is a textual
- * replacement of one quoted scalar after `name:`. Files are replaced atomically with
+ * replacement of one scalar after `name:`. An unquoted old name gains single quotes, since
+ * a plain YAML scalar cannot start with `@`. Files are replaced atomically with
  * their previous mode. Missing files are skipped. Running it again changes nothing.
  * Prints one line per rewritten file, in the installer's language (--lang, default
  * English); exits 1 with a message on an error.
@@ -36,23 +40,37 @@ import { basename, dirname, join } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-export const OLD_NAME = '@natgurlain/dsh-bridge-browser'
-export const NEW_NAME = 'dsh-browser-agent'
+export const OLD_NAMES = ['dsh-browser-agent', '@natgurlain/dsh-bridge-browser']
+export const NEW_NAME = '@natgurlain/dsh-browser-agent'
 const PATCH_FILE = 'cordis.patch.yml'
 const DEPENDENCY_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies']
 
-// `name: '@natgurlain/dsh-bridge-browser'` in block or flow style, single or double quoted
-// (a plain scalar cannot start with `@`). The value must end the mapping entry.
-const NAME_ROW = /(^|[\s{,])(name[ \t]*:[ \t]*)(['"])@natgurlain\/dsh-bridge-browser\3(?=[ \t]*(?:[,}#\r\n]|$))/gmu
+// A `name:` value in block or flow style that ends its mapping entry. Quoted, single or
+// double, for either earlier name; the unscoped name also as a plain scalar (one starting
+// with `@` cannot be plain), which must be followed by the end of the line, a comment, or
+// the rest of a flow mapping.
+const quotedRow = name => new RegExp(
+  String.raw`(^|[\s{,])(name[ \t]*:[ \t]*)(['"])${name.replace('/', String.raw`\/`)}\3(?=[ \t]*(?:[,}#\r\n]|$))`, 'gmu')
+const PLAIN_ROW = /(^|[\s{,])(name[ \t]*:[ \t]+)dsh-browser-agent(?=[ \t]*(?:\r?\n|$)|[ \t]+#|[ \t]*(?:\}|,[^\n]*\}))/gmu
 
-/** The patch text with every old-name `name:` value replaced, and how many there were. */
+/**
+ * The patch text with the `name:` values of the package's latest earlier name replaced,
+ * and how many there were. Rows of the older name are rewritten only in a text that has
+ * none of the newer one: next to such rows they have not applied since v0.3.1, and must
+ * not come back to life.
+ */
 export function rewritePatchText(text) {
-  let count = 0
-  const next = text.replace(NAME_ROW, (_match, lead, key, quote) => {
-    count += 1
-    return `${lead}${key}${quote}${NEW_NAME}${quote}`
-  })
-  return { text: next, count }
+  for (const old of OLD_NAMES) {
+    let count = 0
+    const rewrite = (lead, key, quote) => {
+      count += 1
+      return `${lead}${key}${quote}${NEW_NAME}${quote}`
+    }
+    let next = text.replace(quotedRow(old), (_match, lead, key, quote) => rewrite(lead, key, quote))
+    if (!old.startsWith('@')) next = next.replace(PLAIN_ROW, (_match, lead, key) => rewrite(lead, key, "'"))
+    if (count > 0) return { text: next, count }
+  }
+  return { text, count: 0 }
 }
 
 /** Rewrite one patch file in place; returns the number of rows rewritten (0 when absent). */
@@ -77,7 +95,7 @@ export function migratePatchFile(path) {
   return count
 }
 
-/** Whether a profile manifest still lists the old package as a dependency or a selected bundle. */
+/** Whether a profile manifest still lists an old package as a dependency or a selected bundle. */
 export function profileListsOldName(profileDir) {
   let manifest
   try {
@@ -86,15 +104,15 @@ export function profileListsOldName(profileDir) {
     return false
   }
   if (manifest === null || typeof manifest !== 'object') return false
-  const listed = DEPENDENCY_FIELDS.some(field => Object.hasOwn(manifest[field] ?? {}, OLD_NAME))
+  const listed = DEPENDENCY_FIELDS.some(field => OLD_NAMES.some(name => Object.hasOwn(manifest[field] ?? {}, name)))
   const bundles = manifest.dsh?.profile?.bundles
-  return listed || (Array.isArray(bundles) && bundles.includes(OLD_NAME))
+  return listed || (Array.isArray(bundles) && bundles.some(name => OLD_NAMES.includes(name)))
 }
 
 /**
- * Migrate the named profiles' patches, then the home patch when no profile still uses the
+ * Migrate the named profiles' patches, then the home patch when no profile still uses an
  * old package. Returns the files rewritten with their row counts, and whether the home
- * patch was left for a profile that still runs the old package.
+ * patch was left for a profile that still runs an old package.
  */
 export function migrate(home, profiles) {
   const rewritten = []

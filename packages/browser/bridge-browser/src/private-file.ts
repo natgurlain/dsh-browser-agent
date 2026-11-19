@@ -3,7 +3,7 @@
  * ledger, watcher records, workflow schedules, audit head anchors): one
  * hardened writer, one trust-checked JSON reader, and a write queue.
  *
- * @module dsh-browser-agent/src/private-file
+ * @module @natgurlain/dsh-browser-agent/src/private-file
  */
 
 import { randomBytes } from 'node:crypto'

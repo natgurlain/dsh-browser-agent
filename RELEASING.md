@@ -7,20 +7,24 @@
    and the bridge plugin: `packages/browser/bridge-browser/package.json` together with
    `BRIDGE_PACKAGE_VERSION` in its `src/index.ts`. All of them carry the same version, the
    one in the release tag; `scripts/package-release.mjs` and
-   `scripts/tests/release-consistency.test.mjs` refuse otherwise. After the GitHub release,
-   publish the plugin to npm as `dsh-browser-agent` from `packages/browser/bridge-browser`
-   with `pnpm publish --access public` (check the name, version and file list first with
-   `pnpm publish --dry-run --no-git-checks`).
+   `scripts/tests/release-consistency.test.mjs` refuse otherwise. The release workflow
+   publishes the plugin to npm as `@natgurlain/dsh-browser-agent` (step 5); nothing is published by
+   hand.
 
-   The package was named `@natgurlain/dsh-bridge-browser` up to v0.3.0; on npm that name
-   ends at 0.2.1. Once, with the first `dsh-browser-agent` release, deprecate it:
-   `npm deprecate @natgurlain/dsh-bridge-browser "Renamed to dsh-browser-agent"`.
+   The package was named `@natgurlain/dsh-bridge-browser` up to v0.3.0 and
+   `dsh-browser-agent` from v0.3.1 to v0.3.4; on npm those names end at 0.2.1 and 0.3.4.
+   Both are deprecated in favour of the current name, e.g.
+   `npm deprecate dsh-browser-agent "Renamed to @natgurlain/dsh-browser-agent"`. A new
+   package name has no trusted publisher until it exists, so the `npm` job of its first
+   release fails. Publish that version by hand from the released file,
+   `npm publish https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.5/dsh-browser-agent-plugin-v0.3.5.tgz --access public`,
+   and add the trusted publisher on npmjs.com afterwards.
 2. Replace the previous tag with the new one in the install and uninstall commands of
    `README.md` and `README.zh.md` (the same test checks them), and add a `## vX.Y.Z`
    section to `CHANGELOG.md`. That section becomes the release notes.
 3. Run the gates and the local dry run (below).
-4. Tag and push: `git tag v0.3.4 && git push origin v0.3.4`. A tag containing `-`
-   (e.g. `v0.3.4-rc.1`) is published as a prerelease, with the notes of `v0.3.4`. A
+4. Tag and push: `git tag v0.3.5 && git push origin v0.3.5`. A tag containing `-`
+   (e.g. `v0.3.5-rc.1`) is published as a prerelease, with the notes of `v0.3.5`. A
    prerelease is never what `--release latest` or the panel's update check resolves to.
 5. `.github/workflows/release.yml` runs the checks and packages the assets in a `build`
    job (read-only token, no OIDC), then a separate `publish` job downloads those assets,
@@ -29,7 +33,17 @@
    release already has an asset of the same name the upload fails; delete the stale asset
    by hand first. It can also be started manually (Actions → Release → Run workflow) for an
    existing tag; manual runs default to a draft, and a draft is invisible to the installers
-   until it is published.
+   until it is published. Last, an `npm` job downloads `dsh-browser-agent-plugin-<tag>.tgz`
+   from the GitHub Release and publishes it to npm, after verifying it against the
+   release's `SHA256SUMS` and checking that the
+   package inside is `@natgurlain/dsh-browser-agent` at the tag's version. It runs no repository code
+   and holds no token: npm accepts it by trusted publishing, because the package's settings
+   on npmjs.com (Settings → Trusted Publisher) name the repository `natgurlain/dsh-browser-agent`
+   and the workflow file `release.yml`. Only a pushed tag publishes to npm; a manual run or
+   a prerelease tag does not, and a re-run skips a version npm already has. If the job
+   fails, the GitHub Release is already out: fix the cause and re-run the job (at any
+   time: it needs nothing from the build), or publish the released file by hand with
+   `npm publish <its URL> --access public`.
 
 To reproduce the assets locally: `node scripts/package-release.mjs --out release`
 (add `--skip-build` to reuse existing `dist/`, `dist-firefox/` and bridge `lib/`,
@@ -45,9 +59,9 @@ a clean checkout of the tag:
 
 ```sh
 pnpm install --frozen-lockfile && pnpm run check:runtime && pnpm run typecheck && pnpm run test
-node scripts/package-release.mjs --tag v0.3.4 --out release --notes release-notes.md
+node scripts/package-release.mjs --tag v0.3.5 --out release --notes release-notes.md
 (cd release && sha256sum -c SHA256SUMS)
-gh release create v0.3.4 release/* --verify-tag --title v0.3.4 --notes-file release-notes.md
+gh release create v0.3.5 release/* --verify-tag --title v0.3.5 --notes-file release-notes.md
 ```
 
 Anonymous downloads of a private repository's release answer 404. The installers say so
@@ -87,7 +101,7 @@ is refused.
 | `uninstall.sh`, `uninstall.ps1`, `uninstall.mjs` | The uninstaller; the two shell entry points download and verify `uninstall.mjs` when it is not next to them |
 | `dsh-browser-chrome-<tag>.zip` | Chrome build; manifest `key` stripped so Chrome Web Store uploads are accepted |
 | `dsh-browser-firefox-<tag>.zip` | Firefox build (`dist-firefox/`); manifest `key` stripped |
-| `dsh-browser-agent-plugin-<tag>.tgz` | `pnpm pack` of the bridge plugin (npm package `dsh-browser-agent`) |
+| `dsh-browser-agent-plugin-<tag>.tgz` | `pnpm pack` of the bridge plugin (npm package `@natgurlain/dsh-browser-agent`) |
 | `SHA256SUMS` | One `<64 hex>  <file name>` line per asset above, sorted by name; `sha256sum -c` compatible |
 
 The installers build from the source archive rather than use the prebuilt zips: the zips
@@ -153,7 +167,7 @@ repository gets none (the workflow skips the step).
    download error.
 4. Only then unpack the source archive into `~/.dsh/dsh-browser`, hand over to the
    `scripts/install.sh` inside it, and build. `~/.dsh/dsh-browser/.managed-by-install-sh`
-   records what was installed, e.g. `release v0.3.4 (SHA256SUMS verified)`.
+   records what was installed, e.g. `release v0.3.5 (SHA256SUMS verified)`.
 
 Run inside a checkout without options, the installer installs that checkout and downloads
 nothing. `--unverified-branch <name>` / `DSH_BROWSER_UNVERIFIED_BRANCH` installs a branch

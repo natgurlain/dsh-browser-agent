@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
 const read = (name) => readFileSync(new URL(`../${name}`, import.meta.url), 'utf8')
-const CURRENT = 'dsh-browser-agent'
+const CURRENT = '@natgurlain/dsh-browser-agent'
 
 function uninstallNames() {
   const match = /const BRIDGES = \[([^\]]*)\]/u.exec(read('uninstall.mjs'))
@@ -56,6 +56,8 @@ test('both installers carry settings saved under the previous name over, after t
   const call = ps1.indexOf("& node (Join-Path $Root 'scripts\\migrate-bridge-name.mjs') --lang $ReleaseLang $DshHomeDir 'web'")
   assert.ok(call > 0, 'install.ps1 runs migrate-bridge-name.mjs for the web profile')
   assert.ok(call > ps1.indexOf('$ProfileManifest.dsh.profile.bundles = $Bundles'))
-  assert.match(read('migrate-bridge-name.mjs'), /export const OLD_NAME = '@natgurlain\/dsh-bridge-browser'/u)
-  assert.ok(uninstallNames().includes('@natgurlain/dsh-bridge-browser'), 'uninstall removes the previous name too')
+  assert.match(read('migrate-bridge-name.mjs'), /export const OLD_NAMES = \['dsh-browser-agent', '@natgurlain\/dsh-bridge-browser'\]/u)
+  for (const name of ['dsh-browser-agent', '@natgurlain/dsh-bridge-browser']) {
+    assert.ok(uninstallNames().includes(name), `uninstall removes the earlier name ${name} too`)
+  }
 })

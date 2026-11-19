@@ -8,7 +8,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep, toNamespacedPath } f
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 
-const BRIDGES = ['dsh-browser-agent', '@natgurlain/dsh-bridge-browser', '@yuxianglin/dsh-bridge-browser', '@deepseek-ai/dsh-bridge-browser']
+const BRIDGES = ['@natgurlain/dsh-browser-agent', 'dsh-browser-agent', '@natgurlain/dsh-bridge-browser', '@yuxianglin/dsh-bridge-browser', '@deepseek-ai/dsh-bridge-browser']
 const DEPENDENCY_FIELDS = ['dependencies', 'devDependencies', 'optionalDependencies']
 // Files the bridge plugin writes into the DSH home (MCP bearer token and
 // endpoint, session ledger, watcher records, workflow schedules, the record

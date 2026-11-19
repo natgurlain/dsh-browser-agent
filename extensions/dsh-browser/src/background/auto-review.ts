@@ -13,7 +13,7 @@
  * @module
  */
 
-import type { ReviewCode } from 'dsh-browser-agent/src/protocol.ts'
+import type { ReviewCode } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 
 /** `chrome.storage.local` key of the explicit choices. */
 export const AUTO_APPROVE_STORAGE_KEY = 'dshAutoApprove'

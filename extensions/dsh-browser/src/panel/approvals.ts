@@ -1,5 +1,5 @@
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
-import { isExternalSessionId } from 'dsh-browser-agent/src/protocol.ts'
+import { isExternalSessionId } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 
 /**
  * Characters that render as nothing or reorder text: bidi embeddings,

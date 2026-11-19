@@ -48,7 +48,7 @@ import {
 } from './support/bridge-client.ts'
 import { BROWSER_CONTEXT_KIND } from '../src/browser-context.ts'
 
-const BRIDGE = 'dsh-browser-agent'
+const BRIDGE = '@natgurlain/dsh-browser-agent'
 const TOKEN = '3c9f0a7e51b2d846e0f3a9c17b5d2e68'
 
 let root: string | undefined

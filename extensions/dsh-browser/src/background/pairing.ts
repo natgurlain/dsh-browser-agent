@@ -31,7 +31,7 @@ import {
   isServerFrame,
   parseBridgeFrame,
   type ClientFrame,
-} from 'dsh-browser-agent/src/protocol.ts'
+} from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import {
   createPairingShare,
   derivePairingKeys,
@@ -42,7 +42,7 @@ import {
   pairingDoneMac,
   type PairingContext,
   type PairingKeys,
-} from 'dsh-browser-agent/src/pairing.ts'
+} from '@natgurlain/dsh-browser-agent/src/pairing.ts'
 
 /** How long each step of the exchange may take (reaching the bridge; its answer to our confirmation). */
 export const PAIRING_EXCHANGE_TIMEOUT_MS = 8_000

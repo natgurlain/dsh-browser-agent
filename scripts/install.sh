@@ -641,7 +641,7 @@ register_desktop() {
   fi
 
   status=0
-  (cd "$ROOT" && desktop_cli plugin --profile desktop add -w "dsh-browser-agent@link:$PLUGIN") >"$log" 2>&1 </dev/null || status=$?
+  (cd "$ROOT" && desktop_cli plugin --profile desktop add -w "@natgurlain/dsh-browser-agent@link:$PLUGIN") >"$log" 2>&1 </dev/null || status=$?
   if [ "$status" -eq 0 ]; then
     DESKTOP_STATUS="registered"
     rm -f "$log"
@@ -663,7 +663,7 @@ register_desktop() {
     DESKTOP_STATUS="failed"
     print_pair "警告：注册到 DeepSeek Harness 桌面应用失败。安装会继续完成其余步骤。" "WARNING: registering with the DeepSeek Harness desktop app failed. The install continues with the remaining steps." >&2
   fi
-  desktop_report_failure "$status" "$log" plugin --profile desktop add -w "dsh-browser-agent@link:$PLUGIN"
+  desktop_report_failure "$status" "$log" plugin --profile desktop add -w "@natgurlain/dsh-browser-agent@link:$PLUGIN"
   rm -f "$log"
   return 0
 }
@@ -1248,10 +1248,10 @@ fi
 EXT="$ROOT/extensions/dsh-browser"
 PLUGIN="$ROOT/packages/browser/bridge-browser"
 WEB_PROFILE_MANIFEST="$DSH_HOME_DIR/profiles/web/package.json"
-# Earlier package names of this bridge: this project's own name up to v0.3.0, then
+# Earlier package names of this bridge: this project's own names up to v0.3.4, then
 # upstream and its origin. Installing over any of them must not leave the old bridge
 # registered next to this one; scripts/uninstall.mjs knows the same names.
-LEGACY_PLUGINS="@natgurlain/dsh-bridge-browser @deepseek-ai/dsh-bridge-browser @yuxianglin/dsh-bridge-browser"
+LEGACY_PLUGINS="dsh-browser-agent @natgurlain/dsh-bridge-browser @deepseek-ai/dsh-bridge-browser @yuxianglin/dsh-bridge-browser"
 
 # Bridge token provisioning (zero-config Chrome). Kept in its own function so other
 # installer changes stay independent. The plugin creates ~/.dsh/ext-bridge-token on
@@ -1298,8 +1298,8 @@ remove_stale_plugin_link() {
   return 0
 }
 
-# Settings saved for the bridge under its previous package name (profile cordis.patch.yml
-# rows that name @natgurlain/dsh-bridge-browser) are rewritten to the current name once the
+# Settings saved for the bridge under a previous package name (profile cordis.patch.yml
+# rows that name dsh-browser-agent or @natgurlain/dsh-bridge-browser) are rewritten to the current name once the
 # old registration is gone from that profile; DSH skips a row whose name does not match.
 migrate_bridge_settings() {
   node "$ROOT/scripts/migrate-bridge-name.mjs" --lang "$RELEASE_LANG" "$DSH_HOME_DIR" "$@"
@@ -1312,7 +1312,7 @@ require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not f
 
 print_step 1 "构建浏览器桥" "Build the browser bridge"
 run_quiet "依赖安装失败" "Installing dependencies failed" pnpm install --frozen-lockfile
-run_quiet "桥插件构建失败" "Building the bridge plugin failed" pnpm --filter dsh-browser-agent run build
+run_quiet "桥插件构建失败" "Building the bridge plugin failed" pnpm --filter @natgurlain/dsh-browser-agent run build
 
 print_step 2 "注册到 DSH（web profile 与桌面应用）" "Register with DSH (web profile and desktop app)"
 for legacy_plugin in $LEGACY_PLUGINS; do
@@ -1325,7 +1325,7 @@ done
 migrate_bridge_settings web ||
   fail_pair "无法迁移 web profile 中已保存的桥插件设置。" "Could not carry over the bridge settings saved in the web profile."
 run_quiet "注册到 web profile 失败" "Registering with the web profile failed" \
-  pnpm exec dsh plugin --profile web add -w "dsh-browser-agent@link:$PLUGIN"
+  pnpm exec dsh plugin --profile web add -w "@natgurlain/dsh-browser-agent@link:$PLUGIN"
 print_pair "已注册到 web profile。" "Registered with the web profile."
 register_desktop
 

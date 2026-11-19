@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import { FLEET_ACTION_TOOLS as BRIDGE_ACTIONS, FLEET_READ_TOOLS as BRIDGE_READS } from 'dsh-browser-agent/src/fanout.ts'
+import { FLEET_ACTION_TOOLS as BRIDGE_ACTIONS, FLEET_READ_TOOLS as BRIDGE_READS } from '@natgurlain/dsh-browser-agent/src/fanout.ts'
 import { FLEET_ACTION_TOOLS, FLEET_READ_TOOLS, fleetApprovalPrompt, FleetRegistry, parseFleetRequest, type FleetDeps } from '../src/background/fleet.ts'
 import { resolveApprovalGate } from '../src/background/authorization.ts'
 import { evaluateCallPolicy } from '../src/security/call-policy.ts'

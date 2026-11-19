@@ -43,7 +43,7 @@ jobs:
       - name: Install Chromium for the browser steps
         # Use the workspace's own playwright-core so the browser revision
         # matches chromium.executablePath() in scripts/smoke-browser.mjs.
-        run: pnpm --filter dsh-browser-agent exec playwright-core install --with-deps chromium
+        run: pnpm --filter @natgurlain/dsh-browser-agent exec playwright-core install --with-deps chromium
       # Everything else: frozen install, check:runtime, typecheck, unit tests
       # (bridge, extension, MCP shim), both builds, scripts/tests,
       # benchmark/tests, the runtime and browser smokes, the model-free

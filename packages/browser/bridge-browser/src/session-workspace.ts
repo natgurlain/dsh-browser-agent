@@ -4,7 +4,7 @@
  * choices and every other gateway method pass through. When the bridge
  * workspace cannot be prepared, creation is refused rather than falling back
  * to the Host's default working directory (often the user's repository).
- * @module dsh-browser-agent/src/session-workspace
+ * @module @natgurlain/dsh-browser-agent/src/session-workspace
  */
 
 import { randomUUID } from 'node:crypto'

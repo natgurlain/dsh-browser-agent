@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { BRIDGE_CLOSE_CODES, computeBridgeProof, createBridgeNonce } from 'dsh-browser-agent/src/protocol.ts'
+import { BRIDGE_CLOSE_CODES, computeBridgeProof, createBridgeNonce } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import { challengeUntilHello, completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
 import { FakeWebSocket } from './support/fake-websocket.ts'
 import { chromeEvent, panelPort } from './support/chrome.ts'

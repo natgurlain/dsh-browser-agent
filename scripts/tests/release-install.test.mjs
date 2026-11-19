@@ -274,7 +274,7 @@ function stubCheckout(box, stubs, { complete = false, env = {}, path = process.e
   writeFileSync(join(checkout, 'scripts', 'install.sh'), readFileSync(installer))
   if (complete) {
     writeFileSync(join(checkout, 'packages/browser/bridge-browser/package.json'),
-      JSON.stringify({ name: 'dsh-browser-agent', engines: { dsh: '^0.2.2-rc.2' } }))
+      JSON.stringify({ name: '@natgurlain/dsh-browser-agent', engines: { dsh: '^0.2.2-rc.2' } }))
     mkdirSync(join(checkout, 'extensions/dsh-browser/dist'))
     writeFileSync(join(checkout, 'extensions/dsh-browser/dist/manifest.json'), '{}')
     for (const name of ['write-install-info.mjs', 'provision-bridge-token.mjs', 'migrate-bridge-name.mjs']) {
@@ -335,7 +335,7 @@ test('working pnpm on PATH is used as is, with no fallback notice', { skip }, as
 const WORKING_PNPM = '[ "$1" = --version ] && exit 0\nprintf \'pnpm[%s] %s\\n\' "$(command -v node)" "$*" >>"$STUB_RAN"'
 // A node older than the 24.9.0 the build needs.
 const OLD_NODE = 'printf 18.19.0'
-const BRIDGE_LINK = box => `dsh-browser-agent@link:${join(box.base, 'checkout', 'packages/browser/bridge-browser')}`
+const BRIDGE_LINK = box => `@natgurlain/dsh-browser-agent@link:${join(box.base, 'checkout', 'packages/browser/bridge-browser')}`
 
 function executable(path, text) {
   mkdirSync(dirname(path), { recursive: true })
@@ -356,7 +356,7 @@ function desktopApp(box, { cli = 'ok', node = false, pnpm = false, profile = tru
   writeFileSync(join(runtime, 'versions.json'), JSON.stringify({ schemaVersion: 1, node: '24.21.0', pnpm: '11.28.5' }))
   const outcome = {
     ok: 'exit 0',
-    reject: 'echo \'dsh: installation rejected: Plugin dsh-browser-agent@0.0.7 is incompatible with dsh 0.2.2-rc.1: requirements {"engines.dsh":"^0.2.2-rc.2"}; to override run: dsh plugin allow-version dsh-browser-agent --accept-risk\' >&2\nexit 1',
+    reject: 'echo \'dsh: installation rejected: Plugin @natgurlain/dsh-browser-agent@0.0.7 is incompatible with dsh 0.2.2-rc.1: requirements {"engines.dsh":"^0.2.2-rc.2"}; to override run: dsh plugin allow-version @natgurlain/dsh-browser-agent --accept-risk\' >&2\nexit 1',
     fail: 'echo "dsh: profile lock is held" >&2\nexit 5',
   }[cli]
   executable(join(runtime, 'cli', 'bin', 'dsh'),
@@ -982,7 +982,7 @@ test('dry run: the real release installs end to end into a temporary DSH home', 
   assert.equal(JSON.parse(readFileSync(join(extension, 'install-info.json'), 'utf8')).mode, 'managed')
   assert.equal(existsSync(join(extension, 'bridge-token')), true)
   const profile = JSON.parse(readFileSync(join(box.dshHome, 'profiles', 'web', 'package.json'), 'utf8'))
-  assert.ok(Object.hasOwn(profile.dependencies ?? {}, 'dsh-browser-agent'), JSON.stringify(profile))
+  assert.ok(Object.hasOwn(profile.dependencies ?? {}, '@natgurlain/dsh-browser-agent'), JSON.stringify(profile))
 
   // The uninstaller that release shipped removes it again, old-scope cleanup included.
   const removed = await run('bash', [join(box.managed, 'scripts', 'uninstall.sh'), '--home', box.dshHome], {

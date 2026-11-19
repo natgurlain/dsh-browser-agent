@@ -1,8 +1,8 @@
-# dsh-browser-agent
+# @natgurlain/dsh-browser-agent
 
 [English](README.md) | 中文
 
-[dsh-browser-agent](https://github.com/natgurlain/dsh-browser-agent) 的插件。v0.3.0 及之前此包名为 `@natgurlain/dsh-bridge-browser`，该名称已弃用。
+[dsh-browser-agent](https://github.com/natgurlain/dsh-browser-agent) 的插件。v0.3.1 至 v0.3.4 此包名为 `dsh-browser-agent`，更早为 `@natgurlain/dsh-bridge-browser`，这两个名称均已弃用。
 
 dsh 的**浏览器操作桥**挂载经过 token 认证的 WebSocket 通道（`/ext/bridge`）供浏览器扩展连接，把扩展调用投影到 DSH Typert Remotes，跟随 Session 与 Remote Event 流，并注册用于读取和操作受控标签页、截图、开发者工具的工具集。浏览器保留登录状态，侧栏提供对话界面。
 
@@ -70,7 +70,7 @@ dsh 的**浏览器操作桥**挂载经过 token 认证的 WebSocket 通道（`/e
 
 ## 线协议
 
-消息帧是通过 `t` 区分类型的 JSON 对象，定义在 [`protocol.ts`](src/protocol.ts)，通过 workspace 包的 `./src/*` export 与扩展共享。构建后的包提供 `dsh-browser-agent/protocol` 入口，供外部调用方使用。
+消息帧是通过 `t` 区分类型的 JSON 对象，定义在 [`protocol.ts`](src/protocol.ts)，通过 workspace 包的 `./src/*` export 与扩展共享。构建后的包提供 `@natgurlain/dsh-browser-agent/protocol` 入口，供外部调用方使用。
 
 - 客户端 → 服务端：`hello`（认证+caps）、`rpc`（网关方法透传）、`respond`（按 RPC id 结算宿主交互）、`tool.result`、`pong`。
 - 服务端 → 客户端：`hello.ok`（回显协商后的 caps）、`rpc.result`、`respond.result`（相关联的受理结果或错误）、`event`（由 dsh Remote 流与 waterfall 投影而来的 bridge 内部事件）、`tool.call`、`tool.cancel`、`ping`、`error`。

@@ -35,7 +35,7 @@
  * @module
  */
 
-import { isLoopbackPageOrigin } from 'dsh-browser-agent/src/protocol.ts'
+import { isLoopbackPageOrigin } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import { DEFAULT_SITE_RULES, isNarrowTrustedPattern, matchSitePattern, normalizeSitePattern, type SitePolicy, type SiteRuleEntry } from './site-policy.ts'
 import { originMatchesTrusted } from './trusted-origins.ts'
 import { httpOrigin, parseHttpUrl } from './web-url.ts'

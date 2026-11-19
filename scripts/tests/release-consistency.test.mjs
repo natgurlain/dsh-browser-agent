@@ -117,3 +117,22 @@ test('the release workflow publishes the notes and attests every asset', () => {
   assert.match(workflow, /subject-path: release\/\*/u)
   assert.doesNotMatch(workflow, /--generate-notes/u)
 })
+
+test('the release workflow publishes the packed plugin to npm without a stored token', () => {
+  const workflow = read('.github/workflows/release.yml')
+  const npm = workflow.slice(workflow.indexOf('\n  npm:\n'))
+  assert.match(npm, /needs: publish/u)
+  // Only a pushed release tag: not a manual (possibly draft) run, not a prerelease.
+  assert.match(npm, /if: github\.event_name == 'push' && !contains\(github\.ref_name, '-'\)/u)
+  assert.match(npm, /id-token: write/u)
+  assert.doesNotMatch(npm, /contents: write/u)
+  // The job publishes the released, checksummed asset and runs no repository code.
+  assert.match(npm, /gh release download "\$TAG" --dir release --pattern "dsh-browser-agent-plugin-\$TAG\.tgz" --pattern SHA256SUMS/u)
+  assert.match(npm, /sha256sum -c --ignore-missing SHA256SUMS/u)
+  // A path npm cannot read as a GitHub `owner/repo`.
+  assert.match(npm, /tarball="\.\/release\/dsh-browser-agent-plugin-\$TAG\.tgz"/u)
+  assert.match(npm, /expected @natgurlain\/dsh-browser-agent@\$version/u)
+  assert.match(npm, /npm publish "\$tarball" --access public --ignore-scripts/u)
+  assert.doesNotMatch(npm, /actions\/checkout|download-artifact|pnpm |npm install/u)
+  assert.doesNotMatch(workflow, /NPM_TOKEN|NODE_AUTH_TOKEN|secrets\./u)
+})

@@ -13,7 +13,7 @@
  * file under the dsh home (a title prefix would be spoofable by the model's
  * own schedule tool).
  *
- * @module dsh-browser-agent/src/learning/schedules
+ * @module @natgurlain/dsh-browser-agent/src/learning/schedules
  */
 
 import { mkdir, readFile } from 'node:fs/promises'

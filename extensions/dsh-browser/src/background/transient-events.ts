@@ -1,4 +1,4 @@
-import type { ServerFrame } from 'dsh-browser-agent/src/protocol.ts'
+import type { ServerFrame } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 
 type EventFrame = Extract<ServerFrame, { t: 'event' }>
 

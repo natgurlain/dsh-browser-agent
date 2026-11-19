@@ -8,8 +8,8 @@
  * @module
  */
 
-import { DEFAULT_SNAPSHOT_MAX_CHARS } from 'dsh-browser-agent/src/protocol.ts'
-import type { ToolErrorCode } from 'dsh-browser-agent/src/protocol.ts'
+import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
+import type { ToolErrorCode } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import {
   allocateFrameBudgets,
   frameDocumentKey,

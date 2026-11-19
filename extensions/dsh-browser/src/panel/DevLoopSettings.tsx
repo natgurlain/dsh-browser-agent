@@ -14,7 +14,7 @@ import {
   BRIDGE_DEVLOOP_LINK_METHOD,
   BRIDGE_DEVLOOP_LIST_METHOD,
   BRIDGE_DEVLOOP_UNLINK_METHOD,
-} from 'dsh-browser-agent/src/protocol.ts'
+} from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import type { UiLocale } from '../i18n.ts'
 import { Callout, EntryList, LearnMore, SettingsGroup } from './SettingsKit.tsx'
 import { PANEL_COPY } from './strings.ts'

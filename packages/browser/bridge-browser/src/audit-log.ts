@@ -19,7 +19,7 @@
  * serialized, and the chain head is recovered from the file's last line on
  * first use so a host restart continues the same chain.
  *
- * @module dsh-browser-agent/src/audit-log
+ * @module @natgurlain/dsh-browser-agent/src/audit-log
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'

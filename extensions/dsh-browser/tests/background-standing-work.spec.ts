@@ -7,7 +7,7 @@
  * for nothing behind the kill switch.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { BRIDGE_CLOSE_CODES } from 'dsh-browser-agent/src/protocol.ts'
+import { BRIDGE_CLOSE_CODES } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import { completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'
 import { FakeWebSocket } from './support/fake-websocket.ts'
 import { chromeEvent, memoryStorage, panelPort } from './support/chrome.ts'

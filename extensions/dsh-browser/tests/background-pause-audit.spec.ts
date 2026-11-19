@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   BRIDGE_AUDIT_RECORD_METHOD,
   BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD,
-} from 'dsh-browser-agent/src/protocol.ts'
+} from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import { STRICT_MODE_UNAVAILABLE } from '../src/background/commit-gate.ts'
 import { HOLD_EXPIRED_MESSAGE } from '../src/background/pause-gate.ts'
 import { completeHandshake, panelSawConnected, TEST_BRIDGE_TOKEN } from './support/bridge-handshake.ts'

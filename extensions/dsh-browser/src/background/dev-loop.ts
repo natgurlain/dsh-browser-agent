@@ -31,7 +31,7 @@ import {
   BRIDGE_DEVLOOP_LIST_METHOD,
   BRIDGE_DEVLOOP_UNLINK_METHOD,
   devLoopOrigin,
-} from 'dsh-browser-agent/src/protocol.ts'
+} from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import type { ToolAnswer } from './tools.ts'
 import { httpOrigin } from '../security/web-url.ts'
 

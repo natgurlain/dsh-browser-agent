@@ -1,5 +1,5 @@
 /**
- * Browser half of `dsh-browser-agent`.
+ * Browser half of `@natgurlain/dsh-browser-agent`.
  *
  * When the host plugin is active, this client registers:
  * - a General-settings row with the pasteable bridge WebSocket URL;
@@ -12,7 +12,7 @@
  * dsh's authenticated `/api` channel, like every other call of this page.
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-browser-agent',
+  id: '@natgurlain/dsh-browser-agent',
   factory: (require) => {
     const module = { exports: {} }
     const React = require('react')
@@ -26,7 +26,7 @@ window.__ModuleLoader__.load({
     const PAIRING_POLL_BACKOFF_MS = 30_000
     const PAIRING_NOTICE_MS = 10_000
     const LOCALE_NS = 'bridge-browser'
-    const STYLE_ID = 'dsh-browser-agent/BridgeAddressRow'
+    const STYLE_ID = '@natgurlain/dsh-browser-agent/BridgeAddressRow'
     const inject = ['slots', 'locale']
 
     const dictionaries = {
@@ -147,7 +147,7 @@ window.__ModuleLoader__.load({
         return () => {}
       }
       const style = document.createElement('style')
-      style.dataset.plugin = 'dsh-browser-agent'
+      style.dataset.plugin = '@natgurlain/dsh-browser-agent'
       style.dataset.pluginCss = STYLE_ID
       style.textContent = [
         '.dshBridgeAddressRow{border-bottom:1px solid var(--dsw-alias-border-l2);display:flex;flex-direction:column;gap:8px;padding:16px 0}',

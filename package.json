@@ -1,6 +1,6 @@
 {
   "name": "dsh-browser",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "Standalone dsh browser bridge and controlled-tab Chrome/Firefox extension workspace",
   "author": "Yuxiang Lin",
   "license": "MIT",
@@ -10,10 +10,10 @@
     "node": ">=24.9.0"
   },
   "scripts": {
-    "build": "pnpm --filter dsh-browser-agent run build && pnpm --filter dsh-browser-extension run build",
+    "build": "pnpm --filter @natgurlain/dsh-browser-agent run build && pnpm --filter dsh-browser-extension run build",
     "start": "dsh web",
-    "test": "pnpm --filter dsh-browser-agent run test && pnpm --filter dsh-browser-extension run test && pnpm --filter @natgurlain/dsh-browser-mcp run test",
-    "typecheck": "pnpm --filter dsh-browser-agent run typecheck && pnpm --filter dsh-browser-extension run typecheck",
+    "test": "pnpm --filter @natgurlain/dsh-browser-agent run test && pnpm --filter dsh-browser-extension run test && pnpm --filter @natgurlain/dsh-browser-mcp run test",
+    "typecheck": "pnpm --filter @natgurlain/dsh-browser-agent run typecheck && pnpm --filter dsh-browser-extension run typecheck",
     "gate": "node scripts/gate.mjs",
     "check:runtime": "node scripts/check-runtime.mjs",
     "test:smoke": "node scripts/smoke-runtime.mjs",

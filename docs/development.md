@@ -13,9 +13,9 @@ pnpm run test
 pnpm run check:runtime
 pnpm run test:smoke
 
-pnpm --filter dsh-browser-agent run build
-pnpm --filter dsh-browser-agent run typecheck
-pnpm --filter dsh-browser-agent run test
+pnpm --filter @natgurlain/dsh-browser-agent run build
+pnpm --filter @natgurlain/dsh-browser-agent run typecheck
+pnpm --filter @natgurlain/dsh-browser-agent run test
 
 pnpm --filter dsh-browser-extension run build
 pnpm --filter dsh-browser-extension run build:firefox
@@ -73,7 +73,7 @@ Each row runs install, `check:runtime`, typecheck, the bridge, extension and MCP
 
 To run the runtime smoke with a DSH installed somewhere else against this checkout's bridge (the layout of a linked checkout loaded by the desktop app or a global install), set `DSH_SMOKE_CLI` to that install's `lib/bin.js`: `DSH_SMOKE_CLI=<dir>/node_modules/@deepseek-ai/dsh/lib/bin.js pnpm test:smoke`.
 
-On a DSH release outside the tested list the bridge still loads if `engines.dsh` admits it, and logs a warning naming the tested releases and the command that starts one. Outside `engines.dsh`, DSH itself refuses the plugin with `Plugin dsh-browser-agent@<version> is incompatible with dsh <version>: requirements {"engines.dsh":"^0.2.2-rc.1"}`.
+On a DSH release outside the tested list the bridge still loads if `engines.dsh` admits it, and logs a warning naming the tested releases and the command that starts one. Outside `engines.dsh`, DSH itself refuses the plugin with `Plugin @natgurlain/dsh-browser-agent@<version> is incompatible with dsh <version>: requirements {"engines.dsh":"^0.2.2-rc.1"}`.
 
 What each phase gate rests on (the roadmap is not in this repository; the phases are the ones the tests name):
 

@@ -12,7 +12,7 @@
  * @module
  */
 
-import { WORKFLOW_FORMAT } from 'dsh-browser-agent/src/learning/workflow.ts'
+import { WORKFLOW_FORMAT } from '@natgurlain/dsh-browser-agent/src/learning/workflow.ts'
 
 /** Locator recorded for one element (from the content script). */
 export interface RecordedLocator {

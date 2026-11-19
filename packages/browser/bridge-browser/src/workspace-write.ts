@@ -34,7 +34,7 @@
  * used: it writes text only (PDFs are bytes), always replaces existing files,
  * and documents the ancestor-symlink race as accepted for its threat model.
  *
- * @module dsh-browser-agent/src/workspace-write
+ * @module @natgurlain/dsh-browser-agent/src/workspace-write
  */
 
 import { randomUUID } from 'node:crypto'

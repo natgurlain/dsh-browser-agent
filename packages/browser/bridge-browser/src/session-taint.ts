@@ -43,7 +43,7 @@
  * taint, persisted in chrome.storage.session, still applies on the browser
  * side). Fail-closed alternatives would brick every session after a restart.
  *
- * @module dsh-browser-agent/src/session-taint
+ * @module @natgurlain/dsh-browser-agent/src/session-taint
  */
 
 import type { Context } from '@deepseek-ai/cordis'

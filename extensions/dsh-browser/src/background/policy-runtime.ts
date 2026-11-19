@@ -48,7 +48,7 @@ export const EXEMPT_READS_STORAGE_KEY = 'dshSessionExemptReads'
 /** Sessions the user put in strict mode (same storage area as taint: the browser session). */
 export const STRICT_SESSIONS_STORAGE_KEY = 'dshStrictSessions'
 /** Bridge RPCs that clear and mark the Host-side taint guard of one session. */
-export { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD } from 'dsh-browser-agent/src/protocol.ts'
+export { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 
 /** The settings fields the policy layer reads. */
 export interface PolicySettings {

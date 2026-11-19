@@ -8,7 +8,7 @@
  * exact-name directories two levels below the sessions root is removed, and
  * running sessions are refused before anything touches the disk.
  *
- * @module dsh-browser-agent/src/session-purge
+ * @module @natgurlain/dsh-browser-agent/src/session-purge
  */
 
 import { randomUUID } from 'node:crypto'

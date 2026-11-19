@@ -16,7 +16,7 @@ import {
   type BridgeCaps,
   type BridgeEndpoint,
   type BridgeFrame,
-} from 'dsh-browser-agent/src/protocol.ts'
+} from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 
 /** Token the background suites store in settings. */
 export const TEST_BRIDGE_TOKEN = 'test-bridge-token'

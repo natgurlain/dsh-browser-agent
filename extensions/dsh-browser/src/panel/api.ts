@@ -5,8 +5,8 @@
  * @module
  */
 
-import type { BridgeCaps, RespondResult } from 'dsh-browser-agent/src/protocol.ts'
-import type { ServerFrame } from 'dsh-browser-agent/src/protocol.ts'
+import type { BridgeCaps, RespondResult } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
+import type { ServerFrame } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import type { BridgeFailure, BridgeState } from '../background/bridge.ts'
 import type { Settings } from '../background/index.ts'
 import type { TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'

@@ -28,7 +28,7 @@
  * @module
  */
 
-import { isStandingWork, type StandingWork } from 'dsh-browser-agent/src/protocol.ts'
+import { isStandingWork, type StandingWork } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 
 /** `chrome.storage.local` key holding the {@link StoredStandingHost}. */
 export const STANDING_HOST_STORAGE_KEY = 'dshStandingHost'

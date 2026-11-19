@@ -11,7 +11,7 @@
  * @module
  */
 
-import { isExternalSessionId, isRequesterLabel } from 'dsh-browser-agent/src/protocol.ts'
+import { isExternalSessionId, isRequesterLabel } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import type { ApprovalPrompt } from '../security/approval.ts'
 
 /** Most external sessions remembered (oldest forgotten first). */

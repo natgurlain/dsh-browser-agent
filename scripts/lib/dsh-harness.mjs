@@ -87,7 +87,7 @@ export async function runCli(cli, args, { env, cwd = root, timeout = 120_000 } =
 
 /** Register the working-tree bridge in the `web` profile, as the installers do. */
 export function addBridgePlugin(dsh, env) {
-  return runCli(dsh.cli, ['plugin', '--profile', 'web', 'add', '-w', `dsh-browser-agent@link:${dsh.bridge}`], { env })
+  return runCli(dsh.cli, ['plugin', '--profile', 'web', 'add', '-w', `@natgurlain/dsh-browser-agent@link:${dsh.bridge}`], { env })
 }
 
 /**

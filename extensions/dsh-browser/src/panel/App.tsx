@@ -8,10 +8,10 @@
  */
 
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { BRIDGE_AUDIT_EXPORT_METHOD, BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from 'dsh-browser-agent/src/protocol.ts'
-import type { BridgeCaps } from 'dsh-browser-agent/src/protocol.ts'
-import type { ServerFrame } from 'dsh-browser-agent/src/protocol.ts'
-import { isExternalSessionId } from 'dsh-browser-agent/src/protocol.ts'
+import { BRIDGE_AUDIT_EXPORT_METHOD, BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
+import type { BridgeCaps } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
+import type { ServerFrame } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
+import { isExternalSessionId } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import type { BridgeFailure, BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
 import { readDevToolsAllowance } from '../background/devtools-allowance.ts'

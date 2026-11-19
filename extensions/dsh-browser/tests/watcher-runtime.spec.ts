@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { BRIDGE_WATCH_FIRE_METHOD } from 'dsh-browser-agent/src/protocol.ts'
+import { BRIDGE_WATCH_FIRE_METHOD } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import { PageWatcherRuntime, type PageWatcherRuntimeOptions } from '../src/background/watcher-runtime.ts'
 import { WATCHERS_STORAGE_KEY, type PageWatcher } from '../src/background/watchers.ts'
 import { chromeEvent, memoryStorage, panelPort } from './support/chrome.ts'

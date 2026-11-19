@@ -3,7 +3,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { RuntimeKeeper, RuntimeLease } from '../src/background/runtime-lifecycle.ts'
 import { CLIENT_ID_STORAGE_KEY, createClientId, loadClientIdentity } from '../src/background/client-identity.ts'
-import { isBridgeClientIdentity } from 'dsh-browser-agent/src/protocol.ts'
+import { isBridgeClientIdentity } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 
 function setup(idleMs = 1_000) {
   let now = 10_000

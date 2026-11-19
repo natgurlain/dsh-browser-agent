@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { describeElement, handleLearningMessage, probeRows, rowCells, sanitizedDom, sensitiveFieldCount, setWatching, pageTokens, siteDriverFetch } from '../src/content/learning.ts'
 import { ElementIds } from '../src/content/ids.ts'
-import { buildDriverRequest, validateSiteDriver } from 'dsh-browser-agent/src/learning/site-drivers.ts'
+import { buildDriverRequest, validateSiteDriver } from '@natgurlain/dsh-browser-agent/src/learning/site-drivers.ts'
 
 beforeEach(() => {
   document.body.innerHTML = `

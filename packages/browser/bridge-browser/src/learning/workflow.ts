@@ -11,7 +11,7 @@
  * never stored: such a step must reference a parameter that has no default,
  * so the value is supplied at replay time and never written to disk.
  *
- * @module dsh-browser-agent/src/learning/workflow
+ * @module @natgurlain/dsh-browser-agent/src/learning/workflow
  */
 
 import { wrapUntrustedPageText } from '../protocol.ts'

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { BRIDGE_DEVLOOP_LINK_METHOD, BRIDGE_DEVLOOP_LIST_METHOD, BRIDGE_DEVLOOP_UNLINK_METHOD } from 'dsh-browser-agent/src/protocol.ts'
+import { BRIDGE_DEVLOOP_LINK_METHOD, BRIDGE_DEVLOOP_LIST_METHOD, BRIDGE_DEVLOOP_UNLINK_METHOD } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import {
   createDevLoopPanelRpc,
   DevLoopController,

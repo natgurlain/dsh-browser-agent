@@ -16,7 +16,7 @@ const anchor = realpathSync(join(root, 'node_modules', '@deepseek-ai', 'dsh', 'p
 const require = createRequire(anchor)
 const { initProfile } = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-app-boot')).href)
 const { runPluginCommand } = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-plugin-manager/operations')).href)
-const current = 'dsh-browser-agent'
+const current = '@natgurlain/dsh-browser-agent'
 const legacy = '@deepseek-ai/dsh-bridge-browser'
 // This project's own package name up to v0.3.0.
 const previous = '@natgurlain/dsh-bridge-browser'
@@ -410,7 +410,7 @@ test('desktop profile: the bridge is removed through the app CLI, then the files
   const before = readFileSync(manifestPath, 'utf8')
   const dry = uninstall(fixture, ['--dry-run', '--desktop-app', desktop.app])
   assert.equal(dry.status, 0, dry.stderr)
-  assert.match(dry.stdout, /Remove desktop profile bridges through .*cli\/bin\/dsh: dsh-browser-agent, @natgurlain\/dsh-bridge-browser, @deepseek-ai\/dsh-bridge-browser/u)
+  assert.match(dry.stdout, /Remove desktop profile bridges through .*cli\/bin\/dsh: @natgurlain\/dsh-browser-agent, @natgurlain\/dsh-bridge-browser, @deepseek-ai\/dsh-bridge-browser/u)
   assert.equal(readFileSync(manifestPath, 'utf8'), before)
   assert.deepEqual(desktop.calls(), [])
 
@@ -438,7 +438,7 @@ test('desktop profile: a failing app CLI stops before deleting any installation 
   const desktop = desktopApp(fixture, { fails: true })
   const result = uninstall(fixture, ['--desktop-app', desktop.app])
   assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /Plugin removal from the desktop profile failed; file cleanup stopped\. Command: .*plugin --profile desktop remove dsh-browser-agent \(exit code 4\)/u)
+  assert.match(result.stderr, /Plugin removal from the desktop profile failed; file cleanup stopped\. Command: .*plugin --profile desktop remove @natgurlain\/dsh-browser-agent \(exit code 4\)/u)
   assert.equal(desktop.calls().some(call => call.includes('allow-version')), false)
   assert.ok(readJson(join(fixture.home, 'profiles', 'desktop', 'package.json')).dependencies[current])
   assert.equal(existsSync(fixture.source), true)
@@ -502,14 +502,14 @@ test('language: uninstall.mjs prints English, or Chinese for a Chinese locale, D
   }
   const english = dry({})
   assert.match(english.stdout, /^Uninstall target: /m)
-  assert.match(english.stdout, /^Remove web profile bridges: dsh-browser-agent$/m)
+  assert.match(english.stdout, /^Remove web profile bridges: @natgurlain\/dsh-browser-agent$/m)
   assert.match(english.stdout, /^Delete: /m)
   assertEnglish(fixture, english)
   for (const [env, args] of [[{ DSH_BROWSER_LANG: 'zh' }], [{ ...LOCALE, LANG: 'zh_CN.UTF-8' }],
     [{ ...LOCALE, LC_ALL: 'zh_TW.UTF-8', LANG: 'en_US.UTF-8' }], [{}, ['--lang', 'zh']], [{ ...LOCALE, LANG: 'en_US.UTF-8' }, ['--lang=ZH']]]) {
     const chinese = dry(env, args)
     assert.match(chinese.stdout, /^卸载目标：/m, JSON.stringify([env, args]))
-    assert.match(chinese.stdout, /^移除 web profile 桥插件：dsh-browser-agent$/m)
+    assert.match(chinese.stdout, /^移除 web profile 桥插件：@natgurlain\/dsh-browser-agent$/m)
     assert.match(chinese.stdout, /^删除：/m)
     assertChinese(fixture, chinese)
     assert.equal(chinese.stdout.split('\n').length, english.stdout.split('\n').length, 'one line per message in both languages')

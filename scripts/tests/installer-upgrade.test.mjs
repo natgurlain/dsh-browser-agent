@@ -1,5 +1,5 @@
-// Updating across the package rename @natgurlain/dsh-bridge-browser -> dsh-browser-agent
-// (v0.3.1): exactly one bridge stays registered, and settings saved under the old name keep
+// Updating across the package renames @natgurlain/dsh-bridge-browser -> dsh-browser-agent
+// (v0.3.1) -> @natgurlain/dsh-browser-agent (v0.3.5): exactly one bridge stays registered, and settings saved under the old name keep
 // applying. The end-to-end cases run the real install.sh with the real DSH plugin commands
 // against a throwaway DSH home; only the builds and the browser launch are stubbed.
 import assert from 'node:assert/strict'
@@ -13,7 +13,10 @@ import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { migrate, NEW_NAME, OLD_NAME, rewritePatchText } from '../migrate-bridge-name.mjs'
+import { migrate, NEW_NAME, OLD_NAMES, rewritePatchText } from '../migrate-bridge-name.mjs'
+
+// The name v0.3.1 to v0.3.4 registered; the cases below update from it.
+const OLD_NAME = OLD_NAMES[0]
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const anchor = realpathSync(join(root, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
@@ -24,7 +27,7 @@ const { runPluginCommand } = await import(pathToFileURL(require.resolve('@deepse
 const dshBin = join(dirname(anchor), 'lib', 'bin.js')
 const bundlePatch = join(root, 'packages', 'browser', 'bridge-browser', 'cordis.patch.yml')
 const UPSTREAM = '@deepseek-ai/dsh-bridge-browser'
-const BRIDGE_NAMES = [NEW_NAME, OLD_NAME, UPSTREAM, '@yuxianglin/dsh-bridge-browser']
+const BRIDGE_NAMES = [NEW_NAME, ...OLD_NAMES, UPSTREAM, '@yuxianglin/dsh-bridge-browser']
 const noShell = process.platform === 'win32' ? 'install.sh is not used on Windows' : false
 
 // What DSH's plugin settings page writes for the bridge (dsh-config-editor), plus a toggle row.
@@ -78,6 +81,31 @@ test('rewritePatchText renames only name: values of the previous package, in eve
   assert.deepEqual(rewritePatchText(text), { text, count: 0 }, 'a second run changes nothing')
   // CRLF files keep their line endings.
   assert.equal(rewritePatchText(`- id: bridge-browser\r\n  name: '${OLD_NAME}'\r\n`).text, `- id: bridge-browser\r\n  name: '${NEW_NAME}'\r\n`)
+})
+
+test('rewritePatchText renames both earlier names, and quotes a name that was a plain scalar', () => {
+  assert.deepEqual(OLD_NAMES, ['dsh-browser-agent', '@natgurlain/dsh-bridge-browser'])
+  for (const old of OLD_NAMES) {
+    for (const quote of ['\'', '"']) {
+      assert.deepEqual(rewritePatchText(`- id: bridge-browser\n  name: ${quote}${old}${quote}\n  config: {}\n`),
+        { text: `- id: bridge-browser\n  name: ${quote}${NEW_NAME}${quote}\n  config: {}\n`, count: 1 }, old)
+    }
+  }
+  // A plain scalar cannot start with `@`, so the new name is written quoted.
+  assert.equal(rewritePatchText('- id: bridge-browser\n  name: dsh-browser-agent\n').text, `- id: bridge-browser\n  name: '${NEW_NAME}'\n`)
+  assert.equal(rewritePatchText('- { id: bridge-browser, name: dsh-browser-agent }\n').text, `- { id: bridge-browser, name: '${NEW_NAME}' }\n`)
+  assert.equal(rewritePatchText('  name: dsh-browser-agent # saved\n').text, `  name: '${NEW_NAME}' # saved\n`)
+  // A file with rows of both earlier names: only the later name's rows change, so the row
+  // that has not applied since v0.3.1 stays switched off.
+  assert.deepEqual(rewritePatchText("- id: a\n  name: '@natgurlain/dsh-bridge-browser'\n- id: b\n  name: 'dsh-browser-agent'\n"),
+    { text: `- id: a\n  name: '@natgurlain/dsh-bridge-browser'\n- id: b\n  name: '${NEW_NAME}'\n`, count: 1 })
+  // Not the package: a longer plain scalar, another key, a mismatched quote, the current name,
+  // and plain text that would not stay valid YAML once quoted.
+  for (const kept of ['  name: dsh-browser-agent#x\n', '  name: dsh-browser-agent, extra\n', '{ id: x, name:dsh-browser-agent }\n',
+    '  name: dsh-browser-agent-fork\n', '  name: dsh-browser-agent fork\n', '  rename: dsh-browser-agent\n',
+    '  name: \'dsh-browser-agent"\n', `  name: '${NEW_NAME}'\n`, '  name: my/dsh-browser-agent\n']) {
+    assert.deepEqual(rewritePatchText(kept), { text: kept, count: 0 }, kept)
+  }
 })
 
 test('real DSH composition: a row saved under the old name is skipped until it is migrated', (t) => {
@@ -237,7 +265,7 @@ process.exit(result.exitCode)
   return { base, dshHome, bridge, install, calls }
 }
 
-test('install over a v0.3.0 registration: one bridge, the new name, settings kept, in web and the desktop app', {
+test('install over a v0.3.4 registration: one bridge, the new name, settings kept, in web and the desktop app', {
   skip: noShell, timeout: 600_000,
 }, async (t) => {
   const box = checkout(t, { desktop: true })
@@ -258,7 +286,7 @@ test('install over a v0.3.0 registration: one bridge, the new name, settings kep
   ])
   for (const profile of [web, desktop]) {
     assert.deepEqual(bridgesOf(profile), { dependencies: [NEW_NAME], bundles: [NEW_NAME] }, profile)
-    assert.equal(existsSync(join(profile, 'node_modules', '@natgurlain', 'dsh-bridge-browser')), false, profile)
+    assert.equal(existsSync(join(profile, 'node_modules', ...OLD_NAME.split('/'))), false, profile)
     const patch = join(profile, 'cordis.patch.yml')
     assert.equal(readFileSync(patch, 'utf8'), SAVED_SETTINGS.replace(OLD_NAME, NEW_NAME), profile)
     const { entry, warnings } = composedBridge(join(box.dshHome, 'cordis.patch.yml'), patch)
@@ -266,7 +294,7 @@ test('install over a v0.3.0 registration: one bridge, the new name, settings kep
     assert.deepEqual(warnings, [], profile)
   }
   assert.equal(readFileSync(join(box.dshHome, 'cordis.patch.yml'), 'utf8'), SAVED_SETTINGS.replace(OLD_NAME, NEW_NAME))
-  assert.match(result.stdout, /Saved bridge settings now name dsh-browser-agent: .*profiles\/web\/cordis\.patch\.yml \(1\)/u)
+  assert.match(result.stdout, /Saved bridge settings now name @natgurlain\/dsh-browser-agent: .*profiles\/web\/cordis\.patch\.yml \(1\)/u)
   assert.match(result.stdout, /• web profile: registered/u)
   assert.match(result.stdout, /• DeepSeek Harness desktop app: registered/u)
 

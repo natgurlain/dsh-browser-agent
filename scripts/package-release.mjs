@@ -3,7 +3,7 @@
  * Package release assets into an output directory:
  *   dsh-browser-chrome-<version>.zip   Chrome build (dist/), manifest `key` stripped
  *   dsh-browser-firefox-<version>.zip  Firefox build (dist-firefox/), manifest `key` stripped
- *   dsh-browser-agent-plugin-<version>.tgz  `pnpm pack` of the bridge plugin (npm: dsh-browser-agent)
+ *   dsh-browser-agent-plugin-<version>.tgz  `pnpm pack` of the bridge plugin (npm: @natgurlain/dsh-browser-agent)
  *   dsh-browser-source-<version>.tar.gz  tracked source tree; what scripts/install.sh builds from
  *   dsh-browser-source-<version>.zip     the same tree for scripts/install.ps1
  *   install.sh install.ps1 uninstall.sh uninstall.ps1 uninstall.mjs
@@ -314,7 +314,7 @@ async function main() {
   if (options.build && !options.installerOnly) {
     // Published builds keep the plain version: no checkout build number.
     process.env.DSH_BROWSER_RELEASE_BUILD = '1'
-    run('pnpm', ['--filter', 'dsh-browser-agent', 'run', 'build'], root)
+    run('pnpm', ['--filter', '@natgurlain/dsh-browser-agent', 'run', 'build'], root)
     run('pnpm', ['--filter', 'dsh-browser-extension', 'run', 'build'], root)
     run('pnpm', ['--filter', 'dsh-browser-extension', 'run', 'build:firefox'], root)
   }

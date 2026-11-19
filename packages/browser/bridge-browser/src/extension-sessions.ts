@@ -2,7 +2,7 @@
  * Track session ids that the browser extension has driven through the bridge.
  * Desktop-native sessions must keep the host userQuestions waterfall so the
  * Desktop UI can render ask_user_question cards.
- * @module dsh-browser-agent/src/extension-sessions
+ * @module @natgurlain/dsh-browser-agent/src/extension-sessions
  */
 
 /** Mutable registry of extension-owned session ids. */

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it } from 'vitest'
-import type { ServerFrame } from 'dsh-browser-agent/src/protocol.ts'
+import type { ServerFrame } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import { TransientEventCache } from '../src/background/transient-events.ts'
 
 function event(rpcId: string, method: string, payload: unknown): ServerFrame {

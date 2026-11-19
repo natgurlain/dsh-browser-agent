@@ -8,7 +8,7 @@
  * @module
  */
 
-import type { BridgeClientIdentity } from 'dsh-browser-agent/src/protocol.ts'
+import type { BridgeClientIdentity } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 
 /** `chrome.storage.local` key of the per-install client id. */
 export const CLIENT_ID_STORAGE_KEY = 'dshClientId'

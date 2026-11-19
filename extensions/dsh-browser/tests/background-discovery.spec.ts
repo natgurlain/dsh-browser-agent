@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { describe, expect, it, vi } from 'vitest'
-import type { BridgeConfigPayload } from 'dsh-browser-agent/src/protocol.ts'
+import type { BridgeConfigPayload } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import {
   discoverInstances,
   discoveryUrl,

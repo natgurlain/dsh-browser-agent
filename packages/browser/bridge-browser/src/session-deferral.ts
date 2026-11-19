@@ -19,7 +19,7 @@
  * and skill directories need a real agent, so a provisional id answers empty
  * with `provisional: true` instead of materializing on a browse.
  *
- * @module dsh-browser-agent/src/session-deferral
+ * @module @natgurlain/dsh-browser-agent/src/session-deferral
  */
 
 import type { ImageAttachmentLimits } from '@deepseek-ai/dsh-attachment'

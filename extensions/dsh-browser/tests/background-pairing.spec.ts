@@ -6,7 +6,7 @@ import {
   BRIDGE_PROTOCOL_VERSION,
   bridgeEndpointOfUrl,
   createBridgeNonce,
-} from 'dsh-browser-agent/src/protocol.ts'
+} from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import {
   createPairingShare,
   derivePairingKeys,
@@ -14,7 +14,7 @@ import {
   sealPairingToken,
   verifyPairingClientConfirmation,
   type PairingContext,
-} from 'dsh-browser-agent/src/pairing.ts'
+} from '@natgurlain/dsh-browser-agent/src/pairing.ts'
 import { completeHandshake, panelSawConnected } from './support/bridge-handshake.ts'
 import { FakeWebSocket } from './support/fake-websocket.ts'
 import { chromeEvent, panelPort } from './support/chrome.ts'

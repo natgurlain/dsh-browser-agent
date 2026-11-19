@@ -92,9 +92,9 @@ import {
   isRespondResult,
   type BridgeCaps,
   type RespondResult,
-} from 'dsh-browser-agent/src/protocol.ts'
-import type { ServerFrame } from 'dsh-browser-agent/src/protocol.ts'
-import { BRIDGE_CONFIG_PATH, BRIDGE_PATH, DEVTOOLS_CAPS_VERSION, parseBridgeConfigPayload } from 'dsh-browser-agent/src/protocol.ts'
+} from '@natgurlain/dsh-browser-agent/src/protocol.ts'
+import type { ServerFrame } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
+import { BRIDGE_CONFIG_PATH, BRIDGE_PATH, DEVTOOLS_CAPS_VERSION, parseBridgeConfigPayload } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import { BridgeClient, InstalledTokenUnreadableError, loadInstalledToken, type BridgeFailure, type BridgeState } from './bridge.ts'
 import { createRpc } from './rpc.ts'
 import { OutageRecovery } from './outage-recovery.ts'
@@ -169,13 +169,13 @@ import {
   type StandingSummary,
 } from './standing-work.ts'
 import { loadClientIdentity } from './client-identity.ts'
-import type { BridgeClientIdentity } from 'dsh-browser-agent/src/protocol.ts'
+import type { BridgeClientIdentity } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import { ExternalRequesters, isExternalSessionId } from './external-requesters.ts'
 import { chromeDevLoopBrowser, DevLoopController } from './dev-loop.ts'
 import {
   DEFAULT_SNAPSHOT_MAX_CHARS as DEVLOOP_MAX_CHARS,
   DEVLOOP_CAPTURE_TOOL,
-} from 'dsh-browser-agent/src/protocol.ts'
+} from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import { DevToolsError, devToolsSupported } from './debugger-session.ts'
 import { createDevToolsController } from './devtools-controller.ts'
 import {

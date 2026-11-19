@@ -24,7 +24,7 @@
  * @module
  */
 
-import { DEFAULT_SNAPSHOT_MAX_CHARS } from 'dsh-browser-agent/src/protocol.ts'
+import { DEFAULT_SNAPSHOT_MAX_CHARS } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 import { abortRunningActions, runAction, ActionError, resolveActionTarget, typeTargetIsSensitive } from './actions.ts'
 import { describeActionTargets } from './describe.ts'
 import { AgentOverlay, type OverlayCopy, type PointKind } from './overlay.ts'

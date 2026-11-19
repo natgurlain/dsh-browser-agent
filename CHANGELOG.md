@@ -3,6 +3,23 @@
 Each `## vX.Y.Z` section becomes the notes of that GitHub release
 (`scripts/package-release.mjs --notes`), followed by the SHA-256 digests of its assets.
 
+## v0.3.5
+
+- **The plugin package is `@natgurlain/dsh-browser-agent`.** It carries the author's npm
+  scope, like the project's other packages. It was `dsh-browser-agent` from v0.3.1 to
+  v0.3.4; that name is deprecated on npm and gets no further versions. The repository, the
+  extension's name and the release file names have not changed.
+- **Updating.** Run the installer as usual. It removes the registration under either
+  earlier name from the web profile and the DeepSeek Harness desktop app and adds the new
+  one, so exactly one bridge stays registered. Settings saved for an earlier name in DSH's
+  plugin settings (for example `autoReview: false`) are carried over. The extension does
+  not depend on the package name, so an older extension keeps working with this plugin.
+  If you added the plugin with DSH's own plugin command, remove the old package first:
+  `dsh plugin --profile web remove dsh-browser-agent`.
+- **Releases publish the plugin to npm on their own.** The release workflow publishes the
+  same checksummed package the GitHub release carries, by npm trusted publishing, with no
+  token stored anywhere.
+
 ## v0.3.4
 
 - **No more failed `web_fetch` step after reading a page.** Once a conversation has read a

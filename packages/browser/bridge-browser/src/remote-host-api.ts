@@ -6,7 +6,7 @@
  * goes through Connection because it is a Gateway-owned RPC endpoint rather
  * than a Typert Remote method.
  *
- * @module dsh-browser-agent/src/remote-host-api
+ * @module @natgurlain/dsh-browser-agent/src/remote-host-api
  */
 
 import { addAbortListener } from 'node:events'

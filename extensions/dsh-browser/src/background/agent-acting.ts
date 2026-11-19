@@ -13,7 +13,7 @@
  * @module
  */
 
-import { EXTERNAL_SESSION_PREFIX } from 'dsh-browser-agent/src/protocol.ts'
+import { EXTERNAL_SESSION_PREFIX } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 
 /** Idle time after which a caller without a visible turn stops showing as acting. */
 export const IDLE_WITHOUT_TURN_MS = 12_000
