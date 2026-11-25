@@ -100,7 +100,7 @@ describe('session ownership', () => {
       ['session.selectModel', { provider: 'p', model: 'm' }],
     ] as const) {
       expect(await call(method, { sessionId: 'listed', ...payload }), method).toMatchObject({
-        ok: false, error: { code: 'forbidden', message: expect.stringContaining('not created by the browser extension') },
+        ok: false, error: { code: 'forbidden', message: expect.stringContaining('not created by the browser extension'), details: { notBridgeSession: true } },
       })
     }
     expect(forwarded(inner, 'session.prompt').map(([c]) => (c.payload as { sessionId: string }).sessionId)).toEqual(['created'])

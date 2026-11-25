@@ -17,6 +17,7 @@
  */
 
 import {
+  MAX_REVIEW_SCRIPT_CHARS,
   MAX_REVIEW_UNTRUSTED_CHARS,
   type AutoReviewVerb,
   type ConsequenceReason,
@@ -52,6 +53,12 @@ export interface AutoContext {
   tool: string
   /** The call's arguments. */
   args: Record<string, unknown>
+  /**
+   * Every origin the card names is one of the user's own local pages (the
+   * taint exemption's confirmed loopback origins): developer tools there may
+   * go through Auto approve.
+   */
+  localPage?: boolean
 }
 
 /**
@@ -180,8 +187,16 @@ export function autoApprovePath(prompt: ApprovalPrompt, context: AutoContext): A
   if (!context.on) return { kind: 'card', reason: 'off' }
   if (context.external || prompt.requester !== undefined) return { kind: 'card', reason: 'external-session' }
   if (context.optOut === true) return { kind: 'card', reason: 'opted-out' }
-  // The developer-tools allowance is its own consent, unchanged by Auto approve.
-  if (prompt.devTools === true) return { kind: 'card', reason: 'devtools' }
+  // The developer-tools allowance is its own consent, unchanged by Auto approve,
+  // except on the user's own local pages (their dev server): reads run, and
+  // JavaScript or element changes go to the reviewer. Redaction opt-outs and
+  // script-class attribute changes (perCallOnly) always keep their card.
+  if (prompt.devTools === true) {
+    if (context.localPage !== true || prompt.perCallOnly === true || prompt.origins.length === 0) return { kind: 'card', reason: 'devtools' }
+    if (prompt.kind === 'read') return { kind: 'run' }
+    // The reviewer judges code only on its full text: none, or too long to show, keeps the card.
+    return pageScriptText(context.tool, context.args) === undefined ? { kind: 'card', reason: 'devtools' } : { kind: 'review', reasons: ['page-script'] }
+  }
   // A browser permission can only be granted from a click on the card.
   if (prompt.permission !== undefined) return { kind: 'card', reason: 'permission' }
   // A site the user (or an administrator) set to "ask": their narrower rule wins.
@@ -254,6 +269,32 @@ export interface ReviewExtras {
  * path), the destination, and the text to be typed (never into a sensitive
  * field). No page content.
  */
+/**
+ * The full text a page-script step runs or sets, for the reviewer. Empty when
+ * there is none or it is longer than the reviewer may see: the caller then
+ * shows the card ({@link pageScriptReviewable}).
+ */
+export function pageScriptText(tool: string, args: Record<string, unknown>): string | undefined {
+  const text = tool === 'browser_console_eval'
+    ? typeof args.expression === 'string' ? args.expression : undefined
+    : tool === 'browser_devtools_set_element_style'
+      ? Array.isArray(args.properties)
+        ? args.properties.map((entry) => {
+          const record = typeof entry === 'object' && entry !== null ? entry as Record<string, unknown> : {}
+          return `${String(record.name)}: ${String(record.value)}${record.important === true ? ' !important' : ''}`
+        }).join('\n')
+        : undefined
+      : tool === 'browser_devtools_set_element_attribute'
+        ? `${String(args.name)}: ${args.remove === true ? '(remove)' : typeof args.value === 'string' ? args.value : '(read)'}`
+        : undefined
+  return text === undefined || text.trim() === '' || text.length > MAX_REVIEW_SCRIPT_CHARS ? undefined : text
+}
+
+function scriptField(tool: string, args: Record<string, unknown>): { script?: string } {
+  const text = pageScriptText(tool, args)
+  return text === undefined ? {} : { script: text }
+}
+
 export function buildReviewAction(prompt: ApprovalPrompt, tool: string, args: Record<string, unknown>, extras: ReviewExtras, reasons: ConsequenceReason[]): ReviewAction {
   const facts = prompt.review
   const target = found(facts?.targets?.target) ?? found(facts?.targets?.from)
@@ -281,6 +322,7 @@ export function buildReviewAction(prompt: ApprovalPrompt, tool: string, args: Re
       ...put('destination', destination),
       ...tool === 'browser_type' && !sensitive ? put('typed', args.text) : {},
       ...tool === 'browser_press' ? put('key', typeof args.key === 'string' ? args.key.slice(0, 40) : undefined) : {},
+      ...reasons.includes('page-script') ? scriptField(tool, args) : {},
     },
   }
 }

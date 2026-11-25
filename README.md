@@ -69,7 +69,7 @@ The installer installs the bridge plugin and Chrome extension. It downloads one 
 macOS and Linux. Download the installer, check it against the published digest, then run it:
 
 ```sh
-tag=v0.3.5
+tag=v0.3.6
 base=https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag
 curl --proto '=https' --tlsv1.2 -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS"
 grep ' install.sh$' SHA256SUMS | sha256sum -c -    # macOS: shasum -a 256 -c -
@@ -79,7 +79,7 @@ bash install.sh --release "$tag"
 Windows, in PowerShell (the release path of `install.ps1` has not been run on a Windows machine yet):
 
 ```powershell
-$tag = 'v0.3.5'
+$tag = 'v0.3.6'
 $base = "https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag"
 irm "$base/install.ps1" -OutFile install.ps1; irm "$base/SHA256SUMS" -OutFile SHA256SUMS
 $want = (Select-String -Path SHA256SUMS -Pattern ' install\.ps1$').Line.Split(' ')[0]
@@ -90,7 +90,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --release $tag
 The same digests are printed in the notes of each [release](https://github.com/natgurlain/dsh-browser-agent/releases). The shorter form below runs the installer without checking the script first; what the installer downloads is still verified:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.5/install.sh | bash -s -- --release v0.3.5
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.6/install.sh | bash -s -- --release v0.3.6
 ```
 
 `--release latest` installs the newest release instead of a named one. `SHA256SUMS` comes from the same release as the files, so it catches a corrupted, truncated or substituted download, not a release that was itself published by someone who took over the repository or its release workflow; see [RELEASING.md](RELEASING.md#what-verification-covers).
@@ -105,12 +105,12 @@ When the installer opens `chrome://extensions`, follow its instructions to load 
 If you would rather add the plugin with DSH's own plugin command, each release also carries the plugin package and the extension builds on their own:
 
 ```sh
-dsh plugin --profile web add https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.5/dsh-browser-agent-plugin-v0.3.5.tgz
+dsh plugin --profile web add https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.6/dsh-browser-agent-plugin-v0.3.6.tgz
 ```
 
 The plugin package is `@natgurlain/dsh-browser-agent` since v0.3.5; it was `dsh-browser-agent` from v0.3.1 to v0.3.4 and `@natgurlain/dsh-bridge-browser` before. If you added an earlier release this way, remove the old package first, since both would register the same bridge: `dsh plugin --profile web remove dsh-browser-agent` (or `@natgurlain/dsh-bridge-browser`). Settings you saved for an old package are carried over by `node scripts/migrate-bridge-name.mjs ~/.dsh web` from a checkout (the installer does this for you); otherwise save them again in DSH's plugin settings.
 
-Then download `dsh-browser-chrome-v0.3.5.zip` (or the Firefox zip) from the same [release](https://github.com/natgurlain/dsh-browser-agent/releases), unzip it, load it with **Load unpacked** on your browser's extensions page, and open the side panel. An extension installed this way has no token yet: it shows a short code, and typing that code into the card that appears in DSH connects the two. For the DeepSeek Harness desktop app, use the installer above: it registers the plugin with the app for you.
+Then download `dsh-browser-chrome-v0.3.6.zip` (or the Firefox zip) from the same [release](https://github.com/natgurlain/dsh-browser-agent/releases), unzip it, load it with **Load unpacked** on your browser's extensions page, and open the side panel. An extension installed this way has no token yet: it shows a short code, and typing that code into the card that appears in DSH connects the two. For the DeepSeek Harness desktop app, use the installer above: it registers the plugin with the app for you.
 
 ## Core capabilities
 
@@ -159,11 +159,11 @@ Before every click the target's center is hit-tested; a target covered by anothe
 
 ### Auto approve
 
-Like DeepSeek Harness's own auto-approve: switch it on and the agent works without asking. Click **Auto approve** under the message box; the first time, one confirmation states the trade-off. It stays on for that conversation (also after a restart) until you click it again or **Turn off**. Settings → Permissions & safety → *Start conversations in Auto approve* makes it the default (off unless you turn it on).
+Like DeepSeek Harness's own auto-approve: switch it on and the agent works without asking. Click **Auto approve** under the message box; the first time, one confirmation states the trade-off. It stays on for that conversation (also after a restart) until you click it again or **Turn off**. Settings → Permissions & safety → *Start conversations in Auto approve* makes it the default (off unless you turn it on), also for DeepSeek Harness sessions started in the desktop app or `dsh web` that use the browser.
 
 - **Ordinary steps run at once**: no card, no extra model call, no wait. Navigating, clicking, typing, choosing, searching, reading pages and opening tabs all count as ordinary.
 - **Consequential steps are checked silently** by this conversation's model first: buttons, links and forms that send, delete, submit (POST), publish, share, unsubscribe, transfer, pay or buy; password and payment fields; uploads, downloads and file writes; programs, watchers; and the steps the taint rules flag after the agent read untrusted web pages (typing into another site, a URL carrying data, the clipboard). The timeline shows *Checking…*; if the check allows it, it runs with no card. If it objects, times out (8 s) or fails, you get the usual card with the reviewer's one-line reason.
-- **What still asks**: the developer-tools allowance, the first download (Chrome's permission needs your click), sites you set to *Always ask*, strict mode, and conversations of other apps (MCP).
+- **What still asks**: the developer-tools allowance (except on your own local pages, where reads run and page JavaScript is checked first), the first download (Chrome's permission needs your click), sites you set to *Always ask*, strict mode, and conversations of other apps (MCP).
 - **The trade-off**: with Auto approve on, the agent acts without asking; a web page that tricks the model can make it do things you did not ask for. The check sees only your messages, the action, the control's label and the page address, never the page's content, and treats page text as data; a page that fools the agent may still fool it. Turn it off, or set a site to *Always ask*, where that matters. The kill switch stops everything at once, as always.
 - **Record**: every step it passed is marked **Auto** in the timeline ("Auto-approved", or "Auto-approved after a check" with the reviewer's note in the details) and in the audit log. Each check is one extra request to this conversation's model through DSH, on your account.
 - Administrators: managed policy `disableAutoReview`; the bridge plugin config `autoReview: false` removes the check (consequential steps then ask). Design: [docs/auto-approve-design.md](docs/auto-approve-design.md).
@@ -202,7 +202,7 @@ The summary at the end lists where the bridge was registered and what was skippe
 To update, open **Settings → About** in the side panel. The check compares the running version with the latest GitHub release and offers a command that installs exactly that release with the installer already on disk, for example:
 
 ```sh
-DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.3.5
+DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.3.6
 ```
 
 Installer options:
@@ -233,13 +233,13 @@ Open **Settings → Uninstall dsh-browser** in the extension, copy the command, 
 An installation that recorded its location is removed by the uninstaller it has on disk. Otherwise the command fetches the uninstaller published with the extension's own release; it downloads `uninstall.mjs` from that release and runs it only after its SHA-256 matched `SHA256SUMS`. On macOS or Linux:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.5/uninstall.sh | bash -s -- --release v0.3.5
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.6/uninstall.sh | bash -s -- --release v0.3.6
 ```
 
 On Windows:
 
 ```powershell
-& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.5/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s --release v0.3.5 } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
+& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.6/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s --release v0.3.6 } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
 ```
 
 From a checkout, run `bash scripts/uninstall.sh` or `.\scripts\uninstall.ps1`.
@@ -312,5 +312,5 @@ Build, test and release notes for contributors are in [docs/development.md](docs
   - *Your local pages*: local addresses you said are yours (`localhost`, `*.localhost`, `127.0.0.1`, `[::1]`, with their port). An address gets on that list when you link it for the dev loop, answer "Treat pages from localhost:3000 as yours?" on the banner, or add it in Settings. The host name is compared exactly, so `localhost.evil.com` or `127.0.0.1.nip.io` are ordinary web pages. The DSH host's own web UI is never exempt.
   - *Sites you trust*, over https only: sites you added with the banner's **Trust <site>** (a list of its own in Settings; it does not change any approval card), sites with a **Trusted** rule, and **Always-allowed domains**. A Trusted rule or always-allowed domain from before this existed counts only after you confirm it once in Settings ("Keep"). A stricter rule on the same site (blocked, read-only, always ask, the built-in protections) always wins. Unrestricted control, a "trust for this session" answer on an approval card, and administrator rules do not count.
 
-  A conversation stays unrestricted only while everything it read is exempt, counting every frame whose content was read; screenshots, PDFs, developer-tools output and results that carry console errors always restrict it. The first other page restricts it as before, and the exempt pages read earlier are then treated as sources too (also after **Trust** lifted a restriction, and in conversations forked from it). The exceptions never change where data may go: a restricted conversation still asks before sending data to a local address or to a trusted site.
+  A conversation stays unrestricted only while everything it read is exempt, counting every frame whose content was read; screenshots, PDFs, console output and other developer-tools reads restrict it unless every frame in the tab is one of your own local pages, and captured network requests and response bodies always restrict it (they quote every host the page talked to). The first other page restricts it as before, and the exempt pages read earlier are then treated as sources too (also after **Trust** lifted a restriction, and in conversations forked from it). The exceptions never change where data may go: a restricted conversation still asks before sending data to a local address or to a trusted site.
 - **What that leaves open.** A local page that shows content you did not write (a local mail or feed reader, a proxy, a preview of a downloaded file, a dev server rendering user-generated data) and a trusted site that shows other people's content (comments, tickets, mail) can carry instructions aimed at the agent, and a conversation that read only such pages is not restricted. Turn the matching setting off if that applies to you.

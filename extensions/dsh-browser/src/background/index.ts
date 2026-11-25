@@ -2561,6 +2561,8 @@ async function autoApproveCard(prompt: ApprovalPrompt, options: AuthorizeOptions
     ...options.autoOptOut === true ? { optOut: true } : {},
     tool,
     args,
+    // Every origin the card names and every frame in the tab must be the user's own local page.
+    ...prompt.devTools === true ? { localPage: policyRuntime.allLocalPages([...prompt.origins, ...prompt.tabOrigins ?? []]) && (prompt.tabOrigins?.length ?? 0) > 0 } : {},
   })
   if (path.kind === 'card' || sessionId === undefined) return { kind: 'card' }
   const zh = getUiLocale() === 'zh'

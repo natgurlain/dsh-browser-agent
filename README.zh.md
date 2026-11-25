@@ -69,7 +69,7 @@ cd dsh-browser-agent
 macOS 与 Linux。先下载安装器，用已发布的校验值核对，再运行：
 
 ```sh
-tag=v0.3.5
+tag=v0.3.6
 base=https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag
 curl --proto '=https' --tlsv1.2 -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS"
 grep ' install.sh$' SHA256SUMS | sha256sum -c -    # macOS: shasum -a 256 -c -
@@ -79,7 +79,7 @@ bash install.sh --release "$tag"
 Windows（PowerShell；`install.ps1` 的发布版本路径尚未在 Windows 机器上运行过）：
 
 ```powershell
-$tag = 'v0.3.5'
+$tag = 'v0.3.6'
 $base = "https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag"
 irm "$base/install.ps1" -OutFile install.ps1; irm "$base/SHA256SUMS" -OutFile SHA256SUMS
 $want = (Select-String -Path SHA256SUMS -Pattern ' install\.ps1$').Line.Split(' ')[0]
@@ -90,7 +90,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --release $tag
 同样的校验值也印在每个[发布版本](https://github.com/natgurlain/dsh-browser-agent/releases)的说明里。下面的简短形式不会先核对安装脚本本身；安装器下载的内容仍会被校验：
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.5/install.sh | bash -s -- --release v0.3.5
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.6/install.sh | bash -s -- --release v0.3.6
 ```
 
 `--release latest` 安装最新的发布版本，而不是指定的版本。`SHA256SUMS` 与文件来自同一个发布版本，因此它能发现损坏、截断或被替换的下载，但不能防范接管了仓库或发布流程的人所发布的版本；见 [RELEASING.md](RELEASING.md#what-verification-covers)。
@@ -105,12 +105,12 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-
 如果你想用 DSH 自己的插件命令安装，每个发布版本也单独附带了插件包和扩展构建：
 
 ```sh
-dsh plugin --profile web add https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.5/dsh-browser-agent-plugin-v0.3.5.tgz
+dsh plugin --profile web add https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.6/dsh-browser-agent-plugin-v0.3.6.tgz
 ```
 
 从 v0.3.5 起插件包名为 `@natgurlain/dsh-browser-agent`；v0.3.1 至 v0.3.4 为 `dsh-browser-agent`，更早是 `@natgurlain/dsh-bridge-browser`。如果你曾用这种方式安装过更早的版本，请先移除旧包，否则两者会注册同一个桥：`dsh plugin --profile web remove dsh-browser-agent`（或 `@natgurlain/dsh-bridge-browser`）。为旧包保存的设置可以在 checkout 中运行 `node scripts/migrate-bridge-name.mjs ~/.dsh web` 迁移过来（安装器会自动完成）；否则请在 DSH 的插件设置中重新保存。
 
-然后从同一个[发布页](https://github.com/natgurlain/dsh-browser-agent/releases)下载 `dsh-browser-chrome-v0.3.5.zip`（或 Firefox 的 zip），解压后在浏览器的扩展管理页用**加载已解压的扩展程序**加载，再打开侧边栏。这样安装的扩展还没有 token：它会显示一个短码，把它输入 DSH 中出现的卡片即可连接。如果使用 DeepSeek Harness 桌面应用，请使用上面的安装器：它会替你把插件注册到应用中。
+然后从同一个[发布页](https://github.com/natgurlain/dsh-browser-agent/releases)下载 `dsh-browser-chrome-v0.3.6.zip`（或 Firefox 的 zip），解压后在浏览器的扩展管理页用**加载已解压的扩展程序**加载，再打开侧边栏。这样安装的扩展还没有 token：它会显示一个短码，把它输入 DSH 中出现的卡片即可连接。如果使用 DeepSeek Harness 桌面应用，请使用上面的安装器：它会替你把插件注册到应用中。
 
 ## 核心能力
 
@@ -159,11 +159,11 @@ dsh plugin --profile web add https://github.com/natgurlain/dsh-browser-agent/rel
 
 ### 自动批准
 
-与 DeepSeek Harness 自带的自动批准一样：开启后代理直接操作，不再询问。点击输入框下方的 **自动批准**；首次开启时会确认一次并说明代价。它对该对话一直有效（重启后也是），直到您再次点击或点 **关闭**。设置 → 权限与安全 → *新对话默认开启自动批准* 可将其设为默认（默认关闭）。
+与 DeepSeek Harness 自带的自动批准一样：开启后代理直接操作，不再询问。点击输入框下方的 **自动批准**；首次开启时会确认一次并说明代价。它对该对话一直有效（重启后也是），直到您再次点击或点 **关闭**。设置 → 权限与安全 → *新对话默认开启自动批准* 可将其设为默认（默认关闭），也适用于在桌面应用或 `dsh web` 中开始、使用浏览器的 DeepSeek Harness 会话。
 
 - **普通操作立即执行**：没有卡片，不额外调用模型，不等待。跳转、点击、输入、选择、搜索、读取页面和打开标签页都属于普通操作。
 - **重要操作先由本对话的模型静默检查**：发送、删除、提交（POST）、发布、分享、退订、转账、付款或购买的按钮、链接和表单；密码和支付字段；上传、下载和写文件；程序和页面监视器；以及代理读取不可信网页后被污染规则标记的操作（向其他站点输入、携带数据的网址、剪贴板）。时间线显示“正在检查…”；检查通过则直接执行、没有卡片。若检查反对、超时（8 秒）或出错，您会看到常规卡片，并附审核模型的一句理由。
-- **仍会询问的**：开发者工具授权、第一次下载（Chrome 的权限需要您亲手点击）、您设为“总是询问”的站点、严格模式，以及其他应用（MCP）的对话。
+- **仍会询问的**：开发者工具授权（您自己的本地页面除外：读取直接执行，页面 JavaScript 先经检查）、第一次下载（Chrome 的权限需要您亲手点击）、您设为“总是询问”的站点、严格模式，以及其他应用（MCP）的对话。
 - **代价**：开启自动批准后，代理会直接操作而不再询问；如果网页诱骗了模型，它可能会做您没有要求的事。检查只看到您的消息、操作本身、控件标签和页面地址，从不看页面内容，并把页面文字当作数据；能骗过代理的页面也可能骗过它。在重要的地方请关闭它，或把站点设为“总是询问”。紧急停止一如既往立即停止一切。
 - **记录**：每个被自动批准的步骤都会在时间线中标为 **自动**（“已自动批准”，或“检查后已自动批准”，审核模型的说明在步骤详情中），并写入审计日志。每次检查都会通过 DSH 向本对话的模型额外发送一次请求，使用您的账户。
 - 管理员：托管策略 `disableAutoReview`；桥接插件配置 `autoReview: false` 会关闭检查（重要操作随后会询问）。设计见 [docs/auto-approve-design.md](docs/auto-approve-design.md)。
@@ -202,7 +202,7 @@ dsh plugin --profile web add https://github.com/natgurlain/dsh-browser-agent/rel
 更新时，在侧栏打开**设置 → 软件更新**。检查会把当前版本与 GitHub 上的最新发布版本比较，并给出一条用本机已有的安装器安装该版本的命令，例如：
 
 ```sh
-DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.3.5
+DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.3.6
 ```
 
 安装器选项：
@@ -233,13 +233,13 @@ Windows 请在 checkout 中运行 `.\scripts\install.ps1`。拉取或切换版�
 记录了安装位置的安装由本机已有的卸载器移除。否则，命令会获取与扩展自身版本一同发布的卸载器；它从该发布版本下载 `uninstall.mjs`，只有在其 SHA-256 与 `SHA256SUMS` 一致后才运行。macOS 或 Linux：
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.5/uninstall.sh | bash -s -- --release v0.3.5
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.6/uninstall.sh | bash -s -- --release v0.3.6
 ```
 
 Windows 请运行：
 
 ```powershell
-& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.5/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s --release v0.3.5 } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
+& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.6/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s --release v0.3.6 } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
 ```
 
 在源码目录中运行 `bash scripts/uninstall.sh` 或 `.\scripts\uninstall.ps1`。

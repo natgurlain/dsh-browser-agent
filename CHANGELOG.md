@@ -3,6 +3,28 @@
 Each `## vX.Y.Z` section becomes the notes of that GitHub release
 (`scripts/package-release.mjs --notes`), followed by the SHA-256 digests of its assets.
 
+## v0.3.6
+
+Coding no longer stops after the agent uses the browser on your own local page, and Auto
+approve works for conversations started in DeepSeek Harness.
+
+- **Clear works for every conversation.** The banner's **Clear** used to be refused for a
+  conversation started in DeepSeek Harness rather than in the side panel, so shell and file
+  tools stayed paused until DSH restarted. It now resumes them for any conversation.
+- **Your own local pages don't pause coding.** Screenshots, PDFs, console logs, page
+  JavaScript and element inspection no longer pause shell and file tools when every frame
+  in the tab is a local address you confirmed (or a site you trust). Network captures and
+  downloads still pause them, because they carry other sites' responses.
+- **"Start conversations in Auto approve" applies everywhere.** It used to cover only
+  conversations started in the side panel; it now covers conversations started in DeepSeek
+  Harness too.
+- **Auto approve covers developer tools on your local pages.** On a confirmed local page,
+  reads run without a card, and page JavaScript, style and attribute changes go to the
+  reviewer, which now sees the code itself and refuses anything that sends data out. Other
+  pages, and anything too long to show the reviewer, keep the card.
+- **No error for conversations the side panel can't answer.** For a conversation started
+  in DeepSeek Harness the panel now says to reply there, instead of showing an error.
+
 ## v0.3.5
 
 - **The plugin package is `@natgurlain/dsh-browser-agent`.** It carries the author's npm

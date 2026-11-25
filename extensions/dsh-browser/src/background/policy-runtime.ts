@@ -27,6 +27,7 @@ import { matchSitePattern, type SitePolicy, type SiteRuleEntry } from '../securi
 import { resultTaintsSession, TaintTracker, taintKey, UNKNOWN_SOURCE, type TaintRecord } from '../security/taint.ts'
 import {
   allTaintExempt,
+  allLocalExempt,
   anyLocalExempt,
   originTaintExempt,
   TAINT_EXEMPTION_SWITCHES,
@@ -93,13 +94,24 @@ const WHOLE_TAB_PROVENANCE_TOOLS: ReadonlySet<string> = new Set(['browser_dialog
  * loaded between the frame listing and the capture).
  */
 const NEVER_EXEMPT_TOOLS: ReadonlySet<string> = new Set([
-  'browser_downloads', 'browser_screenshot', 'browser_save_pdf',
+  'browser_downloads',
+  // Captured network traffic: requests and response bodies from any host the
+  // page talked to, so even a local page's capture quotes other sites.
+  'browser_devtools_list_requests', 'browser_devtools_get_request', 'browser_devtools_request_body',
   // Their own results carry no frame provenance (a fleet, a watcher): they taint, whatever the
   // tab shows. A program or series approval (`browser_run`) is not here: its answer is fixed text
   // and does not taint at all (taint.ts CONTENT_FREE_TOOLS); its steps are ordinary calls (click,
   // type, select) and are judged as such.
   'browser_fanout', 'browser_watch', 'browser_watches',
 ])
+
+/**
+ * Tools whose result can carry more than the text of the frames they name: a
+ * screenshot or a PDF (pixels of every subresource), and every developer-tools
+ * read (console output, captured traffic, page JavaScript). Exempt only on the
+ * user's own local pages ({@link allLocalExempt}), with the whole tab known.
+ */
+const LOCAL_ONLY_EXEMPT_TOOLS: ReadonlySet<string> = new Set(['browser_screenshot', 'browser_save_pdf'])
 
 /** What the caller knows about a settled result beyond its targets. */
 export interface ResultFacts {
@@ -353,6 +365,11 @@ export class PolicyRuntime {
     }
   }
 
+  /** Whether every origin is one of the user's own local pages (and there is at least one). */
+  allLocalPages(origins: readonly string[]): boolean {
+    return allLocalExempt(origins, this.exemption())
+  }
+
   /** Trusted rules and always-allowed origins waiting for the user's one-time confirmation (keys). */
   unconfirmedTrust(): string[] {
     return unconfirmedTrust(this.exemption())
@@ -381,7 +398,8 @@ export class PolicyRuntime {
   private exemptProvenance(name: string, record: CallRecord | undefined, fallbackOrigin: string | undefined, after: TabProvenance | undefined, facts: ResultFacts): { origins: string[]; local: boolean } | undefined {
     const config = this.exemption()
     if (!config.localPages && !config.trustedSites) return undefined
-    if (NEVER_EXEMPT_TOOLS.has(name) || isDevToolsTool(name) || facts.quotesConsole === true) return undefined
+    if (NEVER_EXEMPT_TOOLS.has(name)) return undefined
+    const localOnly = LOCAL_ONLY_EXEMPT_TOOLS.has(name) || isDevToolsTool(name) || facts.quotesConsole === true
     const origins = new Set<string>()
     const judged = record?.targets !== undefined
     if (judged) {
@@ -390,7 +408,7 @@ export class PolicyRuntime {
     } else if (fallbackOrigin !== undefined) {
       origins.add(fallbackOrigin)
     }
-    const wholeTab = !judged || !record.touched || WHOLE_TAB_PROVENANCE_TOOLS.has(name)
+    const wholeTab = localOnly || !judged || !record.touched || WHOLE_TAB_PROVENANCE_TOOLS.has(name)
     if (after === undefined) {
       if (wholeTab) return undefined
     } else {
@@ -402,6 +420,7 @@ export class PolicyRuntime {
     }
     const list = [...origins]
     const urls = [...record?.urls ?? [], ...after?.urls ?? []]
+    if (localOnly) return allLocalExempt(list, config, urls) ? { origins: list, local: true } : undefined
     return allTaintExempt(list, config, urls) ? { origins: list, local: anyLocalExempt(list, config) } : undefined
   }
 

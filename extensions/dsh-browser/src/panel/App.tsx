@@ -716,6 +716,16 @@ function ApprovalDetailView({ detail, copy }: { detail: ApprovalDetail; copy: Pa
   }
 }
 
+
+/** The bridge refused a prompt or change because DSH, not the panel, started this conversation. */
+function isHostSessionRefusal(cause: unknown): boolean {
+  if (!(cause instanceof PanelRpcError) || cause.code !== 'forbidden') return false
+  const details = cause.details
+  return (typeof details === 'object' && details !== null && (details as { notBridgeSession?: unknown }).notBridgeSession === true)
+    // Bridges older than the flag say it only in the message.
+    || cause.message.includes('was not created by the browser extension')
+}
+
 export function ApprovalDialog({
   request,
   onDecision,
@@ -982,6 +992,9 @@ export function App(): React.JSX.Element {
   const [relayBaseline, setRelayBaseline] = useState<string | null>(null)
   const [settingsSaveError, setSettingsSaveError] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Conversations started in DSH itself: the bridge refuses prompts and changes from the panel (reply in DSH).
+  const [hostSessionIds, setHostSessionIds] = useState<ReadonlySet<string>>(() => new Set())
+  const noteHostSession = (id: string): void => { setHostSessionIds((current) => current.has(id) ? current : new Set([...current, id])) }
   const [showSessionPicker, setShowSessionPicker] = useState(false)
   const [loadingSessions, setLoadingSessions] = useState(false)
   const [sessionChanging, setSessionChanging] = useState(false)
@@ -2109,6 +2122,10 @@ export function App(): React.JSX.Element {
       await refreshSessionPermissions(sessionId)
     } catch (cause) {
       if (sessionRef.current !== sessionId) return
+      if (isHostSessionRefusal(cause)) {
+        noteHostSession(sessionId)
+        return
+      }
       setPermissionError(copy.app.permissionSwitchFailed(describeCatalogFailure(cause)))
     } finally {
       setPermissionBusy(false)
@@ -2538,7 +2555,11 @@ export function App(): React.JSX.Element {
         }).catch(() => {})
       }
     } catch (cause) {
-      if (sessionRef.current === id) {
+      if (sessionRef.current === id && isHostSessionRefusal(cause)) {
+        noteHostSession(id)
+        setWorking(false)
+        if (textOverride === undefined) setDraft((current) => restoreSubmittedDraft(current, submittedDraft))
+      } else if (sessionRef.current === id) {
         setError(imageErrorMessage(cause, copy, imageLimits ?? undefined))
         setWorking(false)
         if (textOverride === undefined) {
@@ -3696,6 +3717,7 @@ export function App(): React.JSX.Element {
       )}
       {error !== null && <div className="error">{error}</div>}
       {notice !== null && <div className="notice">{notice}</div>}
+      {sessionRef.current !== null && hostSessionIds.has(sessionRef.current) && <div className="notice">{copy.app.hostSessionNote}</div>}
       <footer className="composer">
         {showSlashMenu ? (
           <div className="slash-menu" role="listbox" aria-label={copy.app.slashMenu} ref={slashMenuRef}>
@@ -3840,7 +3862,7 @@ export function App(): React.JSX.Element {
               void addImageFiles(files)
             }}
             placeholder={state === 'connected' ? copy.app.connectedPlaceholder : copy.app.disconnectedPlaceholder}
-            disabled={!sessionReady || busy}
+            disabled={!sessionReady || busy || (sessionRef.current !== null && hostSessionIds.has(sessionRef.current))}
             rows={2}
           />
           <div className="composer-actions">

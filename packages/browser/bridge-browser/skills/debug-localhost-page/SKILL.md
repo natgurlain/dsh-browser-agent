@@ -9,10 +9,12 @@ Use this skill while you are developing a web app that the user runs locally (`h
 
 ## Before you start: taint
 
-In a DSH coding session, the first successful `browser_*` result marks the session as having read web content. From then on, file edits, shell commands and other write tools are **blocked until the user clears it** in the browser side panel. Plan for this:
+In a DSH coding session, a `browser_*` result from an untrusted page marks the session as having read web content. From then on, file edits, shell commands and other write tools are **blocked until the user clears it** in the browser side panel (Clear on the untrusted-content banner, which also works for sessions started in the DSH desktop app or `dsh web`).
 
-- **Preferred:** ask the user to link the tab to this session (side panel → Settings → **Dev loop**; the Host must have `devLoop.enabled: true`, and this session must be on a restricted permission preset, not full access). After each turn that edits files, you then receive the page's console errors, failed requests and DOM changes as context, without calling browser tools yourself, so your edit tools stay available.
-- Otherwise, gather the browser evidence first, then ask the user to clear the taint before you edit. Delegating with `delegate_browser_task` keeps snapshots out of your context, but its summary taints your session too.
+Your own dev server does not count once the user has said it is theirs: when every frame of the tab is a local origin the user confirmed (Trust on the banner, the dev loop link, or Settings), snapshots, screenshots, console logs and element inspection leave your edit tools on. Captured network requests and response bodies (`browser_devtools_list_requests`, `browser_devtools_get_request`, `browser_devtools_request_body`) always taint, since they quote other hosts; prefer the console and failed-request lines in action results. A page that embeds another site (an iframe, a third-party widget) still taints.
+
+- If the session gets tainted by your local page, ask the user to click **Trust** for that local address on the banner (it lifts the restriction and covers later reads), or **Clear**.
+- The dev loop (side panel → Settings → **Dev loop**; the Host needs `devLoop.enabled: true`, and this session a restricted permission preset) sends console errors, failed requests and DOM changes after each turn that edits files, without browser calls of your own.
 
 ## Steps
 

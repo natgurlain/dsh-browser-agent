@@ -120,7 +120,7 @@ const DEFAULT_DEFER_SESSION_CREATE = true
 const DEFAULT_BEACON = true
 
 /** Reported to MCP clients as the server version; manifest.spec checks it equals package.json's. */
-export const BRIDGE_PACKAGE_VERSION = '0.3.5'
+export const BRIDGE_PACKAGE_VERSION = '0.3.6'
 
 /** Instance metadata the discovery endpoints advertise for the extension's picker. */
 const INSTANCE_INFO = { pid: process.pid, startedAt: new Date().toISOString() }
@@ -450,9 +450,14 @@ function mountBridge(
         ctx.logger.warn(`browser bridge: could not record the paired extension (it stays allowed until dsh restarts): ${errorMessage(error)}`)
       })
     },
-    // An MCP client's external session is the bridge's own: the panel may clear its taint too.
+    // The panel may clear the taint of any session it can see: its own, an MCP
+    // client's external session, and a DSH session started elsewhere (the
+    // desktop app, `dsh web`) that used the browser tools. The guard blocks
+    // those sessions' shell and edit tools too, and the panel's Clear is the
+    // only way to lift it short of restarting DSH, so requiring ownership
+    // left such a session read-only for good.
     api: withDevLoopMethods(withTaintMethods(fenced, taint, async (sessionId, signal) =>
-      ledger.external(sessionId) !== undefined || fenced.allowsSession(sessionId, signal, 'own')), devLoop),
+      ledger.external(sessionId) !== undefined || fenced.allowsSession(sessionId, signal, 'read')), devLoop),
     sessionScope: fenced,
     sessionLineage: taint,
     allowedChromeExtensionIds: [...resolved.allowedChromeExtensionIds, ...paired.chromeIds()],

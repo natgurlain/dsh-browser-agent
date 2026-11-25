@@ -93,7 +93,7 @@ Cards that can still appear with Auto approve on:
 | Card | Why it stays |
 |---|---|
 | A consequential step the reviewer denied, or could not review (timeout, error, no reviewer on an old bridge or host) | The design: the reviewer's "no" or silence goes to the user, with one line saying why. |
-| The developer-tools allowance (console, DOM edits, network) | A consent of its own (and its own Settings switch), unchanged by Auto approve. |
+| The developer-tools allowance (console, DOM edits, network) on any page but the user's own local pages | A consent of its own (and its own Settings switch), unchanged by Auto approve. On a confirmed local origin (the taint exemption's own list) developer-tools reads run and JavaScript or element changes go to the reviewer (reason `page-script`); redaction opt-outs and script-class attribute changes keep their card everywhere. |
 | The first download (`permission: 'downloads'`) | Chrome grants an optional permission only from a user gesture on the card. Later downloads are covered. |
 | A site the user or an administrator set to **Always ask** | The user's own, narrower instruction for that site wins. It is also the way to keep a site out of Auto approve. Every forced card built from a policy decision carries its causes (`forcedBy`): element actions, navigation, new tabs, fleets, developer tools, site-driver requests and page watchers (a watcher now evaluates the watched page's site rules: a blocked or read-only page refuses it, an "Always ask" page keeps its card). |
 | Strict mode's commit gate (a site or session in strict mode) | Strict mode is the user's explicit "hold every write on this site for me". |
@@ -200,14 +200,13 @@ tools read-only in a session tainted by web pages until the user clears it
   so service-worker and browser restarts do not turn it off. No timer, no
   per-message or per-hour caps.
 * **Setting:** Permissions & safety → "Start conversations in Auto approve"
-  (default off): every side-panel conversation the user did not switch starts
-  on. A conversation switched off stays off. It applies only to conversations
-  the side panel created or the user prompted from it: a DeepSeek Harness
-  session started in the terminal or the CLI with the browser plugin can also
-  drive the browser (the bridge sends an unbound session's calls to the most
-  recently active browser, and only `mcp-` sessions count as external), and
-  such a session never starts in Auto approve; the toggle can still turn it
-  on explicitly. The list of panel conversations is kept in `chrome.storage.session` (it survives service-worker restarts; after a browser restart a conversation joins it again with its next panel prompt).
+  (default off): every DeepSeek Harness conversation that uses the browser
+  and that the user did not switch starts on, including sessions started in
+  the desktop app, `dsh web` or the CLI (the bridge sends an unbound
+  session's calls to the most recently active browser). Those sessions cannot
+  be prompted from the panel, so a panel-only default left them asking for
+  every step. A conversation switched off stays off. MCP clients' sessions
+  (`mcp-`) are never covered.
 * **Restarts:** until the stored choices have loaded, nothing counts as on
   unless chosen in this worker, and the decision waits for them, so a
   conversation switched off never briefly reads as the Setting's "on". Over

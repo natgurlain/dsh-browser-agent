@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { BridgeServer } from '../src/server.ts'
@@ -7,13 +7,14 @@ import { fakeContext } from './support/fake-ctx.ts'
 import { tempDirs } from './support/tmp.ts'
 
 const PDF = Buffer.from('%PDF-1.7\n%test\n').toString('base64')
+// Real paths: macOS puts the temp dir behind the /var -> /private/var symlink, and the writer resolves it.
 const tempDir = tempDirs('dsh-pdf-')
 
 function harness(result: unknown, mode: string | null = 'workspace-write') {
   const sandboxPolicy = { resolve: vi.fn(() => ({ mode })) }
   const { ctx, definitions: registered } = fakeContext({ get: (name: string) => (name === 'sandboxPolicy' && mode !== null ? sandboxPolicy : undefined) })
   const requestTool = vi.fn(async () => result)
-  const root = tempDir()
+  const root = realpathSync(tempDir())
   const workspace = join(root, 'workspace')
   registerPdfTool(ctx, { requestTool } as unknown as BridgeServer, { toolTimeoutMs: 1_000, workspacePath: workspace })
   const execute = registered[0]!.execute as (args: unknown, exec: unknown) => Promise<{ text: string; path: string; bytes: number }>
@@ -23,7 +24,7 @@ function harness(result: unknown, mode: string | null = 'workspace-write') {
 describe('browser_save_pdf', () => {
   it('writes the rendered PDF into the session workspace through the shared writer', async () => {
     const { execute, requestTool, workspace } = harness({ pdf: { data: PDF, title: 'Quarterly: report?', url: 'https://example.com/q' } })
-    const cwd = tempDir()
+    const cwd = realpathSync(tempDir())
     const exec = { signal: new AbortController().signal, agent: { id: 'session-1', session: { header: { cwd } } } }
     const result = await execute({ landscape: true }, exec)
     expect(requestTool).toHaveBeenCalledWith('browser_save_pdf', { landscape: true }, exec.signal, 1_000, 'session-1')

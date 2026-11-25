@@ -92,6 +92,13 @@ export interface ApprovalPrompt {
   binding?: string
   /** Origin a developer-tools session grant from this card would cover. */
   grantOrigin?: string
+  /**
+   * Developer-tools cards: the origins of every frame in the tab when the card
+   * was built (whole-tab reads such as console and network quote all of them).
+   * Auto approve covers the card only when each is the user's own local page.
+   * Not part of the binding.
+   */
+  tabOrigins?: string[]
   /** This call needs its own approval; no setting or session grant covers it. */
   perCallOnly?: true
   /** The destination URL carries a long or high-entropy value: trusted origins do not skip it. */

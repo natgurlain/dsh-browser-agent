@@ -556,6 +556,8 @@ export interface PanelCopy {
     organizingResults: string
     thinking: string
     connectedPlaceholder: string
+    /** A conversation started in DSH itself (desktop app, dsh web): the panel can watch it, not prompt it. */
+    hostSessionNote: string
     disconnectedPlaceholder: string
     composerHelp: string
     sendMessage: string
@@ -1234,6 +1236,7 @@ const EN: PanelCopy = {
     organizingResults: 'Organizing results',
     thinking: 'Thinking',
     connectedPlaceholder: 'Tell me what you want to do on this page…',
+    hostSessionNote: 'This conversation was started in DeepSeek Harness. Reply to it there; this panel shows its browser steps and approval cards, and Clear on the banner works here.',
     disconnectedPlaceholder: 'Connect to dsh to get started',
     composerHelp: 'Enter to send · Shift + Enter for a new line',
     sendMessage: 'Send message',
@@ -1914,6 +1917,7 @@ const ZH: PanelCopy = {
     organizingResults: '正在整理结果',
     thinking: '正在思考',
     connectedPlaceholder: '告诉我想在这个页面做什么…',
+    hostSessionNote: '此对话是在 DeepSeek Harness 中开始的，请在那里回复；此面板会显示它的浏览器步骤和审批卡片，横幅上的「清除」在这里同样有效。',
     disconnectedPlaceholder: '连接 dsh 后即可开始',
     composerHelp: 'Enter 发送 · Shift + Enter 换行',
     sendMessage: '发送消息',

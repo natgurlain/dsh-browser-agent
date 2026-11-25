@@ -114,8 +114,9 @@ describe('the Auto approve toggle', () => {
     expect(parseAutoReviewState({ offered: 'yes', unavailable: 'nope', startOn: 1, sessions: { a: true, b: 'x', c: { on: true } } }))
       .toEqual({ offered: false, startOn: false, reviewer: false, sessions: { a: true }, panel: [] })
     expect(autoApproveOnFor({ ...STATE, startOn: true, panel: ['new'] }, 'new')).toBe(true)
-    // The Setting applies only to side-panel conversations (a terminal or CLI session stays off).
-    expect(autoApproveOnFor({ ...STATE, startOn: true }, 'tui-session')).toBe(false)
+    // The Setting also covers DSH sessions started outside the panel (desktop app, dsh web, CLI).
+    expect(autoApproveOnFor({ ...STATE, startOn: true }, 'tui-session')).toBe(true)
+    expect(autoApproveOnFor({ ...STATE, startOn: true, sessions: { 'tui-session': false } }, 'tui-session')).toBe(false)
     expect(autoApproveOnFor({ ...STATE, startOn: true, offered: false }, 'new')).toBe(false)
     expect(autoApproveOnFor({ ...STATE, sessions: { a: true } }, 'a')).toBe(true)
     expect(autoApproveOnFor(STATE, null)).toBe(false)

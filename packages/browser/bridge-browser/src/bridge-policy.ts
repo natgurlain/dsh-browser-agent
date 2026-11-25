@@ -184,8 +184,8 @@ export interface BridgePolicyApi extends BrowserHostApi {
   forgetSession(sessionId: string): void
 }
 
-function forbidden(message: string): HostRpcResult {
-  const error: HostRpcFailure = { code: 'forbidden', message, details: {} }
+function forbidden(message: string, details: Record<string, unknown> = {}): HostRpcResult {
+  const error: HostRpcFailure = { code: 'forbidden', message, details }
   return { ok: false, error }
 }
 
@@ -423,7 +423,8 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
       return forbidden(`session ${JSON.stringify(sessionId)} is not available to the browser extension`)
     }
     if (sessionId !== undefined && writeMethod && !await allowsSession(sessionId, call.signal, 'own')) {
-      return forbidden(NOT_BRIDGE_SESSION(sessionId))
+      // Flagged so the panel can say "reply in DSH" instead of showing an error.
+      return forbidden(NOT_BRIDGE_SESSION(sessionId), { notBridgeSession: true })
     }
     if (sessionId !== undefined && FULL_ACCESS_GATED_METHODS.has(call.method)) {
       const permission = call.method === 'commands.execute' && typeof payload.line === 'string'

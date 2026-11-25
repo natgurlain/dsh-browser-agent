@@ -222,6 +222,17 @@ export function allTaintExempt(origins: readonly string[], config: TaintExemptio
   return origins.length > 0 && origins.every((origin) => originTaintExempt(origin, config, urls))
 }
 
+/**
+ * Whether every origin is exempt as one of the user's own local pages (and
+ * there is at least one). The bar for results that can carry more than the
+ * frames' text (a screenshot's pixels, console output, captured traffic,
+ * page JavaScript): only the user's own dev server is trusted with those,
+ * the same trust the dev loop already gives its console and network reports.
+ */
+export function allLocalExempt(origins: readonly string[], config: TaintExemptionConfig, urls: readonly string[] = []): boolean {
+  return origins.length > 0 && origins.every((origin) => localPageExempt(origin, config) && originTaintExempt(origin, config, urls))
+}
+
 /** Whether any of the origins is exempt as a local page (the bridge may refuse those separately). */
 export function anyLocalExempt(origins: readonly string[], config: TaintExemptionConfig): boolean {
   return origins.some((origin) => localPageExempt(origin, config))

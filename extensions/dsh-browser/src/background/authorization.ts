@@ -104,6 +104,8 @@ export function devToolsApprovalForCall(
     devTools: true,
     ...details.length === 0 ? {} : { details },
     ...grantOrigin === undefined ? {} : { grantOrigin },
+    // Every frame counts, and one whose origin cannot be told counts as not local.
+    tabOrigins: frames.every((frame) => effectiveFrameOrigin(frame, frames) !== undefined) ? uniqueOrigins(frames, frames) : [],
     ...perCallOnly ? { perCallOnly: true as const } : {},
     binding: approvalBinding({
       action: call.name,

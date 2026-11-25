@@ -125,15 +125,18 @@ export class AutoApproveRegistry {
 
   /**
    * Whether Auto approve is on for one conversation: its explicit choice,
-   * else the Setting, which applies only to conversations prompted from the
-   * side panel. Before the stored choices load, only a choice made in this
+   * else the Setting. The Setting covers every DSH conversation that uses the
+   * browser, including ones started in the DSH desktop app or `dsh web`
+   * (they cannot be prompted from the panel, so a panel-only default left
+   * them asking for every step). MCP clients' sessions are excluded by the
+   * caller. Before the stored choices load, only a choice made in this
    * worker counts (a stored "off" must not read as the Setting's "on").
    */
   isOn(sessionId: string | undefined, startOn: boolean): boolean {
     if (sessionId === undefined || sessionId === '') return false
     const choice = this.choices.get(sessionId)
     if (choice !== undefined) return choice
-    return this.loaded && startOn && this.panel.has(sessionId)
+    return this.loaded && startOn
   }
 
   /** The user prompted this conversation from the side panel: the Setting applies to it. */

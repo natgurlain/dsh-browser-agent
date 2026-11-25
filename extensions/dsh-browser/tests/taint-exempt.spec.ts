@@ -357,7 +357,7 @@ describe('local pages do not taint', () => {
     expect(h.policy.recordResult(inner, true, LOCAL, tabProvenanceOf(frames))).toEqual({ exempt: false })
   })
 
-  it('F5: a result that carries the tab\'s console text, a screenshot and a PDF always taint', () => {
+  it('F5: console text, screenshots, PDFs and developer-tools reads are exempt only when the whole tab is the user\'s own local pages', () => {
     const h = harness()
     const frames = [
       { frameId: 0, parentFrameId: -1, url: `${LOCAL}/` },
@@ -367,16 +367,23 @@ describe('local pages do not taint', () => {
     const click = { id: 'click', name: 'browser_click', args: { index: 1 }, sessionId: 's1' }
     h.policy.hook('click', 's1', false)(click, callPolicyTargets(click, frames))
     expect(h.policy.recordResult(click, true, LOCAL, tabProvenanceOf(frames))).toMatchObject({ exempt: true })
-    // ...but not when its result quotes console errors, which come from any frame of the tab.
+    // ...but not when its result quotes console errors and another site's frame is in the tab.
     const noisy = { id: 'noisy', name: 'browser_click', args: { index: 1 }, sessionId: 's2' }
     h.policy.hook('noisy', 's2', false)(noisy, callPolicyTargets(noisy, frames))
     expect(h.policy.recordResult(noisy, true, LOCAL, tabProvenanceOf(frames), { quotesConsole: true })).toEqual({ exempt: false })
-    // Even on a page with no other frame: the text quotes whatever the page talked to.
-    expect(read(h, 's3', [LOCAL], { name: 'browser_type', quotesConsole: true, after: { top: LOCAL, frames: [LOCAL], opaque: false } })).toEqual({ exempt: false })
-    // Pixels of every subresource and frame, whatever served them.
+    // A tab of only the user's own local page: console text is the dev server's own (as the dev loop reports it).
+    expect(read(h, 's3', [LOCAL], { name: 'browser_type', quotesConsole: true, after: { top: LOCAL, frames: [LOCAL], opaque: false } })).toEqual({ exempt: true, local: true })
+    // The tab unknown: taints.
+    expect(read(h, 's3b', [LOCAL], { name: 'browser_type', quotesConsole: true })).toEqual({ exempt: false })
     for (const name of ['browser_screenshot', 'browser_save_pdf']) {
-      expect(read(h, `s-${name}`, [LOCAL], { name, after: { top: LOCAL, frames: [LOCAL], opaque: false } }), name).toEqual({ exempt: false })
-      expect(h.policy.get(`s-${name}`)).toBeDefined()
+      // Pixels of a local-only tab: exempt.
+      expect(read(h, `s-${name}`, [LOCAL], { name, after: { top: LOCAL, frames: [LOCAL], opaque: false } }), name).toEqual({ exempt: true, local: true })
+      expect(h.policy.get(`s-${name}`)).toBeUndefined()
+      // A cross-origin frame, an unconfirmed loopback origin, or a trusted remote site: taints.
+      expect(read(h, `x-${name}`, [LOCAL], { name, after: { top: LOCAL, frames: [LOCAL, EVIL], opaque: false } }), name).toEqual({ exempt: false })
+      expect(read(h, `u-${name}`, ['http://localhost:8080'], { name, after: { top: 'http://localhost:8080', frames: ['http://localhost:8080'], opaque: false } }), name).toEqual({ exempt: false })
+      expect(read(h, `t-${name}`, [TRUSTED], { name, after: { top: TRUSTED, frames: [TRUSTED], opaque: false } }), name).toEqual({ exempt: false })
+      expect(h.policy.get(`t-${name}`)).toBeDefined()
     }
   })
 
@@ -424,13 +431,22 @@ describe('local pages do not taint', () => {
     expect(read(h, 's3', [LOCAL])).toEqual({ exempt: false })
     expect(h.policy.recordSelection('s4', undefined)).toEqual({ exempt: false })
     expect(h.policy.get('s4')?.sources).toEqual([UNKNOWN_SOURCE])
-    // Developer-tools output quotes whatever the page talked to (response bodies, console text).
-    for (const name of ['browser_devtools_request_body', 'browser_console_logs', 'browser_console_eval', 'browser_devtools_elements']) {
+    // Developer-tools output quotes whatever the page talked to: exempt only on a tab of the user's own local pages.
+    // Captured network traffic quotes every host the page talked to: never exempt, even on a local tab.
+    for (const name of ['browser_devtools_request_body', 'browser_devtools_get_request', 'browser_devtools_list_requests']) {
+      const network = { id: `nw-${name}`, name, args: {}, sessionId: `nw-${name}` }
+      expect(h.policy.recordResult(network, true, LOCAL, { top: LOCAL, frames: [LOCAL], opaque: false }), name).toEqual({ exempt: false })
+    }
+    for (const name of ['browser_console_logs', 'browser_console_eval', 'browser_devtools_elements']) {
       const devtools = { id: `dt-${name}`, name, args: {}, sessionId: `dt-${name}` }
       h.policy.hook(devtools.id, devtools.sessionId, false)(devtools, { reads: [LOCAL], acts: [], pageOrigin: LOCAL })
-      expect(h.policy.recordResult(devtools, true, LOCAL, { top: LOCAL, frames: [LOCAL], opaque: false }), name).toEqual({ exempt: false })
+      expect(h.policy.recordResult(devtools, true, LOCAL, { top: LOCAL, frames: [LOCAL], opaque: false }), name).toEqual({ exempt: true, local: true })
       // Also on the path the worker takes for them: no recorded targets, only the tab.
-      expect(h.policy.recordResult({ ...devtools, id: `${devtools.id}-bare`, sessionId: `${devtools.sessionId}-bare` }, true, undefined, { top: LOCAL, frames: [LOCAL], opaque: false }), name).toEqual({ exempt: false })
+      expect(h.policy.recordResult({ ...devtools, id: `${devtools.id}-bare`, sessionId: `${devtools.sessionId}-bare` }, true, undefined, { top: LOCAL, frames: [LOCAL], opaque: false }), name).toEqual({ exempt: true, local: true })
+      // Tab unknown, another site's frame, or a trusted remote site: taints.
+      expect(h.policy.recordResult({ ...devtools, id: `${devtools.id}-nt`, sessionId: `${devtools.sessionId}-nt` }, true, LOCAL), name).toEqual({ exempt: false })
+      expect(h.policy.recordResult({ ...devtools, id: `${devtools.id}-x`, sessionId: `${devtools.sessionId}-x` }, true, LOCAL, { top: LOCAL, frames: [LOCAL, EVIL], opaque: false }), name).toEqual({ exempt: false })
+      expect(h.policy.recordResult({ ...devtools, id: `${devtools.id}-t`, sessionId: `${devtools.sessionId}-t` }, true, TRUSTED, { top: TRUSTED, frames: [TRUSTED], opaque: false }), name).toEqual({ exempt: false })
     }
     // A fleet and a watcher taint as before, even with only local frames in the tab.
     for (const name of ['browser_fanout', 'browser_watch', 'browser_watches']) {

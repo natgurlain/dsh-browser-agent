@@ -135,15 +135,25 @@ export type AutoReviewVerb = typeof AUTO_REVIEW_VERBS[number]
  * - `program`: a `browser_run` program or a "do the remaining N" series.
  * - `standing`: a watcher that can start the agent later, or a site driver request.
  * - `url-risk`: the destination address carries a long or high-entropy value.
+ * - `page-script`: a developer-tools write on the user's own local page (running
+ *   JavaScript in it, changing an element's style or attribute).
  */
 export const CONSEQUENCE_REASONS = [
   'commit-words', 'high-risk-words', 'submits-form', 'sensitive-field', 'tainted', 'files', 'program', 'standing', 'url-risk',
+  'page-script',
 ] as const
 
 export type ConsequenceReason = typeof CONSEQUENCE_REASONS[number]
 
 /** Longest untrusted (page- or agent-authored) string a review request may carry (UTF-16 code units). */
 export const MAX_REVIEW_UNTRUSTED_CHARS = 200
+
+/**
+ * Longest page-script source a review request may carry (UTF-16 code units):
+ * the reviewer judges JavaScript, a style or an attribute value only on its
+ * full text, so a longer one is never sent for review (the card shows).
+ */
+export const MAX_REVIEW_SCRIPT_CHARS = 2_000
 
 /**
  * One consequential action as the extension computed it, for the reviewer.
@@ -178,6 +188,11 @@ export interface ReviewAction {
     key?: string
     /** The card's one-line summary, for actions without an element (programs, watchers). */
     summary?: string
+    /**
+     * `page-script` only: the full JavaScript to run, or `name: value` of the
+     * style or attribute to set, up to {@link MAX_REVIEW_SCRIPT_CHARS}.
+     */
+    script?: string
   }
 }
 
@@ -236,7 +251,7 @@ export function parseReviewAction(value: unknown): ReviewAction | undefined {
   const untrusted = raw.untrusted
   if (typeof untrusted !== 'object' || untrusted === null || Array.isArray(untrusted)) return undefined
   const fields = untrusted as Record<string, unknown>
-  const known = new Set<string>(UNTRUSTED_KEYS)
+  const known = new Set<string>([...UNTRUSTED_KEYS, 'script'])
   if (Object.keys(fields).some((key) => !known.has(key))) return undefined
   const out: ReviewAction['untrusted'] = {}
   for (const key of UNTRUSTED_KEYS) {
@@ -244,6 +259,11 @@ export function parseReviewAction(value: unknown): ReviewAction | undefined {
     if (field === undefined) continue
     if (typeof field !== 'string' || field.length > MAX_REVIEW_UNTRUSTED_CHARS) return undefined
     out[key] = field
+  }
+  const script = fields.script
+  if (script !== undefined) {
+    if (typeof script !== 'string' || script.length > MAX_REVIEW_SCRIPT_CHARS || !(raw.reasons as unknown[]).includes('page-script')) return undefined
+    out.script = script
   }
   return {
     tool: raw.tool,
