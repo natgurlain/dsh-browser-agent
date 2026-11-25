@@ -260,9 +260,12 @@ export function parseReviewAction(value: unknown): ReviewAction | undefined {
     if (typeof field !== 'string' || field.length > MAX_REVIEW_UNTRUSTED_CHARS) return undefined
     out[key] = field
   }
+  // A page-script step is judged on its script: one without it is refused, and a script needs that reason.
   const script = fields.script
+  const pageScript = (raw.reasons as unknown[]).includes('page-script')
+  if (script === undefined ? pageScript : !pageScript) return undefined
   if (script !== undefined) {
-    if (typeof script !== 'string' || script.length > MAX_REVIEW_SCRIPT_CHARS || !(raw.reasons as unknown[]).includes('page-script')) return undefined
+    if (typeof script !== 'string' || script.trim() === '' || script.length > MAX_REVIEW_SCRIPT_CHARS) return undefined
     out.script = script
   }
   return {

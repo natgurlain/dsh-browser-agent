@@ -3385,8 +3385,9 @@ async function dispatchDevToolsTool(call: ToolCall, activeCall: ActiveToolCall, 
   const prompt = decision.kind === 'force'
     ? forcedApprovalPrompt(call, frames, decision.reasons, undefined, {}, decision.causes)
     : devToolsApprovalForCall(call, frames)
-  const authorization = await auditedAuthorize(activeCall, (shown, onPrompt) => authorizeToolCall(
-    shown, signal, target.windowId ?? 0, { sessionId: call.sessionId, tabId: target.id, toolCallId: call.id, onPrompt },
+  // Auto approve needs the call itself: its arguments are the script the reviewer reads.
+  const authorization = await auditedAuthorize(activeCall, (shown, onPrompt, onAuto) => authorizeToolCall(
+    shown, signal, target.windowId ?? 0, { sessionId: call.sessionId, tabId: target.id, toolCallId: call.id, onPrompt, auto: { call, onAuto } },
   ))(prompt)
   if (signal.aborted) return devToolsCancelled()
   if (authorization !== 'approved') {

@@ -105,7 +105,7 @@ export function devToolsApprovalForCall(
     ...details.length === 0 ? {} : { details },
     ...grantOrigin === undefined ? {} : { grantOrigin },
     // Every frame counts, and one whose origin cannot be told counts as not local.
-    tabOrigins: frames.every((frame) => effectiveFrameOrigin(frame, frames) !== undefined) ? uniqueOrigins(frames, frames) : [],
+    tabOrigins: allFramesVouchable(frames) ? uniqueOrigins(frames, frames) : [],
     ...perCallOnly ? { perCallOnly: true as const } : {},
     binding: approvalBinding({
       action: call.name,
@@ -505,9 +505,38 @@ function effectiveFrameOrigin(frame: TabFrame, frames: TabFrame[], visited = new
  * page's effective origin and the effective origins of every frame. `opaque`
  * when the top page has no web origin.
  */
-export function tabProvenanceOf(frames: TabFrame[]): { top?: string; frames: string[]; opaque: boolean; urls: string[] } {
+export function tabProvenanceOf(frames: TabFrame[]): { top?: string; frames: string[]; opaque: boolean; unvouchable: boolean; urls: string[] } {
   const top = uniqueOrigins(frames.filter((frame) => frame.frameId === 0), frames)[0]
-  return { ...top === undefined ? {} : { top }, frames: uniqueOrigins(frames, frames), opaque: top === undefined, urls: frameUrls(frames, frames) }
+  return {
+    ...top === undefined ? {} : { top },
+    frames: uniqueOrigins(frames, frames),
+    opaque: top === undefined,
+    unvouchable: !allFramesVouchable(frames),
+    urls: frameUrls(frames, frames),
+  }
+}
+
+/**
+ * Whether every frame's content can be attributed to a web origin, for the
+ * taint exemption and Auto approve's "your own local page" test. Cards and
+ * grants still name a `data:`, `about:blank` or opaque `blob:` frame by its
+ * parent (effectiveFrameOrigin), but its content need not come from that
+ * parent: a cross-origin child can navigate itself to `data:` or
+ * `about:blank`, and a sandboxed frame has an opaque origin. Only
+ * `about:srcdoc`, whose content the parent's own markup supplies, inherits.
+ */
+export function allFramesVouchable(frames: TabFrame[]): boolean {
+  return frames.every((frame) => vouchedFrameOrigin(frame, frames) !== undefined)
+}
+
+function vouchedFrameOrigin(frame: TabFrame, frames: TabFrame[], visited = new Set<number>()): string | undefined {
+  if (visited.has(frame.frameId)) return undefined
+  visited.add(frame.frameId)
+  const direct = originFromUrl(frame.url)
+  if (direct !== undefined) return direct
+  if (frame.url !== 'about:srcdoc') return undefined
+  const parent = frames.find((candidate) => candidate.frameId === frame.parentFrameId)
+  return parent === undefined ? undefined : vouchedFrameOrigin(parent, frames, visited)
 }
 
 export function originFromUrl(value: string): string | undefined {

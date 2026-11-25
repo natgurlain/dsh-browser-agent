@@ -3,6 +3,23 @@
 Each `## vX.Y.Z` section becomes the notes of that GitHub release
 (`scripts/package-release.mjs --notes`), followed by the SHA-256 digests of its assets.
 
+## v0.3.7
+
+Fixes from a review of v0.3.6.
+
+- **Auto approve now reviews page JavaScript, as v0.3.6 said it would.** Developer-tools
+  calls did not hand their arguments to Auto approve, so page JavaScript, style and
+  attribute changes on your local page still showed a card. The reviewer now gets them.
+- **The reviewer sees everything that decides what a script does.** Besides the code it is
+  shown the full target selector, the frame, whether a style change edits a whole
+  stylesheet rule, and whether JavaScript waits for a promise. A hidden line break
+  (U+2028) shows as a real one, and invisible Unicode tag characters are removed.
+- **A frame with no web address of its own no longer counts as your local page.** A `data:`,
+  `about:blank` or sandboxed frame used to count as the page around it, so a third-party
+  widget that turned itself into a `data:` page could be read without pausing coding. Such
+  a tab now pauses coding and keeps its developer-tools cards. `srcdoc` frames, which the
+  page writes itself, still count as the page.
+
 ## v0.3.6
 
 Coding no longer stops after the agent uses the browser on your own local page, and Auto

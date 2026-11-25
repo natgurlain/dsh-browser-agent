@@ -179,10 +179,17 @@ function untrusted(value: string): string {
   return value.replace(/[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, 200)
 }
 
-/** Page-script source as the reviewer sees it: whole, with invisible and bidi-control characters made visible as spaces (they could hide code). */
+/**
+ * Page-script source as the reviewer sees it: whole. Every character a script
+ * engine treats as a line break becomes a plain newline (U+2028 can end a
+ * `//` comment while looking like the same line), and invisible, bidi-control
+ * and Unicode tag characters become spaces (they could hide code or text).
+ */
 function untrustedScript(value: string): string {
-  // eslint-disable-next-line no-control-regex
-  return value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/gu, ' ')
+  return value
+    .replace(/\r\n?|[\u2028\u2029\u0085]/gu, '\n')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B-\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0F\uFEFF\uFFA0\uFFF0-\uFFFB\u{E0000}-\u{E0FFF}]/gu, ' ')
 }
 
 /** JSON with `<`, `>` and `&` escaped, so no string can form a tag. */

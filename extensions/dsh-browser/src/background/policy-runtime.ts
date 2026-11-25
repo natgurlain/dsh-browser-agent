@@ -81,6 +81,8 @@ export interface TabProvenance {
   top?: string
   frames: string[]
   opaque: boolean
+  /** Some frame's content cannot be attributed to a web origin (authorization.ts `allFramesVouchable`): whole-tab results are not exempt. */
+  unvouchable?: boolean
   urls?: string[]
 }
 
@@ -414,7 +416,7 @@ export class PolicyRuntime {
     } else {
       if (after.top !== undefined) origins.add(after.top)
       if (wholeTab) {
-        if (after.opaque || after.frames.length === 0) return undefined
+        if (after.opaque || after.unvouchable === true || after.frames.length === 0) return undefined
         for (const origin of after.frames) origins.add(origin)
       }
     }

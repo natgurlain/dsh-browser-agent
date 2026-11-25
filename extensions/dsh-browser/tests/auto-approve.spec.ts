@@ -10,7 +10,7 @@
  * trips) and the card's line.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { approvalPromptForCall, devToolsApprovalForCall, forcedApprovalPrompt, type ApprovalContext } from '../src/background/authorization.ts'
+import { approvalPromptForCall, devToolsApprovalForCall, forcedApprovalPrompt, tabProvenanceOf, type ApprovalContext } from '../src/background/authorization.ts'
 import { AUTO_APPROVE_KEPT, AutoApproveRegistry, autoApproveNote, RUNAWAY_LIMIT, RUNAWAY_WINDOW_MS, type AutoApproveStored } from '../src/background/auto-review.ts'
 import type { TabFrame } from '../src/background/frames.ts'
 import type { ToolCall } from '../src/background/tools.ts'
@@ -147,7 +147,31 @@ describe('Auto approve: off, ordinary, consequential', () => {
     // A style change: every property and value.
     const style: ApprovalPrompt = { ...evaluate, action: 'browser_devtools_set_element_style' }
     const styled = buildReviewAction(style, 'browser_devtools_set_element_style', { properties: [{ name: 'background', value: 'url(https://evil.example/x)', important: true }] }, { tainted: false }, ['page-script'])
-    expect(styled.untrusted.script).toBe('background: url(https://evil.example/x) !important')
+    expect(styled.untrusted.script).toBe('[target: the focused element]\n---\nbackground: url(https://evil.example/x) !important')
+  })
+
+  it('page-script: the reviewer sees where it runs and how far it reaches, whole', () => {
+    const style: ApprovalPrompt = { kind: 'action', action: 'browser_devtools_set_element_style', summary: 'Style', origins: ['http://localhost:3000'], canTrust: false, devTools: true }
+    const selector = `main > ${'div '.repeat(60)}.card`
+    const styled = buildReviewAction(style, 'browser_devtools_set_element_style', { selector, frame: 2, mode: 'rule', properties: [{ name: 'display', value: 'none' }] }, { tainted: false }, ['page-script'])
+    expect(styled.untrusted.script).toBe(`[target selector: ${selector}]\n[frame: 2]\n[mode: rule: edits the matching stylesheet rule, so every element that rule matches changes]\n---\ndisplay: none`)
+    const evaluate: ApprovalPrompt = { ...style, action: 'browser_console_eval' }
+    const awaited = buildReviewAction(evaluate, 'browser_console_eval', { expression: 'f()', awaitPromise: true }, { tainted: false }, ['page-script'])
+    expect(awaited.untrusted.script).toBe('[awaitPromise: waits for a returned promise]\n---\nf()')
+    // The bridge refuses a page-script step that carries no script.
+    const { script: _dropped, ...rest } = awaited.untrusted
+    expect(parseReviewAction({ ...awaited, untrusted: rest })).toBeUndefined()
+  })
+
+  it('a frame whose content no web origin vouches for (data:, about:blank, opaque blob:) makes the tab not local; srcdoc inherits', () => {
+    const top = { frameId: 0, parentFrameId: -1, url: 'http://localhost:3000/' }
+    const card = (child: string) => devToolsApprovalForCall({ id: 'c', name: 'browser_console_logs', args: {} } as ToolCall, [top, { frameId: 4, parentFrameId: 0, url: child }] as TabFrame[], 'en')
+    for (const child of ['data:text/html,<p>hi</p>', 'about:blank', 'blob:null/1b2c']) {
+      expect(card(child).tabOrigins).toEqual([])
+      expect(tabProvenanceOf([top, { frameId: 4, parentFrameId: 0, url: child }] as TabFrame[]).unvouchable).toBe(true)
+    }
+    expect(card('about:srcdoc').tabOrigins).toEqual(['http://localhost:3000'])
+    expect(tabProvenanceOf([top, { frameId: 4, parentFrameId: 0, url: 'about:srcdoc' }] as TabFrame[]).unvouchable).toBe(false)
   })
 
   it('a developer-tools card names every frame of the tab, so a local page with another site in a frame is not local', () => {

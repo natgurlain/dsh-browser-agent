@@ -275,7 +275,7 @@ export interface ReviewExtras {
  * shows the card ({@link pageScriptReviewable}).
  */
 export function pageScriptText(tool: string, args: Record<string, unknown>): string | undefined {
-  const text = tool === 'browser_console_eval'
+  const body = tool === 'browser_console_eval'
     ? typeof args.expression === 'string' ? args.expression : undefined
     : tool === 'browser_devtools_set_element_style'
       ? Array.isArray(args.properties)
@@ -287,7 +287,26 @@ export function pageScriptText(tool: string, args: Record<string, unknown>): str
       : tool === 'browser_devtools_set_element_attribute'
         ? `${String(args.name)}: ${args.remove === true ? '(remove)' : typeof args.value === 'string' ? args.value : '(read)'}`
         : undefined
-  return text === undefined || text.trim() === '' || text.length > MAX_REVIEW_SCRIPT_CHARS ? undefined : text
+  if (body === undefined || body.trim() === '') return undefined
+  // The arguments that change where it runs or how far it reaches, whole, so the reviewer judges what really runs.
+  const context = scriptContext(tool, args)
+  const text = context.length === 0 ? body : `${context.join('\n')}\n---\n${body}`
+  return text.length > MAX_REVIEW_SCRIPT_CHARS ? undefined : text
+}
+
+function scriptContext(tool: string, args: Record<string, unknown>): string[] {
+  const lines: string[] = []
+  if (tool !== 'browser_console_eval') {
+    if (typeof args.selector === 'string' && args.selector !== '') lines.push(`[target selector: ${args.selector}]`)
+    else if (typeof args.index === 'number') lines.push(`[target: snapshot element ${args.index}]`)
+    else lines.push('[target: the focused element]')
+  }
+  if (args.frame !== undefined) lines.push(`[frame: ${JSON.stringify(args.frame)}]`)
+  if (tool === 'browser_devtools_set_element_style' && args.mode === 'rule') {
+    lines.push('[mode: rule: edits the matching stylesheet rule, so every element that rule matches changes]')
+  }
+  if (tool === 'browser_console_eval' && args.awaitPromise === true) lines.push('[awaitPromise: waits for a returned promise]')
+  return lines
 }
 
 function scriptField(tool: string, args: Record<string, unknown>): { script?: string } {

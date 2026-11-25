@@ -381,6 +381,8 @@ describe('local pages do not taint', () => {
       expect(h.policy.get(`s-${name}`)).toBeUndefined()
       // A cross-origin frame, an unconfirmed loopback origin, or a trusted remote site: taints.
       expect(read(h, `x-${name}`, [LOCAL], { name, after: { top: LOCAL, frames: [LOCAL, EVIL], opaque: false } }), name).toEqual({ exempt: false })
+      // A frame no web origin vouches for (a data: page a widget navigated itself to): taints.
+      expect(read(h, `d-${name}`, [LOCAL], { name, after: { top: LOCAL, frames: [LOCAL], opaque: false, unvouchable: true } }), name).toEqual({ exempt: false })
       expect(read(h, `u-${name}`, ['http://localhost:8080'], { name, after: { top: 'http://localhost:8080', frames: ['http://localhost:8080'], opaque: false } }), name).toEqual({ exempt: false })
       expect(read(h, `t-${name}`, [TRUSTED], { name, after: { top: TRUSTED, frames: [TRUSTED], opaque: false } }), name).toEqual({ exempt: false })
       expect(h.policy.get(`t-${name}`)).toBeDefined()
