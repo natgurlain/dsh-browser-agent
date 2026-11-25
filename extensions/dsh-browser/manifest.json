@@ -3,7 +3,7 @@
   "name": "__MSG_extensionName__",
   "description": "__MSG_extensionDescription__",
   "default_locale": "en",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1TyJErFOIx8BKtJpyi1Z44ex6zuhUE73U2rd2YafnaMKqDGI3aS7NUTAPfz63Lyfa29AnrZzQhLp5HqXCCUhp3j/rfaV5zQ5vqWcsnelen7MkNfQ3t/NVC5PC0zX0jepmLt9s5EYjBvqQapu9/JXjvwq/cGE+Y70vw6mT3MBKuV/9+LniiB3r+s1YCtL9huGoXcHbBjhSrmaW498TPYWdiwN4w46AQ6R3mz4yES6KdyUrd40KV2UgNDNvUZW1NBywcPAF3Kl2oBwHtP60EX83d5AhqOl2krBDaI55DSRj4eKzK9G/XhrDu7ivRnd3k6WldAnVNaCbvaKwoTjglb0/wIDAQAB",
   "minimum_chrome_version": "125",
   "permissions": [

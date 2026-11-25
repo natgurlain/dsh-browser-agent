@@ -388,6 +388,8 @@ export interface BridgeServerDeps {
     expectResult?(sessionId: string, callId: string): void
     /** The extension answered it; `exempt` is the frame's `taintExempt` flag, `local` its `taintExemptLocal`. */
     noteResult?(sessionId: string, callId: string, exempt: boolean, local?: boolean): void
+    /** The call was refused before it reached any browser (no extension connected, cancelled before dispatch). */
+    noteUndelivered?(sessionId: string, callId: string): void
     /** Whether an ancestor of the session read taint-exempt pages (sent as `inheritedExemptReads`). */
     inheritsExemptReads?(sessionId: string): boolean
   }
@@ -612,17 +614,28 @@ export class BridgeServer {
     requester?: string,
     panelAction?: PanelUserRequest,
   ): Promise<unknown> {
-    const conn = this.pickConnection(name, sessionId)
+    // Refusals before dispatch reached no browser, so their error text quotes no page:
+    // they are recorded as such and do not taint the session (session-taint.ts).
+    const undelivered = (error: unknown): never => {
+      if (sessionId !== undefined && callId !== undefined) this.noteLineage(lineage => { lineage.noteUndelivered?.(sessionId, callId) })
+      throw error
+    }
+    let conn: ReadyConnection | undefined
+    try {
+      conn = this.pickConnection(name, sessionId)
+    } catch (error) {
+      return undelivered(error)
+    }
     if (conn === undefined) {
-      throw new BridgeToolError('bridge-closed', this.connections.size === 0
+      return undelivered(new BridgeToolError('bridge-closed', this.connections.size === 0
         ? 'no browser extension is connected to the bridge'
-        : `no connected browser extension can serve "${name}"`)
+        : `no connected browser extension can serve "${name}"`))
     }
     // A caller that already aborted must not dispatch: the abort listener
     // below does not replay for pre-aborted signals, so the call would be
     // sent to the extension and executed despite the cancellation.
     if (signal.aborted) {
-      throw new BridgeToolError('bridge-closed', 'tool call cancelled before dispatch')
+      return undelivered(new BridgeToolError('bridge-closed', 'tool call cancelled before dispatch'))
     }
     // An MCP client's external session binds to the first install it reaches,
     // at dispatch: it never falls back to another browser profile afterwards.

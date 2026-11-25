@@ -115,8 +115,10 @@ export function toolAllowedWhileTainted(name: string): boolean {
 /**
  * Whether a tool result taints its session. Failed browser calls taint too:
  * their error text can quote the page (an open dialog's message, a field's
- * validation error). A failure that never reached a page costs only a
- * needless Clear; a missed taint costs data.
+ * validation error). A missed taint costs data, a needless one a Clear. A
+ * call the bridge refused before it reached any browser (no extension
+ * connected, cancelled first) quotes no page and is exempt
+ * ({@link SessionTaintRegistry.noteUndelivered}).
  * @param name - tool name.
  */
 export function resultTaintsSession(name: string): boolean {
@@ -200,7 +202,7 @@ export class SessionTaintRegistry {
   private readonly entries = new Map<string, TaintEntry>()
   private readonly parents = new Map<string, string>()
   /** Extension results per in-flight tool call: how many were requested, how many came back vouched exempt. */
-  private readonly vouchers = new Map<string, { expected: number; exempt: number; local: boolean }>()
+  private readonly vouchers = new Map<string, { expected: number; exempt: number; local: boolean; undelivered: boolean }>()
   /** Sessions that hold content of vouched-exempt reads (told to their descendants' calls). */
   private readonly exemptReaders = new Set<string>()
   /**
@@ -265,7 +267,26 @@ export class SessionTaintRegistry {
       const oldest = this.vouchers.keys().next()
       if (oldest.done !== true) this.vouchers.delete(oldest.value)
     }
-    this.vouchers.set(key, { expected: 1, exempt: 0, local: false })
+    this.vouchers.set(key, { expected: 1, exempt: 0, local: false, undelivered: false })
+  }
+
+  /**
+   * One request of this tool call was refused before it reached any browser:
+   * nothing it returns can quote a page. A call that sent nothing at all is
+   * content-free; one that also sent requests is judged on those alone.
+   */
+  noteUndelivered(sessionId: string, callId: string): void {
+    const key = voucherKey(sessionId, callId)
+    const entry = this.vouchers.get(key)
+    if (entry !== undefined) {
+      entry.undelivered = true
+      return
+    }
+    if (this.vouchers.size >= MAX_VOUCHERS) {
+      const oldest = this.vouchers.keys().next()
+      if (oldest.done !== true) this.vouchers.delete(oldest.value)
+    }
+    this.vouchers.set(key, { expected: 0, exempt: 0, local: false, undelivered: true })
   }
 
   /**
@@ -310,6 +331,8 @@ export class SessionTaintRegistry {
     const key = voucherKey(sessionId, callId)
     const entry = this.vouchers.get(key)
     this.vouchers.delete(key)
+    // Nothing ever reached a browser: no page content, nothing to vouch for.
+    if (entry !== undefined && entry.expected === 0 && entry.undelivered) return true
     const exempt = entry !== undefined && entry.expected > 0 && entry.exempt === entry.expected && this.honours(entry.local)
     if (exempt) this.exemptReaders.add(sessionId)
     return exempt

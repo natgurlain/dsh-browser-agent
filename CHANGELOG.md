@@ -3,6 +3,17 @@
 Each `## vX.Y.Z` section becomes the notes of that GitHub release
 (`scripts/package-release.mjs --notes`), followed by the SHA-256 digests of its assets.
 
+## v0.3.8
+
+- **A browser step that never reached the browser no longer pauses coding.** When the
+  extension was not connected (for example while you reload it), a browser step failed with
+  "no browser extension is connected", and that failure still counted as reading a web page:
+  shell and file tools were paused until you clicked Clear. A step refused before it reaches
+  any browser now leaves them on. A step that did reach the browser is judged as before.
+- **After updating, restart DeepSeek Harness** (Quit, not just close the window). The bridge
+  is loaded when the app starts, so reloading the extension alone keeps the old bridge
+  running.
+
 ## v0.3.7
 
 Fixes from a review of v0.3.6.

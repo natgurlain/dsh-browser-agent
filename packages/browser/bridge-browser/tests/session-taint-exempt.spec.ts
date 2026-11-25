@@ -163,6 +163,30 @@ describe('the voucher travels on the authenticated frame', () => {
     expect(registry.takeExempt('s1', 'call-failed-exempt')).toBe(true)
   })
 
+  it('a call refused before it reached any browser (no extension, cancelled first) does not taint', async () => {
+    const registry = new SessionTaintRegistry()
+    const bridge = await startTestBridge({ sessionLineage: registry })
+    // No extension connected: the refusal quotes no page.
+    await expect((async () => bridge.bridge.requestTool('browser_open_tab', { url: 'http://127.0.0.1:8123/' }, new AbortController().signal, 1_000, 's1', 'call-none'))())
+      .rejects.toMatchObject({ code: 'bridge-closed' })
+    expect(registry.takeExempt('s1', 'call-none')).toBe(true)
+    // ...and counts as no exempt read for descendants.
+    expect(registry.inheritsExemptReads('s1')).toBe(false)
+    const client = await connectClient(bridge.url, caps)
+    const aborted = new AbortController()
+    aborted.abort()
+    await expect((async () => bridge.bridge.requestTool('browser_snapshot', {}, aborted.signal, 1_000, 's1', 'call-aborted'))()).rejects.toMatchObject({ code: 'bridge-closed' })
+    expect(registry.takeExempt('s1', 'call-aborted')).toBe(true)
+    expect(toolCallsOf(client.frames)).toHaveLength(0)
+    // A call that also reached the browser is judged on what came back: an unvouched answer taints.
+    const sent = bridge.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1_000, 's1', 'call-mixed')
+    await waitFor(() => toolCallsOf(client.frames).length >= 1)
+    client.send({ t: 'tool.result', id: toolCallsOf(client.frames)[0]!.id, ok: true, result: { text: 'web' } } as never)
+    await sent
+    await expect((async () => bridge.bridge.requestTool('browser_snapshot', {}, aborted.signal, 1_000, 's1', 'call-mixed'))()).rejects.toMatchObject({ code: 'bridge-closed' })
+    expect(registry.takeExempt('s1', 'call-mixed')).toBe(false)
+  })
+
   it('a call that timed out carries no voucher', async () => {
     const registry = new SessionTaintRegistry()
     const bridge = await startTestBridge({ sessionLineage: registry })
