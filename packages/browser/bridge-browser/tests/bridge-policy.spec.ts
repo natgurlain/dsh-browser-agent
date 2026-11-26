@@ -101,6 +101,12 @@ describe('session ownership', () => {
     }
   })
 
+  it('lets the panel reply to a DSH-started session on the auto preset, but never switch one to full access', async () => {
+    const { call } = harness({ 'session.permissions': () => ({ ok: true, value: { current: 'auto' } }) })
+    expect(await call('session.prompt', { sessionId: 'listed', content: [{ type: 'text', text: 'hi' }] })).toMatchObject({ ok: true })
+    expect(await call('session.setPermission', { sessionId: 'listed', preset: 'danger-full-access' })).toMatchObject({ ok: false, error: { code: 'forbidden' } })
+  })
+
   it('with promptHostSessions: false, acts only in sessions the bridge created; other listed sessions stay read-only', async () => {
     const { call, inner } = harness({}, { promptHostSessions: false })
     expect(await call('session.create', {})).toEqual({ ok: true, value: { sessionId: 'created' } })

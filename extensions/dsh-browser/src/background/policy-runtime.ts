@@ -417,6 +417,19 @@ export class PolicyRuntime {
   }
 
   /**
+   * Whether opening these origins is the agent opening its own dev server:
+   * the session is untainted (no page content could have chosen the URL),
+   * and every origin is a loopback page that would be exempt as a local page
+   * (local pages on, no stricter site rule, never the DSH host's own UI).
+   * Such a browser_open_tab or browser_navigate needs no card.
+   */
+  opensOwnDevServer(sessionId: string | undefined, origins: readonly string[]): boolean {
+    if (this.taint.get(sessionId) !== undefined || origins.length === 0) return false
+    const config: TaintExemptionConfig = { ...this.exemption(sessionId), loopbackScope: 'any' }
+    return origins.every((origin) => isLoopbackPageOrigin(origin) && originTaintExempt(origin, config))
+  }
+
+  /**
    * Whether a page's title and URL may reach this untainted session without
    * tainting it: its origin is exempt for this session (browser_list_tabs).
    */

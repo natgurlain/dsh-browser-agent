@@ -3,6 +3,26 @@
 Each `## vX.Y.Z` section becomes the notes of that GitHub release
 (`scripts/package-release.mjs --notes`), followed by the SHA-256 digests of its assets.
 
+## v0.3.10
+
+Fixes from the first real session on 0.3.9.
+
+- **Opening your own dev server needs no card.** When a conversation that has not read any
+  untrusted page opens a `localhost` / `127.0.0.1` page itself (`browser_open_tab` or
+  `browser_navigate`), it no longer waits for an approval card. Before, the card sat in the side
+  panel, timed out after a minute, and the agent gave up on the browser. A URL that looks like it
+  carries data out, a site rule that is stricter, DSH's own web UI, and a conversation that read
+  an untrusted page still ask as before.
+- **The panel can reply to DSH conversations on the `auto` preset.** 0.3.9 let the panel reply to
+  conversations started in DSH, but refused any on a preset it treats as full access, `auto`
+  included. A DSH-started conversation now takes panel messages whatever preset you chose for it
+  in DSH. Switching a conversation to a full-access preset from the browser is still refused, and
+  bridge-created conversations keep the full-access gate. `promptHostSessions: false` still makes
+  DSH conversations view-only.
+- **A refusal no longer starts a new chat.** After a reconnect, the panel took any refusal of a
+  conversation as "DSH no longer has the previous conversation" and opened a new chat. Only a
+  conversation DSH reports missing does that now.
+
 ## v0.3.9
 
 This release changes how the untrusted-content guard decides and what it does, instead of

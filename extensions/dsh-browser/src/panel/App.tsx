@@ -193,7 +193,9 @@ function isUnavailableMethod(cause: unknown): boolean {
  */
 function isSessionGone(cause: unknown): boolean {
   const code = errorCodeOf(cause)
-  if (code === 'not-found' || code === 'forbidden' || code === 'session-not-found') return true
+  // A bare `forbidden` is a policy refusal (a preset, a setting), not a missing conversation:
+  // treating it as gone started a new chat over a conversation that still exists.
+  if (code === 'not-found' || code === 'session-not-found') return true
   const message = cause instanceof Error ? cause.message : String(cause)
   return /is not available to the browser extension|session\b.*\bnot found|unknown session|no such session/iu.test(message)
 }

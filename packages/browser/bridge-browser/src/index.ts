@@ -121,7 +121,7 @@ const DEFAULT_DEFER_SESSION_CREATE = true
 const DEFAULT_BEACON = true
 
 /** Reported to MCP clients as the server version; manifest.spec checks it equals package.json's. */
-export const BRIDGE_PACKAGE_VERSION = '0.3.9'
+export const BRIDGE_PACKAGE_VERSION = '0.3.10'
 
 /** Instance metadata the discovery endpoints advertise for the extension's picker. */
 /** Agent sessions with a turn running now (`agent/status`): the `busy` discovery flag and the `turns` standing hint. */
@@ -182,7 +182,7 @@ export interface Config {
   /**
    * Let the browser panel reply to conversations started in DSH (prompt,
    * model, permission preset, commands). Defaults to true; false makes them
-   * view-only from the browser, as before 0.3.9.
+   * view-only from the browser, as before 0.3.10.
    */
   promptHostSessions?: boolean
   /**

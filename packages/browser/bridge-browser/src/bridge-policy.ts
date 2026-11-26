@@ -437,7 +437,10 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
       // Flagged so the panel can say "reply in DSH" instead of showing an error.
       return forbidden(NOT_BRIDGE_SESSION(sessionId), { notBridgeSession: true })
     }
-    if (sessionId !== undefined && FULL_ACCESS_GATED_METHODS.has(call.method)) {
+    // A conversation started in DSH runs the preset the user chose there (`auto` included): replying to it
+    // from the panel does not change what it may do. Switching any session to full access stays gated.
+    const hostSession = sessionId !== undefined && options.promptHostSessions !== false && !owned(sessionId)
+    if (sessionId !== undefined && FULL_ACCESS_GATED_METHODS.has(call.method) && !hostSession) {
       const permission = call.method === 'commands.execute' && typeof payload.line === 'string'
         ? permissionCommandOf(payload.line)
         : undefined

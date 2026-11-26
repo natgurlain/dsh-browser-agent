@@ -2655,6 +2655,11 @@ async function authorizeToolCall(
       prompt,
       sessionTrustedActionOrigins,
       settings.trustedActionOrigins,
+    ) || (
+      // The agent opening its own dev server (localhost / 127.0.0.1) in a clean session: no card.
+      (prompt.action === 'browser_open_tab' || prompt.action === 'browser_navigate')
+      && prompt.kind === 'action' && prompt.urlRisk !== true
+      && policyRuntime.opensOwnDevServer(sessionId, prompt.origins)
     ),
   })
   if (gate !== 'prompt') return gate

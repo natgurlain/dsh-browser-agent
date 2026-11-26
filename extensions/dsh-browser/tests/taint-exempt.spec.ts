@@ -898,3 +898,17 @@ describe('a loopback dev server the session opened itself', () => {
     expect(read(h, 'dev', [DEV], { name: 'browser_screenshot', after: { top: DEV, frames: [DEV, 'https://ads.example'], opaque: false } })).toEqual({ exempt: false })
   })
 })
+
+describe('opening the agent\'s own dev server needs no card', () => {
+  it('covers loopback origins of a clean session only, never the DSH host or a stricter rule', () => {
+    const h = harness({ taintLocalOrigins: [], siteRules: [{ pattern: '127.0.0.1:9999', rule: 'blocked' }] }, { neverExemptOrigin: (o) => o === 'http://127.0.0.1:4000' })
+    expect(h.policy.opensOwnDevServer('dev', ['http://127.0.0.1:8123'])).toBe(true)
+    expect(h.policy.opensOwnDevServer('dev', ['http://localhost:5173'])).toBe(true)
+    expect(h.policy.opensOwnDevServer('dev', ['https://example.com'])).toBe(false)
+    expect(h.policy.opensOwnDevServer('dev', ['http://127.0.0.1:8123', 'https://example.com'])).toBe(false)
+    expect(h.policy.opensOwnDevServer('dev', ['http://127.0.0.1:4000'])).toBe(false)
+    expect(h.policy.opensOwnDevServer('dev', [])).toBe(false)
+    read(h, 'web', ['https://evil.example'])
+    expect(h.policy.opensOwnDevServer('web', ['http://127.0.0.1:8123'])).toBe(false)
+  })
+})
