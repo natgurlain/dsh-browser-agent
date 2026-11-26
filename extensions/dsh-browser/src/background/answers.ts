@@ -19,6 +19,12 @@ export interface ToolAnswer {
   ok: boolean
   result?: unknown
   error?: ToolError
+  /**
+   * The answer is this extension's own fixed text (an approval that was not
+   * granted, a cancel): it quotes no page, so it never taints the session.
+   * Sent as `pageFree` on the `tool.result` frame.
+   */
+  pageFree?: true
 }
 
 /** A settled answer whose `ok` narrows it (lanes that always set one or the other). */
@@ -34,8 +40,8 @@ export function fail(message: string, code: ToolErrorCode = 'action-failed'): { 
 /** What a call answers when it was cancelled (kill switch, bridge cancel, expiry). */
 export const CANCELLED_MESSAGE = 'Tool call was cancelled'
 
-export function cancelledAnswer(): { ok: false; error: { code: 'action-failed'; message: string } } {
-  return { ok: false, error: { code: 'action-failed', message: CANCELLED_MESSAGE } }
+export function cancelledAnswer(): { ok: false; error: { code: 'action-failed'; message: string }; pageFree: true } {
+  return { ok: false, error: { code: 'action-failed', message: CANCELLED_MESSAGE }, pageFree: true }
 }
 
 /** The model-facing text for an ordinary approval card that was not granted. */
@@ -55,7 +61,7 @@ export function approvalFailureMessage(prompt: Pick<ApprovalPrompt, 'action'>, a
 /** The answer for an ordinary approval card that was not granted. */
 export function approvalFailure(prompt: Pick<ApprovalPrompt, 'action'>, authorization: Exclude<ApprovalAuthorization, 'approved'>): ToolAnswer {
   const code: ToolErrorCode = authorization === 'timed-out' ? 'timeout' : authorization === 'cancelled' ? 'bridge-closed' : 'action-failed'
-  return { ok: false, error: { code, message: approvalFailureMessage(prompt, authorization) } }
+  return { ok: false, error: { code, message: approvalFailureMessage(prompt, authorization) }, pageFree: true }
 }
 
 /**
@@ -68,9 +74,10 @@ export function notApprovedAnswer(
   deniedMessage: string,
   subject: string,
   authorization: Exclude<ApprovalAuthorization, 'approved'>,
-): { ok: false; error: { code: 'timeout' | 'action-failed'; message: string } } {
+): { ok: false; error: { code: 'timeout' | 'action-failed'; message: string }; pageFree: true } {
   return {
     ok: false,
+    pageFree: true,
     error: {
       code: authorization === 'timed-out' ? 'timeout' : 'action-failed',
       message: authorization === 'denied' ? deniedMessage : `${subject} was not approved (${authorization}).`,

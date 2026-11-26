@@ -8,7 +8,7 @@ const PNG_PIXEL = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkY
 function stubChrome(
   tab: Partial<chrome.tabs.Tab>,
   capture?: (options: unknown) => string,
-  windowState?: { focused: boolean },
+  windowState?: { focused: boolean; state?: string },
 ) {
   const full: chrome.tabs.Tab = {
     id: 7,
@@ -62,6 +62,21 @@ describe('browser_screenshot dispatch', () => {
     const image = (answer.result as { image: { data: string; mediaType: string } }).image
     expect(image.data).toBe(PNG_PIXEL)
     expect(image.mediaType).toBe('image/png')
+  })
+
+  it('captures a window that is on screen but not focused (the user is in another app), without a retry hint', async () => {
+    const { captureVisibleTab } = stubChrome({ active: true }, undefined, { focused: false, state: 'normal' })
+    const answer = await dispatchToolCall(call(), 'auto', undefined, approve)
+    expect(answer.ok).toBe(true)
+    expect(captureVisibleTab).toHaveBeenCalled()
+  })
+
+  it('refuses a minimized window once, telling the model not to retry', async () => {
+    const { captureVisibleTab } = stubChrome({ active: true }, undefined, { focused: false, state: 'minimized' })
+    const answer = await dispatchToolCall(call(), 'auto', undefined, approve)
+    expect(answer.ok).toBe(false)
+    expect(answer.error?.message).toMatch(/minimized.*Do not retry/)
+    expect(captureVisibleTab).not.toHaveBeenCalled()
   })
 
   it('passes format and quality through to captureVisibleTab', async () => {

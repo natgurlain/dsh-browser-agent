@@ -253,7 +253,7 @@ describe('dev loop RPCs and the bridge policy', () => {
       return { ok: true, value: {} }
     })
     const hostApi: BrowserHostApi = { call: inner, async *events() {}, respond: async () => ({ accepted: true }) }
-    const fenced = withBridgePolicy(hostApi, { allowDangerFullAccess: false, presetSandbox: () => 'workspace-write', ledger: memorySessionLedger(['browser-owned']) })
+    const fenced = withBridgePolicy(hostApi, { allowDangerFullAccess: false, presetSandbox: () => 'workspace-write', ledger: memorySessionLedger(['browser-owned']), promptHostSessions: false })
     const { devLoop } = harness()
     const api = withDevLoopMethods(fenced, devLoop)
     const call = (method: string, payload: unknown) => api.call({ rpcId: 'r', method, payload, signal })
@@ -270,7 +270,7 @@ describe('dev loop RPCs and the bridge policy', () => {
     expect(await call(BRIDGE_DEVLOOP_UNLINK_METHOD, { sessionId: 'coding' })).toEqual({ ok: true, value: { unlinked: true } })
   })
 
-  it('still refuses prompting, steering or changing a linked coding session from the browser', async () => {
+  it('with promptHostSessions off, linking does not let the browser prompt, steer or change the coding session', async () => {
     const { call, inner, fenced } = fencedHarness()
     await call(BRIDGE_DEVLOOP_LINK_METHOD, { sessionId: 'coding', url: 'http://localhost:5173/' })
     inner.mockClear()

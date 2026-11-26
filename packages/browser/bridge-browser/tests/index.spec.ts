@@ -92,6 +92,7 @@ describe('config', () => {
       beaconPorts: [...BEACON_PORTS],
       allowedChromeExtensionIds: [PINNED_CHROME_EXTENSION_ID],
       pairing: true,
+      promptHostSessions: true,
       allowDangerFullAccess: false,
       safePermissionPresets: [],
       forwardedPorts: [],
@@ -132,6 +133,7 @@ describe('config', () => {
       beaconPorts: [...BEACON_PORTS],
       allowedChromeExtensionIds: [PINNED_CHROME_EXTENSION_ID],
       pairing: true,
+      promptHostSessions: true,
       allowDangerFullAccess: false,
       safePermissionPresets: [],
       forwardedPorts: [],
@@ -206,7 +208,7 @@ describe('apply', () => {
     const register = vi.spyOn(ctx.webServer, 'register')
     await apply(ctx, { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '' })
     expect(routes.map(route => `${route.methods.join(',')} ${route.path}`)).toEqual(['POST /api/bridge-browser.pairing'])
-    expect(commands.map(command => command.name)).toEqual(['browser-pair'])
+    expect(commands.map(command => command.name)).toEqual(['browser-pair', 'browser-clear'])
     // Nothing waits and nothing is paired on a fresh bridge.
     const status = await routes[0]!.fetch(new Request('http://127.0.0.1/api/bridge-browser.pairing', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"action":"status"}',
@@ -243,7 +245,8 @@ describe('apply', () => {
     const off = pairingContext()
     await apply(off.ctx, { token: STRONG_TOKEN, ...VALID, sessionWorkspacePath: '', pairing: false })
     expect(off.routes).toEqual([])
-    expect(off.commands).toEqual([])
+    // Pairing off leaves only /browser-clear.
+    expect(off.commands.map(command => command.name)).toEqual(['browser-clear'])
 
     const bare = stubContext()
     const warn = vi.spyOn(bare.logger, 'warn')

@@ -1,3 +1,17 @@
+/** Per-call accounting of the extension results a browser tool call asked for. */
+interface Voucher {
+  /** Requests sent to an extension. */
+  expected: number
+  /** Answers the extension vouched exempt (local or trusted pages). */
+  exempt: number
+  /** Answers the extension marked page-free (approval not granted, cancelled: fixed extension text). */
+  pageFree: number
+  /** Requests the bridge settled itself after dispatch (timeout, cancel, socket closed): its own fixed text. */
+  bridgeSettled: number
+  local: boolean
+  undelivered: boolean
+}
+
 /**
  * Host-side session taint: once untrusted web content entered an agent
  * session through a browser tool (or an injected follow snapshot), that
@@ -50,7 +64,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { BrowserHostApi, HostRpcCall, HostRpcResult } from './host-api.ts'
 import { isRecord } from './host-api.ts'
-import { realpathSync } from 'node:fs'
+import { lstatSync, realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD } from './protocol.ts'
 
@@ -113,12 +127,12 @@ export function toolAllowedWhileTainted(name: string): boolean {
 }
 
 /**
- * Whether a tool result taints its session. Failed browser calls taint too:
- * their error text can quote the page (an open dialog's message, a field's
- * validation error). A missed taint costs data, a needless one a Clear. A
- * call the bridge refused before it reached any browser (no extension
- * connected, cancelled first) quotes no page and is exempt
- * ({@link SessionTaintRegistry.noteUndelivered}).
+ * Whether a tool result can taint its session. Failed browser calls can:
+ * their error text may quote the page (an open dialog's message, a field's
+ * validation error). Answers that carry only fixed text do not taint
+ * ({@link SessionTaintRegistry.takeExempt}): a call refused before it reached
+ * a browser, one the bridge timed out or cancelled itself, and one the
+ * extension marked page-free (an approval that was not granted).
  * @param name - tool name.
  */
 export function resultTaintsSession(name: string): boolean {
@@ -138,7 +152,7 @@ export function workspaceReadDenial(name: string, args: unknown, workspace: stri
   const spec = TAINT_WORKSPACE_READ_TOOLS.get(name)
   if (spec === undefined) return undefined
   const deny = (why: string): string => `Tool "${name}" is limited to this session's workspace while the session holds untrusted web page content (${why}). `
-    + 'The user can lift the restriction with "Clear" on the untrusted-content banner in the browser panel. Do not retry outside the workspace.'
+    + 'The user can lift the restriction by typing /browser-clear in this conversation. Do not retry outside the workspace.'
   if (workspace === undefined || !isAbsolute(workspace)) return deny('the session has no workspace directory')
   const record = isRecord(args) ? args : {}
   const pattern = record.pattern
@@ -156,13 +170,77 @@ export function workspaceReadDenial(name: string, args: unknown, workspace: stri
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)) ? undefined : deny(`${raw} is outside the workspace`)
 }
 
-/** Resolve symlinks on the longest existing prefix of a path. */
-function realPathOf(path: string): string {
+/**
+ * File-writing tools a tainted session may run inside its own workspace: an
+ * injected page can then at worst change project files, which the user sees
+ * in the diff, and never reach `~/.ssh`, another repository, or `.git`
+ * (hooks run code). Maps each tool to the argument naming its path.
+ */
+export const TAINT_WORKSPACE_WRITE_TOOLS: ReadonlyMap<string, string> = new Map([
+  ['edit', 'file_path'],
+  ['write', 'file_path'],
+])
+
+/** Path segments a tainted session may not write under (code that runs on its own, editor and agent config). */
+const TAINT_WRITE_DENIED_SEGMENTS: ReadonlySet<string> = new Set(['.git', '.github', '.husky', '.vscode', '.idea', '.claude', '.dsh', '.envrc', 'node_modules'])
+
+/**
+ * Denial reason for a file write of a tainted session, or undefined when it
+ * stays inside the workspace, outside {@link TAINT_WRITE_DENIED_SEGMENTS},
+ * and asks for no wider sandbox. Fails closed like {@link workspaceReadDenial}.
+ */
+export function workspaceWriteDenial(name: string, args: unknown, workspace: string | undefined): string | undefined {
+  const arg = TAINT_WORKSPACE_WRITE_TOOLS.get(name)
+  if (arg === undefined) return undefined
+  const deny = (why: string): string => `Tool "${name}" may only write inside this session's workspace while the session holds untrusted web page content (${why}). `
+    + 'The user can lift the restriction by typing /browser-clear in this conversation.'
+  if (workspace === undefined || !isAbsolute(workspace)) return deny('the session has no workspace directory')
+  const record = isRecord(args) ? args : {}
+  if (record.sandbox_permissions !== undefined) return deny('a wider sandbox is not available')
+  const raw = record[arg]
+  if (typeof raw !== 'string' || raw.trim() === '') return deny('no path was given')
+  // The tools resolve a relative path against the session's current directory, which can differ from the workspace.
+  if (!isAbsolute(raw)) return deny(`use an absolute path inside ${workspace}`)
+  const root = realPathOf(workspace, true)
+  const target = realPathOf(resolve(raw), true)
+  const rel = relative(root, target)
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return deny(`${raw} is outside the workspace`)
+  // Case-insensitive file systems (macOS, Windows): `.GIT` is `.git`.
+  const segment = rel.split(/[\\/]/u).map((part) => part.normalize('NFC').toLowerCase())
+    .find((part) => TAINT_WRITE_DENIED_SEGMENTS.has(part) || part.startsWith('.env'))
+  if (segment !== undefined) return deny(`${segment} is protected`)
+  // A symlink as the target (dangling or not) would write wherever it points.
+  try {
+    if (lstatSync(resolve(raw)).isSymbolicLink()) return deny(`${raw} is a symbolic link`)
+  } catch { /* does not exist yet: a new file */ }
+  return undefined
+}
+
+/** Tools a tainted session may run once the user approved that exact call. */
+export const TAINT_ASK_TOOLS: ReadonlySet<string> = new Set(['bash'])
+
+/** Longest shell command put to the user while tainted: longer ones are refused, never shown cut. */
+export const TAINT_ASK_MAX_COMMAND = 4000
+
+/** The question put to the user for a tainted session's shell command. */
+export function taintAskReason(name: string, args: unknown, cause: string | undefined): string {
+  const record = isRecord(args) ? args : {}
+  const command = typeof record.command === 'string' ? record.command : JSON.stringify(args)
+  const workdir = typeof record.workdir === 'string' ? ` (in ${record.workdir})` : ''
+  return `This conversation read untrusted web content${cause === undefined ? '' : ` (${cause})`}, so a page may be steering it. `
+    + `Allow this ${name} command once?${workdir}\n\n${command}`
+}
+
+/**
+ * Resolve symlinks on the longest existing prefix of a path. `native` uses
+ * the OS resolver, which also returns the on-disk case of every component.
+ */
+function realPathOf(path: string, native = false): string {
   let current = resolve(path)
   const rest: string[] = []
   for (;;) {
     try {
-      return join(realpathSync(current), ...rest.reverse())
+      return join(native ? realpathSync.native(current) : realpathSync(current), ...rest.reverse())
     } catch {
       const parent = dirname(current)
       if (parent === current) return resolve(path)
@@ -202,7 +280,7 @@ export class SessionTaintRegistry {
   private readonly entries = new Map<string, TaintEntry>()
   private readonly parents = new Map<string, string>()
   /** Extension results per in-flight tool call: how many were requested, how many came back vouched exempt. */
-  private readonly vouchers = new Map<string, { expected: number; exempt: number; local: boolean; undelivered: boolean }>()
+  private readonly vouchers = new Map<string, Voucher>()
   /** Sessions that hold content of vouched-exempt reads (told to their descendants' calls). */
   private readonly exemptReaders = new Set<string>()
   /**
@@ -267,7 +345,7 @@ export class SessionTaintRegistry {
       const oldest = this.vouchers.keys().next()
       if (oldest.done !== true) this.vouchers.delete(oldest.value)
     }
-    this.vouchers.set(key, { expected: 1, exempt: 0, local: false, undelivered: false })
+    this.vouchers.set(key, { expected: 1, exempt: 0, pageFree: 0, bridgeSettled: 0, local: false, undelivered: false })
   }
 
   /**
@@ -286,18 +364,35 @@ export class SessionTaintRegistry {
       const oldest = this.vouchers.keys().next()
       if (oldest.done !== true) this.vouchers.delete(oldest.value)
     }
-    this.vouchers.set(key, { expected: 0, exempt: 0, local: false, undelivered: true })
+    this.vouchers.set(key, { expected: 0, exempt: 0, pageFree: 0, bridgeSettled: 0, local: false, undelivered: true })
   }
 
   /**
    * The extension answered one requested result; `exempt` is its
-   * `taintExempt` flag, `local` whether that exemption rests on a local page.
+   * `taintExempt` flag, `local` whether that exemption rests on a local page,
+   * `pageFree` its `pageFree` flag (the answer is the extension's own text:
+   * an approval that was not granted, a cancel; nothing from a page).
    */
-  noteResult(sessionId: string, callId: string, exempt: boolean, local = false): void {
+  noteResult(sessionId: string, callId: string, exempt: boolean, local = false, pageFree = false): void {
     const entry = this.vouchers.get(voucherKey(sessionId, callId))
-    if (entry === undefined || !exempt) return
+    if (entry === undefined) return
+    if (pageFree) {
+      entry.pageFree += 1
+      return
+    }
+    if (!exempt) return
     entry.exempt += 1
     if (local) entry.local = true
+  }
+
+  /**
+   * The bridge settled one dispatched request itself (timeout, cancel, the
+   * socket closed): the model sees the bridge's fixed error text, and a late
+   * extension answer is dropped, so nothing from a page reaches it.
+   */
+  noteBridgeSettled(sessionId: string, callId: string): void {
+    const entry = this.vouchers.get(voucherKey(sessionId, callId))
+    if (entry !== undefined) entry.bridgeSettled += 1
   }
 
   /** Whether a voucher of this kind is honoured at all. */
@@ -321,10 +416,11 @@ export class SessionTaintRegistry {
   }
 
   /**
-   * Whether the extension vouched for every result this tool call asked it
-   * for (at least one). Consumes the record: a voucher covers one tool
-   * result, once. No call id, no request, an unanswered or unvouched request
-   * all answer false, so the caller taints.
+   * Whether this tool call's result is free of unvouched page content: every
+   * request it sent came back vouched exempt, page-free, or was settled by
+   * the bridge itself. Consumes the record: a voucher covers one tool result,
+   * once. No call id, no record, or any request answered with page content
+   * the extension did not vouch for all answer false, so the caller taints.
    */
   takeExempt(sessionId: string, callId: string | undefined): boolean {
     if (callId === undefined) return false
@@ -332,10 +428,16 @@ export class SessionTaintRegistry {
     const entry = this.vouchers.get(key)
     this.vouchers.delete(key)
     // Nothing ever reached a browser: no page content, nothing to vouch for.
-    if (entry !== undefined && entry.expected === 0 && entry.undelivered) return true
-    const exempt = entry !== undefined && entry.expected > 0 && entry.exempt === entry.expected && this.honours(entry.local)
-    if (exempt) this.exemptReaders.add(sessionId)
-    return exempt
+    if (entry === undefined) return false
+    if (entry.expected === 0) return entry.undelivered
+    // Extension flags are vouchers: honoured only while this bridge honours vouchers at all.
+    const vouched = this.honour.any ? entry.exempt + entry.pageFree : 0
+    if (vouched + entry.bridgeSettled < entry.expected) return false
+    if (entry.exempt > 0) {
+      if (!this.honours(entry.local)) return false
+      this.exemptReaders.add(sessionId)
+    }
+    return true
   }
 
   /** Clear only this session's own taint (a tainted ancestor still applies). */
@@ -382,16 +484,28 @@ export class SessionTaintRegistry {
 const NETWORK_READ_TOOLS: ReadonlySet<string> = new Set(['web_fetch', 'web_search'])
 
 /** Model-facing reason for a denied tool in a tainted session. */
-export function taintDenialReason(name: string): string {
-  const disabled = `Tool "${name}" is disabled in this session: it has read untrusted web page content, so shell, file-writing, `
-    + 'network, and delegation tools are off (read-only) until the user clears the session in the browser panel '
-    + '("Clear" on the untrusted-content banner). '
+export function taintDenialReason(name: string, cause?: string): string {
+  const disabled = `Tool "${name}" is disabled in this session: it has read untrusted web page content`
+    + `${cause === undefined ? '' : ` (first through ${cause})`}, so network, delegation and plugin tools are off `
+    + '(shell commands need the user\'s approval; file edits stay inside the workspace) until the user types /browser-clear in this conversation '
+    + '(or clicks "Clear" on the banner in the browser panel). '
   // Reading a page is still possible, through the browser: say so instead of sending the model to the user.
   if (NETWORK_READ_TOOLS.has(name)) {
     return `${disabled}Do not retry ${name}. To read a page, open its URL with browser_open_tab or browser_navigate and read it `
       + 'with browser_snapshot; for a search, open a search engine\'s results page the same way.'
   }
-  return `${disabled}Do not retry; tell the user what you need and why.`
+  return `${disabled}Do not retry and do not work around it: stop, tell the user what you need and why, and ask them to type /browser-clear if they agree.`
+}
+
+/** Options for {@link installSessionTaint}. */
+export interface SessionTaintOptions {
+  /**
+   * Put one call of a tainted session to the user (dsh's approval service:
+   * a human in the DSH UI or the panel, never Auto approve; under the
+   * `never` policy nobody is asked and the answer is not a grant). Absent:
+   * those calls are denied outright, as before.
+   */
+  askUser?: (request: { sessionId: string; toolName: string; callId: string; reason: string; signal: AbortSignal }) => Promise<string>
 }
 
 /** The slice of a dsh Agent the taint guard reads. */
@@ -422,7 +536,7 @@ function linkFromHeader(registry: SessionTaintRegistry, agent: AgentLike | undef
  * Observe browser tool results and agent creation, and guard every other tool
  * of a tainted session. Returns the disposer for all of them.
  */
-export function installSessionTaint(ctx: Context, registry: SessionTaintRegistry): () => void {
+export function installSessionTaint(ctx: Context, registry: SessionTaintRegistry, options: SessionTaintOptions = {}): () => void {
   const disposers: Array<() => void> = []
   // Lineage: a subagent's header names its creator; a fork or child created
   // while another agent drives has that agent as its initiator.
@@ -445,13 +559,56 @@ export function installSessionTaint(ctx: Context, registry: SessionTaintRegistry
     if (resultTaintsSession(exec.name) && !exempt) registry.mark(sessionId, exec.name)
     return undefined
   }))
+  // One-shot grants: the user approved this exact call of a tainted session (bash).
+  // Keyed by the execution object itself: pre-execute and the guard receive the same one, so a grant
+  // can never outlive its call or match another call that reuses the id.
+  const grants = new WeakSet<object>()
+  const ask = options.askUser
+  if (ask !== undefined) {
+    disposers.push(ctx.on('tools/pre-execute', async (rawExec, next) => {
+      const exec = rawExec as unknown as GuardExec & { signal?: AbortSignal }
+      const decision = await next()
+      if (exec.agent === undefined || !TAINT_ASK_TOOLS.has(exec.name)) return decision
+      if (decision.kind !== 'allow' && decision.kind !== 'ask') return decision
+      const sessionId = String(exec.agent.id)
+      linkFromHeader(registry, exec.agent)
+      if (!registry.isTainted(sessionId) || typeof exec.callId !== 'string') return decision
+      const record = isRecord(exec.arguments) ? exec.arguments : {}
+      // A wider sandbox for a page-steered command is never offered, and the user must see all of it.
+      if (record.sandbox_permissions !== undefined) return decision
+      if (typeof record.command !== 'string' || record.command.length > TAINT_ASK_MAX_COMMAND) return decision
+      const outcome = await ask({
+        sessionId,
+        toolName: exec.name,
+        callId: exec.callId as string,
+        reason: taintAskReason(exec.name, exec.arguments, registry.effective(sessionId)?.firstTool),
+        signal: exec.signal ?? new AbortController().signal,
+      }).catch(() => 'unavailable' as const)
+      if (outcome === 'allowed-once') grants.add(rawExec as object)
+      return decision
+    }))
+  }
   const denial = (exec: GuardExec): string | undefined => {
     if (exec.agent === undefined) return undefined
     linkFromHeader(registry, exec.agent)
-    if (!registry.isTainted(String(exec.agent.id))) return undefined
-    if (!toolAllowedWhileTainted(exec.name)) return taintDenialReason(exec.name)
+    const sessionId = String(exec.agent.id)
+    if (!registry.isTainted(sessionId)) return undefined
+    const cause = registry.effective(sessionId)?.firstTool
     const cwd = exec.agent.session?.header?.cwd
-    return workspaceReadDenial(exec.name, exec.arguments, typeof cwd === 'string' ? cwd : undefined)
+    const workspace = typeof cwd === 'string' ? cwd : undefined
+    if (TAINT_WORKSPACE_WRITE_TOOLS.has(exec.name)) return workspaceWriteDenial(exec.name, exec.arguments, workspace)
+    if (TAINT_ASK_TOOLS.has(exec.name)) {
+      // Consumed: a grant covers this one call.
+      if (grants.delete(exec as object)) return undefined
+      return ask === undefined
+        ? taintDenialReason(exec.name, cause)
+        : `Tool "${exec.name}" was not run: this session holds untrusted web page content${cause === undefined ? '' : ` (first through ${cause})`}, `
+          + 'so every shell command needs the user\'s approval, and it was not given (denied, timed out, nobody could answer, '
+          + `longer than ${String(TAINT_ASK_MAX_COMMAND)} characters, or asking for a wider sandbox). `
+          + 'Do not retry the same command; tell the user what you need and why. Typing /browser-clear turns shell commands back on without asking.'
+    }
+    if (!toolAllowedWhileTainted(exec.name)) return taintDenialReason(exec.name, cause)
+    return workspaceReadDenial(exec.name, exec.arguments, workspace)
   }
   // dsh-tools in every tested DSH release (src/dsh-support.ts; index.ts refuses older hosts) always has guard().
   disposers.push(ctx.tools.guard((exec) => denial(exec as unknown as GuardExec)))

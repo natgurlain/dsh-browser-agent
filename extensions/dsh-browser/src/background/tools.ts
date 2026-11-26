@@ -210,6 +210,12 @@ export interface TabManagementContext {
    */
   tabHidden?: (url: string) => boolean
   /**
+   * Whether a tab's title and URL may reach this session without marking it
+   * untrusted (an exempt page: the agent's own dev server, a site the user
+   * trusts). browser_list_tabs shows the others only with `details: true`.
+   */
+  tabReadable?: (url: string) => boolean
+  /**
    * A "do the remaining N" step: what its element must still look like and,
    * for a series, the page it was approved on. The page is compared here, on
    * the frames listed for this very step; the element is compared by the
@@ -252,6 +258,8 @@ const CHECKED_STEP_TOOLS: ReadonlySet<string> = new Set(['browser_click', 'brows
 
 /** Placeholder for the title and URL of a tab site policy hides. */
 const TAB_HIDDEN = '(hidden by site policy)'
+/** What browser_list_tabs shows for a tab outside {@link TabManagementContext.tabReadable} without `details`. */
+const TAB_REDACTED = '(hidden: call browser_list_tabs with details=true to see it)'
 
 /** What the dispatcher asks of the on-page overlay. Never fails a call. */
 export interface ActionOverlay {
@@ -1818,9 +1826,13 @@ async function dispatchTabManagementTool(
 ): Promise<ToolAnswer> {
   if (call.name === 'browser_downloads') return dispatchDownloadsTool(call, budget, authorize, signal, context)
   if (call.name === 'browser_list_tabs') {
-    const approval = tabManagementApproval(call)
-    const rejected = await authorizeTabManagement(approval, context.unrestrictedAccess, authorize, call, signal)
-    if (rejected !== undefined) return rejected
+    // The default listing shows only exempt pages in full: no card, no taint.
+    const details = call.args.details === true || context.tabReadable === undefined
+    if (details) {
+      const approval = tabManagementApproval(call)
+      const rejected = await authorizeTabManagement(approval, context.unrestrictedAccess, authorize, call, signal)
+      if (rejected !== undefined) return rejected
+    }
     const tabs = await chrome.tabs.query({})
     if (isCancelled(call, signal)) return cancelled()
     const records = tabs
@@ -1830,16 +1842,29 @@ async function dispatchTabManagementTool(
         // Blocked sites and origins outside the managed allowlist: not even
         // their title or address reaches the model.
         const hidden = context.tabHidden?.(tabUrl(tab)) === true
+        const redacted = !hidden && !details && context.tabReadable?.(tabUrl(tab)) !== true
         return {
           tabId: tab.id,
           windowId: tab.windowId,
           index: tab.index,
           active: tab.active,
           controlled: tab.id === context.controlledTabId,
-          title: hidden ? TAB_HIDDEN : tab.title ?? '',
-          url: hidden ? TAB_HIDDEN : tabUrl(tab),
+          title: hidden ? TAB_HIDDEN : redacted ? TAB_REDACTED : tab.title ?? '',
+          url: hidden ? TAB_HIDDEN : redacted ? TAB_REDACTED : tabUrl(tab),
         }
       })
+    if (!details) {
+      const shown = [...new Set(records.flatMap((record) => {
+        const origin = record.url === TAB_HIDDEN || record.url === TAB_REDACTED ? undefined : originFromUrl(record.url)
+        return origin === undefined ? [] : [origin]
+      }))]
+      const text = JSON.stringify({ tabs: records }, null, 2)
+      // Nothing page-authored left: ids and flags only.
+      if (shown.length === 0) return { ok: true, result: { text }, pageFree: true }
+      // The shown titles come from these exempt origins: the policy layer judges the result on them.
+      context.policy?.(call, { reads: shown, acts: [] })
+      return { ok: true, result: { text: wrapUntrustedContent(text, budget.maxChars) } }
+    }
     return {
       ok: true,
       result: { text: wrapUntrustedContent(JSON.stringify({ tabs: records }, null, 2), budget.maxChars) },
@@ -1877,6 +1902,7 @@ async function dispatchTabManagementTool(
     const activate = call.args.activate === true
     context.commitAction?.()
     await context.followTab(current)
+    let inFront = true
     if (activate) {
       if (current.windowId !== undefined) {
         try {
@@ -1890,13 +1916,20 @@ async function dispatchTabManagementTool(
       } catch {
         return unavailable(`Tab ${tabId} was followed but could not be activated.`)
       }
+      // Report what happened: the browser cannot take focus from another app.
+      if (current.windowId !== undefined) {
+        try { inFront = (await chrome.windows.get(current.windowId)).focused !== false } catch { /* closed: the next call says so */ }
+      }
     }
     return {
       ok: true,
       result: {
-        text: activate
+        text: !activate
+          ? `Tab ${tabId} is now the controlled tab. Call browser_snapshot before operating its page.`
+          : inFront
           ? `Tab ${tabId} is now the controlled and active tab. Call browser_snapshot before operating its page.`
-          : `Tab ${tabId} is now the controlled tab. Call browser_snapshot before operating its page.`,
+          : `Tab ${tabId} is now the controlled and active tab of its window, but the window stays behind the app the user is using (the browser cannot take focus from it). `
+            + 'Screenshots and page tools still work; do not call browser_follow_tab again for focus.',
       },
     }
   }
@@ -2022,16 +2055,18 @@ async function dispatchScreenshot(
     return unavailable('The controlled tab has no window, so its viewport cannot be captured.')
   }
   // `captureVisibleTab` photographs the last composited frame. A window that is
-  // not focused can hand back a stale image that no longer matches the DOM, so
-  // fail clearly instead of presenting old pixels as the current state.
+  // merely not focused (the user is typing in another app) keeps compositing
+  // while it is on screen, so it is captured as is: the extension cannot take
+  // focus from another app, and refusing only sent the model into a retry
+  // loop. A minimized window composites nothing: say so once, plainly.
   const windowsApi = (globalThis as {
-    chrome?: { windows?: { get?: (id: number) => Promise<{ focused?: boolean }> } }
+    chrome?: { windows?: { get?: (id: number) => Promise<{ focused?: boolean; state?: string }> } }
   }).chrome?.windows
   if (typeof windowsApi?.get === 'function') {
     try {
       const win = await windowsApi.get(windowId)
-      if (win.focused === false) {
-        return unavailable('The browser window is not focused, so a captured frame could be stale. Bring it to the front (browser_follow_tab { activate: true }) and retry.')
+      if (win.state === 'minimized') {
+        return unavailable('The browser window is minimized, so its viewport cannot be captured. Do not retry: ask the user to restore the browser window.')
       }
     } catch {
       // A closed window is reported by the capture call itself.

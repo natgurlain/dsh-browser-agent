@@ -13,7 +13,9 @@
  *   CLI session can be started there) can be prompted,
  *   steered, injected into, or purged. Other listable non-subagent sessions
  *   (Desktop, CLI) stay readable — history, state, cancel — so an approval
- *   raised by such a session can still be shown; `session.list` and
+ *   raised by such a session can still be shown, and the panel may also reply
+ *   to them (prompt, model, preset, commands) unless `promptHostSessions` is
+ *   false; they are never purged from the browser; `session.list` and
  *   `workspace.list` answer only about the bridge's own sessions;
  * - no full access: bridge sessions start on a safe preset even when the Host
  *   default is full access, no switch to a full-access preset, and no prompt,
@@ -160,6 +162,13 @@ export interface BridgePolicyOptions {
   safePresetNames?: readonly string[]
   /** Durable record of bridge-created sessions (the only ownership proof); defaults to memory only. */
   ledger?: SessionLedger
+  /**
+   * Let the panel prompt (and pick the model, permission preset or a command
+   * for) conversations started in DSH, not only the ones it created. The
+   * full-access gate still applies, and DSH-started conversations still
+   * cannot be deleted from the browser. Defaults to true.
+   */
+  promptHostSessions?: boolean
 }
 
 /** How a server-owned method touches a session. */
@@ -422,7 +431,9 @@ export function withBridgePolicy(api: BrowserHostApi, options: BridgePolicyOptio
     if (sessionId !== undefined && readMethod && !await allowsSession(sessionId, call.signal, 'read')) {
       return forbidden(`session ${JSON.stringify(sessionId)} is not available to the browser extension`)
     }
-    if (sessionId !== undefined && writeMethod && !await allowsSession(sessionId, call.signal, 'own')) {
+    if (sessionId !== undefined && writeMethod && !await allowsSession(sessionId, call.signal, 'own')
+      // A conversation started in DSH: the panel may reply to it unless the config says no.
+      && !(options.promptHostSessions !== false && await allowsSession(sessionId, call.signal, 'read'))) {
       // Flagged so the panel can say "reply in DSH" instead of showing an error.
       return forbidden(NOT_BRIDGE_SESSION(sessionId), { notBridgeSession: true })
     }

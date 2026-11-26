@@ -83,6 +83,7 @@ import {
   BRIDGE_APPROVAL_WITHDRAW_METHOD,
   BRIDGE_AUDIT_RECORD_METHOD,
   BRIDGE_STANDING_EVENT_METHOD,
+  BRIDGE_TAINT_CLEARED_EVENT_METHOD,
   STANDING_WORK_CAPS_VERSION,
   isStandingWork,
   type StandingWork,
@@ -551,6 +552,13 @@ let bridge: BridgeClient | null = null
 let rpc: ReturnType<typeof createRpc> | null = null
 const panelPorts = new Set<chrome.runtime.Port>()
 const BRIDGE_KEEPALIVE_ALARM = 'bridge-keepalive'
+/**
+ * While the runtime is idle (no panel, nothing running), a once-a-minute
+ * look at local discovery: when the Host says an agent turn is running
+ * (`busy`), reconnect, so a browser call later in that turn finds this
+ * browser instead of "no browser extension is connected".
+ */
+const BRIDGE_IDLE_PROBE_ALARM = 'bridge-idle-probe'
 /** What the bridge last said the Host holds for this install; restored from storage.local on boot (standing-work.ts). */
 let hostStanding: StandingWork = NO_HOST_STANDING
 /** Whether storage.local may hold a host hint (so "none" has something to clear). */
@@ -1422,6 +1430,7 @@ async function releaseKillSwitch(): Promise<void> {
   refreshActionBadges()
   broadcastKillSwitch()
   if (panelPorts.size > 0) armBridgeKeepalive()
+  else armIdleProbe()
   await settingsReady
   await startBridge()
 }
@@ -1922,6 +1931,8 @@ function standingSummary(): StandingSummary {
     watchers: settingsLoaded && settings.allowPageWatchers ? pageWatchers.registry.list().length : 0,
     schedules: hostStanding.schedules,
     mcp: hostStanding.mcp,
+    // A running turn keeps an open connection open; it never makes a lost one reconnect.
+    turns: bridge?.connected === true ? hostStanding.turns ?? 0 : 0,
   }
 }
 
@@ -1933,8 +1944,8 @@ function onStandingWorkChanged(): void {
 
 /** Adopt the bridge's hint and mirror it (with the address it came from) for the next browser start. */
 function setHostStanding(work: StandingWork): void {
-  const changed = work.schedules !== hostStanding.schedules || work.mcp !== hostStanding.mcp
-  hostStanding = { schedules: work.schedules, mcp: work.mcp }
+  const changed = work.schedules !== hostStanding.schedules || work.mcp !== hostStanding.mcp || (work.turns ?? 0) !== (hostStanding.turns ?? 0)
+  hostStanding = { schedules: work.schedules, mcp: work.mcp, ...work.turns === undefined ? {} : { turns: work.turns } }
   const stored = storedStandingHost(hostStanding, connectedAddress)
   const area = (chrome.storage as { local?: chrome.storage.StorageArea }).local
   if (area !== undefined && (stored !== undefined || hostStandingStored)) {
@@ -2055,13 +2066,17 @@ const runtimeKeeper = new RuntimeKeeper(runtimeLease, {
       void Promise.resolve(chrome.runtime.getPlatformInfo()).catch(() => {})
     } catch { /* not available in this context */ }
   },
-  onActive: armBridgeKeepalive,
+  onActive: () => {
+    armBridgeKeepalive()
+    void Promise.resolve(chrome.alarms.clear(BRIDGE_IDLE_PROBE_ALARM)).catch(() => {})
+  },
   onIdle: () => {
     if (panelPorts.size > 0) return
     bridgeStartRevision += 1
     bridge?.stop()
     clearStandingRetry()
     disarmBridgeKeepalive()
+    armIdleProbe()
   },
   persist: (activeUntil) => {
     const area = (chrome.storage as { session?: chrome.storage.StorageArea }).session
@@ -2142,6 +2157,7 @@ const runtimeRestored = (async () => {
   await restoreRuntimeLease()
   await restoreHostStanding()
   runtimeKeeper.update()
+  if (!runtimeLease.active() && panelPorts.size === 0) armIdleProbe()
   if (!runtimeLease.active() || panelPorts.size > 0) return
   if (runtimeLease.standingOnly() && !standingRetry.due()) {
     // A parked reconnect is not due yet: this wake-up (a tab event, a
@@ -3075,6 +3091,7 @@ function routeToolCall(call: ToolCall): void {
         rollbackActionCommit,
         policy,
         tabHidden: (url) => policyRuntime.pageHidden(url, unrestrictedAccess),
+        tabReadable: (url) => policyRuntime.readableWithoutTaint(call.sessionId, url),
       },
     )
   }
@@ -3190,10 +3207,19 @@ function routeToolCall(call: ToolCall): void {
       // Untrusted page content entered the session: taint it (security/taint.ts),
       // unless everything the call could have quoted is exempt (local pages,
       // sites the user trusts). The tab is looked at again only when that is possible.
-      const after = policyRuntime.mayExempt(call.sessionId) ? await tabProvenanceAfter(activeCall.tabId) : undefined
+      // A cancelled call answers fixed text (below), so nothing it read reaches the model.
+      const cancelled = controller.signal.aborted && !(call.name === 'browser_open_tab' && answer.ok)
+      // Fixed extension text (an approval not granted, a cancel) quotes no page: it never taints.
+      // An ok answer is page-free only when its lane says so (browser_list_tabs with nothing readable shown).
+      const pageFree = cancelled || answer.pageFree === true
+      const after = !pageFree && policyRuntime.mayExempt(call.sessionId) ? await tabProvenanceAfter(activeCall.tabId) : undefined
       // Sent on the result frame: the bridge then leaves the session's shell and file tools on.
-      const verdict = policyRuntime.recordResult(call, answer.ok, policyTabOrigin, after, { quotesConsole: callQuotedConsole(call) })
-      const taintExempt = verdict.exempt
+      const verdict = pageFree
+        ? (policyRuntime.forgetCall(call.id), { exempt: false })
+        : policyRuntime.recordResult(call, answer.ok, policyTabOrigin, after, { quotesConsole: callQuotedConsole(call) })
+      const taintExempt = pageFree
+        ? { pageFree: true as const }
+        : verdict.exempt
         ? { taintExempt: true as const, ...verdict.local === true ? { taintExemptLocal: true as const } : {} }
         : {}
       learning.recordResult(call, answer, {
@@ -3205,13 +3231,14 @@ function routeToolCall(call: ToolCall): void {
       if (activeToolCalls.get(call.id) !== activeCall) return
       // A committed browser_open_tab already rebound affinity; prefer that
       // factual success over a generic cancel that would leave the model wrong.
-      if (controller.signal.aborted && !(call.name === 'browser_open_tab' && answer.ok)) {
+      if (cancelled) {
         if (activeToolCalls.get(call.id) === activeCall) {
           bridge?.send({
             t: 'tool.result',
             id: call.id,
             ok: false,
             error: { code: 'action-failed', message: 'Tool call was cancelled' },
+            pageFree: true,
           })
         }
         return
@@ -3248,6 +3275,7 @@ function routeToolCall(call: ToolCall): void {
             id: call.id,
             ok: false,
             error: { code: 'action-failed', message: 'Tool call was cancelled' },
+            pageFree: true,
           })
         }
         return
@@ -3394,6 +3422,7 @@ async function dispatchDevToolsTool(call: ToolCall, activeCall: ActiveToolCall, 
     return {
       ok: false,
       error: { code: authorization === 'timed-out' ? 'timeout' : 'action-failed', message: approvalFailureMessage(prompt, authorization) },
+      pageFree: true,
     }
   }
   try {
@@ -3739,6 +3768,15 @@ async function startBridge(): Promise<void> {
           // carried no standing cap: an older bridge does not reserve this method,
           // so there it could be a Host-stream event that merely uses the name.
           if (caps?.standing !== undefined && isStandingWork(frame.frame.payload)) setHostStanding(frame.frame.payload)
+          return
+        }
+        if (frame.t === 'event' && frame.frame.method === BRIDGE_TAINT_CLEARED_EVENT_METHOD) {
+          // The user typed /browser-clear in DSH: the bridge already cleared its side.
+          // Only from a bridge that announced these notices (see protocol.ts).
+          const clearedSessionId = (frame.frame.payload as { sessionId?: unknown } | null)?.sessionId
+          if (caps?.taintClearEvents === 1 && typeof clearedSessionId === 'string' && clearedSessionId !== '') {
+            void policyRuntime.ready.then(() => { policyRuntime.taint.clear(clearedSessionId) })
+          }
           return
         }
         if (frame.t === 'event') {
@@ -4647,9 +4685,60 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     void settingsReady.then(expireDevToolsAllowance)
     return
   }
+  if (alarm.name === BRIDGE_IDLE_PROBE_ALARM) {
+    void runtimeRestored.then(onIdleProbeAlarm)
+    return
+  }
   if (alarm.name !== BRIDGE_KEEPALIVE_ALARM) return
   void runtimeRestored.then(onKeepaliveAlarm)
 })
+
+/**
+ * Arm the idle probe unless it already runs: on every idle transition, and at
+ * boot (an extension reload, an install, or a browser start begins idle and
+ * never transitions). Every half minute, the MV3 alarm minimum.
+ */
+function armIdleProbe(): void {
+  if (killSwitchEngaged || bridgeRefusal !== undefined) return
+  void (async () => {
+    const existing = await chrome.alarms.get(BRIDGE_IDLE_PROBE_ALARM)
+    if (existing === undefined || existing === null) chrome.alarms.create(BRIDGE_IDLE_PROBE_ALARM, { periodInMinutes: 0.5 })
+  })().catch(() => {})
+}
+
+/** The idle probe ({@link BRIDGE_IDLE_PROBE_ALARM}): reconnect when the Host has a turn running. */
+async function onIdleProbeAlarm(): Promise<void> {
+  if (killSwitchEngaged || bridgeRefusal !== undefined) {
+    void Promise.resolve(chrome.alarms.clear(BRIDGE_IDLE_PROBE_ALARM)).catch(() => {})
+    return
+  }
+  if (panelPorts.size > 0 || runtimeLease.active() || (bridge !== null && bridge.state !== 'stopped')) return
+  let busy = false
+  let busyUrl: string | undefined
+  // Bounded and local only: the remembered address, then the fixed discovery ports.
+  await discoverInstances(planDiscovery({
+    ...(lastBridgeUrl === undefined ? {} : { rememberedUrl: lastBridgeUrl }),
+    excludeUrls: [...rejectedBridgeUrls],
+  }), {
+    probe: async (port, timeoutMs) => {
+      const payload = await readBridgeConfig(port, timeoutMs)
+      if (payload?.busy === true && !busy) {
+        busy = true
+        busyUrl = payload.wsUrl
+      }
+      return payload
+    },
+    shouldContinue: () => !busy && panelPorts.size === 0,
+  // Not the first answer: the first instance found may be idle while another one is busy.
+  }, { stopAtFirstHit: false }).catch(() => [])
+  if (!busy || panelPorts.size > 0 || killSwitchEngaged) return
+  // Counts as activity: the lease holds the connection for the usual idle window, renewed by the turn.
+  // A headless reconnect dials only a known address: the one that said it is busy.
+  if (busyUrl !== undefined) headlessBridgeUrl = busyUrl
+  runtimeLease.touch()
+  runtimeKeeper.update()
+  void settingsReady.then(() => startBridge())
+}
 
 function onKeepaliveAlarm(): void {
   if (panelPorts.size === 0) {

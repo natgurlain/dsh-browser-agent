@@ -3,6 +3,56 @@
 Each `## vX.Y.Z` section becomes the notes of that GitHub release
 (`scripts/package-release.mjs --notes`), followed by the SHA-256 digests of its assets.
 
+## v0.3.9
+
+This release changes how the untrusted-content guard decides and what it does, instead of
+patching single cases. The loop of building a page, opening it in the browser and looking at it
+keeps every tool on, and a conversation that did read an untrusted page can still work.
+
+- **Only page content can restrict a conversation.** Before, any browser step restricted it
+  unless the extension could prove it was safe, so every case nobody had listed did: an
+  approval card that timed out or was denied, a step the bridge timed out or cancelled, a
+  cancelled step. A step whose answer is fixed text from the extension or the bridge now
+  leaves the conversation alone. Answers that carry anything from a page are judged as before.
+- **Your own dev server is trusted without a click.** A `localhost` / `127.0.0.1` page that the
+  agent opened itself (with `browser_open_tab` or `browser_navigate`, while nothing untrusted
+  had been read) counts as a local page for that conversation: reading it, screenshots and
+  console logs keep every tool on, on any port. A tab the agent only followed, or a page with
+  frames from other sites, is judged as before. `devLoop.trustLoopback: false` still turns this
+  off.
+- **A restricted conversation degrades instead of stopping.** After reading an untrusted page,
+  each shell command is put to you for approval in DSH (Auto approve never answers these; a
+  command longer than 4000 characters is refused rather than shown cut), and file edits stay
+  allowed inside the workspace, by absolute path, except `.git`, `.github`, `.env*`, editor and
+  agent config, `node_modules`, and symbolic links (checked without regard to letter case).
+  Network tools (`web_fetch`, `web_search`), subagents and plugin tools stay off, and no command
+  or edit can ask for a wider sandbox.
+- **Clear from DSH.** Type `/browser-clear` in the conversation to lift the restriction. The
+  extension's own record clears too. The panel's Clear still works. The agent is told what
+  caused the restriction and to ask you, instead of working around it.
+- **Reply from the side panel to conversations started in DSH.** The panel could only watch
+  them ("Reply to it there"). It can now send messages and pick the model, permission preset or
+  a command for them. Conversations running a full-access preset still refuse, and DSH-started
+  conversations still cannot be deleted from the browser. `promptHostSessions: false` in the
+  plugin config restores view-only.
+- **`browser_list_tabs` no longer restricts the conversation.** By default it shows titles and
+  URLs only for tabs the conversation may read safely, lists the others by tab id, and needs no
+  approval. `details: true` shows everything, asks you first, and restricts as before.
+- **The extension is there when a turn needs it.** It stays connected while any DSH turn is
+  running. When it has gone idle (or just started, after a reload or a browser start) it checks
+  local DSH every half minute and reconnects when a turn is running, and a browser call made
+  while no extension is connected waits up to 40 seconds for it during a turn. Before, an agent
+  that coded for more than five minutes found "no browser extension is connected" unless the
+  side panel was open.
+- **Screenshots no longer loop on focus.** A browser window that is on screen but behind the app
+  you are typing in is captured as is. Before, the screenshot was refused and the agent was told
+  to retry after `browser_follow_tab`, which cannot take focus from another app, so it looped.
+  `browser_follow_tab` now says when the window stayed behind. A minimized window is refused once,
+  with "do not retry".
+
+Updating a checkout install: run `./scripts/install.sh`, reload the extension, and quit and reopen
+DSH (the desktop app loads the new bridge only on restart).
+
 ## v0.3.8
 
 - **A browser step that never reached the browser no longer pauses coding.** When the

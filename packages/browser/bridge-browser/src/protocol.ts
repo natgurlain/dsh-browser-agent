@@ -319,6 +319,14 @@ export const STANDING_WORK_CAPS_VERSION = 1
  */
 export const BRIDGE_STANDING_EVENT_METHOD = 'bridge/standing'
 
+/**
+ * The bridge's own sealed notice that the user cleared a session's taint in
+ * DSH (`/browser-clear`): `{ sessionId }`. Acted on only from a bridge whose
+ * `hello.ok` carried `taintClearEvents`, so a Host-stream event that merely
+ * uses the name on an older bridge changes nothing.
+ */
+export const BRIDGE_TAINT_CLEARED_EVENT_METHOD = 'bridge/taintCleared'
+
 /** Upper bound on the schedule count a hint may claim (anything larger is malformed). */
 export const MAX_STANDING_SCHEDULES = 10_000
 
@@ -333,6 +341,12 @@ export interface StandingWork {
   schedules: number
   /** The loopback MCP endpoint is enabled in the plugin config. */
   mcp: boolean
+  /**
+   * Agent turns running on the Host right now: a browser call may come at any
+   * step, so the extension stays connected until they end. Never persisted
+   * (a stale count would keep a browser reconnecting). Absent on older bridges.
+   */
+  turns?: number
 }
 
 /**
@@ -346,6 +360,7 @@ export function isStandingWork(value: unknown): value is StandingWork {
   return typeof work.schedules === 'number' && Number.isSafeInteger(work.schedules)
     && work.schedules >= 0 && work.schedules <= MAX_STANDING_SCHEDULES
     && typeof work.mcp === 'boolean'
+    && (work.turns === undefined || (typeof work.turns === 'number' && Number.isSafeInteger(work.turns) && work.turns >= 0 && work.turns <= MAX_STANDING_SCHEDULES))
 }
 
 /** Internal RPC: read and verify one session's audit log for the panel's export. */
@@ -1008,6 +1023,8 @@ export interface BridgeCaps {
    * the matching exemption off so both sides agree. Absent on older bridges.
    */
   taintExemptions?: { local: boolean; trusted: boolean }
+  /** Server only: this bridge sends {@link BRIDGE_TAINT_CLEARED_EVENT_METHOD} events (version 1). */
+  taintClearEvents?: number
   /**
    * Client only: the extension handles {@link BRIDGE_STANDING_EVENT_METHOD}
    * events at this wire version ({@link STANDING_WORK_CAPS_VERSION}). Absent
@@ -1086,10 +1103,12 @@ export type ClientFrame =
    * exempt from session taint (the user's own loopback pages, or sites the
    * user marked trusted) and that its own record of the session is untainted;
    * absent means "taint as usual". It sits on the frame, never inside
-   * `result`, so neither a page nor the agent can set it.
+   * `result`, so neither a page nor the agent can set it. `pageFree: true`
+   * says the answer is the extension's own fixed text (an approval that was
+   * not granted, a cancel): it quotes no page and never taints.
    */
-  | { t: 'tool.result'; id: string; ok: true; result: unknown; taintExempt?: true; taintExemptLocal?: true }
-  | { t: 'tool.result'; id: string; ok: false; error: ToolError; taintExempt?: true; taintExemptLocal?: true }
+  | { t: 'tool.result'; id: string; ok: true; result: unknown; taintExempt?: true; taintExemptLocal?: true; pageFree?: true }
+  | { t: 'tool.result'; id: string; ok: false; error: ToolError; taintExempt?: true; taintExemptLocal?: true; pageFree?: true }
   /** Liveness reply. */
   | { t: 'pong' }
   /**
@@ -1218,9 +1237,10 @@ export function isServerFrame(frame: BridgeFrame): frame is ServerFrame {
  * `taintExemptLocal` when the exemption rests on a local (loopback) page,
  * which a bridge may refuse on its own (`devLoop.trustLoopback: false`).
  */
-function taintExemptFields(frame: Record<string, unknown>): { taintExempt?: true; taintExemptLocal?: true } {
-  if (frame.taintExempt !== true) return {}
-  return { taintExempt: true, ...(frame.taintExemptLocal === true ? { taintExemptLocal: true as const } : {}) }
+function taintExemptFields(frame: Record<string, unknown>): { taintExempt?: true; taintExemptLocal?: true; pageFree?: true } {
+  const pageFree = frame.pageFree === true ? { pageFree: true as const } : {}
+  if (frame.taintExempt !== true) return pageFree
+  return { taintExempt: true, ...(frame.taintExemptLocal === true ? { taintExemptLocal: true as const } : {}), ...pageFree }
 }
 
 export function parseBridgeFrame(text: string): BridgeFrame | undefined {
@@ -1371,6 +1391,7 @@ function isCaps(value: unknown): value is BridgeCaps {
     && (caps.hostApprovals === undefined || caps.hostApprovals === HOST_APPROVALS_CAPS_VERSION)
     && (caps.standing === undefined || isStandingWork(caps.standing))
     && (caps.taintExemptions === undefined || isTaintExemptionCaps(caps.taintExemptions))
+    && (caps.taintClearEvents === undefined || (typeof caps.taintClearEvents === 'number' && Number.isSafeInteger(caps.taintClearEvents) && caps.taintClearEvents > 0))
     // Any version is a valid claim; only the known one is acted on.
     && (caps.standingUpdates === undefined || (typeof caps.standingUpdates === 'number' && Number.isSafeInteger(caps.standingUpdates) && caps.standingUpdates > 0))
     // Any version is a valid claim; only AUTO_REVIEW_CAPS_VERSION is acted on.
@@ -1431,12 +1452,20 @@ export interface BridgeConfigPayload {
   pid?: number
   /** Host start time as an ISO 8601 string. */
   startedAt?: string
+  /**
+   * Set while an agent turn is running on the Host: an idle extension that
+   * probes discovery reconnects, so a browser call later in the turn finds it
+   * (runtime-lifecycle.ts). Says nothing about which session or what it does.
+   */
+  busy?: true
 }
 
 /** Instance metadata the discovery endpoints advertise. */
 export interface BridgeInstanceInfo {
   pid?: number
   startedAt?: string
+  /** Whether an agent turn is running now (read on every answer). */
+  busy?: () => boolean
 }
 
 /**
@@ -1456,6 +1485,7 @@ export function bridgeConfigPayload(
     ...(beacon ? { beacon: true as const } : {}),
     ...(info.pid === undefined ? {} : { pid: info.pid }),
     ...(info.startedAt === undefined ? {} : { startedAt: info.startedAt }),
+    ...(info.busy?.() === true ? { busy: true as const } : {}),
   }
 }
 
@@ -1496,6 +1526,7 @@ export function parseBridgeConfigPayload(value: unknown): BridgeConfigPayload | 
     ...(body.beacon === true ? { beacon: true as const } : {}),
     ...(typeof body.pid === 'number' && Number.isInteger(body.pid) && body.pid > 0 ? { pid: body.pid } : {}),
     ...(typeof body.startedAt === 'string' && body.startedAt !== '' ? { startedAt: body.startedAt } : {}),
+    ...(body.busy === true ? { busy: true as const } : {}),
   }
 }
 

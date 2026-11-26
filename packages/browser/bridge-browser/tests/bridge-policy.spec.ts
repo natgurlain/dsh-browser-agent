@@ -85,8 +85,24 @@ describe('bridge method allowlist', () => {
 })
 
 describe('session ownership', () => {
-  it('acts only in sessions the bridge created; other listed sessions stay read-only', async () => {
+  it('lets the panel reply to a DSH-started session by default, never to a subagent or unlisted one', async () => {
     const { call, inner } = harness()
+    for (const [method, payload] of [
+      ['session.prompt', { content: [{ type: 'text', text: 'hi' }] }],
+      ['commands.execute', { line: '/plan' }],
+      ['session.setPermission', { preset: 'read-only' }],
+      ['session.selectModel', { provider: 'p', model: 'm' }],
+    ] as const) {
+      expect(await call(method, { sessionId: 'listed', ...payload }), method).toMatchObject({ ok: true })
+    }
+    expect(forwarded(inner, 'session.prompt').map(([c]) => (c.payload as { sessionId: string }).sessionId)).toEqual(['listed'])
+    for (const sessionId of ['child', 'nowhere']) {
+      expect(await call('session.prompt', { sessionId, content: [] }), sessionId).toMatchObject({ ok: false, error: { code: 'forbidden' } })
+    }
+  })
+
+  it('with promptHostSessions: false, acts only in sessions the bridge created; other listed sessions stay read-only', async () => {
+    const { call, inner } = harness({}, { promptHostSessions: false })
     expect(await call('session.create', {})).toEqual({ ok: true, value: { sessionId: 'created' } })
     expect(await call('session.prompt', { sessionId: 'created', content: [{ type: 'text', text: 'hi' }] })).toMatchObject({ ok: true })
     // A Desktop/CLI session the Host lists: history and cancel yes, acting no.
@@ -107,7 +123,7 @@ describe('session ownership', () => {
   })
 
   it('strips sessionId, cwd, and workspaceId from session.create so it cannot adopt or relocate a session', async () => {
-    const { call, inner } = harness()
+    const { call, inner } = harness({}, { promptHostSessions: false })
     for (const payload of [{ sessionId: 'listed' }, { cwd: '/home/victim' }, { workspaceId: 'ws-main-repo' }]) {
       expect(await call('session.create', payload)).toMatchObject({ ok: true, value: { sessionId: 'created' } })
     }

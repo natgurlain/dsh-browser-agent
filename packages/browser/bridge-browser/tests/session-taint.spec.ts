@@ -69,7 +69,7 @@ describe('session taint (Host side)', () => {
     result({ name: 'bash', agent: agent('s1') }, { isError: false })
     expect(await check({ name: 'bash', agent: agent('s1') })).toBeUndefined()
     result({ name: 'browser_snapshot', agent: agent('s1') }, { isError: false })
-    expect(await check({ name: 'bash', agent: agent('s1') })).toMatch(/untrusted web page content.*clears the session/)
+    expect(await check({ name: 'bash', agent: agent('s1') })).toMatch(/untrusted web page content \(first through browser_snapshot\).*\/browser-clear/)
     // A refused fetch or search is told the way that still works: the browser tools.
     for (const name of ['web_fetch', 'web_search']) {
       const reason = await check({ name, agent: agent('s1') })

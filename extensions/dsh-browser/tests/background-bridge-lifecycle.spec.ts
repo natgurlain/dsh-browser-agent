@@ -463,6 +463,7 @@ describe('background bridge lifecycle', () => {
         id: 'close-in-flight',
         ok: false,
         error: { code: 'action-failed', message: 'Tool call was cancelled' },
+        pageFree: true,
       })
       expect(chrome.storage.local.set).toHaveBeenCalledWith(expect.objectContaining({
         dshSettings: expect.objectContaining({ unrestrictedBrowserAccess: false }),

@@ -69,7 +69,7 @@ The installer installs the bridge plugin and Chrome extension. It downloads one 
 macOS and Linux. Download the installer, check it against the published digest, then run it:
 
 ```sh
-tag=v0.3.8
+tag=v0.3.9
 base=https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag
 curl --proto '=https' --tlsv1.2 -fsSL -O "$base/install.sh" -O "$base/SHA256SUMS"
 grep ' install.sh$' SHA256SUMS | sha256sum -c -    # macOS: shasum -a 256 -c -
@@ -79,7 +79,7 @@ bash install.sh --release "$tag"
 Windows, in PowerShell (the release path of `install.ps1` has not been run on a Windows machine yet):
 
 ```powershell
-$tag = 'v0.3.8'
+$tag = 'v0.3.9'
 $base = "https://github.com/natgurlain/dsh-browser-agent/releases/download/$tag"
 irm "$base/install.ps1" -OutFile install.ps1; irm "$base/SHA256SUMS" -OutFile SHA256SUMS
 $want = (Select-String -Path SHA256SUMS -Pattern ' install\.ps1$').Line.Split(' ')[0]
@@ -90,7 +90,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --release $tag
 The same digests are printed in the notes of each [release](https://github.com/natgurlain/dsh-browser-agent/releases). The shorter form below runs the installer without checking the script first; what the installer downloads is still verified:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.8/install.sh | bash -s -- --release v0.3.8
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.9/install.sh | bash -s -- --release v0.3.9
 ```
 
 `--release latest` installs the newest release instead of a named one. `SHA256SUMS` comes from the same release as the files, so it catches a corrupted, truncated or substituted download, not a release that was itself published by someone who took over the repository or its release workflow; see [RELEASING.md](RELEASING.md#what-verification-covers).
@@ -105,12 +105,12 @@ When the installer opens `chrome://extensions`, follow its instructions to load 
 If you would rather add the plugin with DSH's own plugin command, each release also carries the plugin package and the extension builds on their own:
 
 ```sh
-dsh plugin --profile web add https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.8/dsh-browser-agent-plugin-v0.3.8.tgz
+dsh plugin --profile web add https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.9/dsh-browser-agent-plugin-v0.3.9.tgz
 ```
 
 The plugin package is `@natgurlain/dsh-browser-agent` since v0.3.5; it was `dsh-browser-agent` from v0.3.1 to v0.3.4 and `@natgurlain/dsh-bridge-browser` before. If you added an earlier release this way, remove the old package first, since both would register the same bridge: `dsh plugin --profile web remove dsh-browser-agent` (or `@natgurlain/dsh-bridge-browser`). Settings you saved for an old package are carried over by `node scripts/migrate-bridge-name.mjs ~/.dsh web` from a checkout (the installer does this for you); otherwise save them again in DSH's plugin settings.
 
-Then download `dsh-browser-chrome-v0.3.8.zip` (or the Firefox zip) from the same [release](https://github.com/natgurlain/dsh-browser-agent/releases), unzip it, load it with **Load unpacked** on your browser's extensions page, and open the side panel. An extension installed this way has no token yet: it shows a short code, and typing that code into the card that appears in DSH connects the two. For the DeepSeek Harness desktop app, use the installer above: it registers the plugin with the app for you.
+Then download `dsh-browser-chrome-v0.3.9.zip` (or the Firefox zip) from the same [release](https://github.com/natgurlain/dsh-browser-agent/releases), unzip it, load it with **Load unpacked** on your browser's extensions page, and open the side panel. An extension installed this way has no token yet: it shows a short code, and typing that code into the card that appears in DSH connects the two. For the DeepSeek Harness desktop app, use the installer above: it registers the plugin with the app for you.
 
 ## Core capabilities
 
@@ -202,7 +202,7 @@ The summary at the end lists where the bridge was registered and what was skippe
 To update, open **Settings → About** in the side panel. The check compares the running version with the latest GitHub release and offers a command that installs exactly that release with the installer already on disk, for example:
 
 ```sh
-DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.3.8
+DSH_HOME="$HOME/.dsh" bash "$HOME/.dsh/dsh-browser/scripts/install.sh" --release v0.3.9
 ```
 
 Installer options:
@@ -233,13 +233,13 @@ Open **Settings → Uninstall dsh-browser** in the extension, copy the command, 
 An installation that recorded its location is removed by the uninstaller it has on disk. Otherwise the command fetches the uninstaller published with the extension's own release; it downloads `uninstall.mjs` from that release and runs it only after its SHA-256 matched `SHA256SUMS`. On macOS or Linux:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.8/uninstall.sh | bash -s -- --release v0.3.8
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.9/uninstall.sh | bash -s -- --release v0.3.9
 ```
 
 On Windows:
 
 ```powershell
-& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.8/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s --release v0.3.8 } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
+& { $ErrorActionPreference = 'Stop'; $d=New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ('dsh-browser-uninstall.'+[Guid]::NewGuid().ToString('N'))); try { $s=Join-Path $d.FullName 'uninstall.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/natgurlain/dsh-browser-agent/releases/download/v0.3.9/uninstall.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s --release v0.3.9 } finally { Remove-Item -LiteralPath $d.FullName -Recurse -Force } }
 ```
 
 From a checkout, run `bash scripts/uninstall.sh` or `.\scripts\uninstall.ps1`.

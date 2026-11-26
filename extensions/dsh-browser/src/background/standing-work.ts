@@ -52,6 +52,8 @@ export interface StandingSummary {
   watchers: number
   schedules: number
   mcp: boolean
+  /** Agent turns running on the connected Host (counted only while connected; never stored). */
+  turns?: number
 }
 
 /** Whether the Host reported any standing work. */
@@ -61,7 +63,7 @@ export function hostHasStanding(work: StandingWork): boolean {
 
 /** Units of standing work in a summary (what the lease counts). */
 export function standingCount(summary: StandingSummary): number {
-  return summary.watchers + summary.schedules + (summary.mcp ? 1 : 0)
+  return summary.watchers + summary.schedules + (summary.mcp ? 1 : 0) + (summary.turns ?? 0)
 }
 
 /**

@@ -862,3 +862,39 @@ describe('the banner\'s one-click choices', () => {
     })
   })
 })
+
+describe('a loopback dev server the session opened itself', () => {
+  const DEV = 'http://127.0.0.1:8471'
+  it('counts as local for that session only, without a prior confirmation', () => {
+    const h = harness({ taintLocalOrigins: [] })
+    const { call } = navigate(h, 'dev', `${DEV}/game.html`)
+    expect(h.policy.recordResult(call, true, undefined, { top: DEV, frames: [DEV], opaque: false })).toMatchObject({ exempt: true, local: true })
+    // A screenshot (local-only exemption) of that page stays untainted too.
+    expect(read(h, 'dev', [DEV], { name: 'browser_screenshot', after: { top: DEV, frames: [DEV], opaque: false } })).toMatchObject({ exempt: true, local: true })
+    expect(h.policy.get('dev')).toBeUndefined()
+    // Another session that never opened it still needs the confirmation.
+    expect(read(h, 'other', [DEV], { after: { top: DEV, frames: [DEV], opaque: false } })).toEqual({ exempt: false })
+  })
+
+  it('is not granted to a tainted session, to a failed open, or to a non-loopback URL', () => {
+    const h = harness({ taintLocalOrigins: [] })
+    read(h, 'web', ['https://evil.example'])
+    expect(h.policy.get('web')).toBeDefined()
+    const tainted = navigate(h, 'web', `${DEV}/`)
+    h.policy.recordResult(tainted.call, true, undefined, { top: DEV, frames: [DEV], opaque: false })
+    expect(h.policy.exemption('web').localOrigins).not.toContain(DEV)
+    const failed = navigate(h, 'f', `${DEV}/`)
+    h.policy.recordResult(failed.call, false, undefined, { top: DEV, frames: [DEV], opaque: false })
+    expect(h.policy.exemption('f').localOrigins).not.toContain(DEV)
+    const remote = navigate(h, 'r', 'https://example.com/')
+    h.policy.recordResult(remote.call, true, undefined, { top: 'https://example.com', frames: ['https://example.com'], opaque: false })
+    expect(h.policy.exemption('r').localOrigins).toEqual([])
+  })
+
+  it('still taints when a third-party frame is on the page', () => {
+    const h = harness({ taintLocalOrigins: [] })
+    const { call } = navigate(h, 'dev', `${DEV}/`)
+    h.policy.recordResult(call, true, undefined, { top: DEV, frames: [DEV], opaque: false })
+    expect(read(h, 'dev', [DEV], { name: 'browser_screenshot', after: { top: DEV, frames: [DEV, 'https://ads.example'], opaque: false } })).toEqual({ exempt: false })
+  })
+})

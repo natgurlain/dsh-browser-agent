@@ -187,12 +187,55 @@ describe('the voucher travels on the authenticated frame', () => {
     expect(registry.takeExempt('s1', 'call-mixed')).toBe(false)
   })
 
-  it('a call that timed out carries no voucher', async () => {
+  it('a call the bridge timed out or cancelled itself answers its own text and does not taint', async () => {
     const registry = new SessionTaintRegistry()
     const bridge = await startTestBridge({ sessionLineage: registry })
-    await connectClient(bridge.url, caps)
+    const client = await connectClient(bridge.url, caps)
     await expect(bridge.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 30, 's1', 'call-slow')).rejects.toMatchObject({ code: 'timeout' })
-    expect(registry.takeExempt('s1', 'call-slow')).toBe(false)
+    expect(registry.takeExempt('s1', 'call-slow')).toBe(true)
+    // A late answer after the timeout changes nothing.
+    client.send({ t: 'tool.result', id: toolCallsOf(client.frames)[0]!.id, ok: true, result: { text: 'web' } } as never)
+    const cancel = new AbortController()
+    const pending = bridge.bridge.requestTool('browser_snapshot', {}, cancel.signal, 1_000, 's1', 'call-cancel')
+    await waitFor(() => toolCallsOf(client.frames).length >= 2)
+    cancel.abort()
+    await expect(pending).rejects.toMatchObject({ code: 'bridge-closed' })
+    expect(registry.takeExempt('s1', 'call-cancel')).toBe(true)
+    expect(registry.inheritsExemptReads('s1')).toBe(false)
+  })
+
+  it('while the Host is busy, a call waits for an extension to connect instead of failing at once', async () => {
+    const registry = new SessionTaintRegistry()
+    let busy = 1_000
+    const bridge = await startTestBridge({ sessionLineage: registry, awaitConnectionMs: () => busy } as never)
+    const pending = bridge.bridge.requestTool('browser_snapshot', {}, new AbortController().signal, 1_000, 's1', 'call-wait')
+    const client = await connectClient(bridge.url, caps)
+    await waitFor(() => toolCallsOf(client.frames).length >= 1)
+    client.send({ t: 'tool.result', id: toolCallsOf(client.frames)[0]!.id, ok: true, result: { text: 'ok' } } as never)
+    await expect(pending).resolves.toEqual({ text: 'ok' })
+    busy = 0
+  })
+
+  it('an extension answer marked pageFree (approval not granted) does not taint; an unmarked failure does', async () => {
+    const registry = new SessionTaintRegistry()
+    const bridge = await startTestBridge({ sessionLineage: registry })
+    const client = await connectClient(bridge.url, caps)
+    const answer = async (callId: string, n: number, extra: Record<string, unknown>) => {
+      const pending = bridge.bridge.requestTool('browser_list_tabs', {}, new AbortController().signal, 1_000, 's1', callId)
+      await waitFor(() => toolCallsOf(client.frames).length >= n)
+      client.send({ t: 'tool.result', id: toolCallsOf(client.frames)[n - 1]!.id, ok: false, error: { code: 'timeout', message: 'The browser approval request timed out.' }, ...extra } as never)
+      await expect(pending).rejects.toMatchObject({ code: 'timeout' })
+    }
+    await answer('call-free', 1, { pageFree: true })
+    expect(registry.takeExempt('s1', 'call-free')).toBe(true)
+    await answer('call-page', 2, {})
+    expect(registry.takeExempt('s1', 'call-page')).toBe(false)
+    await answer('call-bad', 3, { pageFree: 'yes' })
+    expect(registry.takeExempt('s1', 'call-bad')).toBe(false)
+    // A bridge that honours no vouchers ignores the extension's flag.
+    registry.honour = { any: false, local: false }
+    await answer('call-off', 4, { pageFree: true })
+    expect(registry.takeExempt('s1', 'call-off')).toBe(false)
   })
 
   it('passes the snapshot injection flag through only as the literal true', async () => {

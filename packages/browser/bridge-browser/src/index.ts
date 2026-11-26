@@ -78,6 +78,7 @@ import { DEVLOOP_CAPTURE_TIMEOUT_MS, DevLoop, withDevLoopMethods } from './dev-l
 import { mountLearning, type LearningMount } from './learning/index.ts'
 import { errorMessage } from './host-api.ts'
 import { filePairedExtensions, PAIRED_EXTENSIONS_FILE_NAME, PairingDesk, type PairedExtensions } from './pairing-host.ts'
+import { mountTaintClearCommand, type TaintCommandRegistry } from './taint-command.ts'
 import { mountPairingControls, PAIRING_COMMAND_NAME, type PairingCommandRegistry, type PairingFetchRegistry } from './pairing-mount.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -120,10 +121,12 @@ const DEFAULT_DEFER_SESSION_CREATE = true
 const DEFAULT_BEACON = true
 
 /** Reported to MCP clients as the server version; manifest.spec checks it equals package.json's. */
-export const BRIDGE_PACKAGE_VERSION = '0.3.8'
+export const BRIDGE_PACKAGE_VERSION = '0.3.9'
 
 /** Instance metadata the discovery endpoints advertise for the extension's picker. */
-const INSTANCE_INFO = { pid: process.pid, startedAt: new Date().toISOString() }
+/** Agent sessions with a turn running now (`agent/status`): the `busy` discovery flag and the `turns` standing hint. */
+const RUNNING_SESSIONS = new Set<string>()
+const INSTANCE_INFO = { pid: process.pid, startedAt: new Date().toISOString(), busy: () => RUNNING_SESSIONS.size > 0 }
 
 /** Plugin config: deployment-varying tunables only; the wire contract stays fixed. */
 export interface Config {
@@ -176,6 +179,12 @@ export interface Config {
    * only presets known to be restricted are usable from the browser.
    */
   allowDangerFullAccess?: boolean
+  /**
+   * Let the browser panel reply to conversations started in DSH (prompt,
+   * model, permission preset, commands). Defaults to true; false makes them
+   * view-only from the browser, as before 0.3.9.
+   */
+  promptHostSessions?: boolean
   /**
    * Additional preset names to treat as restricted when the Host's preset
    * table cannot vouch for them (presets whose sandbox is `read-only` or
@@ -258,6 +267,7 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   allowedChromeExtensionIds: z.array(z.string().pattern(/^[a-p]{32}$/)).default([PINNED_CHROME_EXTENSION_ID]),
   pairing: z.boolean().default(true),
   allowDangerFullAccess: z.boolean().default(false),
+  promptHostSessions: z.boolean().default(true),
   safePermissionPresets: z.array(z.string()).default([]),
   forwardedPorts: z.array(z.number().step(1).min(1).max(65535)).default([]),
   allowForwardedPorts: z.boolean().default(false),
@@ -356,7 +366,14 @@ function mountBridge(
   // until the user clears it in the panel (session-taint.ts).
   const taint = new SessionTaintRegistry()
   taint.honour = { any: resolved.honorTaintExemptions, local: resolved.honorTaintExemptions && resolved.devLoop.trustLoopback }
-  ctx.effect(() => installSessionTaint(ctx, taint), 'bridge-browser: session taint guard')
+  // A tainted session's shell commands are put to the user one by one (dsh's approval service).
+  const askTaintedCall = createHostApprovalRequester(
+    () => ctx.get('approval' as never) as ApprovalServiceLike | undefined,
+    () => ctx.agents as unknown as AgentLookup,
+  )
+  ctx.effect(() => installSessionTaint(ctx, taint, { askUser: askTaintedCall }), 'bridge-browser: session taint guard')
+  // A turn that ended while the plugin was unloaded never reports idle: start every load from none.
+  ctx.effect(() => () => { RUNNING_SESSIONS.clear() }, 'bridge-browser: running turns')
   // DSH 0.1.7+ replaced `agent/session-start` with `agent/created` as the
   // startup-driving extension point (agent registered with live session and
   // completed setup); bind there so deferred sessions still receive their
@@ -383,6 +400,7 @@ function mountBridge(
   // Least privilege: the extension reaches only what its panel uses, in scope.
   const fenced = withBridgePolicy(api, {
     allowDangerFullAccess: resolved.allowDangerFullAccess,
+    promptHostSessions: resolved.promptHostSessions,
     presetSandbox: (preset) => presetSandbox(ctx, preset),
     safePresetNames: resolved.safePermissionPresets,
     ledger,
@@ -432,7 +450,20 @@ function mountBridge(
   ctx.on('tools/result', (exec, result) => {
     devLoop.noteToolResult(exec.agent === undefined ? undefined : String(exec.agent.id), exec.name, result.isError)
   })
-  ctx.on('agent/status', ({ agent, status }) => { void devLoop.noteStatus(String(agent.id), status) })
+  // `server` is assigned below; a status change before that has no extension to tell.
+  const notifyTurns = (): void => { try { server.notifyStandingWork() } catch { /* not created yet */ } }
+  ctx.on('agent/status', ({ agent, status }) => {
+    void devLoop.noteStatus(String(agent.id), status)
+    const sessionId = String(agent.id)
+    const had = RUNNING_SESSIONS.has(sessionId)
+    if (status === 'running') RUNNING_SESSIONS.add(sessionId)
+    else RUNNING_SESSIONS.delete(sessionId)
+    if (had !== RUNNING_SESSIONS.has(sessionId)) notifyTurns()
+  })
+  ctx.on('agent/disposed', (payload: { agent?: { id: unknown } }) => {
+    if (payload.agent !== undefined && RUNNING_SESSIONS.delete(String(payload.agent.id))) notifyTurns()
+    return undefined
+  })
   const killSwitch = createKillSwitchHandler({ devLoop, learning: () => learning, info: (message) => { ctx.logger.info(message) } })
   // One-step pairing for extensions without a token (store builds, Firefox):
   // they show a code, and nothing is released until the user types it into dsh itself.
@@ -471,6 +502,7 @@ function mountBridge(
       devTools: { version: DEVTOOLS_CAPS_VERSION },
       // Told to the extension so its own taint record agrees with what this bridge honours.
       taintExemptions: { local: taint.honour.local, trusted: taint.honour.any },
+      taintClearEvents: 1,
     },
     injectBrowserSnapshot: createSnapshotInjector((sessionId, snapshot, reason) => browserContext.inject(sessionId, snapshot, reason), taint),
     purgeSession,
@@ -514,7 +546,10 @@ function mountBridge(
     standingWork: (connection) => ({
       schedules: Math.min(learning?.standingSchedules(connection) ?? 0, MAX_STANDING_SCHEDULES),
       mcp: resolved.mcp.enabled,
+      turns: Math.min(RUNNING_SESSIONS.size, MAX_STANDING_SCHEDULES),
     }),
+    // An idle extension probes every half minute while a turn runs (runtime-lifecycle.ts): give it that long.
+    awaitConnectionMs: () => RUNNING_SESSIONS.size > 0 ? 40_000 : 0,
   })
   ctx.effect(() => {
     learning = mountLearning(ctx, server, {
@@ -593,6 +628,12 @@ function mountBridge(
       for (const dispose of disposers.reverse()) await dispose()
     }
   }, 'bridge-browser: pairing controls')
+
+  // `/browser-clear`: the user lifts a conversation's taint from DSH itself.
+  ctx.effect(() => {
+    const dispose = mountTaintClearCommand(optionalService<TaintCommandRegistry>(ctx, 'commands'), taint, (sessionId) => { server.notifyTaintCleared(sessionId) })
+    return async () => { await dispose?.() }
+  }, 'bridge-browser: taint clear command')
 
   // Zero-config discovery endpoint: the extension fetches this to learn the
   // bridge WebSocket URL without any manual configuration. The URL carries no
@@ -731,9 +772,11 @@ function mountBridge(
         + 'When a call reports "dialog open", answer it with browser_dialog before anything else; when a click reports "covered by", '
         + 'dismiss the covering element first. Use browser_pdf_text for a PDF tab and browser_downloads to find downloaded files. '
         // Said up front so the model does not spend a step on a refused web_fetch (session-taint.ts).
-        + 'Once a browser_* tool has read a web page, web_fetch and web_search are usually refused for the rest of the conversation '
-        + '(as are shell and file-writing tools): to read another page or site, open it with browser_open_tab or browser_navigate '
-        + 'and read it with browser_snapshot instead of calling web_fetch.'
+        + 'Pages you serve yourself on localhost or 127.0.0.1 and open with browser_open_tab or browser_navigate are trusted: '
+        + 'reading, screenshotting and console logs there keep every tool on. Prefer that over following an existing tab or listing tabs. '
+        + 'Reading any other web page turns off web_fetch, web_search and delegation, makes every shell command ask the user, '
+        + 'and limits file edits to the workspace, until the user types /browser-clear: '
+        + 'to read another site, use browser_open_tab or browser_navigate with browser_snapshot instead of web_fetch.'
         + (devToolsDisposers === undefined
           ? ''
           : ' The browser_devtools_* and browser_console_* tools are available for element/CSS inspection, page-context JavaScript, and network '

@@ -29,6 +29,7 @@ import {
   allTaintExempt,
   allLocalExempt,
   anyLocalExempt,
+  isLoopbackPageOrigin,
   originTaintExempt,
   TAINT_EXEMPTION_SWITCHES,
   trustOfferFor,
@@ -48,6 +49,10 @@ export const TAINT_STORAGE_KEY = 'dshSessionTaint'
 export const EXEMPT_READS_STORAGE_KEY = 'dshSessionExemptReads'
 /** Sessions the user put in strict mode (same storage area as taint: the browser session). */
 export const STRICT_SESSIONS_STORAGE_KEY = 'dshStrictSessions'
+/** Loopback origins each session opened itself while untainted (same storage area: the browser session). */
+export const SESSION_LOOPBACK_STORAGE_KEY = 'dshSessionLoopback'
+/** Browser tools whose URL the model names: opening a loopback URL with them trusts it for that session. */
+const SESSION_LOOPBACK_TOOLS: ReadonlySet<string> = new Set(['browser_open_tab', 'browser_navigate'])
 /** Bridge RPCs that clear and mark the Host-side taint guard of one session. */
 export { BRIDGE_TAINT_CLEAR_METHOD, BRIDGE_TAINT_MARK_METHOD } from '@natgurlain/dsh-browser-agent/src/protocol.ts'
 
@@ -213,6 +218,15 @@ export class PolicyRuntime {
   private readonly strictSessions = new Set<string>()
   /** Set once the persisted strict sessions are loaded; toggles before that wait for it. */
   private strictLoaded = false
+  /**
+   * Loopback origins a session opened itself (browser_open_tab or
+   * browser_navigate to a URL the model named) while it was untainted: the
+   * agent's own dev server. They count as the user's local pages for that
+   * session only, without the one-time confirmation other loopback origins
+   * need (a tab the agent merely followed still needs it). Persisted next to
+   * taint, so a worker restart in the middle of a dev loop keeps them.
+   */
+  private readonly sessionLoopback = new Map<string, Set<string>>()
   private readonly ports = new Set<chrome.runtime.Port>()
 
   constructor(private readonly options: PolicyRuntimeOptions) {
@@ -229,6 +243,7 @@ export class PolicyRuntime {
     this.ready = Promise.all([
       this.taint.ready,
       this.loadStrictSessions(),
+      this.loadSessionLoopback(),
       loadManagedPolicy().then((policy) => { this.setManaged(policy) }),
     ]).then(() => undefined)
   }
@@ -246,6 +261,36 @@ export class PolicyRuntime {
       // Storage unavailable: strict sites from settings still apply.
     }
     this.strictLoaded = true
+  }
+
+  private async loadSessionLoopback(): Promise<void> {
+    try {
+      const stored = (await this.options.storage?.get(SESSION_LOOPBACK_STORAGE_KEY))?.[SESSION_LOOPBACK_STORAGE_KEY]
+      if (typeof stored !== 'object' || stored === null) return
+      for (const [key, origins] of Object.entries(stored as Record<string, unknown>)) {
+        if (!Array.isArray(origins)) continue
+        const valid = origins.filter((origin): origin is string => typeof origin === 'string' && isLoopbackPageOrigin(origin))
+        if (valid.length > 0) this.sessionLoopback.set(key, new Set([...this.sessionLoopback.get(key) ?? [], ...valid]))
+      }
+    } catch { /* storage unavailable: confirmed origins still apply */ }
+  }
+
+  /**
+   * A session opened `url` itself with a URL the model named. Trusted only
+   * while the session is untainted (no page content could have chosen it)
+   * and only for a loopback origin.
+   */
+  noteSessionOpened(sessionId: string | undefined, url: string | undefined): void {
+    if (url === undefined || this.taint.get(sessionId) !== undefined) return
+    const origin = httpOrigin(url)
+    if (origin === undefined || !isLoopbackPageOrigin(origin)) return
+    const key = taintKey(sessionId)
+    const origins = this.sessionLoopback.get(key) ?? new Set<string>()
+    if (origins.has(origin)) return
+    origins.add(origin)
+    this.sessionLoopback.set(key, origins)
+    const stored = Object.fromEntries([...this.sessionLoopback].map(([k, v]) => [k, [...v]]))
+    void this.options.storage?.set({ [SESSION_LOOPBACK_STORAGE_KEY]: stored }).catch(() => {})
   }
 
   setManaged(policy: ManagedPolicy): void {
@@ -340,15 +385,17 @@ export class PolicyRuntime {
   /** Whether a read could leave this session untainted at all (some exemption is on and it is untainted). */
   mayExempt(sessionId: string | undefined): boolean {
     if (this.taint.get(sessionId) !== undefined) return false
-    const config = this.exemption()
+    const config = this.exemption(sessionId)
     return config.localPages || config.trustedSites
   }
 
   /**
    * The exemptions in force now: the two settings, minus what managed policy
-   * or the connected bridge forces off, with the user's lists.
+   * or the connected bridge forces off, with the user's lists. With a
+   * session, the loopback origins that session opened itself count as the
+   * user's local pages too ({@link noteSessionOpened}).
    */
-  exemption(): TaintExemptionConfig {
+  exemption(sessionId?: string): TaintExemptionConfig {
     const settings = this.options.settings()
     const bridge = this.options.bridgeExemptions?.()
     const switches = this.options.switches ?? TAINT_EXEMPTION_SWITCHES
@@ -358,13 +405,25 @@ export class PolicyRuntime {
       // Unrestricted access is not an explicit choice about any one site.
       site: this.sitePolicy(false),
       trustedActionOrigins: settings.trustedActionOrigins ?? [],
-      localOrigins: settings.taintLocalOrigins ?? [],
+      localOrigins: sessionId === undefined
+        ? settings.taintLocalOrigins ?? []
+        : [...new Set([...settings.taintLocalOrigins ?? [], ...this.sessionLoopback.get(taintKey(sessionId)) ?? []])],
       taintTrustedSites: settings.taintTrustedSites ?? [],
       trustConfirmed: settings.taintTrustConfirmed ?? [],
       loopbackScope: switches.loopbackScope,
       trustedMigration: switches.trustedMigration,
       ...this.options.neverExemptOrigin === undefined ? {} : { neverExempt: this.options.neverExemptOrigin },
     }
+  }
+
+  /**
+   * Whether a page's title and URL may reach this untainted session without
+   * tainting it: its origin is exempt for this session (browser_list_tabs).
+   */
+  readableWithoutTaint(sessionId: string | undefined, url: string): boolean {
+    if (this.taint.get(sessionId) !== undefined) return false
+    const origin = httpOrigin(url)
+    return origin !== undefined && originTaintExempt(origin, this.exemption(sessionId), [url])
   }
 
   /** Whether every origin is one of the user's own local pages (and there is at least one). */
@@ -397,8 +456,8 @@ export class PolicyRuntime {
    *   carries the tab's console text, and for screenshots and PDFs (pixels of
    *   every subresource).
    */
-  private exemptProvenance(name: string, record: CallRecord | undefined, fallbackOrigin: string | undefined, after: TabProvenance | undefined, facts: ResultFacts): { origins: string[]; local: boolean } | undefined {
-    const config = this.exemption()
+  private exemptProvenance(sessionId: string | undefined, name: string, record: CallRecord | undefined, fallbackOrigin: string | undefined, after: TabProvenance | undefined, facts: ResultFacts): { origins: string[]; local: boolean } | undefined {
+    const config = this.exemption(sessionId)
     if (!config.localPages && !config.trustedSites) return undefined
     if (NEVER_EXEMPT_TOOLS.has(name)) return undefined
     const localOnly = LOCAL_ONLY_EXEMPT_TOOLS.has(name) || isDevToolsTool(name) || facts.quotesConsole === true
@@ -448,7 +507,9 @@ export class PolicyRuntime {
     const reachedPage = record?.targets !== undefined || fallbackOrigin !== undefined
     if (!resultTaintsSession(call.name, true) || (!ok && !reachedPage)) return { exempt: false }
     if (this.taint.get(call.sessionId) === undefined) {
-      const exempt = this.exemptProvenance(call.name, record, fallbackOrigin, after, facts)
+      // The agent opening its own dev server: trusted for this session before the result is judged.
+      if (ok && SESSION_LOOPBACK_TOOLS.has(call.name)) this.noteSessionOpened(call.sessionId, record?.targets?.destination)
+      const exempt = this.exemptProvenance(call.sessionId, call.name, record, fallbackOrigin, after, facts)
       if (exempt !== undefined) {
         this.taint.noteExemptRead(call.sessionId, exempt.origins)
         return { exempt: true, local: exempt.local }
@@ -556,7 +617,7 @@ export class PolicyRuntime {
   injectionExempt(sessionId: string, origin: string | undefined, frames: readonly string[] | undefined, urls: readonly string[] = []): boolean {
     if (origin === undefined || frames === undefined || frames.length === 0) return false
     if (this.taint.get(sessionId) !== undefined) return false
-    return allTaintExempt([origin, ...frames], this.exemption(), urls)
+    return allTaintExempt([origin, ...frames], this.exemption(sessionId), urls)
   }
 
   /** Whether an exempt injection of these origins rests on a local page (told to the bridge). */

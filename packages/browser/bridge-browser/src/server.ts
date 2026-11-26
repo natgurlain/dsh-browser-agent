@@ -99,6 +99,7 @@ import {
   BRIDGE_PROTOCOL_VERSION,
   BRIDGE_SESSION_PURGE_METHOD,
   BRIDGE_STANDING_EVENT_METHOD,
+  BRIDGE_TAINT_CLEARED_EVENT_METHOD,
   STANDING_WORK_CAPS_VERSION,
   canonicalJson,
   isStandingWork,
@@ -387,9 +388,11 @@ export interface BridgeServerDeps {
     /** A tool call is about to ask the extension for one result (taint exemption, session-taint.ts). */
     expectResult?(sessionId: string, callId: string): void
     /** The extension answered it; `exempt` is the frame's `taintExempt` flag, `local` its `taintExemptLocal`. */
-    noteResult?(sessionId: string, callId: string, exempt: boolean, local?: boolean): void
+    noteResult?(sessionId: string, callId: string, exempt: boolean, local?: boolean, pageFree?: boolean): void
     /** The call was refused before it reached any browser (no extension connected, cancelled before dispatch). */
     noteUndelivered?(sessionId: string, callId: string): void
+    /** The bridge settled a dispatched request itself (timeout, cancel, socket closed). */
+    noteBridgeSettled?(sessionId: string, callId: string): void
     /** Whether an ancestor of the session read taint-exempt pages (sent as `inheritedExemptReads`). */
     inheritsExemptReads?(sessionId: string): boolean
   }
@@ -402,6 +405,12 @@ export interface BridgeServerDeps {
    * is sent at all (the extension then keeps its usual idle rule).
    */
   standingWork?: (connection: string) => StandingWork
+  /**
+   * How long a tool call waits for an extension when none is connected
+   * (milliseconds; 0 fails at once). The plugin waits while an agent turn is
+   * running, the time an idle extension's probe needs to reconnect.
+   */
+  awaitConnectionMs?: () => number
 }
 
 /** What the server needs from the Host's reviewer (auto-review.ts `AutoReviewer`). */
@@ -557,6 +566,17 @@ export class BridgeServer {
   }
 
   /**
+   * The user cleared a session's taint in DSH: tell every connected
+   * extension, so its own record of the session clears too (otherwise its
+   * next read would taint the session again).
+   */
+  notifyTaintCleared(sessionId: string): void {
+    for (const conn of this.connections.values()) {
+      sendFrame(conn, { t: 'event', frame: { rpcId: '', method: BRIDGE_TAINT_CLEARED_EVENT_METHOD, payload: { sessionId } } })
+    }
+  }
+
+  /**
    * The Host's standing work changed (a schedule was created, cancelled or
    * revoked): tell each connected extension whose hint differs from the one
    * it last received. Sent sealed, and only to extensions that advertised
@@ -614,6 +634,42 @@ export class BridgeServer {
     requester?: string,
     panelAction?: PanelUserRequest,
   ): Promise<unknown> {
+    // No browser yet, but the Host is busy: an idle extension reconnects within its probe period.
+    const waitMs = this.connections.size === 0 && !signal.aborted ? this.deps.awaitConnectionMs?.() ?? 0 : 0
+    if (waitMs > 0) {
+      return this.whenConnected(waitMs, signal)
+        .then(() => this.requestToolNow(name, args, signal, timeoutMs, sessionId, callId, program, requester, panelAction))
+    }
+    return this.requestToolNow(name, args, signal, timeoutMs, sessionId, callId, program, requester, panelAction)
+  }
+
+  /** Resolve once an extension is connected, the wait is over, or the caller gave up. */
+  private whenConnected(waitMs: number, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve) => {
+      const deadline = this.now() + waitMs
+      const check = (): void => {
+        if (this.connections.size > 0 || signal.aborted || this.closed || this.now() >= deadline) {
+          signal.removeEventListener('abort', check)
+          clearInterval(timer)
+          resolve()
+        }
+      }
+      const timer = setInterval(check, 250)
+      signal.addEventListener('abort', check, { once: true })
+    })
+  }
+
+  private requestToolNow(
+    name: string,
+    args: Record<string, unknown>,
+    signal: AbortSignal,
+    timeoutMs: number,
+    sessionId?: string,
+    callId?: string,
+    program?: ProgramStepRef,
+    requester?: string,
+    panelAction?: PanelUserRequest,
+  ): Promise<unknown> {
     // Refusals before dispatch reached no browser, so their error text quotes no page:
     // they are recorded as such and do not taint the session (session-taint.ts).
     const undelivered = (error: unknown): never => {
@@ -656,6 +712,8 @@ export class BridgeServer {
     return new Promise<unknown>((resolve, reject) => {
       const settle = (error: BridgeToolError): void => {
         clearTimeout(entry.timer)
+        // Only a call still pending here is the bridge's to settle (a late close after the answer is not).
+        if (this.pendingTools.get(id) === entry) this.noteBridgeSettledFor(entry)
         this.dropPendingTool(id)
         signal.removeEventListener('abort', onAbort)
         this.auditSettled(id, error)
@@ -1197,7 +1255,7 @@ export class BridgeServer {
         for await (const frame of this.deps.api.events(abort.signal)) {
           if (ws.readyState !== WebSocket.OPEN) break
           // The bridge's own event methods are never projected from a Host stream.
-          if (frame.method === BRIDGE_STANDING_EVENT_METHOD) continue
+          if (frame.method === BRIDGE_STANDING_EVENT_METHOD || frame.method === BRIDGE_TAINT_CLEARED_EVENT_METHOD) continue
           sendFrame(target, {
             t: 'event',
             frame,
@@ -1675,7 +1733,7 @@ export class BridgeServer {
     // Only an answer from the extension can vouch for a result (never a timeout or cancel).
     const { sessionId, callId } = pending
     if (sessionId !== undefined && callId !== undefined) {
-      this.noteLineage(lineage => { lineage.noteResult?.(sessionId, callId, frame.taintExempt === true, frame.taintExemptLocal === true) })
+      this.noteLineage(lineage => { lineage.noteResult?.(sessionId, callId, frame.taintExempt === true, frame.taintExemptLocal === true, frame.pageFree === true) })
     }
     if (frame.ok) {
       // An unbound session that a browser served is bound there from now on
@@ -1690,6 +1748,12 @@ export class BridgeServer {
       this.auditSettled(frame.id, error)
       pending.reject(error)
     }
+  }
+
+  /** A pending call is being settled by the bridge's own error text: it cannot taint (session-taint.ts). */
+  private noteBridgeSettledFor(pending: PendingTool): void {
+    const { sessionId, callId } = pending
+    if (sessionId !== undefined && callId !== undefined) this.noteLineage(lineage => { lineage.noteBridgeSettled?.(sessionId, callId) })
   }
 
   /** Record a failed or withdrawn call; auditing never affects the call itself. */
@@ -1729,6 +1793,7 @@ export class BridgeServer {
     for (const [id, pending] of [...this.pendingTools]) {
       if (pending.conn !== conn) continue
       clearTimeout(pending.timer)
+      this.noteBridgeSettledFor(pending)
       this.dropPendingTool(id)
       const error = new BridgeToolError('bridge-closed', reason)
       this.auditSettled(id, error)

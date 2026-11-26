@@ -612,6 +612,7 @@ describe('dispatchToolCall', () => {
         code: 'action-failed',
         message: 'The user denied the browser approval request for "browser_snapshot".',
       },
+      pageFree: true,
     })
     expect(authorize).toHaveBeenCalledWith(expect.objectContaining({
       kind: 'read',
@@ -632,6 +633,7 @@ describe('dispatchToolCall', () => {
         code: 'action-failed',
         message: 'No browser side panel was available to receive or complete the approval request for "browser_press".',
       },
+      pageFree: true,
     })
     expect(chromeMock.sendMessage).not.toHaveBeenCalled()
   })
@@ -648,6 +650,7 @@ describe('dispatchToolCall', () => {
         code: 'timeout',
         message: 'The browser approval request for "browser_press" timed out before the user responded.',
       },
+      pageFree: true,
     })
     expect(chromeMock.sendMessage).not.toHaveBeenCalled()
   })
